@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "core",
+    "platforms/windows/core-ffi",
+    "platforms/android/core-ffi",
+]
+
+# 如果以后新增子工程，按相对路径加到 members 即可

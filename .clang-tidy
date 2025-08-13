@@ -1,0 +1,56 @@
+# .clang-tidy — ClipBridge C++ lint rules
+
+# 选择的规则集：聚焦 bug、性能、可读性与现代化；控制噪音
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  misc-*,
+  portability-*
+  # 精选 cppcoreguidelines 子集（避免过度严格）
+  ,cppcoreguidelines-avoid-c-arrays,
+  cppcoreguidelines-avoid-non-const-global-variables,
+  cppcoreguidelines-narrowing-conversions,
+  cppcoreguidelines-pro-bounds-constant-array-index,
+  cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  cppcoreguidelines-pro-type-const-cast,
+  cppcoreguidelines-pro-type-static-cast-downcast
+
+# 将高价值问题当错误处理（CI 直接失败）
+WarningsAsErrors: >
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*
+
+# 仅分析 Windows 外壳源码（减少对第三方/生成代码的噪音）
+HeaderFilterRegex: 'platforms/windows/ClipBridgeShell/.*'
+
+# 排除常见生成头（WinUI/XAML、winrt 投影等）
+ExcludeHeaderFilterRegex: '.*(/GeneratedFiles/|/winrt/|xaml\..*|\.g\.h|\.g\.hpp)$'
+
+# 其他有用选项
+AnalyzeTemporaryDtors: true
+FormatStyle: file   # 遵循根目录 .clang-format
+UseColor: true
+
+CheckOptions:
+  # 允许少量常见“魔法数字”，降低噪音（readability-magic-numbers）
+  - key: readability-magic-numbers.IgnoredNumericLiterals
+    value: '0;1;2;3;4;8;16;24;32;60;64;100;255;256;512;1024'
+  - key: readability-magic-numbers.IgnorePowersOfTwoIntegerWeights
+    value: 'true'
+  - key: readability-magic-numbers.IgnoreAllFloatingPointValues
+    value: 'true'
+
+  # modernization：鼓励 using/override/=default 等现代写法
+  - key: modernize-use-using.IgnoreMacros
+    value: 'true'
+  - key: modernize-use-override.AllowOverrideAndFinalInSameMacro
+    value: 'true'
+
+  # performance：对易逃逸对象的复制发警告
+  - key: performance-move-const-arg.CheckTriviallyCopyableMove
+    value: 'true'

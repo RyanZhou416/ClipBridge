@@ -1,0 +1,30 @@
+# 使用 Rust 2021 版语法
+edition = "2021"
+
+# 最大行宽（超出会自动换行）
+max_width = 100
+
+# 尽量用小型启发式规则来决定是否换行
+use_small_heuristics = "Max"
+
+# 缩进空格数（与 .editorconfig 保持一致）
+tab_spaces = 4
+
+# 换行风格统一为 Unix 风格 LF
+newline_style = "Unix"
+
+# 缩进链式调用
+chain_width = 60
+
+# 对长函数签名参数自动换行
+fn_call_width = 60
+
+# 在 match 分支中，长表达式会自动换行缩进
+match_arm_blocks = true
+
+# 保留空行
+blank_lines_upper_bound = 2
+
+# 在函数参数列表、数组、结构体等处，长列表会自动多行显示
+wrap_comments = true
+comment_width = 80

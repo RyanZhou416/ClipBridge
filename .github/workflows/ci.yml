@@ -1,0 +1,128 @@
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+# 并发控制：同一分支上新的 CI 会取消旧的，节省配额
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ───────────────────────────────────────────────────────────
+  # 1) Rust 核心：格式化 / 静态检查 / 测试 / 依赖审计
+  # ───────────────────────────────────────────────────────────
+  rust:
+    name: Rust Core
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./ # 如果 core/ 是 workspace 成员，根目录跑就行
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 可选缓存，加速 cargo 构建（后续你也可以加上 target 缓存）
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format check (rustfmt)
+        run: cargo fmt --all -- --check
+
+      - name: Lint (clippy)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --all --verbose
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny || true
+
+      - name: Audit (cargo-deny)
+        run: cargo deny check
+
+  # ───────────────────────────────────────────────────────────
+  # 2) Windows 外壳：C++/WinUI 3 构建
+  # ───────────────────────────────────────────────────────────
+  windows_cpp:
+    name: Windows C++ Shell
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 如果外壳在构建阶段需要 Rust 核心 DLL，你可以先编核心（Release）：
+      # （若不需要可注释掉以下步骤）
+      - name: Install Rust (optional for core DLL)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build Rust core (Release)  # 如需：把生成的 DLL 拷到外壳可执行目录
+        run: cargo build --package core --release
+        shell: bash
+
+      # 配置 MSBuild（VS 2022 Build Tools 已预装于 windows-latest）
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # 🔧 需要你按实际路径修改：
+      #   如果你有 .sln，用 .sln 更好；下面示例用 .vcxproj
+      - name: Build WinUI3 project (Release x64)
+        run: msbuild platforms\\windows\\ClipBridgeShell\\ClipBridgeShell.vcxproj /p:Configuration=Release /p:Platform=x64 /m
+        shell: pwsh
+
+      # 可选：上传编译产物，方便从 Actions 下载
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-shell-release
+          path: |
+            platforms/windows/ClipBridgeShell/x64/Release/**
+            !**/*.pdb
+
+  # ───────────────────────────────────────────────────────────
+  # 3) Android（Java 外壳）：Lint + 构建 Debug APK
+  # ───────────────────────────────────────────────────────────
+  android_java:
+    name: Android Java Shell
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 🔧 需要你按实际路径修改：-p 后面是 Android 工程根
+      - name: Lint
+        run: ./gradlew -p platforms/android lint
+      - name: Assemble Debug
+        run: ./gradlew -p platforms/android assembleDebug
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-debug
+          path: |
+            platforms/android/app/build/outputs/apk/debug/*.apk

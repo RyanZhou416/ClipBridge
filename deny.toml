@@ -1,0 +1,69 @@
+# deny.toml — ClipBridge dependency & license audit (cargo-deny)
+
+# 1) 漏洞与撤回版本（yanked）严格禁止
+[advisories]
+# 漏洞数据库更新策略：CI 会自动联网拉取（也可在本地 `cargo deny fetch`）
+db-path = "~/.cargo/advisory-db"
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "deny"
+notice = "warn" # 官方通告/注意级别，先给出告警
+
+# 2) 许可证白名单（只允许这些）
+[licenses]
+unlicensed = "deny"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "MPL-2.0",        # 如遇到，允许；但尽量避免混用强约束许可证
+]
+# 明确拒绝（常见强 Copyleft）
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "LGPL-2.1",
+    "LGPL-3.0",
+    "AGPL-3.0",
+]
+copyleft = "warn"        # 若出现其他 Copyleft，先告警（非阻断），便于人工评估
+# 要求每个 crate 必须声明许可证
+allow-osi-fsf-free = "either"
+confidence-threshold = 0.8
+
+# 3) 重复版本/通配依赖限制（避免供应链复杂度）
+[bans]
+multiple-versions = "warn"  # 同一 crate 多版本并存先告警（Rust 生态常见，先不阻断）
+wildcards = "deny"          # Cargo.toml 里的依赖版本通配（*、^0 等）禁止
+# 允许的重复版本特例（必要时在这里加白名单）
+# e.g.
+# allow = [
+#   { name = "bitflags", versions = ["1", "2"] }
+# ]
+
+# 4) 允许/禁止的来源（避免非 crates.io 未知源）
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# 若你确实要用私有 git 依赖，可在这里加白名单：
+# allow-git = ["ssh://git@github.com/your/repo"]
+
+# 5) crate 例外白名单（少用，仅用于临时豁免）
+# 例如某个 crate 被标记 unmaintained，但你评估可控：
+# [[licenses.exceptions]]
+# name = "some-unmaintained-crate"
+# version = "=1.2.3"
+# allow = true
+# rationale = "Used indirectly, no exposure surface; pinned and monitored."
+
+# 6) 输出报告设置
+[graph]
+# 输出依赖树时隐藏 dev-dependencies（CI 更干净）
+# include-dev = false
+
+[output]
+format = "human"
