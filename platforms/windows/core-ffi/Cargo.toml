@@ -4,9 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-# 给 C++/WinUI3 调用，必须是 cdylib
 crate-type = ["cdylib"]
 
 [dependencies]
-# 依赖上层的 core 库（路径从 windows/core-ffi 回到根，再到 core）
-core = { path = "../../../core" }
+cb_core = { path = "../../../cb_core" }

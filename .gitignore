@@ -8,8 +8,7 @@ ehthumbs.db
 Desktop.ini
 
 # Logs
-*.log
-*.tmp
+
 
 # Editor settings (optional: remove if you want to commit IDE configs)
 .vscode/
@@ -46,6 +45,7 @@ Desktop.ini
 *.ipch
 *.aps
 *.pch
+/platforms/windows/ClipBridgeShell/x64/Debug/
 
 # Temporary files
 *.tmp
@@ -70,8 +70,6 @@ local.properties
 # IntelliJ
 out/
 
-# Log files
-*.log
 
 # Android Studio captures
 captures/
@@ -98,3 +96,4 @@ captures/
 *~
 *.swp
 *.swo
+

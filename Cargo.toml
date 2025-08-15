@@ -2,7 +2,7 @@
 resolver = "2"
 
 members = [
-    "core",
+    "cb_core",
     "platforms/windows/core-ffi",
     "platforms/android/core-ffi",
 ]

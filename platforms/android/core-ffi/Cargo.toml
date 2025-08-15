@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-# 给 Android NDK / JNI 使用，同样是 cdylib
 crate-type = ["cdylib"]
 
 [dependencies]
-core = { path = "../../../core" }
+cb_core = { path = "../../../cb_core" }

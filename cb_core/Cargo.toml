@@ -1,10 +1,10 @@
 [package]
-name = "core"
+name = "cb_core"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-# 让 core 库可以在 FFI（Android/Windows 外壳）和 CLI 测试中复用
+# 让 cb_core 库可以在 FFI（Android/Windows 外壳）和 CLI 测试中复用
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
