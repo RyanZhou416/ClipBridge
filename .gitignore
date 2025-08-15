@@ -58,6 +58,22 @@ Desktop.ini
 *.user
 *.rsuser
 
+# Visual Studio
+.vs/
+*.vcxproj.user
+*.db
+*.opendb
+
+# Build output
+x64/
+bin/
+obj/
+Generated Files/
+
+# NuGet packages
+packages/
+*.nupkg
+
 # =======================================
 # Android / Java
 # =======================================
