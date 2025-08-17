@@ -8,4 +8,8 @@ edition = "2021"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-# 这里先留空，等实现时再加
+anyhow = "1"
+rusqlite = { version = "0.31", features = ["bundled","chrono"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"

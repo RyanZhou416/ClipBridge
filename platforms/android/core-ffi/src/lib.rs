@@ -4,5 +4,5 @@ use std::ffi::c_char;
 /// 先只返回一个 C 风格的静态字符串，确保能编过。
 #[no_mangle]
 pub extern "C" fn cb_core_ping() -> *const std::os::raw::c_char {
-    cb_core::ping_ptr()
+    cb_core_ping()
 }
