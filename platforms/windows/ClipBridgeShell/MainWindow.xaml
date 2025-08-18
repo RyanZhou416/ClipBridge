@@ -9,7 +9,9 @@
     mc:Ignorable="d"
     Title="ClipBridgeShell">
 
-    <Grid>
-
+    <Grid Padding="12">
+        <ScrollViewer>
+            <TextBlock x:Name="LogBox" TextWrapping="Wrap"/>
+        </ScrollViewer>
     </Grid>
 </Window>

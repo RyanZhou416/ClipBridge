@@ -1,3 +1,4 @@
+//platforms/android/core-ffi/src/lib.rs
 use std::ffi::c_char;
 
 /// 最小 JNI/NDK 侧可用的 C ABI 导出（后续你可以改成 JNI 命名）

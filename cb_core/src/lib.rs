@@ -1,3 +1,14 @@
+//cb_core/src/lib.rs
+
+pub mod models;
+pub mod ingest;
+pub mod api;
+
+// 放在其它 mod 前也可
+pub use models::*;      // 便于 core-ffi 直接用
+pub use ingest::*;
+pub use api::*;
+
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use rusqlite::{params, Connection};

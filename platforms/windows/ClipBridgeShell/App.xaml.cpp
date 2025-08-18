@@ -8,40 +8,53 @@
 
 using namespace winrt;
 using namespace Microsoft::UI::Xaml;
+using winrt::Microsoft::UI::Xaml::Window;
+namespace winrt::ClipBridgeShell::implementation
+{
+
+    void App::SetMainWindow(Window const& w)
+        {
+	        s_winWeak = w;
+        }
+    Window App::TryGetMainWindow()
+        {
+	        return s_winWeak.get();
+        }
+    }
 
 
 
-// ---------- 与 cb_ffi.h 对齐的最小 C 结构/回调声明（你也可以直接 #include 头文件） ----------
-struct CbStr
-{
-	const char* ptr;
-	uint32_t	len;
-};
-struct CbStrList
-{
-	const CbStr* items;
-	uint32_t	 len;
-};
-struct CbDevice
-{
-	CbStr device_id, account_id, name, pubkey_fingerprint;
-};
-struct CbConfig
-{
-	CbStr	 device_name;
-	int32_t	 listen_port;
-	uint32_t api_version;
-};
-struct CbMeta
-{
-	CbStr	  item_id, owner_device_id, owner_account_id;
-	CbStrList kinds, mimes;
-	CbStr	  preferred_mime;
-	uint64_t  size_bytes;
-	CbStr	  sha256;
-	uint64_t  created_at;
-	uint64_t  expires_at;
-};
+    // ---------- 与 cb_ffi.h 对齐的最小 C 结构/回调声明（你也可以直接 #include 头文件） ----------
+    struct CbStr
+    {
+	    const char* ptr;
+	    uint32_t	len;
+    };
+    struct CbStrList
+    {
+	    const CbStr* items;
+	    uint32_t	 len;
+    };
+    struct CbDevice
+    {
+	    CbStr device_id, account_id, name, pubkey_fingerprint;
+    };
+    struct CbConfig
+    {
+	    CbStr	 device_name;
+	    int32_t	 listen_port;
+	    uint32_t api_version;
+    };
+    struct CbMeta
+    {
+	    CbStr	  item_id, owner_device_id, owner_account_id;
+	    CbStrList kinds, mimes;
+	    CbStr	  preferred_mime;
+	    uint64_t  size_bytes;
+	    CbStr	  sha256;
+	    uint64_t  created_at;
+	    uint64_t  expires_at;
+    };
 
 // 现在再声明函数指针类型（此时 CbMeta 已经是已知类型了）
 using cb_store_metadata_t = int(__cdecl*)(const CbMeta*);
@@ -58,14 +71,14 @@ using CbOnNewMetadata	   = void(__cdecl*)(const CbMeta*);
 using CbOnTransferProgress = void(__cdecl*)(const CbStr*, uint64_t, uint64_t);
 using CbOnError			   = void(__cdecl*)(int, const CbStr*);
 
-struct CbCallbacks
-{
-	CbOnDeviceOnline	 on_device_online;
-	CbOnDeviceOffline	 on_device_offline;
-	CbOnNewMetadata		 on_new_metadata;
-	CbOnTransferProgress on_transfer_progress;
-	CbOnError			 on_error;
-};
+    struct CbCallbacks
+    {
+	    CbOnDeviceOnline	 on_device_online;
+	    CbOnDeviceOffline	 on_device_offline;
+	    CbOnNewMetadata		 on_new_metadata;
+	    CbOnTransferProgress on_transfer_progress;
+	    CbOnError			 on_error;
+    };
 
 // 核心导出函数指针
 using cb_get_version_t = uint32_t(__cdecl*)();
@@ -74,47 +87,47 @@ using cb_shutdown_t	   = void(__cdecl*)();
 
 namespace
 {
-// UTF-8 -> UTF-16（有长度）
-std::wstring Utf8ToWide(const CbStr& s)
-{
-	if (!s.ptr || s.len == 0)
-		return L"";
-	int			 wlen = MultiByteToWideChar(CP_UTF8, 0, s.ptr, (int)s.len, nullptr, 0);
-	std::wstring w(wlen, L'\0');
-	MultiByteToWideChar(CP_UTF8, 0, s.ptr, (int)s.len, w.data(), wlen);
-	return w;
-}
+    // UTF-8 -> UTF-16（有长度）
+    std::wstring Utf8ToWide(const CbStr& s)
+    {
+	    if (!s.ptr || s.len == 0)
+		    return L"";
+	    int			 wlen = MultiByteToWideChar(CP_UTF8, 0, s.ptr, (int)s.len, nullptr, 0);
+	    std::wstring w(wlen, L'\0');
+	    MultiByteToWideChar(CP_UTF8, 0, s.ptr, (int)s.len, w.data(), wlen);
+	    return w;
+    }
 
-// ---------- 全局句柄与函数指针 ----------
-HMODULE			 g_core			  = nullptr;
-cb_get_version_t g_cb_get_version = nullptr;
-cb_init_t		 g_cb_init		  = nullptr;
-cb_shutdown_t	 g_cb_shutdown	  = nullptr;
+    // ---------- 全局句柄与函数指针 ----------
+    HMODULE			 g_core			  = nullptr;
+    cb_get_version_t g_cb_get_version = nullptr;
+    cb_init_t		 g_cb_init		  = nullptr;
+    cb_shutdown_t	 g_cb_shutdown	  = nullptr;
 
-// ---------- 回调实现（注意：来自工作线程，实际项目里请切回 UI 线程再更新界面） ----------
-void __cdecl OnDeviceOnline(const CbDevice* dev)
-{
-	auto name = Utf8ToWide(dev->name);
-	MessageBoxW(nullptr, (L"Device online: " + name).c_str(), L"CB", MB_OK | MB_ICONINFORMATION);
-}
-void __cdecl OnNewMetadata(const CbMeta* meta)
-{
-	auto id = Utf8ToWide(meta->item_id);
-	MessageBoxW(nullptr, (L"New meta: " + id).c_str(), L"CB", MB_OK | MB_ICONINFORMATION);
-}
-void __cdecl OnTransferProgress(const CbStr* id, uint64_t sent, uint64_t total)
-{
-	// 占位：可改为状态栏/通知气泡
-	(void)id;
-	(void)sent;
-	(void)total;
-}
-void __cdecl OnError(int code, const CbStr* msg)
-{
-	auto		 w = Utf8ToWide(*msg);
-	std::wstring t = L"Core error " + std::to_wstring(code) + L": " + w;
-	MessageBoxW(nullptr, t.c_str(), L"CB", MB_OK | MB_ICONERROR);
-}
+    // ---------- 回调实现（注意：来自工作线程，实际项目里请切回 UI 线程再更新界面） ----------
+    void __cdecl OnDeviceOnline(const CbDevice* dev)
+    {
+	    auto name = Utf8ToWide(dev->name);
+	    MessageBoxW(nullptr, (L"Device online: " + name).c_str(), L"CB", MB_OK | MB_ICONINFORMATION);
+    }
+    void __cdecl OnNewMetadata(const CbMeta* meta)
+    {
+	    auto id = Utf8ToWide(meta->item_id);
+	    MessageBoxW(nullptr, (L"New meta: " + id).c_str(), L"CB", MB_OK | MB_ICONINFORMATION);
+    }
+    void __cdecl OnTransferProgress(const CbStr* id, uint64_t sent, uint64_t total)
+    {
+	    // 占位：可改为状态栏/通知气泡
+	    (void)id;
+	    (void)sent;
+	    (void)total;
+    }
+    void __cdecl OnError(int code, const CbStr* msg)
+    {
+	    auto		 w = Utf8ToWide(*msg);
+	    std::wstring t = L"Core error " + std::to_wstring(code) + L": " + w;
+	    MessageBoxW(nullptr, t.c_str(), L"CB", MB_OK | MB_ICONERROR);
+    }
 
 // ---------- 启动核心并注册回调 ----------
 void StartCoreFFI()
@@ -226,23 +239,7 @@ void StartCoreFFI()
 		g_cb_store_metadata(&m);
 	}
 
-	if (g_cb_store_metadata)
-	{
-		// 组装一条最小元数据（UTF-8）
-		const char* id	  = "item-demo-001";
-		const char* dev	  = "device-A";
-		const char* acc	  = "account-1";
-		const char* pmime = "text/plain";
-		CbStr		id_s{id, (uint32_t)strlen(id)};
-		CbStr		dev_s{dev, (uint32_t)strlen(dev)};
-		CbStr		acc_s{acc, (uint32_t)strlen(acc)};
-		CbStr		pm_s{pmime, (uint32_t)strlen(pmime)};
-		CbStrList	empty{nullptr, 0};
-		CbStr		sha{nullptr, 0};
-
-		CbMeta m{id_s, dev_s, acc_s, empty, empty, pm_s, 5, sha, 1720000000, 0};
-		g_cb_store_metadata(&m);
-	}
+	
 
 	// 然后再：
 	if (g_cb_history_list)
@@ -281,11 +278,13 @@ App::App()
 
 void App::OnLaunched([[maybe_unused]] LaunchActivatedEventArgs const& e)
 {
-	window = make<MainWindow>();
+	window = make<MainWindow>(); // 构造函数里已 InitializeComponent()
 	window.Activate();
 
 	// 退出时释放 core_ffi_windows.dll
 	window.Closed([](auto&&, auto&&) { StopCoreFFI(); });
+
+    App::SetMainWindow(window);
 
 	StartCoreFFI();
 }

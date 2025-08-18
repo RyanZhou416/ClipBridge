@@ -1,5 +1,9 @@
 // platforms/windows/core-ffi/src/lib.rs
+
+
 #![allow(non_camel_case_types)]
+
+mod models_api; pub use models_api::*;
 
 use std::{
     ffi::c_char,
@@ -7,6 +11,10 @@ use std::{
     sync::{Mutex, OnceLock},
     time::Duration,
 };
+use std::ffi::{CStr, CString};
+use std::os::raw::c_int;
+use std::ptr;
+use serde_json::json;
 
 use cb_core::{self, ClipMeta as CoreClipMeta};
 

@@ -7,18 +7,42 @@
 using namespace winrt;
 using namespace Microsoft::UI::Xaml;
 
-// To learn more about WinUI, the WinUI project structure,
-// and more about our project templates, see: http://aka.ms/winui-project-info.
-
 namespace winrt::ClipBridgeShell::implementation
 {
-    int32_t MainWindow::MyProperty()
+    MainWindow::MainWindow()
     {
-        throw hresult_not_implemented();
+	    InitializeComponent();
+	    Title(L"ClipBridge");
     }
 
-    void MainWindow::MyProperty(int32_t /* value */)
+    void MainWindow::AppendLog(winrt::hstring const& line)
     {
-        throw hresult_not_implemented();
+	    using Microsoft::UI::Xaml::FrameworkElement;
+	    using Microsoft::UI::Xaml::Controls::TextBlock;
+
+	    if (!m_logBox)
+	    {
+		    if (auto fe = this->Content().try_as<FrameworkElement>())
+			    m_logBox = fe.FindName(L"LogBox").try_as<TextBlock>();
+	    }
+	    if (auto tb = m_logBox)
+	    {
+		    auto old = tb.Text();
+		    tb.Text(old.empty() ? line : old + L"\n" + line);
+	    }
     }
-}
+
+    void MainWindow::AppendLog(std::wstring const& line)
+    {
+	    AppendLog(winrt::hstring(line));
+    }
+
+    int32_t MainWindow::MyProperty()
+    {
+	    throw hresult_not_implemented();
+    }
+    void MainWindow::MyProperty(int32_t)
+    {
+	    throw hresult_not_implemented();
+    }
+} // namespace winrt::ClipBridgeShell::implementation
