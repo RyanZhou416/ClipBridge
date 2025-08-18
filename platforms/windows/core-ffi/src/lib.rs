@@ -1,291 +1,516 @@
 // platforms/windows/core-ffi/src/lib.rs
-
-
-#![allow(non_camel_case_types)]
-
-mod models_api; pub use models_api::*;
+//! ClipBridge Core — Windows FFI Bridge (mixed style)
+//! - cb_init: 通过 C 结构体传配置
+//! - 其余函数：JSON UTF-8 字符串入/出
+//! - 所有由库分配返回的字符串都需调用 cb_free 释放
+//!
+//! 依赖：
+//!   - once_cell = "1"
+//!   - serde = { version = "1", features = ["derive"] }
+//!   - serde_json = "1"
+//!   - 本项目内部 crate: cb_core
+//!
+//! 生成方式（示例 Cargo.toml 片段见文末）：编译为 cdylib
 
 use std::{
-    ffi::c_char,
-    slice,
-    sync::{Mutex, OnceLock},
-    time::Duration,
+    ffi::{CStr, CString},
+    os::raw::{c_char, c_int, c_uint, c_ulonglong, c_ushort},
+    sync::{Mutex, Arc},
 };
-use std::ffi::{CStr, CString};
-use std::os::raw::c_int;
-use std::ptr;
-use serde_json::json;
 
-use cb_core::{self, ClipMeta as CoreClipMeta};
+use once_cell::sync::OnceCell;
 
-// ===== C 对齐结构体（保持与 cb_ffi.h 一致） =====
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct CbStr {
-    pub ptr: *const c_char,
-    pub len: u32,
+use cb_core::prelude::*;
+
+// ----------------------------- 全局状态 ---------------------------------------------
+
+struct CoreState {
+    core: Option<CbCore>,
+    callbacks: Option<Arc<CallbackBridge>>,
 }
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct CbBytes {
-    pub ptr: *const u8,
-    pub len: u32,
+
+static GLOBAL: OnceCell<Mutex<CoreState>> = OnceCell::new();
+
+fn state() -> &'static Mutex<CoreState> {
+    GLOBAL.get_or_init(|| Mutex::new(CoreState { core: None, callbacks: None }))
 }
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct CbStrList {
-    pub items: *const CbStr,
-    pub len: u32,
-}
+
+// ----------------------------- C 侧结构体映射 ---------------------------------------
 
 #[repr(C)]
-pub struct CbDevice {
-    pub device_id: CbStr,
-    pub account_id: CbStr,
-    pub name: CbStr,
-    pub pubkey_fingerprint: CbStr,
-}
-#[repr(C)]
-pub struct CbConfig {
-    pub device_name: CbStr,
-    pub listen_port: i32,
-    pub api_version: u32,
-}
-#[repr(C)]
-pub struct CbMeta {
-    pub item_id: CbStr,
-    pub owner_device_id: CbStr,
-    pub owner_account_id: CbStr,
-    pub kinds: CbStrList,
-    pub mimes: CbStrList,
-    pub preferred_mime: CbStr,
-    pub size_bytes: u64,
-    pub sha256: CbStr,
-    pub created_at: u64,
-    pub expires_at: u64,
-}
+pub struct cb_config {
+    device_name: *const c_char,
+    data_dir: *const c_char,
+    cache_dir: *const c_char,
+    log_dir: *const c_char,
 
-// ===== 回调类型 =====
-type OnDeviceOnline      = Option<extern "C" fn(*const CbDevice)>;
-type OnDeviceOffline     = Option<extern "C" fn(*const CbStr)>;
-type OnNewMetadata       = Option<extern "C" fn(*const CbMeta)>;
-type OnTransferProgress  = Option<extern "C" fn(*const CbStr, u64, u64)>;
-type OnError             = Option<extern "C" fn(i32, *const CbStr)>;
+    max_cache_bytes: u64,
+    max_cache_items: u32,
+    max_history_items: u32,
+    item_ttl_secs: i32,
+
+    enable_mdns: c_int,
+    service_name: *const c_char,
+    port: c_ushort,
+    prefer_quic: c_int,
+
+    key_alias: *const c_char,
+    trusted_only: c_int,
+    require_encryption: c_int,
+
+    reserved1: *const c_char,
+    reserved2: u64,
+}
 
 #[repr(C)]
-#[derive(Clone, Copy)]
-pub struct CbCallbacks {
-    pub on_device_online: OnDeviceOnline,
-    pub on_device_offline: OnDeviceOffline,
-    pub on_new_metadata: OnNewMetadata,
-    pub on_transfer_progress: OnTransferProgress,
-    pub on_error: OnError,
+#[derive(Copy, Clone)]
+pub struct cb_callbacks {
+    device_online: Option<extern "C" fn(*const c_char)>,
+    device_offline: Option<extern "C" fn(*const c_char)>,
+    new_metadata: Option<extern "C" fn(*const c_char)>,
+    transfer_progress: Option<extern "C" fn(*const c_char, c_ulonglong, c_ulonglong)>,
+    on_error: Option<extern "C" fn(c_int, *const c_char)>,
 }
 
-// ===== 全局状态 =====
-static STORE: OnceLock<Mutex<State>> = OnceLock::new();
-struct State {
-    callbacks: Option<CbCallbacks>,
-    paused: bool,
-}
-fn state() -> &'static Mutex<State> {
-    STORE.get_or_init(|| Mutex::new(State { callbacks: None, paused: false }))
+// ----------------------------- 回调桥（C 指针 → Rust Trait） ------------------------
+
+struct CallbackBridge {
+    cbs: cb_callbacks,
 }
 
-// ===== ☆ 你问到的两个“辅助转换函数”就放这里（C → Rust Owned） =====
-unsafe fn cbstr_to_string(s: CbStr) -> String {
-    if s.ptr.is_null() || s.len == 0 { return String::new(); }
-    let bytes = slice::from_raw_parts(s.ptr as *const u8, s.len as usize);
-    String::from_utf8_lossy(bytes).to_string()
-}
-unsafe fn list_to_vec_strings(list: CbStrList) -> Vec<String> {
-    if list.items.is_null() || list.len == 0 { return vec![]; }
-    let items = slice::from_raw_parts(list.items, list.len as usize);
-    items.iter().map(|s| cbstr_to_string(*s)).collect()
-}
-
-// 小工具：把 &str 包成 CbStr（注意：仅本栈帧有效，供回调临时使用）
-fn s(s: &str) -> CbStr { CbStr { ptr: s.as_ptr() as *const c_char, len: s.len() as u32 } }
-fn sl(items: &[CbStr]) -> CbStrList { CbStrList { items: items.as_ptr(), len: items.len() as u32 } }
-
-// ===== 导出 API =====
-#[no_mangle]
-pub extern "C" fn cb_get_version() -> u32 { 1 }
-
-// 初始化：这里会初始化 SQLite（cb_core::init），并保存回调
-#[no_mangle]
-pub extern "C" fn cb_init(cfg: *const CbConfig, cbs: *const CbCallbacks) -> i32 {
-    if cfg.is_null() || cbs.is_null() { return -1; }
-
-    // 1) 初始化 SQLite 到平台默认目录（Windows: %LOCALAPPDATA%\ClipBridge\db\clipbridge.sqlite）
-    if let Err(e) = cb_core::init(None) {
-        eprintln!("core init failed: {e:?}");
-        return -2;
+impl CallbackBridge {
+    fn new(cbs: &cb_callbacks) -> Self {
+        Self { cbs: *cbs }
     }
 
-    // 2) 保存回调
-    let mut st = state().lock().unwrap();
-    unsafe { st.callbacks = Some((*cbs).clone()); }
-    st.paused = false;
-
-    // 3) 演示：0.8s 后回调一次 device+meta，方便前端验证事件通路
-    std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_millis(800));
-        let guard = state().lock().unwrap();
-        if let Some(ref c) = guard.callbacks {
-            if let Some(f) = c.on_device_online {
-                let dev = CbDevice {
-                    device_id: s("device-A"),
-                    account_id: s("account-1"),
-                    name: s("My-PC"),
-                    pubkey_fingerprint: s("fp-001"),
-                };
-                f(&dev as *const _);
-            }
-            if let Some(fm) = c.on_new_metadata {
-                let kinds_arr = [s("text")];
-                let mimes_arr = [s("text/plain")];
-                let meta = CbMeta {
-                    item_id: s("item-123"),
-                    owner_device_id: s("device-A"),
-                    owner_account_id: s("account-1"),
-                    kinds: sl(&kinds_arr),
-                    mimes: sl(&mimes_arr),
-                    preferred_mime: s("text/plain"),
-                    size_bytes: 14,
-                    sha256: s(""),
-                    created_at: 1_720_000_000,
-                    expires_at: 0,
-                };
-                fm(&meta as *const _);
-            }
+    fn emit_error(&self, code: c_int, msg: &str) {
+        if let Some(f) = self.cbs.on_error {
+            let c = CString::new(msg).unwrap_or_else(|_| CString::new("error").unwrap());
+            f(code, c.as_ptr());
         }
-    });
-
-    0
+    }
 }
 
+impl CbCallbacks for CallbackBridge {
+    fn on_device_online(&self, device: &DeviceInfo) {
+        if let Some(f) = self.cbs.device_online {
+            if let Ok(js) = serde_json::to_string(device) {
+                if let Ok(cs) = CString::new(js) {
+                    f(cs.as_ptr());
+                }
+            }
+        }
+    }
+    fn on_device_offline(&self, device_id: &str) {
+        if let Some(f) = self.cbs.device_offline {
+            if let Ok(cs) = CString::new(device_id) {
+                f(cs.as_ptr());
+            }
+        }
+    }
+    fn on_new_metadata(&self, meta: &ItemMeta) {
+        if let Some(f) = self.cbs.new_metadata {
+            if let Ok(js) = serde_json::to_string(meta) {
+                if let Ok(cs) = CString::new(js) {
+                    f(cs.as_ptr());
+                }
+            }
+        }
+    }
+    fn on_transfer_progress(&self, item_id: &str, done: u64, total: u64) {
+        if let Some(f) = self.cbs.transfer_progress {
+            if let Ok(cs) = CString::new(item_id) {
+                f(cs.as_ptr(), done as c_ulonglong, total as c_ulonglong);
+            }
+        }
+    }
+    fn on_error(&self, err: &CbError) {
+        // 将 Core 的错误转为 (code, message)
+        let code = match err.kind {
+            CbErrorKind::InvalidArg => 1,
+            CbErrorKind::InitFailed => 2,
+            CbErrorKind::Storage => 3,
+            CbErrorKind::Network => 4,
+            CbErrorKind::NotFound => 5,
+            CbErrorKind::Paused => 6,
+            CbErrorKind::Internal => 7,
+        };
+        self.emit_error(code, &err.message);
+    }
+}
+
+// ----------------------------- 工具：C 字符串 ↔ Rust --------------------------------
+
+fn cstr_opt(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() { return None; }
+    let s = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn cstr_required(_name: &str, ptr: *const c_char) -> Result<String, c_int> {
+    if ptr.is_null() {
+        return Err(CB_ERR_INVALID_ARG);
+    }
+    Ok(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string())
+}
+
+fn to_cstring_ptr(s: String) -> *mut c_char {
+    CString::new(s).unwrap().into_raw()
+}
+
+fn set_out_json(out: *mut *mut c_char, s: String) -> c_int {
+    if out.is_null() { return CB_ERR_INVALID_ARG; }
+    unsafe { *out = to_cstring_ptr(s) };
+    CB_OK
+}
+
+// ----------------------------- 错误码常量（与头文件一致） ----------------------------
+
+const CB_OK: c_int              = 0;
+const CB_ERR_INVALID_ARG: c_int = 1;
+const CB_ERR_INIT_FAILED: c_int = 2;
+const CB_ERR_STORAGE: c_int     = 3;
+const CB_ERR_NETWORK: c_int     = 4;
+const CB_ERR_NOT_FOUND: c_int   = 5;
+const CB_ERR_PAUSED: c_int      = 6;
+const CB_ERR_INTERNAL: c_int    = 7;
+
+fn map_core_err(e: &CbError) -> c_int {
+    match e.kind {
+        CbErrorKind::InvalidArg => CB_ERR_INVALID_ARG,
+        CbErrorKind::InitFailed => CB_ERR_INIT_FAILED,
+        CbErrorKind::Storage    => CB_ERR_STORAGE,
+        CbErrorKind::Network    => CB_ERR_NETWORK,
+        CbErrorKind::NotFound   => CB_ERR_NOT_FOUND,
+        CbErrorKind::Paused     => CB_ERR_PAUSED,
+        CbErrorKind::Internal   => CB_ERR_INTERNAL,
+    }
+}
+
+// ----------------------------- extern "C" 导出 --------------------------------------
+
 #[no_mangle]
-pub extern "C" fn cb_pause(pause: i32) -> i32 {
+pub extern "C" fn cb_init(cfg: *const cb_config, cbs: *const cb_callbacks) -> c_int {
+    if cfg.is_null() || cbs.is_null() {
+        return CB_ERR_INVALID_ARG;
+    }
+
+    // 把 C 结构体映射到 CbConfig
+    let cfg_ref = unsafe { &*cfg };
+    let device_name = match cstr_required("device_name", cfg_ref.device_name) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let data_dir = match cstr_required("data_dir", cfg_ref.data_dir) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let cache_dir = match cstr_required("cache_dir", cfg_ref.cache_dir) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+
+    let limits = CacheLimits {
+        max_bytes: cfg_ref.max_cache_bytes,
+        max_items: cfg_ref.max_cache_items,
+    };
+    let net = NetOptions {
+        enable_mdns: cfg_ref.enable_mdns != 0,
+        prefer_quic: cfg_ref.prefer_quic != 0,
+    };
+    let sec = SecurityOptions {
+        trusted_only: cfg_ref.trusted_only != 0,
+        require_encryption: cfg_ref.require_encryption != 0,
+    };
+
+    let callbacks = unsafe { &*cbs };
+    let bridge = Arc::new(CallbackBridge::new(callbacks));
+
+    // 构造 Core
+    let core_cfg = CbConfig {
+        device_name,
+        data_dir: data_dir.into(),
+        cache_dir: cache_dir.into(),
+        cache_limits: limits,
+        net,
+        security: sec,
+    };
+
+    // 初始化 Core
+    let core_res = CbCore::init(
+        core_cfg,
+        bridge.clone(),
+        Arc::new(FileSecureStore::new(
+            cstr_opt(cfg_ref.key_alias).unwrap_or_else(|| "default".to_string()),
+            // keystore 目录：<data_dir>/keystore
+            cstr_required("data_dir", cfg_ref.data_dir).unwrap() + "/keystore",
+        )),
+    );
+
     let mut st = state().lock().unwrap();
-    st.paused = pause != 0;
-    0
+    match core_res {
+        Ok(core) => {
+            st.core = Some(core);
+            st.callbacks = Some(bridge);
+            CB_OK
+        }
+        Err(e) => {
+            // 把错误抛给上层回调
+            let code = map_core_err(&e);
+            if let Some(cb) = st.callbacks.as_ref() {
+                cb.emit_error(code, &e.message);
+            }
+            code
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn cb_shutdown() {
     let mut st = state().lock().unwrap();
+    if let Some(core) = st.core.take() {
+        core.shutdown();
+    }
     st.callbacks = None;
-    st.paused = false;
 }
 
-// ===== ☆ 你问到的两个导出函数：cb_store_metadata / cb_history_list =====
-
-// 把一条元数据写入 SQLite 历史
 #[no_mangle]
-pub extern "C" fn cb_store_metadata(meta: *const CbMeta) -> i32 {
-    if meta.is_null() { return -1; }
-    let m = unsafe { &*meta };
+pub extern "C" fn cb_get_version_string() -> *mut c_char {
+    to_cstring_ptr(cb_core::proto::CORE_SEMVER.to_string())
+}
 
-    // C → Rust Owned
-    let item_id          = unsafe { cbstr_to_string(m.item_id) };
-    let owner_device_id  = unsafe { cbstr_to_string(m.owner_device_id) };
-    let owner_account_id = unsafe { let s = cbstr_to_string(m.owner_account_id); if s.is_empty() { None } else { Some(s) } };
-    let kinds_vec        = unsafe { list_to_vec_strings(m.kinds) };
-    let mimes_vec        = unsafe { list_to_vec_strings(m.mimes) };
-    let preferred_mime   = unsafe { cbstr_to_string(m.preferred_mime) };
-    let sha256           = unsafe { let s = cbstr_to_string(m.sha256); if s.is_empty() { None } else { Some(s) } };
+#[no_mangle]
+pub extern "C" fn cb_get_protocol_version() -> c_uint {
+    cb_core::proto::PROTOCOL_VERSION
+}
 
-    let row = CoreClipMeta {
-        item_id,
-        source_device_id: owner_device_id,  // 先用 owner_device_id 作为来源
-        owner_account_id,
-        kinds_json: serde_json::to_string(&kinds_vec).unwrap_or_else(|_| "[]".to_string()),
-        mimes_json: serde_json::to_string(&mimes_vec).unwrap_or_else(|_| "[]".to_string()),
-        preferred_mime,
-        size_bytes: m.size_bytes as i64,
-        sha256,
-        preview_text: None,
-        files_json: None,
-        created_at: m.created_at as i64,
-        expires_at: if m.expires_at == 0 { None } else { Some(m.expires_at as i64) },
-        seen_ts: chrono::Utc::now().timestamp(),
+#[no_mangle]
+pub extern "C" fn cb_ingest_local_copy(json_snapshot: *const c_char, out_item_id: *mut *mut c_char) -> c_int {
+    let js = match cstr_required("json_snapshot", json_snapshot) {
+        Ok(s) => s,
+        Err(code) => return code,
     };
-
-    match cb_core::store_meta(&row) {
-        Ok(_) => 0,
-        Err(e) => { eprintln!("store_meta failed: {e:?}"); -2 }
-    }
-}
-
-// 查询历史并“逐条通过 on_new_metadata 回调喂给外壳”
-#[no_mangle]
-pub extern "C" fn cb_history_list(since_ts: u64, limit: u32) -> i32 {
-    // 1) 读库
-    let rows = match cb_core::history_since(since_ts as i64, limit) {
+    let snap: ClipboardSnapshot = match serde_json::from_str(&js) {
         Ok(v) => v,
-        Err(e) => { eprintln!("history_since failed: {e:?}"); return -2; }
+        Err(_) => return CB_ERR_INVALID_ARG,
     };
 
-    // 2) 取回调
     let st = state().lock().unwrap();
-    let Some(cb) = &st.callbacks else { return -3; };
-    let Some(on_meta) = cb.on_new_metadata else { return 0; };
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
 
-    // 3) 逐条拼装并回调
-    for r in rows {
-        // —— 先把所有“被引用的数据”放到稳定的本地变量里（保证在回调期间活着）——
-        let item_id_s        = r.item_id;                     // String
-        let owner_dev_s      = r.source_device_id;            // String
-        let owner_acc_s      = r.owner_account_id.unwrap_or_default(); // String
-        let preferred_mime_s = r.preferred_mime;              // String
-        let sha_s            = r.sha256.unwrap_or_default();  // String
-
-        // kinds/mimes 反序列化成 Vec<String>
-        let kinds_vec: Vec<String> = serde_json::from_str(&r.kinds_json).unwrap_or_default();
-        let mimes_vec: Vec<String> = serde_json::from_str(&r.mimes_json).unwrap_or_default();
-
-        // 把 Vec<String> 映射为 Vec<CbStr>（指向上面的字符串数据）
-        let kinds_store: Vec<CbStr> = kinds_vec.iter()
-            .map(|t| CbStr { ptr: t.as_ptr() as *const c_char, len: t.len() as u32 })
-            .collect();
-        let mimes_store: Vec<CbStr> = mimes_vec.iter()
-            .map(|t| CbStr { ptr: t.as_ptr() as *const c_char, len: t.len() as u32 })
-            .collect();
-
-        // 再把顶层 String 也转成 CbStr（仍指向上面的变量数据）
-        let item_id_cb       = CbStr { ptr: item_id_s.as_ptr() as *const c_char,       len: item_id_s.len() as u32 };
-        let owner_dev_cb     = CbStr { ptr: owner_dev_s.as_ptr() as *const c_char,     len: owner_dev_s.len() as u32 };
-        let owner_acc_cb     = CbStr { ptr: owner_acc_s.as_ptr() as *const c_char,     len: owner_acc_s.len() as u32 };
-        let preferred_mime_cb= CbStr { ptr: preferred_mime_s.as_ptr() as *const c_char,len: preferred_mime_s.len() as u32 };
-        let sha_cb           = CbStr { ptr: sha_s.as_ptr() as *const c_char,           len: sha_s.len() as u32 };
-
-        let kinds_cb = CbStrList { items: kinds_store.as_ptr(), len: kinds_store.len() as u32 };
-        let mimes_cb = CbStrList { items: mimes_store.as_ptr(), len: mimes_store.len() as u32 };
-
-        // 组装 CbMeta（仅包含对上面本地变量的指针；生命周期受本作用域控制）
-        let meta = CbMeta {
-            item_id:           item_id_cb,
-            owner_device_id:   owner_dev_cb,
-            owner_account_id:  owner_acc_cb,
-            kinds:             kinds_cb,
-            mimes:             mimes_cb,
-            preferred_mime:    preferred_mime_cb,
-            size_bytes:        r.size_bytes as u64,
-            sha256:            sha_cb,
-            created_at:        r.created_at as u64,
-            expires_at:        r.expires_at.unwrap_or(0) as u64,
-        };
-
-        // 在这些局部变量仍然活着的时候回调
-        on_meta(&meta as *const CbMeta);
-        // 回调结束后自然继续下一条；局部变量在本次循环末尾释放
+    match core.ingest_local_copy(snap) {
+        Ok(id) => set_out_json(out_item_id, id),
+        Err(e) => {
+            if let Some(cb) = st.callbacks.as_ref() {
+                cb.emit_error(map_core_err(&e), &e.message);
+            }
+            map_core_err(&e)
+        }
     }
-
-    0
 }
 
-
-// 预留：统一释放跨 FFI 分配的内存（当前未用）
 #[no_mangle]
-pub extern "C" fn cb_free(_p: *mut core::ffi::c_void) {}
+pub extern "C" fn cb_ingest_remote_metadata(json_meta: *const c_char) -> c_int {
+    let js = match cstr_required("json_meta", json_meta) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let meta: ItemMeta = match serde_json::from_str(&js) {
+        Ok(v) => v,
+        Err(_) => return CB_ERR_INVALID_ARG,
+    };
+
+    let st = state().lock().unwrap();
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
+
+    match core.ingest_remote_metadata(&meta) {
+        Ok(()) => CB_OK,
+        Err(e) => {
+            if let Some(cb) = st.callbacks.as_ref() {
+                cb.emit_error(map_core_err(&e), &e.message);
+            }
+            map_core_err(&e)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cb_ensure_content_cached(
+    item_id: *const c_char,
+    prefer_mime_or_null: *const c_char,
+    out_json_localref: *mut *mut c_char
+) -> c_int {
+    let id = match cstr_required("item_id", item_id) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let prefer = cstr_opt(prefer_mime_or_null);
+
+    let st = state().lock().unwrap();
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
+
+    match core.ensure_content_cached(&id, prefer.as_deref()) {
+        Ok(loc) => {
+            match serde_json::to_string(&loc) {
+                Ok(js) => set_out_json(out_json_localref, js),
+                Err(_) => CB_ERR_INTERNAL,
+            }
+        }
+        Err(e) => {
+            if let Some(cb) = st.callbacks.as_ref() {
+                cb.emit_error(map_core_err(&e), &e.message);
+            }
+            map_core_err(&e)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cb_list_history(limit: c_uint, offset: c_uint, out_json_array: *mut *mut c_char) -> c_int {
+    let st = state().lock().unwrap();
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
+    let q = HistoryQuery {
+        limit,
+        offset,
+        kind: None,
+    };
+    match core.list_history(q) {
+        Ok(v) => {
+            match serde_json::to_string(&v) {
+                Ok(js) => set_out_json(out_json_array, js),
+                Err(_) => CB_ERR_INTERNAL,
+            }
+        }
+        Err(e) => {
+            if let Some(cb) = st.callbacks.as_ref() {
+                cb.emit_error(map_core_err(&e), &e.message);
+            }
+            map_core_err(&e)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cb_get_item(item_id: *const c_char, out_json_record: *mut *mut c_char) -> c_int {
+    let id = match cstr_required("item_id", item_id) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let st = state().lock().unwrap();
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
+    match core.get_item(&id) {
+        Ok(Some(rec)) => {
+            match serde_json::to_string(&rec) {
+                Ok(js) => set_out_json(out_json_record, js),
+                Err(_) => CB_ERR_INTERNAL,
+            }
+        }
+        Ok(None) => CB_ERR_NOT_FOUND,
+        Err(e) => {
+            if let Some(cb) = st.callbacks.as_ref() {
+                cb.emit_error(map_core_err(&e), &e.message);
+            }
+            map_core_err(&e)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cb_pause(yes: c_int) -> c_int {
+    let st = state().lock().unwrap();
+    if let Some(core) = st.core.as_ref() {
+        core.pause(yes != 0);
+        CB_OK
+    } else {
+        CB_ERR_INIT_FAILED
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cb_prune_cache() -> c_int {
+    let st = state().lock().unwrap();
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
+    match core.prune_cache() {
+        Ok(()) => CB_OK,
+        Err(e) => {
+            if let Some(cb) = st.callbacks.as_ref() {
+                cb.emit_error(map_core_err(&e), &e.message);
+            }
+            map_core_err(&e)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cb_prune_history() -> c_int {
+    let st = state().lock().unwrap();
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
+    match core.prune_history() {
+        Ok(()) => CB_OK,
+        Err(e) => {
+            if let Some(cb) = st.callbacks.as_ref() {
+                cb.emit_error(map_core_err(&e), &e.message);
+            }
+            map_core_err(&e)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cb_free(p: *mut c_char) {
+    if p.is_null() { return; }
+    unsafe { drop(CString::from_raw(p)); }
+}
+
+// ----------------------------- FileSecureStore 实现 -------------------------------
+// 简单的“文件型安全存储”，写在 <data_dir>/keystore/<alias> 文件里。
+// 仅用于 demo；生产建议替换为 DPAPI/Keychain 等系统级方案。
+
+struct FileSecureStore {
+    alias: String,
+    dir: String,
+}
+
+impl FileSecureStore {
+    fn new(alias: String, dir: String) -> Self {
+        Self { alias, dir }
+    }
+    fn path(&self) -> std::path::PathBuf {
+        std::path::PathBuf::from(&self.dir).join(&self.alias)
+    }
+}
+
+impl SecureStore for FileSecureStore {
+    fn get(&self, _key: &str) -> Option<Vec<u8>> {
+        let p = self.path();
+        std::fs::read(p).ok()
+    }
+    fn set(&self, _key: &str, value: &[u8]) -> CbResult<()> {
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| CbError { kind: CbErrorKind::InitFailed, message: e.to_string() })?;
+        std::fs::write(self.path(), value)
+            .map_err(|e| CbError { kind: CbErrorKind::InitFailed, message: e.to_string() })?;
+        Ok(())
+    }
+}

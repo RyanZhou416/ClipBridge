@@ -1,19 +1,33 @@
 //cb_core/src/lib.rs
 
-pub mod models;
-pub mod ingest;
-pub mod api;
+mod api;
+pub mod proto;
+pub(crate) mod storage;
 
-// 放在其它 mod 前也可
-pub use models::*;      // 便于 core-ffi 直接用
-pub use ingest::*;
-pub use api::*;
+pub(crate) mod net {
+    pub(crate) mod mdns;
+    pub(crate) mod quic;
+}
+
+//pub use api::*;
+
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+
+pub mod prelude {
+    pub use crate::api::{
+        CbCore, CbConfig, CacheLimits, NetOptions, SecurityOptions,
+        CbCallbacks, SecureStore, HistoryQuery, HistoryKind, HistoryEntry,
+        ItemRecord, CbResult, CbError, CbErrorKind,
+    };
+    pub use crate::proto::{
+        PROTOCOL_VERSION, CORE_SEMVER, DeviceInfo, ClipboardSnapshot, ItemMeta, LocalContentRef,
+    };
+}
 
 #[derive(Debug, Clone)]
 pub struct Device {

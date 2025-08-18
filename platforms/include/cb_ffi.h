@@ -1,100 +1,73 @@
-// cb_ffi.h — ClipBridge FFI v1
+// cb_ffi.h — ClipBridge Core FFI (mixed style)
 #pragma once
 #include <stdint.h>
 
-#ifdef _WIN32
-  #define CB_CALL __cdecl
-#else
-  #define CB_CALL
-#endif
-
-#define CB_API_VERSION 1u
-
-// -------------------- 基础类型 --------------------
-typedef struct CbStr {
-    const char* ptr;   // UTF-8; 可为 NULL
-    uint32_t    len;   // 字节长度；ptr 为 NULL 时需为 0
-} CbStr;
-
-typedef struct CbBytes {
-    const uint8_t* ptr;
-    uint32_t       len;
-} CbBytes;
-
-typedef struct CbStrList {
-    const struct CbStr* items; // 连续数组
-    uint32_t            len;
-} CbStrList;
-
-// -------------------- 设备 / 配置 --------------------
-typedef struct CbDevice {
-    CbStr device_id;              // UUID/ULID
-    CbStr account_id;             // 可为空（无账号模式）
-    CbStr name;                   // 设备显示名
-    CbStr pubkey_fingerprint;     // 可选：用于校验
-} CbDevice;
-
-typedef struct CbConfig {
-    CbStr device_name;            // 本机名称
-    int32_t listen_port;          // 0 = 自动
-    uint32_t api_version;         // 传 CB_API_VERSION
-} CbConfig;
-
-// -------------------- 元数据（精简骨架版） --------------------
-typedef struct CbMeta {
-    CbStr   item_id;              // 主键
-    CbStr   owner_device_id;
-    CbStr   owner_account_id;     // 可为空
-    CbStrList kinds;              // 例如: ["text","image","file"]
-    CbStrList mimes;              // 例如: ["text/plain","image/png"]
-    CbStr   preferred_mime;       // 例如: "text/plain"
-    uint64_t size_bytes;
-    CbStr   sha256;               // 可为空（未知时）
-    uint64_t created_at;          // epoch seconds
-    uint64_t expires_at;          // 0 = 不设置
-    // 预览、文件列表等后续按需扩展
-} CbMeta;
-
-// -------------------- 回调 --------------------
-typedef void (CB_CALL *CbOnDeviceOnline)(const CbDevice* dev);
-typedef void (CB_CALL *CbOnDeviceOffline)(const CbStr* device_id);
-typedef void (CB_CALL *CbOnNewMetadata)(const CbMeta* meta);
-typedef void (CB_CALL *CbOnTransferProgress)(const CbStr* item_id, uint64_t sent, uint64_t total);
-typedef void (CB_CALL *CbOnError)(int code, const CbStr* msg);
-
-typedef struct CbCallbacks {
-    CbOnDeviceOnline      on_device_online;     // 可为 NULL
-    CbOnDeviceOffline     on_device_offline;
-    CbOnNewMetadata       on_new_metadata;
-    CbOnTransferProgress  on_transfer_progress;
-    CbOnError             on_error;
-} CbCallbacks;
-
-// -------------------- 导出函数（C ABI） --------------------
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// 版本号（便于握手）
-uint32_t CB_CALL cb_get_version(void);
+// error codes
+#define CB_OK                 0
+#define CB_ERR_INVALID_ARG    1
+#define CB_ERR_INIT_FAILED    2
+#define CB_ERR_STORAGE        3
+#define CB_ERR_NETWORK        4
+#define CB_ERR_NOT_FOUND      5
+#define CB_ERR_PAUSED         6
+#define CB_ERR_INTERNAL       7
 
-// 初始化核心；保存回调；启动发现/网络等（本骨架里先不启网络）
-int CB_CALL cb_init(const CbConfig* cfg, const CbCallbacks* cbs);
+// config struct (MUST match Rust repr(C) layout)
+typedef struct {
+  const char* device_name;     // UTF-8
+  const char* data_dir;        // UTF-8 path
+  const char* cache_dir;       // UTF-8 path
+  const char* log_dir;         // optional
 
-// 发送“我这儿有新剪贴板元数据”
-int CB_CALL cb_send_metadata(const CbMeta* meta);
+  uint64_t    max_cache_bytes;
+  uint32_t    max_cache_items;
+  uint32_t    max_history_items;
+  int32_t     item_ttl_secs;   // -1 = none
 
-// 请求正文（懒取）
-int CB_CALL cb_request_content(const CbStr* item_id, const CbStr* mime);
+  int         enable_mdns;     // 0/1
+  const char* service_name;    // optional
+  uint16_t    port;            // 0 = auto
+  int         prefer_quic;     // 0/1
 
-// 暂停/恢复（1=暂停，0=恢复）
-int CB_CALL cb_pause(int32_t pause);
+  const char* key_alias;       // optional
+  int         trusted_only;    // 0/1
+  int         require_encryption; // 0/1
 
-// 关闭与清理
-void CB_CALL cb_shutdown(void);
+  const char* reserved1;
+  uint64_t    reserved2;
+} cb_config;
 
-// 若有从 core 返回的堆内存，统一用它释放（本骨架暂不需要）
-void CB_CALL cb_free(void* p);
+// callbacks
+typedef struct {
+  void (*device_online)(const char* json_device);
+  void (*device_offline)(const char* device_id);
+  void (*new_metadata)(const char* json_meta);
+  void (*transfer_progress)(const char* item_id, unsigned long long done, unsigned long long total);
+  void (*on_error)(int code, const char* message);
+} cb_callbacks;
+
+// API
+int  cb_init(const cb_config* cfg, const cb_callbacks* cbs);
+void cb_shutdown(void);
+
+const char* cb_get_version_string(void); // must free with cb_free
+uint32_t    cb_get_protocol_version(void);
+
+int cb_ingest_local_copy(const char* json_snapshot, char** out_item_id);
+int cb_ingest_remote_metadata(const char* json_meta);
+int cb_ensure_content_cached(const char* item_id, const char* prefer_mime_or_null, char** out_json_localref);
+int cb_list_history(uint32_t limit, uint32_t offset, char** out_json_array);
+int cb_get_item(const char* item_id, char** out_json_record);
+int cb_pause(int yes);
+int cb_prune_cache(void);
+int cb_prune_history(void);
+
+// free strings returned by the library
+void cb_free(void* p);
 
 #ifdef __cplusplus
 }
