@@ -1,9 +1,9 @@
-﻿using System.Diagnostics.CodeAnalysis;
-
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Contracts.ViewModels;
 using ClipBridgeShell_CS.Helpers;
-
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 
@@ -123,4 +123,34 @@ public class NavigationService : INavigationService
             Navigated?.Invoke(sender, e);
         }
     }
+
+    public void RefreshCurrentPage()
+    {
+        Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [NAV] RefreshCurrentPage begin");
+
+        if (Frame is null)
+        {
+            Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [NAV] RefreshCurrentPage skipped (no frame)");
+            return;
+        }
+
+        // 记录当前页类型 & 参数
+        var currentElement = Frame.Content as FrameworkElement;
+        var pageType = currentElement?.GetType() ?? Frame.CurrentSourcePageType;
+        var parameter = (Frame as Frame)?.GetNavigationState(); // 如果你有参数，可以自行保存你自己的参数来源
+
+        // 导航到相同的页类型，触发完整的构建和资源解析
+        var navigated = Frame.Navigate(pageType, null);
+        if (navigated)
+        {
+            // 清空回退栈（与模板一致）
+            Frame.BackStack.Clear();
+            Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [NAV] RefreshCurrentPage done → {pageType.Name}");
+        }
+        else
+        {
+            Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [NAV] RefreshCurrentPage failed → {pageType?.Name}");
+        }
+    }
+
 }

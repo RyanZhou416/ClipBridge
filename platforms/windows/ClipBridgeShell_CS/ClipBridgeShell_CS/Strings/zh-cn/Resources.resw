@@ -118,7 +118,7 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
   <data name="AppDisplayName" xml:space="preserve">
-    <value>Clip Bridge</value>
+    <value>剪贴桥</value>
   </data>
   <data name="AppDescription" xml:space="preserve">
     <value>ClipBridgeShell_CS</value>
@@ -172,5 +172,8 @@
     &lt;action content="Settings" arguments="action=Settings"/&gt;
   &lt;/actions&gt;
 &lt;/toast&gt;</value>
+  </data>
+  <data name="Settings_LanguageCombo.Header" xml:space="preserve">
+    <value>语言</value>
   </data>
 </root>

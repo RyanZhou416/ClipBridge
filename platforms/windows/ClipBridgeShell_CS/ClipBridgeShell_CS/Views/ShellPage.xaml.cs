@@ -1,5 +1,7 @@
-﻿using ClipBridgeShell_CS.Contracts.Services;
+using System.Diagnostics;
+using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Helpers;
+using ClipBridgeShell_CS.Services;
 using ClipBridgeShell_CS.ViewModels;
 
 using Microsoft.UI.Xaml;
@@ -34,6 +36,18 @@ public sealed partial class ShellPage : Page
         App.MainWindow.SetTitleBar(AppTitleBar);
         App.MainWindow.Activated += MainWindow_Activated;
         AppTitleBarText.Text = "AppDisplayName".GetLocalized();
+
+        var loc = App.GetService<ILocalizationService>();
+        var nav = App.GetService<INavigationService>();
+        var themeSvc = App.GetService<IThemeSelectorService>();
+        loc.LanguageChanged += async (_, __) =>
+        {
+            Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [SHELL] LanguageChanged received → refresh page");
+            nav.RefreshCurrentPage();                              // 让 x:Uid 重新拉资源
+            AppTitleBarText.Text = "AppDisplayName".GetLocalized();// 手动刷新标题栏文本
+            await themeSvc.SetRequestedThemeAsync();               // ★ 重新把主题“套回”到最新根元素
+            Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [SHELL] Title updated & Theme re-applied");
+        };
     }
 
     private void OnLoaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)

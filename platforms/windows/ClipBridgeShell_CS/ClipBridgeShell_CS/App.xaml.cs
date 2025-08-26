@@ -1,4 +1,4 @@
-﻿using ClipBridgeShell_CS.Activation;
+using ClipBridgeShell_CS.Activation;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Contracts.Services;
 using ClipBridgeShell_CS.Core.Services;
@@ -41,7 +41,10 @@ public partial class App : Application
 
     public static WindowEx MainWindow { get; } = new MainWindow();
 
-    public static UIElement? AppTitlebar { get; set; }
+    public static UIElement? AppTitlebar
+    {
+        get; set;
+    }
 
     public App()
     {
@@ -67,6 +70,7 @@ public partial class App : Application
             services.AddSingleton<IActivationService, ActivationService>();
             services.AddSingleton<IPageService, PageService>();
             services.AddSingleton<INavigationService, NavigationService>();
+            services.AddSingleton<ILocalizationService, LocalizationService>();// For language switching
 
             // Core Services
             services.AddSingleton<ISampleDataService, SampleDataService>();
@@ -104,8 +108,23 @@ public partial class App : Application
     {
         base.OnLaunched(args);
 
-        App.GetService<IAppNotificationService>().Show(string.Format("AppNotificationSamplePayload".GetLocalized(), AppContext.BaseDirectory));
+        // 读取本地持久化的语言（键名自定义）
+        const string PreferredLanguageKey = "PreferredLanguage";
+        var local = App.GetService<ILocalSettingsService>();
+        var loc = App.GetService<ILocalizationService>();
+
+        var saved = await local.ReadSettingAsync<string>(PreferredLanguageKey);
+        if (!string.IsNullOrWhiteSpace(saved))
+        {
+            loc.SetLanguage(saved, hotReload: false); // 页面还没创建，不用刷新
+        }
+
+        //App.GetService<IAppNotificationService>().Show(string.Format("AppNotificationSamplePayload".GetLocalized(), AppContext.BaseDirectory));
 
         await App.GetService<IActivationService>().ActivateAsync(args);
+
+        var themeSvc = App.GetService<IThemeSelectorService>();
+        await themeSvc.InitializeAsync();
+        await themeSvc.SetRequestedThemeAsync();
     }
 }

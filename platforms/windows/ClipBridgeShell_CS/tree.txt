@@ -1,7 +1,12 @@
+PS C:\Project\ClipBridge\platforms\windows\ClipBridgeShell_CS> tree /f
+卷 OS 的文件夹 PATH 列表
+卷序列号为 01AD-19FA
 C:.
 │  .editorconfig
 │  .vsconfig
 │  ClipBridgeShell_CS.sln
+│  tree.txt
+│  结构.md
 │
 ├─ClipBridgeShell_CS
 │  │  app.manifest
@@ -42,18 +47,1296 @@ C:.
 │  │  │  └─net7.0-windows10.0.19041.0
 │  │  │      └─win10-x86
 │  │  │          └─publish
-│  │  ├─x64
-│  │  │  └─Debug
-│  │  │      └─net7.0-windows10.0.19041.0
-│  │  │          └─win10-x64
 │  │  └─x86
 │  │      └─Debug
 │  │          └─net7.0-windows10.0.19041.0
 │  │              └─win10-x86
+│  │                  │  App.xbf
+│  │                  │  appsettings.json
+│  │                  │  AppxManifest.xml
+│  │                  │  ClipBridgeShell_CS.build.appxrecipe
+│  │                  │  ClipBridgeShell_CS.Core.dll
+│  │                  │  ClipBridgeShell_CS.Core.pdb
+│  │                  │  ClipBridgeShell_CS.deps.json
+│  │                  │  ClipBridgeShell_CS.dll
+│  │                  │  ClipBridgeShell_CS.exe
+│  │                  │  ClipBridgeShell_CS.pdb
+│  │                  │  ClipBridgeShell_CS.runtimeconfig.json
+│  │                  │  clretwrc.dll
+│  │                  │  clrgc.dll
+│  │                  │  clrjit.dll
+│  │                  │  CommunityToolkit.Mvvm.dll
+│  │                  │  CommunityToolkit.WinUI.UI.Controls.DataGrid.dll
+│  │                  │  coreclr.dll
+│  │                  │  CoreMessagingXP.dll
+│  │                  │  createdump.exe
+│  │                  │  dcompi.dll
+│  │                  │  dwmcorei.dll
+│  │                  │  DwmSceneI.dll
+│  │                  │  DWriteCore.dll
+│  │                  │  hostfxr.dll
+│  │                  │  hostpolicy.dll
+│  │                  │  MainWindow.xbf
+│  │                  │  marshal.dll
+│  │                  │  Microsoft.CSharp.dll
+│  │                  │  Microsoft.DiaSymReader.Native.x86.dll
+│  │                  │  Microsoft.DirectManipulation.dll
+│  │                  │  Microsoft.Extensions.Configuration.Abstractions.dll
+│  │                  │  Microsoft.Extensions.Configuration.Binder.dll
+│  │                  │  Microsoft.Extensions.Configuration.CommandLine.dll
+│  │                  │  Microsoft.Extensions.Configuration.dll
+│  │                  │  Microsoft.Extensions.Configuration.EnvironmentVariables.dll
+│  │                  │  Microsoft.Extensions.Configuration.FileExtensions.dll
+│  │                  │  Microsoft.Extensions.Configuration.Json.dll
+│  │                  │  Microsoft.Extensions.Configuration.UserSecrets.dll
+│  │                  │  Microsoft.Extensions.DependencyInjection.Abstractions.dll
+│  │                  │  Microsoft.Extensions.DependencyInjection.dll
+│  │                  │  Microsoft.Extensions.FileProviders.Abstractions.dll
+│  │                  │  Microsoft.Extensions.FileProviders.Physical.dll
+│  │                  │  Microsoft.Extensions.FileSystemGlobbing.dll
+│  │                  │  Microsoft.Extensions.Hosting.Abstractions.dll
+│  │                  │  Microsoft.Extensions.Hosting.dll
+│  │                  │  Microsoft.Extensions.Logging.Abstractions.dll
+│  │                  │  Microsoft.Extensions.Logging.Configuration.dll
+│  │                  │  Microsoft.Extensions.Logging.Console.dll
+│  │                  │  Microsoft.Extensions.Logging.Debug.dll
+│  │                  │  Microsoft.Extensions.Logging.dll
+│  │                  │  Microsoft.Extensions.Logging.EventLog.dll
+│  │                  │  Microsoft.Extensions.Logging.EventSource.dll
+│  │                  │  Microsoft.Extensions.Options.ConfigurationExtensions.dll
+│  │                  │  Microsoft.Extensions.Options.dll
+│  │                  │  Microsoft.Extensions.Primitives.dll
+│  │                  │  Microsoft.Graphics.Display.dll
+│  │                  │  Microsoft.InputStateManager.dll
+│  │                  │  Microsoft.InteractiveExperiences.Projection.dll
+│  │                  │  Microsoft.Internal.FrameworkUdk.dll
+│  │                  │  Microsoft.UI.Composition.OSSupport.dll
+│  │                  │  Microsoft.UI.dll
+│  │                  │  Microsoft.UI.Input.dll
+│  │                  │  Microsoft.UI.Windowing.Core.dll
+│  │                  │  Microsoft.UI.Windowing.dll
+│  │                  │  Microsoft.UI.Xaml.Controls.dll
+│  │                  │  Microsoft.UI.Xaml.Controls.pri
+│  │                  │  Microsoft.ui.xaml.dll
+│  │                  │  Microsoft.UI.Xaml.Internal.dll
+│  │                  │  Microsoft.UI.Xaml.Phone.dll
+│  │                  │  Microsoft.ui.xaml.resources.19h1.dll
+│  │                  │  Microsoft.ui.xaml.resources.common.dll
+│  │                  │  Microsoft.VisualBasic.Core.dll
+│  │                  │  Microsoft.VisualBasic.dll
+│  │                  │  Microsoft.Web.WebView2.Core.dll
+│  │                  │  Microsoft.Win32.Primitives.dll
+│  │                  │  Microsoft.Win32.Registry.dll
+│  │                  │  Microsoft.Windows.ApplicationModel.DynamicDependency.Projection.dll
+│  │                  │  Microsoft.Windows.ApplicationModel.Resources.dll
+│  │                  │  Microsoft.Windows.ApplicationModel.Resources.Projection.dll
+│  │                  │  Microsoft.Windows.ApplicationModel.WindowsAppRuntime.Projection.dll
+│  │                  │  Microsoft.Windows.AppLifecycle.Projection.dll
+│  │                  │  Microsoft.Windows.AppNotifications.Builder.Projection.dll
+│  │                  │  Microsoft.Windows.AppNotifications.Projection.dll
+│  │                  │  Microsoft.Windows.PushNotifications.Projection.dll
+│  │                  │  Microsoft.Windows.SDK.NET.dll
+│  │                  │  Microsoft.Windows.Security.AccessControl.Projection.dll
+│  │                  │  Microsoft.Windows.System.Power.Projection.dll
+│  │                  │  Microsoft.Windows.System.Projection.dll
+│  │                  │  Microsoft.Windows.Widgets.dll
+│  │                  │  Microsoft.Windows.Widgets.Providers.Projection.dll
+│  │                  │  Microsoft.WindowsAppRuntime.Bootstrap.dll
+│  │                  │  Microsoft.WindowsAppRuntime.Bootstrap.Net.dll
+│  │                  │  Microsoft.WindowsAppRuntime.dll
+│  │                  │  Microsoft.WindowsAppRuntime.Insights.Resource.dll
+│  │                  │  Microsoft.WinUI.dll
+│  │                  │  Microsoft.Xaml.Interactions.dll
+│  │                  │  Microsoft.Xaml.Interactivity.dll
+│  │                  │  MRM.dll
+│  │                  │  mscordaccore.dll
+│  │                  │  mscordaccore_x86_x86_7.0.2024.26716.dll
+│  │                  │  mscordbi.dll
+│  │                  │  mscorlib.dll
+│  │                  │  mscorrc.dll
+│  │                  │  msquic.dll
+│  │                  │  netstandard.dll
+│  │                  │  Newtonsoft.Json.dll
+│  │                  │  PushNotificationsLongRunningTask.ProxyStub.dll
+│  │                  │  resources.pri
+│  │                  │  RestartAgent.exe
+│  │                  │  System.AppContext.dll
+│  │                  │  System.Buffers.dll
+│  │                  │  System.Collections.Concurrent.dll
+│  │                  │  System.Collections.dll
+│  │                  │  System.Collections.Immutable.dll
+│  │                  │  System.Collections.NonGeneric.dll
+│  │                  │  System.Collections.Specialized.dll
+│  │                  │  System.ComponentModel.Annotations.dll
+│  │                  │  System.ComponentModel.DataAnnotations.dll
+│  │                  │  System.ComponentModel.dll
+│  │                  │  System.ComponentModel.EventBasedAsync.dll
+│  │                  │  System.ComponentModel.Primitives.dll
+│  │                  │  System.ComponentModel.TypeConverter.dll
+│  │                  │  System.Configuration.dll
+│  │                  │  System.Console.dll
+│  │                  │  System.Core.dll
+│  │                  │  System.Data.Common.dll
+│  │                  │  System.Data.DataSetExtensions.dll
+│  │                  │  System.Data.dll
+│  │                  │  System.Diagnostics.Contracts.dll
+│  │                  │  System.Diagnostics.Debug.dll
+│  │                  │  System.Diagnostics.DiagnosticSource.dll
+│  │                  │  System.Diagnostics.EventLog.dll
+│  │                  │  System.Diagnostics.EventLog.Messages.dll
+│  │                  │  System.Diagnostics.FileVersionInfo.dll
+│  │                  │  System.Diagnostics.Process.dll
+│  │                  │  System.Diagnostics.StackTrace.dll
+│  │                  │  System.Diagnostics.TextWriterTraceListener.dll
+│  │                  │  System.Diagnostics.Tools.dll
+│  │                  │  System.Diagnostics.TraceSource.dll
+│  │                  │  System.Diagnostics.Tracing.dll
+│  │                  │  System.dll
+│  │                  │  System.Drawing.dll
+│  │                  │  System.Drawing.Primitives.dll
+│  │                  │  System.Dynamic.Runtime.dll
+│  │                  │  System.Formats.Asn1.dll
+│  │                  │  System.Formats.Tar.dll
+│  │                  │  System.Globalization.Calendars.dll
+│  │                  │  System.Globalization.dll
+│  │                  │  System.Globalization.Extensions.dll
+│  │                  │  System.IO.Compression.Brotli.dll
+│  │                  │  System.IO.Compression.dll
+│  │                  │  System.IO.Compression.FileSystem.dll
+│  │                  │  System.IO.Compression.Native.dll
+│  │                  │  System.IO.Compression.ZipFile.dll
+│  │                  │  System.IO.dll
+│  │                  │  System.IO.FileSystem.AccessControl.dll
+│  │                  │  System.IO.FileSystem.dll
+│  │                  │  System.IO.FileSystem.DriveInfo.dll
+│  │                  │  System.IO.FileSystem.Primitives.dll
+│  │                  │  System.IO.FileSystem.Watcher.dll
+│  │                  │  System.IO.IsolatedStorage.dll
+│  │                  │  System.IO.MemoryMappedFiles.dll
+│  │                  │  System.IO.Pipes.AccessControl.dll
+│  │                  │  System.IO.Pipes.dll
+│  │                  │  System.IO.UnmanagedMemoryStream.dll
+│  │                  │  System.Linq.dll
+│  │                  │  System.Linq.Expressions.dll
+│  │                  │  System.Linq.Parallel.dll
+│  │                  │  System.Linq.Queryable.dll
+│  │                  │  System.Memory.dll
+│  │                  │  System.Net.dll
+│  │                  │  System.Net.Http.dll
+│  │                  │  System.Net.Http.Json.dll
+│  │                  │  System.Net.HttpListener.dll
+│  │                  │  System.Net.Mail.dll
+│  │                  │  System.Net.NameResolution.dll
+│  │                  │  System.Net.NetworkInformation.dll
+│  │                  │  System.Net.Ping.dll
+│  │                  │  System.Net.Primitives.dll
+│  │                  │  System.Net.Quic.dll
+│  │                  │  System.Net.Requests.dll
+│  │                  │  System.Net.Security.dll
+│  │                  │  System.Net.ServicePoint.dll
+│  │                  │  System.Net.Sockets.dll
+│  │                  │  System.Net.WebClient.dll
+│  │                  │  System.Net.WebHeaderCollection.dll
+│  │                  │  System.Net.WebProxy.dll
+│  │                  │  System.Net.WebSockets.Client.dll
+│  │                  │  System.Net.WebSockets.dll
+│  │                  │  System.Numerics.dll
+│  │                  │  System.Numerics.Vectors.dll
+│  │                  │  System.ObjectModel.dll
+│  │                  │  System.Private.CoreLib.dll
+│  │                  │  System.Private.DataContractSerialization.dll
+│  │                  │  System.Private.Uri.dll
+│  │                  │  System.Private.Xml.dll
+│  │                  │  System.Private.Xml.Linq.dll
+│  │                  │  System.Reflection.DispatchProxy.dll
+│  │                  │  System.Reflection.dll
+│  │                  │  System.Reflection.Emit.dll
+│  │                  │  System.Reflection.Emit.ILGeneration.dll
+│  │                  │  System.Reflection.Emit.Lightweight.dll
+│  │                  │  System.Reflection.Extensions.dll
+│  │                  │  System.Reflection.Metadata.dll
+│  │                  │  System.Reflection.Primitives.dll
+│  │                  │  System.Reflection.TypeExtensions.dll
+│  │                  │  System.Resources.Reader.dll
+│  │                  │  System.Resources.ResourceManager.dll
+│  │                  │  System.Resources.Writer.dll
+│  │                  │  System.Runtime.CompilerServices.Unsafe.dll
+│  │                  │  System.Runtime.CompilerServices.VisualC.dll
+│  │                  │  System.Runtime.dll
+│  │                  │  System.Runtime.Extensions.dll
+│  │                  │  System.Runtime.Handles.dll
+│  │                  │  System.Runtime.InteropServices.dll
+│  │                  │  System.Runtime.InteropServices.JavaScript.dll
+│  │                  │  System.Runtime.InteropServices.RuntimeInformation.dll
+│  │                  │  System.Runtime.Intrinsics.dll
+│  │                  │  System.Runtime.Loader.dll
+│  │                  │  System.Runtime.Numerics.dll
+│  │                  │  System.Runtime.Serialization.dll
+│  │                  │  System.Runtime.Serialization.Formatters.dll
+│  │                  │  System.Runtime.Serialization.Json.dll
+│  │                  │  System.Runtime.Serialization.Primitives.dll
+│  │                  │  System.Runtime.Serialization.Xml.dll
+│  │                  │  System.Security.AccessControl.dll
+│  │                  │  System.Security.Claims.dll
+│  │                  │  System.Security.Cryptography.Algorithms.dll
+│  │                  │  System.Security.Cryptography.Cng.dll
+│  │                  │  System.Security.Cryptography.Csp.dll
+│  │                  │  System.Security.Cryptography.dll
+│  │                  │  System.Security.Cryptography.Encoding.dll
+│  │                  │  System.Security.Cryptography.OpenSsl.dll
+│  │                  │  System.Security.Cryptography.Primitives.dll
+│  │                  │  System.Security.Cryptography.X509Certificates.dll
+│  │                  │  System.Security.dll
+│  │                  │  System.Security.Principal.dll
+│  │                  │  System.Security.Principal.Windows.dll
+│  │                  │  System.Security.SecureString.dll
+│  │                  │  System.ServiceModel.Web.dll
+│  │                  │  System.ServiceProcess.dll
+│  │                  │  System.Text.Encoding.CodePages.dll
+│  │                  │  System.Text.Encoding.dll
+│  │                  │  System.Text.Encoding.Extensions.dll
+│  │                  │  System.Text.Encodings.Web.dll
+│  │                  │  System.Text.Json.dll
+│  │                  │  System.Text.RegularExpressions.dll
+│  │                  │  System.Threading.Channels.dll
+│  │                  │  System.Threading.dll
+│  │                  │  System.Threading.Overlapped.dll
+│  │                  │  System.Threading.Tasks.Dataflow.dll
+│  │                  │  System.Threading.Tasks.dll
+│  │                  │  System.Threading.Tasks.Extensions.dll
+│  │                  │  System.Threading.Tasks.Parallel.dll
+│  │                  │  System.Threading.Thread.dll
+│  │                  │  System.Threading.ThreadPool.dll
+│  │                  │  System.Threading.Timer.dll
+│  │                  │  System.Transactions.dll
+│  │                  │  System.Transactions.Local.dll
+│  │                  │  System.ValueTuple.dll
+│  │                  │  System.Web.dll
+│  │                  │  System.Web.HttpUtility.dll
+│  │                  │  System.Windows.dll
+│  │                  │  System.Xml.dll
+│  │                  │  System.Xml.Linq.dll
+│  │                  │  System.Xml.ReaderWriter.dll
+│  │                  │  System.Xml.Serialization.dll
+│  │                  │  System.Xml.XDocument.dll
+│  │                  │  System.Xml.XmlDocument.dll
+│  │                  │  System.Xml.XmlSerializer.dll
+│  │                  │  System.Xml.XPath.dll
+│  │                  │  System.Xml.XPath.XDocument.dll
+│  │                  │  WindowsAppRuntime.png
+│  │                  │  WindowsAppSdk.AppxDeploymentExtensions.Desktop-EventLog-Instrumentation.dll
+│  │                  │  WindowsAppSdk.AppxDeploymentExtensions.Desktop.dll
+│  │                  │  WindowsBase.dll
+│  │                  │  WinRT.Runtime.dll
+│  │                  │  WinUIEdit.dll
+│  │                  │  WinUIEx.dll
+│  │                  │  wuceffectsi.dll
+│  │                  │
+│  │                  ├─af-ZA
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─am-ET
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─AppX
+│  │                  │  │  appsettings.json
+│  │                  │  │  AppxManifest.xml
+│  │                  │  │  ClipBridgeShell_CS.Core.dll
+│  │                  │  │  ClipBridgeShell_CS.deps.json
+│  │                  │  │  ClipBridgeShell_CS.dll
+│  │                  │  │  ClipBridgeShell_CS.exe
+│  │                  │  │  ClipBridgeShell_CS.runtimeconfig.json
+│  │                  │  │  clretwrc.dll
+│  │                  │  │  clrgc.dll
+│  │                  │  │  clrjit.dll
+│  │                  │  │  CommunityToolkit.Mvvm.dll
+│  │                  │  │  CommunityToolkit.WinUI.UI.Controls.DataGrid.dll
+│  │                  │  │  CommunityToolkit.WinUI.UI.Controls.DataGrid.pri
+│  │                  │  │  coreclr.dll
+│  │                  │  │  CoreMessagingXP.dll
+│  │                  │  │  createdump.exe
+│  │                  │  │  dcompi.dll
+│  │                  │  │  dwmcorei.dll
+│  │                  │  │  DwmSceneI.dll
+│  │                  │  │  DWriteCore.dll
+│  │                  │  │  hostfxr.dll
+│  │                  │  │  hostpolicy.dll
+│  │                  │  │  marshal.dll
+│  │                  │  │  Microsoft.CSharp.dll
+│  │                  │  │  Microsoft.DiaSymReader.Native.x86.dll
+│  │                  │  │  Microsoft.DirectManipulation.dll
+│  │                  │  │  Microsoft.Extensions.Configuration.Abstractions.dll
+│  │                  │  │  Microsoft.Extensions.Configuration.Binder.dll
+│  │                  │  │  Microsoft.Extensions.Configuration.CommandLine.dll
+│  │                  │  │  Microsoft.Extensions.Configuration.dll
+│  │                  │  │  Microsoft.Extensions.Configuration.EnvironmentVariables.dll
+│  │                  │  │  Microsoft.Extensions.Configuration.FileExtensions.dll
+│  │                  │  │  Microsoft.Extensions.Configuration.Json.dll
+│  │                  │  │  Microsoft.Extensions.Configuration.UserSecrets.dll
+│  │                  │  │  Microsoft.Extensions.DependencyInjection.Abstractions.dll
+│  │                  │  │  Microsoft.Extensions.DependencyInjection.dll
+│  │                  │  │  Microsoft.Extensions.FileProviders.Abstractions.dll
+│  │                  │  │  Microsoft.Extensions.FileProviders.Physical.dll
+│  │                  │  │  Microsoft.Extensions.FileSystemGlobbing.dll
+│  │                  │  │  Microsoft.Extensions.Hosting.Abstractions.dll
+│  │                  │  │  Microsoft.Extensions.Hosting.dll
+│  │                  │  │  Microsoft.Extensions.Logging.Abstractions.dll
+│  │                  │  │  Microsoft.Extensions.Logging.Configuration.dll
+│  │                  │  │  Microsoft.Extensions.Logging.Console.dll
+│  │                  │  │  Microsoft.Extensions.Logging.Debug.dll
+│  │                  │  │  Microsoft.Extensions.Logging.dll
+│  │                  │  │  Microsoft.Extensions.Logging.EventLog.dll
+│  │                  │  │  Microsoft.Extensions.Logging.EventSource.dll
+│  │                  │  │  Microsoft.Extensions.Options.ConfigurationExtensions.dll
+│  │                  │  │  Microsoft.Extensions.Options.dll
+│  │                  │  │  Microsoft.Extensions.Primitives.dll
+│  │                  │  │  Microsoft.Graphics.Display.dll
+│  │                  │  │  Microsoft.InputStateManager.dll
+│  │                  │  │  Microsoft.InteractiveExperiences.Projection.dll
+│  │                  │  │  Microsoft.Internal.FrameworkUdk.dll
+│  │                  │  │  Microsoft.UI.Composition.OSSupport.dll
+│  │                  │  │  Microsoft.UI.dll
+│  │                  │  │  Microsoft.UI.Input.dll
+│  │                  │  │  Microsoft.UI.Windowing.Core.dll
+│  │                  │  │  Microsoft.UI.Windowing.dll
+│  │                  │  │  Microsoft.UI.Xaml.Controls.dll
+│  │                  │  │  Microsoft.UI.Xaml.Controls.pri
+│  │                  │  │  Microsoft.ui.xaml.dll
+│  │                  │  │  Microsoft.UI.Xaml.Internal.dll
+│  │                  │  │  Microsoft.UI.Xaml.Phone.dll
+│  │                  │  │  Microsoft.ui.xaml.resources.19h1.dll
+│  │                  │  │  Microsoft.ui.xaml.resources.common.dll
+│  │                  │  │  Microsoft.VisualBasic.Core.dll
+│  │                  │  │  Microsoft.VisualBasic.dll
+│  │                  │  │  Microsoft.Web.WebView2.Core.dll
+│  │                  │  │  Microsoft.Win32.Primitives.dll
+│  │                  │  │  Microsoft.Win32.Registry.dll
+│  │                  │  │  Microsoft.Windows.ApplicationModel.DynamicDependency.Projection.dll
+│  │                  │  │  Microsoft.Windows.ApplicationModel.Resources.dll
+│  │                  │  │  Microsoft.Windows.ApplicationModel.Resources.Projection.dll
+│  │                  │  │  Microsoft.Windows.ApplicationModel.WindowsAppRuntime.Projection.dll
+│  │                  │  │  Microsoft.Windows.AppLifecycle.Projection.dll
+│  │                  │  │  Microsoft.Windows.AppNotifications.Builder.Projection.dll
+│  │                  │  │  Microsoft.Windows.AppNotifications.Projection.dll
+│  │                  │  │  Microsoft.Windows.PushNotifications.Projection.dll
+│  │                  │  │  Microsoft.Windows.SDK.NET.dll
+│  │                  │  │  Microsoft.Windows.Security.AccessControl.Projection.dll
+│  │                  │  │  Microsoft.Windows.System.Power.Projection.dll
+│  │                  │  │  Microsoft.Windows.System.Projection.dll
+│  │                  │  │  Microsoft.Windows.Widgets.dll
+│  │                  │  │  Microsoft.Windows.Widgets.Providers.Projection.dll
+│  │                  │  │  Microsoft.WindowsAppRuntime.Bootstrap.dll
+│  │                  │  │  Microsoft.WindowsAppRuntime.Bootstrap.Net.dll
+│  │                  │  │  Microsoft.WindowsAppRuntime.dll
+│  │                  │  │  Microsoft.WindowsAppRuntime.Insights.Resource.dll
+│  │                  │  │  Microsoft.WinUI.dll
+│  │                  │  │  Microsoft.Xaml.Interactions.dll
+│  │                  │  │  Microsoft.Xaml.Interactions.pri
+│  │                  │  │  Microsoft.Xaml.Interactivity.dll
+│  │                  │  │  Microsoft.Xaml.Interactivity.pri
+│  │                  │  │  MRM.dll
+│  │                  │  │  mscordaccore.dll
+│  │                  │  │  mscordaccore_x86_x86_7.0.2024.26716.dll
+│  │                  │  │  mscordbi.dll
+│  │                  │  │  mscorlib.dll
+│  │                  │  │  mscorrc.dll
+│  │                  │  │  msquic.dll
+│  │                  │  │  netstandard.dll
+│  │                  │  │  Newtonsoft.Json.dll
+│  │                  │  │  PushNotificationsLongRunningTask.ProxyStub.dll
+│  │                  │  │  resources.pri
+│  │                  │  │  RestartAgent.exe
+│  │                  │  │  System.AppContext.dll
+│  │                  │  │  System.Buffers.dll
+│  │                  │  │  System.Collections.Concurrent.dll
+│  │                  │  │  System.Collections.dll
+│  │                  │  │  System.Collections.Immutable.dll
+│  │                  │  │  System.Collections.NonGeneric.dll
+│  │                  │  │  System.Collections.Specialized.dll
+│  │                  │  │  System.ComponentModel.Annotations.dll
+│  │                  │  │  System.ComponentModel.DataAnnotations.dll
+│  │                  │  │  System.ComponentModel.dll
+│  │                  │  │  System.ComponentModel.EventBasedAsync.dll
+│  │                  │  │  System.ComponentModel.Primitives.dll
+│  │                  │  │  System.ComponentModel.TypeConverter.dll
+│  │                  │  │  System.Configuration.dll
+│  │                  │  │  System.Console.dll
+│  │                  │  │  System.Core.dll
+│  │                  │  │  System.Data.Common.dll
+│  │                  │  │  System.Data.DataSetExtensions.dll
+│  │                  │  │  System.Data.dll
+│  │                  │  │  System.Diagnostics.Contracts.dll
+│  │                  │  │  System.Diagnostics.Debug.dll
+│  │                  │  │  System.Diagnostics.DiagnosticSource.dll
+│  │                  │  │  System.Diagnostics.EventLog.dll
+│  │                  │  │  System.Diagnostics.EventLog.Messages.dll
+│  │                  │  │  System.Diagnostics.FileVersionInfo.dll
+│  │                  │  │  System.Diagnostics.Process.dll
+│  │                  │  │  System.Diagnostics.StackTrace.dll
+│  │                  │  │  System.Diagnostics.TextWriterTraceListener.dll
+│  │                  │  │  System.Diagnostics.Tools.dll
+│  │                  │  │  System.Diagnostics.TraceSource.dll
+│  │                  │  │  System.Diagnostics.Tracing.dll
+│  │                  │  │  System.dll
+│  │                  │  │  System.Drawing.dll
+│  │                  │  │  System.Drawing.Primitives.dll
+│  │                  │  │  System.Dynamic.Runtime.dll
+│  │                  │  │  System.Formats.Asn1.dll
+│  │                  │  │  System.Formats.Tar.dll
+│  │                  │  │  System.Globalization.Calendars.dll
+│  │                  │  │  System.Globalization.dll
+│  │                  │  │  System.Globalization.Extensions.dll
+│  │                  │  │  System.IO.Compression.Brotli.dll
+│  │                  │  │  System.IO.Compression.dll
+│  │                  │  │  System.IO.Compression.FileSystem.dll
+│  │                  │  │  System.IO.Compression.Native.dll
+│  │                  │  │  System.IO.Compression.ZipFile.dll
+│  │                  │  │  System.IO.dll
+│  │                  │  │  System.IO.FileSystem.AccessControl.dll
+│  │                  │  │  System.IO.FileSystem.dll
+│  │                  │  │  System.IO.FileSystem.DriveInfo.dll
+│  │                  │  │  System.IO.FileSystem.Primitives.dll
+│  │                  │  │  System.IO.FileSystem.Watcher.dll
+│  │                  │  │  System.IO.IsolatedStorage.dll
+│  │                  │  │  System.IO.MemoryMappedFiles.dll
+│  │                  │  │  System.IO.Pipes.AccessControl.dll
+│  │                  │  │  System.IO.Pipes.dll
+│  │                  │  │  System.IO.UnmanagedMemoryStream.dll
+│  │                  │  │  System.Linq.dll
+│  │                  │  │  System.Linq.Expressions.dll
+│  │                  │  │  System.Linq.Parallel.dll
+│  │                  │  │  System.Linq.Queryable.dll
+│  │                  │  │  System.Memory.dll
+│  │                  │  │  System.Net.dll
+│  │                  │  │  System.Net.Http.dll
+│  │                  │  │  System.Net.Http.Json.dll
+│  │                  │  │  System.Net.HttpListener.dll
+│  │                  │  │  System.Net.Mail.dll
+│  │                  │  │  System.Net.NameResolution.dll
+│  │                  │  │  System.Net.NetworkInformation.dll
+│  │                  │  │  System.Net.Ping.dll
+│  │                  │  │  System.Net.Primitives.dll
+│  │                  │  │  System.Net.Quic.dll
+│  │                  │  │  System.Net.Requests.dll
+│  │                  │  │  System.Net.Security.dll
+│  │                  │  │  System.Net.ServicePoint.dll
+│  │                  │  │  System.Net.Sockets.dll
+│  │                  │  │  System.Net.WebClient.dll
+│  │                  │  │  System.Net.WebHeaderCollection.dll
+│  │                  │  │  System.Net.WebProxy.dll
+│  │                  │  │  System.Net.WebSockets.Client.dll
+│  │                  │  │  System.Net.WebSockets.dll
+│  │                  │  │  System.Numerics.dll
+│  │                  │  │  System.Numerics.Vectors.dll
+│  │                  │  │  System.ObjectModel.dll
+│  │                  │  │  System.Private.CoreLib.dll
+│  │                  │  │  System.Private.DataContractSerialization.dll
+│  │                  │  │  System.Private.Uri.dll
+│  │                  │  │  System.Private.Xml.dll
+│  │                  │  │  System.Private.Xml.Linq.dll
+│  │                  │  │  System.Reflection.DispatchProxy.dll
+│  │                  │  │  System.Reflection.dll
+│  │                  │  │  System.Reflection.Emit.dll
+│  │                  │  │  System.Reflection.Emit.ILGeneration.dll
+│  │                  │  │  System.Reflection.Emit.Lightweight.dll
+│  │                  │  │  System.Reflection.Extensions.dll
+│  │                  │  │  System.Reflection.Metadata.dll
+│  │                  │  │  System.Reflection.Primitives.dll
+│  │                  │  │  System.Reflection.TypeExtensions.dll
+│  │                  │  │  System.Resources.Reader.dll
+│  │                  │  │  System.Resources.ResourceManager.dll
+│  │                  │  │  System.Resources.Writer.dll
+│  │                  │  │  System.Runtime.CompilerServices.Unsafe.dll
+│  │                  │  │  System.Runtime.CompilerServices.VisualC.dll
+│  │                  │  │  System.Runtime.dll
+│  │                  │  │  System.Runtime.Extensions.dll
+│  │                  │  │  System.Runtime.Handles.dll
+│  │                  │  │  System.Runtime.InteropServices.dll
+│  │                  │  │  System.Runtime.InteropServices.JavaScript.dll
+│  │                  │  │  System.Runtime.InteropServices.RuntimeInformation.dll
+│  │                  │  │  System.Runtime.Intrinsics.dll
+│  │                  │  │  System.Runtime.Loader.dll
+│  │                  │  │  System.Runtime.Numerics.dll
+│  │                  │  │  System.Runtime.Serialization.dll
+│  │                  │  │  System.Runtime.Serialization.Formatters.dll
+│  │                  │  │  System.Runtime.Serialization.Json.dll
+│  │                  │  │  System.Runtime.Serialization.Primitives.dll
+│  │                  │  │  System.Runtime.Serialization.Xml.dll
+│  │                  │  │  System.Security.AccessControl.dll
+│  │                  │  │  System.Security.Claims.dll
+│  │                  │  │  System.Security.Cryptography.Algorithms.dll
+│  │                  │  │  System.Security.Cryptography.Cng.dll
+│  │                  │  │  System.Security.Cryptography.Csp.dll
+│  │                  │  │  System.Security.Cryptography.dll
+│  │                  │  │  System.Security.Cryptography.Encoding.dll
+│  │                  │  │  System.Security.Cryptography.OpenSsl.dll
+│  │                  │  │  System.Security.Cryptography.Primitives.dll
+│  │                  │  │  System.Security.Cryptography.X509Certificates.dll
+│  │                  │  │  System.Security.dll
+│  │                  │  │  System.Security.Principal.dll
+│  │                  │  │  System.Security.Principal.Windows.dll
+│  │                  │  │  System.Security.SecureString.dll
+│  │                  │  │  System.ServiceModel.Web.dll
+│  │                  │  │  System.ServiceProcess.dll
+│  │                  │  │  System.Text.Encoding.CodePages.dll
+│  │                  │  │  System.Text.Encoding.dll
+│  │                  │  │  System.Text.Encoding.Extensions.dll
+│  │                  │  │  System.Text.Encodings.Web.dll
+│  │                  │  │  System.Text.Json.dll
+│  │                  │  │  System.Text.RegularExpressions.dll
+│  │                  │  │  System.Threading.Channels.dll
+│  │                  │  │  System.Threading.dll
+│  │                  │  │  System.Threading.Overlapped.dll
+│  │                  │  │  System.Threading.Tasks.Dataflow.dll
+│  │                  │  │  System.Threading.Tasks.dll
+│  │                  │  │  System.Threading.Tasks.Extensions.dll
+│  │                  │  │  System.Threading.Tasks.Parallel.dll
+│  │                  │  │  System.Threading.Thread.dll
+│  │                  │  │  System.Threading.ThreadPool.dll
+│  │                  │  │  System.Threading.Timer.dll
+│  │                  │  │  System.Transactions.dll
+│  │                  │  │  System.Transactions.Local.dll
+│  │                  │  │  System.ValueTuple.dll
+│  │                  │  │  System.Web.dll
+│  │                  │  │  System.Web.HttpUtility.dll
+│  │                  │  │  System.Windows.dll
+│  │                  │  │  System.Xml.dll
+│  │                  │  │  System.Xml.Linq.dll
+│  │                  │  │  System.Xml.ReaderWriter.dll
+│  │                  │  │  System.Xml.Serialization.dll
+│  │                  │  │  System.Xml.XDocument.dll
+│  │                  │  │  System.Xml.XmlDocument.dll
+│  │                  │  │  System.Xml.XmlSerializer.dll
+│  │                  │  │  System.Xml.XPath.dll
+│  │                  │  │  System.Xml.XPath.XDocument.dll
+│  │                  │  │  vs.appxrecipe
+│  │                  │  │  WindowsAppRuntime.png
+│  │                  │  │  WindowsAppSdk.AppxDeploymentExtensions.Desktop-EventLog-Instrumentation.dll
+│  │                  │  │  WindowsAppSdk.AppxDeploymentExtensions.Desktop.dll
+│  │                  │  │  WindowsBase.dll
+│  │                  │  │  WinRT.Runtime.dll
+│  │                  │  │  WinUIEdit.dll
+│  │                  │  │  WinUIEx.dll
+│  │                  │  │  WinUIEx.pri
+│  │                  │  │  wuceffectsi.dll
+│  │                  │  │
+│  │                  │  ├─af-ZA
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─am-ET
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ar-SA
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─as-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─Assets
+│  │                  │  │      LockScreenLogo.scale-200.png
+│  │                  │  │      SplashScreen.scale-200.png
+│  │                  │  │      Square150x150Logo.scale-200.png
+│  │                  │  │      Square44x44Logo.scale-200.png
+│  │                  │  │      Square44x44Logo.targetsize-24_altform-unplated.png
+│  │                  │  │      StoreLogo.png
+│  │                  │  │      Wide310x150Logo.scale-200.png
+│  │                  │  │      WindowIcon.ico
+│  │                  │  │
+│  │                  │  ├─az-Latn-AZ
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─bg-BG
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─bn-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─bs-Latn-BA
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ca-ES
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ca-Es-VALENCIA
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─cs-CZ
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─cy-GB
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─da-DK
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─de-DE
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─el-GR
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─en-GB
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─en-us
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─es-ES
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─es-MX
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─et-EE
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─eu-ES
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─fa-IR
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─fi-FI
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─fil-PH
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─fr-CA
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─fr-FR
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ga-IE
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─gd-gb
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─gl-ES
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─gu-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─he-IL
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─hi-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─hr-HR
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─hu-HU
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─hy-AM
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─id-ID
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─is-IS
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─it-IT
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ja-JP
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ka-GE
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─kk-KZ
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─km-KH
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─kn-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ko-KR
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─kok-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─lb-LU
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─lo-LA
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─lt-LT
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─lv-LV
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─mi-NZ
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─Microsoft.UI.Xaml
+│  │                  │  │  └─Assets
+│  │                  │  │          NoiseAsset_256x256_PNG.png
+│  │                  │  │
+│  │                  │  ├─mk-MK
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ml-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─mr-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ms-MY
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─mt-MT
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─nb-NO
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ne-NP
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─nl-NL
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─nn-NO
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─or-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─pa-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─pl-PL
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─pt-BR
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─pt-PT
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─quz-PE
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ro-RO
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ru-RU
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─sk-SK
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─sl-SI
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─sq-AL
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─sr-Cyrl-BA
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─sr-Cyrl-RS
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─sr-Latn-RS
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─sv-SE
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ta-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─te-IN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─th-TH
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─tr-TR
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─tt-RU
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ug-CN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─uk-UA
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─ur-PK
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─uz-Latn-UZ
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─vi-VN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  ├─zh-CN
+│  │                  │  │      Microsoft.ui.xaml.dll.mui
+│  │                  │  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │  │
+│  │                  │  └─zh-TW
+│  │                  │          Microsoft.ui.xaml.dll.mui
+│  │                  │          Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ar-SA
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─as-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─az-Latn-AZ
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─bg-BG
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─bn-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─bs-Latn-BA
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ca-ES
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ca-Es-VALENCIA
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─cs-CZ
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─cy-GB
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─da-DK
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─de-DE
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─el-GR
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─en-GB
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─en-us
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─es-ES
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─es-MX
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─et-EE
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─eu-ES
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─fa-IR
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─fi-FI
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─fil-PH
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─fr-CA
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─fr-FR
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ga-IE
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─gd-gb
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─gl-ES
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─gu-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─he-IL
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─hi-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─hr-HR
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─hu-HU
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─hy-AM
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─id-ID
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─is-IS
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─it-IT
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ja-JP
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ka-GE
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─kk-KZ
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─km-KH
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─kn-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ko-KR
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─kok-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─lb-LU
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─lo-LA
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─lt-LT
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─lv-LV
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─mi-NZ
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─Microsoft.UI.Xaml
+│  │                  │  └─Assets
+│  │                  │          NoiseAsset_256x256_PNG.png
+│  │                  │
+│  │                  ├─mk-MK
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ml-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─mr-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ms-MY
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─mt-MT
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─nb-NO
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ne-NP
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─nl-NL
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─nn-NO
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─or-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─pa-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─pl-PL
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─pt-BR
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─pt-PT
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─quz-PE
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ro-RO
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ru-RU
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─sk-SK
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─sl-SI
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─sq-AL
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─sr-Cyrl-BA
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─sr-Cyrl-RS
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─sr-Latn-RS
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─Styles
+│  │                  │      FontSizes.xbf
+│  │                  │      TextBlock.xbf
+│  │                  │      Thickness.xbf
+│  │                  │
+│  │                  ├─sv-SE
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ta-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─te-IN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─th-TH
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─tr-TR
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─tt-RU
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ug-CN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─uk-UA
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─ur-PK
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─uz-Latn-UZ
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─vi-VN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  ├─Views
+│  │                  │      DevicesPage.xbf
+│  │                  │      LogsPage.xbf
+│  │                  │      MainPage.xbf
+│  │                  │      SettingsPage.xbf
+│  │                  │      ShellPage.xbf
+│  │                  │
+│  │                  ├─zh-CN
+│  │                  │      Microsoft.ui.xaml.dll.mui
+│  │                  │      Microsoft.UI.Xaml.Phone.dll.mui
+│  │                  │
+│  │                  └─zh-TW
+│  │                          Microsoft.ui.xaml.dll.mui
+│  │                          Microsoft.UI.Xaml.Phone.dll.mui
+│  │
 │  ├─Contracts
 │  │  ├─Services
 │  │  │      IActivationService.cs
 │  │  │      IAppNotificationService.cs
+│  │  │      ILocalizationService.cs
 │  │  │      ILocalSettingsService.cs
 │  │  │      INavigationService.cs
 │  │  │      INavigationViewService.cs
@@ -101,18 +1384,67 @@ C:.
 │  │                  │  .NETCoreApp,Version=v7.0.AssemblyAttributes.cs
 │  │                  │  App.g.cs
 │  │                  │  App.g.i.cs
+│  │                  │  App.xaml
+│  │                  │  App.xbf
+│  │                  │  apphost.exe
+│  │                  │  ClipBrid.80FA5F85.Up2Date
 │  │                  │  ClipBridgeShell_CS.AssemblyInfo.cs
 │  │                  │  ClipBridgeShell_CS.AssemblyInfoInputs.cache
 │  │                  │  ClipBridgeShell_CS.assets.cache
 │  │                  │  ClipBridgeShell_CS.csproj.AssemblyReference.cache
+│  │                  │  ClipBridgeShell_CS.csproj.BuildWithSkipAnalyzers
+│  │                  │  ClipBridgeShell_CS.csproj.CoreCompileInputs.cache
+│  │                  │  ClipBridgeShell_CS.csproj.FileListAbsolute.txt
+│  │                  │  ClipBridgeShell_CS.dll
 │  │                  │  ClipBridgeShell_CS.GeneratedMSBuildEditorConfig.editorconfig
+│  │                  │  ClipBridgeShell_CS.genruntimeconfig.cache
 │  │                  │  ClipBridgeShell_CS.GlobalUsings.g.cs
+│  │                  │  ClipBridgeShell_CS.pdb
+│  │                  │  ClipBridgeShell_CS.sourcelink.json
+│  │                  │  excluded.layout.resfiles
+│  │                  │  excluded.layout.resfiles.intermediate
+│  │                  │  filtered.layout.resfiles
+│  │                  │  filtered.layout.resfiles.intermediate
 │  │                  │  MainWindow.g.cs
 │  │                  │  MainWindow.g.i.cs
+│  │                  │  MainWindow.xaml
+│  │                  │  MainWindow.xbf
+│  │                  │  MultipleQualifiersPerDimensionFound.txt
+│  │                  │  pri.resfiles
+│  │                  │  pri.resfiles.intermediate
+│  │                  │  priconfig.xml
+│  │                  │  priconfig.xml.intermediate
+│  │                  │  ProjectArchitectures.txt
+│  │                  │  qualifiers.txt
+│  │                  │  qualifiers.txt.intermediate
+│  │                  │  resources.resfiles
+│  │                  │  resources.resfiles.intermediate
+│  │                  │  unfiltered.layout.resfiles
+│  │                  │  unfiltered.layout.resfiles.intermediate
 │  │                  │  XamlSaveStateFile.xml
 │  │                  │  XamlTypeInfo.g.cs
 │  │                  │
+│  │                  ├─embed
+│  │                  │  │  App.xbf
+│  │                  │  │  embed.resfiles
+│  │                  │  │  embed.resfiles.intermediate
+│  │                  │  │  MainWindow.xbf
+│  │                  │  │
+│  │                  │  ├─Styles
+│  │                  │  │      FontSizes.xbf
+│  │                  │  │      TextBlock.xbf
+│  │                  │  │      Thickness.xbf
+│  │                  │  │
+│  │                  │  └─Views
+│  │                  │          DevicesPage.xbf
+│  │                  │          LogsPage.xbf
+│  │                  │          MainPage.xbf
+│  │                  │          SettingsPage.xbf
+│  │                  │          ShellPage.xbf
+│  │                  │
 │  │                  ├─intermediatexaml
+│  │                  │      ClipBridgeShell_CS.dll
+│  │                  │
 │  │                  ├─Manifests
 │  │                  │      app.manifest
 │  │                  │      WindowsAppSDK.manifest
@@ -540,23 +1872,46 @@ C:.
 │  │                  │          Microsoft.UI.Xaml.Phone.dll.mui
 │  │                  │
 │  │                  ├─ref
+│  │                  │      ClipBridgeShell_CS.dll
+│  │                  │
 │  │                  ├─refint
+│  │                  │      ClipBridgeShell_CS.dll
+│  │                  │
 │  │                  ├─Styles
+│  │                  │      FontSizes.g.cs
 │  │                  │      FontSizes.g.i.cs
+│  │                  │      FontSizes.xaml
+│  │                  │      FontSizes.xbf
+│  │                  │      TextBlock.g.cs
 │  │                  │      TextBlock.g.i.cs
+│  │                  │      TextBlock.xaml
+│  │                  │      TextBlock.xbf
+│  │                  │      Thickness.g.cs
 │  │                  │      Thickness.g.i.cs
+│  │                  │      Thickness.xaml
+│  │                  │      Thickness.xbf
 │  │                  │
 │  │                  └─Views
 │  │                          DevicesPage.g.cs
 │  │                          DevicesPage.g.i.cs
+│  │                          DevicesPage.xaml
+│  │                          DevicesPage.xbf
 │  │                          LogsPage.g.cs
 │  │                          LogsPage.g.i.cs
+│  │                          LogsPage.xaml
+│  │                          LogsPage.xbf
 │  │                          MainPage.g.cs
 │  │                          MainPage.g.i.cs
+│  │                          MainPage.xaml
+│  │                          MainPage.xbf
 │  │                          SettingsPage.g.cs
 │  │                          SettingsPage.g.i.cs
+│  │                          SettingsPage.xaml
+│  │                          SettingsPage.xbf
 │  │                          ShellPage.g.cs
 │  │                          ShellPage.g.i.cs
+│  │                          ShellPage.xaml
+│  │                          ShellPage.xbf
 │  │
 │  ├─Properties
 │  │  │  launchsettings.json
@@ -569,6 +1924,7 @@ C:.
 │  ├─Services
 │  │      ActivationService.cs
 │  │      AppNotificationService.cs
+│  │      LocalizationService.cs
 │  │      LocalSettingsService.cs
 │  │      NavigationService.cs
 │  │      NavigationViewService.cs
@@ -576,7 +1932,10 @@ C:.
 │  │      ThemeSelectorService.cs
 │  │
 │  ├─Strings
-│  │  └─en-us
+│  │  ├─en-US
+│  │  │      Resources.resw
+│  │  │
+│  │  └─zh-CN
 │  │          Resources.resw
 │  │
 │  ├─Styles
@@ -614,6 +1973,10 @@ C:.
 │  │  └─x86
 │  │      └─Debug
 │  │          └─net7.0
+│  │                  ClipBridgeShell_CS.Core.deps.json
+│  │                  ClipBridgeShell_CS.Core.dll
+│  │                  ClipBridgeShell_CS.Core.pdb
+│  │
 │  ├─Contracts
 │  │  └─Services
 │  │          IFileService.cs
@@ -653,11 +2016,21 @@ C:.
 │  │              │  ClipBridgeShell_CS.Core.AssemblyInfoInputs.cache
 │  │              │  ClipBridgeShell_CS.Core.assets.cache
 │  │              │  ClipBridgeShell_CS.Core.csproj.AssemblyReference.cache
+│  │              │  ClipBridgeShell_CS.Core.csproj.BuildWithSkipAnalyzers
+│  │              │  ClipBridgeShell_CS.Core.csproj.CoreCompileInputs.cache
+│  │              │  ClipBridgeShell_CS.Core.csproj.FileListAbsolute.txt
+│  │              │  ClipBridgeShell_CS.Core.dll
 │  │              │  ClipBridgeShell_CS.Core.GeneratedMSBuildEditorConfig.editorconfig
 │  │              │  ClipBridgeShell_CS.Core.GlobalUsings.g.cs
+│  │              │  ClipBridgeShell_CS.Core.pdb
+│  │              │  ClipBridgeShell_CS.Core.sourcelink.json
 │  │              │
 │  │              ├─ref
+│  │              │      ClipBridgeShell_CS.Core.dll
+│  │              │
 │  │              └─refint
+│  │                      ClipBridgeShell_CS.Core.dll
+│  │
 │  └─Services
 │          FileService.cs
 │          SampleDataService.cs
@@ -676,7 +2049,601 @@ C:.
     │  └─x86
     │      └─Debug
     │          └─net7.0-windows10.0.19041.0
-    │                  CoverletSourceRootsMapping
+    │              │  appsettings.json
+    │              │  ClipBridgeShell_CS.Core.dll
+    │              │  ClipBridgeShell_CS.Core.pdb
+    │              │  ClipBridgeShell_CS.deps.json
+    │              │  ClipBridgeShell_CS.dll
+    │              │  ClipBridgeShell_CS.exe
+    │              │  ClipBridgeShell_CS.pdb
+    │              │  ClipBridgeShell_CS.runtimeconfig.json
+    │              │  ClipBridgeShell_CS.Tests.MSTest.deps.json
+    │              │  ClipBridgeShell_CS.Tests.MSTest.dll
+    │              │  ClipBridgeShell_CS.Tests.MSTest.pdb
+    │              │  ClipBridgeShell_CS.Tests.MSTest.runtimeconfig.json
+    │              │  CommunityToolkit.Mvvm.dll
+    │              │  CommunityToolkit.WinUI.UI.Controls.DataGrid.dll
+    │              │  CoreMessagingXP.dll
+    │              │  CoverletSourceRootsMapping
+    │              │  dcompi.dll
+    │              │  dwmcorei.dll
+    │              │  DwmSceneI.dll
+    │              │  DWriteCore.dll
+    │              │  marshal.dll
+    │              │  Microsoft.DirectManipulation.dll
+    │              │  Microsoft.Extensions.Configuration.Abstractions.dll
+    │              │  Microsoft.Extensions.Configuration.Binder.dll
+    │              │  Microsoft.Extensions.Configuration.CommandLine.dll
+    │              │  Microsoft.Extensions.Configuration.dll
+    │              │  Microsoft.Extensions.Configuration.EnvironmentVariables.dll
+    │              │  Microsoft.Extensions.Configuration.FileExtensions.dll
+    │              │  Microsoft.Extensions.Configuration.Json.dll
+    │              │  Microsoft.Extensions.Configuration.UserSecrets.dll
+    │              │  Microsoft.Extensions.DependencyInjection.Abstractions.dll
+    │              │  Microsoft.Extensions.DependencyInjection.dll
+    │              │  Microsoft.Extensions.FileProviders.Abstractions.dll
+    │              │  Microsoft.Extensions.FileProviders.Physical.dll
+    │              │  Microsoft.Extensions.FileSystemGlobbing.dll
+    │              │  Microsoft.Extensions.Hosting.Abstractions.dll
+    │              │  Microsoft.Extensions.Hosting.dll
+    │              │  Microsoft.Extensions.Logging.Abstractions.dll
+    │              │  Microsoft.Extensions.Logging.Configuration.dll
+    │              │  Microsoft.Extensions.Logging.Console.dll
+    │              │  Microsoft.Extensions.Logging.Debug.dll
+    │              │  Microsoft.Extensions.Logging.dll
+    │              │  Microsoft.Extensions.Logging.EventLog.dll
+    │              │  Microsoft.Extensions.Logging.EventSource.dll
+    │              │  Microsoft.Extensions.Options.ConfigurationExtensions.dll
+    │              │  Microsoft.Extensions.Options.dll
+    │              │  Microsoft.Extensions.Primitives.dll
+    │              │  Microsoft.Foundation.winmd
+    │              │  Microsoft.Graphics.Display.dll
+    │              │  Microsoft.Graphics.winmd
+    │              │  Microsoft.InputStateManager.dll
+    │              │  Microsoft.InteractiveExperiences.Projection.dll
+    │              │  Microsoft.Internal.FrameworkUdk.dll
+    │              │  Microsoft.TestPlatform.AdapterUtilities.dll
+    │              │  Microsoft.TestPlatform.CommunicationUtilities.dll
+    │              │  Microsoft.TestPlatform.CoreUtilities.dll
+    │              │  Microsoft.TestPlatform.CrossPlatEngine.dll
+    │              │  Microsoft.TestPlatform.PlatformAbstractions.dll
+    │              │  Microsoft.TestPlatform.Utilities.dll
+    │              │  Microsoft.UI.Composition.OSSupport.dll
+    │              │  Microsoft.UI.dll
+    │              │  Microsoft.UI.Input.dll
+    │              │  Microsoft.UI.Text.winmd
+    │              │  Microsoft.UI.Windowing.Core.dll
+    │              │  Microsoft.UI.Windowing.dll
+    │              │  Microsoft.UI.winmd
+    │              │  Microsoft.UI.Xaml.Controls.dll
+    │              │  Microsoft.UI.Xaml.Controls.pri
+    │              │  Microsoft.ui.xaml.dll
+    │              │  Microsoft.UI.Xaml.Internal.dll
+    │              │  Microsoft.UI.Xaml.Phone.dll
+    │              │  Microsoft.ui.xaml.resources.19h1.dll
+    │              │  Microsoft.ui.xaml.resources.common.dll
+    │              │  Microsoft.UI.Xaml.winmd
+    │              │  Microsoft.VisualStudio.CodeCoverage.Shim.dll
+    │              │  Microsoft.VisualStudio.TestPlatform.Common.dll
+    │              │  Microsoft.VisualStudio.TestPlatform.MSTest.TestAdapter.dll
+    │              │  Microsoft.VisualStudio.TestPlatform.MSTestAdapter.PlatformServices.dll
+    │              │  Microsoft.VisualStudio.TestPlatform.MSTestAdapter.PlatformServices.Interface.dll
+    │              │  Microsoft.VisualStudio.TestPlatform.ObjectModel.dll
+    │              │  Microsoft.VisualStudio.TestPlatform.TestFramework.dll
+    │              │  Microsoft.VisualStudio.TestPlatform.TestFramework.Extensions.dll
+    │              │  Microsoft.VisualStudio.TestPlatform.TestFramework.Extensions.xml
+    │              │  Microsoft.Web.WebView2.Core.dll
+    │              │  Microsoft.Web.WebView2.Core.winmd
+    │              │  Microsoft.Windows.ApplicationModel.DynamicDependency.Projection.dll
+    │              │  Microsoft.Windows.ApplicationModel.DynamicDependency.winmd
+    │              │  Microsoft.Windows.ApplicationModel.Resources.dll
+    │              │  Microsoft.Windows.ApplicationModel.Resources.Projection.dll
+    │              │  Microsoft.Windows.ApplicationModel.Resources.winmd
+    │              │  Microsoft.Windows.ApplicationModel.WindowsAppRuntime.Projection.dll
+    │              │  Microsoft.Windows.ApplicationModel.WindowsAppRuntime.winmd
+    │              │  Microsoft.Windows.AppLifecycle.Projection.dll
+    │              │  Microsoft.Windows.AppLifecycle.winmd
+    │              │  Microsoft.Windows.AppNotifications.Builder.Projection.dll
+    │              │  Microsoft.Windows.AppNotifications.Builder.winmd
+    │              │  Microsoft.Windows.AppNotifications.Projection.dll
+    │              │  Microsoft.Windows.AppNotifications.winmd
+    │              │  Microsoft.Windows.PushNotifications.Projection.dll
+    │              │  Microsoft.Windows.PushNotifications.winmd
+    │              │  Microsoft.Windows.SDK.NET.dll
+    │              │  Microsoft.Windows.Security.AccessControl.Projection.dll
+    │              │  Microsoft.Windows.Security.AccessControl.winmd
+    │              │  Microsoft.Windows.System.Power.Projection.dll
+    │              │  Microsoft.Windows.System.Power.winmd
+    │              │  Microsoft.Windows.System.Projection.dll
+    │              │  Microsoft.Windows.System.winmd
+    │              │  Microsoft.Windows.Widgets.dll
+    │              │  Microsoft.Windows.Widgets.Providers.Projection.dll
+    │              │  Microsoft.Windows.Widgets.winmd
+    │              │  Microsoft.WindowsAppRuntime.Bootstrap.dll
+    │              │  Microsoft.WindowsAppRuntime.Bootstrap.Net.dll
+    │              │  Microsoft.WindowsAppRuntime.dll
+    │              │  Microsoft.WindowsAppRuntime.Insights.Resource.dll
+    │              │  Microsoft.WinUI.dll
+    │              │  Microsoft.Xaml.Interactions.dll
+    │              │  Microsoft.Xaml.Interactivity.dll
+    │              │  MRM.dll
+    │              │  Newtonsoft.Json.dll
+    │              │  NuGet.Frameworks.dll
+    │              │  PushNotificationsLongRunningTask.ProxyStub.dll
+    │              │  resources.pri
+    │              │  RestartAgent.exe
+    │              │  System.Diagnostics.EventLog.dll
+    │              │  testhost.dll
+    │              │  testhost.x86.dll
+    │              │  testhost.x86.exe
+    │              │  WindowsAppRuntime.png
+    │              │  WindowsAppSdk.AppxDeploymentExtensions.Desktop-EventLog-Instrumentation.dll
+    │              │  WindowsAppSdk.AppxDeploymentExtensions.Desktop.dll
+    │              │  WinRT.Runtime.dll
+    │              │  WinUIEdit.dll
+    │              │  WinUIEx.dll
+    │              │  wuceffectsi.dll
+    │              │
+    │              ├─af-ZA
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─am-ET
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ar-SA
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─as-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─az-Latn-AZ
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─bg-BG
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─bn-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─bs-Latn-BA
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ca-ES
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ca-Es-VALENCIA
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ClipBridgeShell_CS.Tests.MSTest
+    │              │      Microsoft.TestPlatform.PlatformAbstractions.dll
+    │              │      testhost.x86.dll
+    │              │      testhost.x86.exe
+    │              │
+    │              ├─cs
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─cs-CZ
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─cy-GB
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─da-DK
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─de
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─de-DE
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─el-GR
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─en-GB
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─en-us
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─es
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─es-ES
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─es-MX
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─et-EE
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─eu-ES
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─fa-IR
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─fi-FI
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─fil-PH
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─fr
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─fr-CA
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─fr-FR
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ga-IE
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─gd-gb
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─gl-ES
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─gu-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─he-IL
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─hi-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─hr-HR
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─hu-HU
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─hy-AM
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─id-ID
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─is-IS
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─it
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─it-IT
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ja
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─ja-JP
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ka-GE
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─kk-KZ
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─km-KH
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─kn-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ko
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─ko-KR
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─kok-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─lb-LU
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─lo-LA
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─lt-LT
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─lv-LV
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─mi-NZ
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─Microsoft.UI.Xaml
+    │              │  └─Assets
+    │              │          NoiseAsset_256x256_PNG.png
+    │              │
+    │              ├─mk-MK
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ml-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─mr-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ms-MY
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─mt-MT
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─nb-NO
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ne-NP
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─nl-NL
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─nn-NO
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─or-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─pa-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─pl
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─pl-PL
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─pt-BR
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─pt-PT
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─quz-PE
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ro-RO
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ru
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─ru-RU
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─runtimes
+    │              │  ├─win
+    │              │  │  └─lib
+    │              │  │      └─net6.0
+    │              │  │              System.Diagnostics.EventLog.dll
+    │              │  │              System.Diagnostics.EventLog.Messages.dll
+    │              │  │
+    │              │  ├─win10-arm64
+    │              │  │  └─native
+    │              │  │          Microsoft.WindowsAppRuntime.Bootstrap.dll
+    │              │  │
+    │              │  ├─win10-x64
+    │              │  │  └─native
+    │              │  │          Microsoft.WindowsAppRuntime.Bootstrap.dll
+    │              │  │
+    │              │  └─win10-x86
+    │              │      └─native
+    │              │              Microsoft.WindowsAppRuntime.Bootstrap.dll
+    │              │
+    │              ├─sk-SK
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─sl-SI
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─sq-AL
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─sr-Cyrl-BA
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─sr-Cyrl-RS
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─sr-Latn-RS
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─sv-SE
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ta-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─te-IN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─th-TH
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─tr
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─tr-TR
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─tt-RU
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ug-CN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─uk-UA
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─ur-PK
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─uz-Latn-UZ
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─vi-VN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─zh-CN
+    │              │      Microsoft.ui.xaml.dll.mui
+    │              │      Microsoft.UI.Xaml.Phone.dll.mui
+    │              │
+    │              ├─zh-Hans
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              ├─zh-Hant
+    │              │      Microsoft.TestPlatform.CommunicationUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CoreUtilities.resources.dll
+    │              │      Microsoft.TestPlatform.CrossPlatEngine.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+    │              │      Microsoft.VisualStudio.TestPlatform.ObjectModel.resources.dll
+    │              │
+    │              └─zh-TW
+    │                      Microsoft.ui.xaml.dll.mui
+    │                      Microsoft.UI.Xaml.Phone.dll.mui
     │
     └─obj
         │  ClipBridgeShell_CS.Tests.MSTest.csproj.nuget.dgspec.json
@@ -700,13 +2667,43 @@ C:.
             └─Debug
                 └─net7.0-windows10.0.19041.0
                     │  .NETCoreApp,Version=v7.0.AssemblyAttributes.cs
+                    │  ClipBrid.362E8AFB.Up2Date
                     │  ClipBridgeShell_CS.Tests.MSTest.AssemblyInfo.cs
                     │  ClipBridgeShell_CS.Tests.MSTest.AssemblyInfoInputs.cache
                     │  ClipBridgeShell_CS.Tests.MSTest.assets.cache
                     │  ClipBridgeShell_CS.Tests.MSTest.csproj.AssemblyReference.cache
+                    │  ClipBridgeShell_CS.Tests.MSTest.csproj.CoreCompileInputs.cache
+                    │  ClipBridgeShell_CS.Tests.MSTest.csproj.FileListAbsolute.txt
+                    │  ClipBridgeShell_CS.Tests.MSTest.dll
                     │  ClipBridgeShell_CS.Tests.MSTest.GeneratedMSBuildEditorConfig.editorconfig
+                    │  ClipBridgeShell_CS.Tests.MSTest.genruntimeconfig.cache
                     │  ClipBridgeShell_CS.Tests.MSTest.GlobalUsings.g.cs
+                    │  ClipBridgeShell_CS.Tests.MSTest.pdb
+                    │  ClipBridgeShell_CS.Tests.MSTest.sourcelink.json
+                    │  CommunityToolkit.WinUI.UI.Controls.DataGrid.pri.xml
+                    │  excluded.layout.resfiles
+                    │  excluded.layout.resfiles.intermediate
+                    │  filtered.layout.resfiles
+                    │  filtered.layout.resfiles.intermediate
                     │  Microsoft.UI.Xaml.Controls.pri.xml
+                    │  Microsoft.Xaml.Interactions.pri.xml
+                    │  Microsoft.Xaml.Interactivity.pri.xml
+                    │  MultipleQualifiersPerDimensionFound.txt
+                    │  pri.resfiles
+                    │  pri.resfiles.intermediate
+                    │  priconfig.xml
+                    │  priconfig.xml.intermediate
+                    │  qualifiers.txt
+                    │  qualifiers.txt.intermediate
+                    │  resources.resfiles
+                    │  resources.resfiles.intermediate
+                    │  unfiltered.layout.resfiles
+                    │  unfiltered.layout.resfiles.intermediate
+                    │  WinUIEx.pri.xml
+                    │
+                    ├─embed
+                    │      embed.resfiles
+                    │      embed.resfiles.intermediate
                     │
                     ├─Manifests
                     │      app.manifest
@@ -1135,4 +3132,7 @@ C:.
                     │          Microsoft.UI.Xaml.Phone.dll.mui
                     │
                     ├─ref
+                    │      ClipBridgeShell_CS.Tests.MSTest.dll
+                    │
                     └─refint
+                            ClipBridgeShell_CS.Tests.MSTest.dll

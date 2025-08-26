@@ -1,4 +1,4 @@
-﻿<Page
+<Page
     x:Class="ClipBridgeShell_CS.Views.ShellPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -22,7 +22,7 @@
             <TextBlock x:Name="AppTitleBarText"
                        VerticalAlignment="Center"
                        TextWrapping="NoWrap"
-                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Style="{ThemeResource CaptionTextBlockStyle}"
                        Margin="28,0,0,0"/>
         </Grid>
         <NavigationView

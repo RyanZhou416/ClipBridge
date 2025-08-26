@@ -1,4 +1,4 @@
-﻿using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 
 namespace ClipBridgeShell_CS.Contracts.Services;
@@ -20,4 +20,5 @@ public interface INavigationService
     bool NavigateTo(string pageKey, object? parameter = null, bool clearNavigation = false);
 
     bool GoBack();
+    void RefreshCurrentPage();
 }
