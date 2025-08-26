@@ -1,19 +1,18 @@
-// App.xaml.h
 #pragma once
 #include "App.xaml.g.h"
+#include <winrt/Microsoft.UI.Xaml.h>
 
 namespace winrt::ClipBridgeShell::implementation
 {
-struct App : AppT<App>
+    struct App : winrt::Microsoft::UI::Xaml::ApplicationT<App>
+    {
+        App();
+        void OnLaunched(Microsoft::UI::Xaml::LaunchActivatedEventArgs const&);
+    };
+}
+
+namespace winrt::ClipBridgeShell::factory_implementation
 {
-	App();
-	void OnLaunched(Microsoft::UI::Xaml::LaunchActivatedEventArgs const&);
+    struct App : winrt::Microsoft::UI::Xaml::ApplicationT<App, implementation::App> {};
+}
 
-	static void SetMainWindow(winrt::Microsoft::UI::Xaml::Window const& w);
-	static winrt::Microsoft::UI::Xaml::Window TryGetMainWindow();
-
-  private:
-	winrt::Microsoft::UI::Xaml::Window								  window{nullptr};
-	static inline winrt::weak_ref<winrt::Microsoft::UI::Xaml::Window> s_winWeak{nullptr};
-};
-} // namespace winrt::ClipBridgeShell::implementation

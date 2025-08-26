@@ -1,0 +1,10 @@
+﻿{
+    "profiles": {
+      "ClipBridgeShell_CS (Package)": {
+        "commandName": "MsixPackage"
+      },
+      "ClipBridgeShell_CS (Unpackaged)": {
+        "commandName": "Project"
+      }
+    }
+}

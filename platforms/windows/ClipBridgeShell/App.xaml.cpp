@@ -2,290 +2,194 @@
 #include "App.xaml.h"
 #include "MainWindow.xaml.h"
 
-#include <Windows.h>
+
+#if __has_include("App.g.cpp")
+#include "App.g.cpp"
+#endif
+
+
+#include <winrt/Microsoft.UI.Xaml.h>
+#include <winrt/Microsoft.UI.Dispatching.h>
+#include <winrt/Microsoft.UI.Windowing.h>
+#include <winrt/Microsoft.UI.Xaml.Controls.h>
+#include <winrt/Windows.Graphics.h>
+
+#include <windows.h>
+#include <shlobj_core.h>
 #include <string>
-#include <cstring>
+
+#include "CoreHost.h"
 
 using namespace winrt;
 using namespace Microsoft::UI::Xaml;
-using winrt::Microsoft::UI::Xaml::Window;
-namespace winrt::ClipBridgeShell::implementation
-{
-
-    void App::SetMainWindow(Window const& w)
-        {
-	        s_winWeak = w;
-        }
-    Window App::TryGetMainWindow()
-        {
-	        return s_winWeak.get();
-        }
-    }
-
-
-
-    // ---------- 与 cb_ffi.h 对齐的最小 C 结构/回调声明（你也可以直接 #include 头文件） ----------
-    struct CbStr
-    {
-	    const char* ptr;
-	    uint32_t	len;
-    };
-    struct CbStrList
-    {
-	    const CbStr* items;
-	    uint32_t	 len;
-    };
-    struct CbDevice
-    {
-	    CbStr device_id, account_id, name, pubkey_fingerprint;
-    };
-    struct CbConfig
-    {
-	    CbStr	 device_name;
-	    int32_t	 listen_port;
-	    uint32_t api_version;
-    };
-    struct CbMeta
-    {
-	    CbStr	  item_id, owner_device_id, owner_account_id;
-	    CbStrList kinds, mimes;
-	    CbStr	  preferred_mime;
-	    uint64_t  size_bytes;
-	    CbStr	  sha256;
-	    uint64_t  created_at;
-	    uint64_t  expires_at;
-    };
-
-// 现在再声明函数指针类型（此时 CbMeta 已经是已知类型了）
-using cb_store_metadata_t = int(__cdecl*)(const CbMeta*);
-using cb_history_list_t	  = int(__cdecl*)(uint64_t, uint32_t);
-
-// 全局函数指针（只在这里声明一次）
-cb_store_metadata_t g_cb_store_metadata = nullptr;
-cb_history_list_t	g_cb_history_list	= nullptr;
-
-// 回调类型
-using CbOnDeviceOnline	   = void(__cdecl*)(const CbDevice*);
-using CbOnDeviceOffline	   = void(__cdecl*)(const CbStr*);
-using CbOnNewMetadata	   = void(__cdecl*)(const CbMeta*);
-using CbOnTransferProgress = void(__cdecl*)(const CbStr*, uint64_t, uint64_t);
-using CbOnError			   = void(__cdecl*)(int, const CbStr*);
-
-    struct CbCallbacks
-    {
-	    CbOnDeviceOnline	 on_device_online;
-	    CbOnDeviceOffline	 on_device_offline;
-	    CbOnNewMetadata		 on_new_metadata;
-	    CbOnTransferProgress on_transfer_progress;
-	    CbOnError			 on_error;
-    };
-
-// 核心导出函数指针
-using cb_get_version_t = uint32_t(__cdecl*)();
-using cb_init_t		   = int(__cdecl*)(const CbConfig*, const CbCallbacks*);
-using cb_shutdown_t	   = void(__cdecl*)();
 
 namespace
 {
-    // UTF-8 -> UTF-16（有长度）
-    std::wstring Utf8ToWide(const CbStr& s)
+    // Keep a weak reference to the main Window (no header changes needed)
+    winrt::weak_ref<winrt::Microsoft::UI::Xaml::Window> g_mainWindowWeak{ nullptr };
+
+    // ------ small utilities (ASCII only) ------
+    std::wstring JoinPath(std::wstring a, std::wstring const& b)
     {
-	    if (!s.ptr || s.len == 0)
-		    return L"";
-	    int			 wlen = MultiByteToWideChar(CP_UTF8, 0, s.ptr, (int)s.len, nullptr, 0);
-	    std::wstring w(wlen, L'\0');
-	    MultiByteToWideChar(CP_UTF8, 0, s.ptr, (int)s.len, w.data(), wlen);
-	    return w;
+        if (!a.empty() && a.back() != L'\\' && a.back() != L'/') a.push_back(L'\\');
+        a.append(b);
+        return a;
     }
 
-    // ---------- 全局句柄与函数指针 ----------
-    HMODULE			 g_core			  = nullptr;
-    cb_get_version_t g_cb_get_version = nullptr;
-    cb_init_t		 g_cb_init		  = nullptr;
-    cb_shutdown_t	 g_cb_shutdown	  = nullptr;
+    bool EnsureDirExists(std::wstring path)
+    {
+        if (path.empty()) return false;
+        for (auto& ch : path) if (ch == L'/') ch = L'\\';
 
-    // ---------- 回调实现（注意：来自工作线程，实际项目里请切回 UI 线程再更新界面） ----------
-    void __cdecl OnDeviceOnline(const CbDevice* dev)
-    {
-	    auto name = Utf8ToWide(dev->name);
-	    MessageBoxW(nullptr, (L"Device online: " + name).c_str(), L"CB", MB_OK | MB_ICONINFORMATION);
-    }
-    void __cdecl OnNewMetadata(const CbMeta* meta)
-    {
-	    auto id = Utf8ToWide(meta->item_id);
-	    MessageBoxW(nullptr, (L"New meta: " + id).c_str(), L"CB", MB_OK | MB_ICONINFORMATION);
-    }
-    void __cdecl OnTransferProgress(const CbStr* id, uint64_t sent, uint64_t total)
-    {
-	    // 占位：可改为状态栏/通知气泡
-	    (void)id;
-	    (void)sent;
-	    (void)total;
-    }
-    void __cdecl OnError(int code, const CbStr* msg)
-    {
-	    auto		 w = Utf8ToWide(*msg);
-	    std::wstring t = L"Core error " + std::to_wstring(code) + L": " + w;
-	    MessageBoxW(nullptr, t.c_str(), L"CB", MB_OK | MB_ICONERROR);
+        size_t pos = 0;
+        if (path.rfind(L"\\\\", 0) == 0) {
+            pos = path.find(L'\\', 2);
+            if (pos == std::wstring::npos) return false;
+            pos = path.find(L'\\', pos + 1);
+            if (pos == std::wstring::npos) return false;
+        } else if (path.size() >= 2 && path[1] == L':') {
+            pos = 2;
+        }
+
+        while (true) {
+            pos = path.find(L'\\', pos + 1);
+            std::wstring sub = (pos == std::wstring::npos) ? path : path.substr(0, pos);
+            if (!sub.empty()) {
+                if (!::CreateDirectoryW(sub.c_str(), nullptr)) {
+                    DWORD err = ::GetLastError();
+                    if (err != ERROR_ALREADY_EXISTS) return false;
+                }
+            }
+            if (pos == std::wstring::npos) break;
+        }
+        return true;
     }
 
-// ---------- 启动核心并注册回调 ----------
-void StartCoreFFI()
-{
-	// 1) 计算 AppX 运行目录（WinUI 桌面调试常见路径）
-	wchar_t exePath[MAX_PATH];
-	GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-	std::wstring dir = exePath;
-	size_t		 pos = dir.find_last_of(L"\\/");
-	if (pos != std::wstring::npos)
-		dir.resize(pos + 1);
+    std::wstring GetLocalAppData()
+    {
+        PWSTR raw = nullptr;
+        std::wstring out;
+        if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &raw))) {
+            out = raw;
+            ::CoTaskMemFree(raw);
+        }
+        return out;
+    }
 
-	std::wstring full = dir + L"core_ffi_windows.dll";
+    std::wstring GetDeviceName()
+    {
+        wchar_t buf[256]{};
+        DWORD n = static_cast<DWORD>(std::size(buf));
+        if (::GetComputerNameExW(ComputerNameDnsHostname, buf, &n)) {
+            return std::wstring(buf, buf + n);
+        }
+        n = static_cast<DWORD>(std::size(buf));
+        if (::GetComputerNameW(buf, &n)) {
+            return std::wstring(buf, buf + n);
+        }
+        return L"Windows-PC";
+    }
 
-	// 2) 限定搜索目录并加载 DLL
-	SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-	AddDllDirectory(dir.c_str());
-	g_core = LoadLibraryW(full.c_str());
-	if (!g_core)
-	{
-		DWORD	ec = GetLastError();
-		wchar_t buf[512];
-		FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-					   nullptr,
-					   ec,
-					   0,
-					   buf,
-					   512,
-					   nullptr);
-		std::wstring msg =
-			L"LoadLibrary failed:\n" + full + L"\n\nError " + std::to_wstring(ec) + L": " + buf;
-		MessageBoxW(nullptr, msg.c_str(), L"FFI", MB_OK | MB_ICONERROR);
-		return;
-	}
-
-	// 3) 解析导出
-	g_cb_get_version = (cb_get_version_t)GetProcAddress(g_core, "cb_get_version");
-	g_cb_init		 = (cb_init_t)GetProcAddress(g_core, "cb_init");
-	g_cb_shutdown	 = (cb_shutdown_t)GetProcAddress(g_core, "cb_shutdown");
-	g_cb_store_metadata = (cb_store_metadata_t)GetProcAddress(g_core, "cb_store_metadata");
-	g_cb_history_list	= (cb_history_list_t)GetProcAddress(g_core, "cb_history_list");
-	if (!g_cb_store_metadata || !g_cb_history_list)
-	{
-		MessageBoxW(nullptr,
-					L"missing exports: cb_store_metadata or cb_history_list",
-					L"FFI",
-					MB_OK | MB_ICONERROR);
-	}
-	if (!g_cb_get_version || !g_cb_init || !g_cb_shutdown)
-	{
-		MessageBoxW(
-			nullptr, L"GetProcAddress failed: missing core exports", L"FFI", MB_OK | MB_ICONERROR);
-		return;
-	}
-	
-
-	// 4) 版本握手（可选）
-	uint32_t ver = g_cb_get_version();
-	if (ver != 1)
-	{
-		MessageBoxW(nullptr, L"Core API version mismatch", L"FFI", MB_OK | MB_ICONERROR);
-		return;
-	}
-
-	// 5) 组装回调与配置并初始化
-	CbCallbacks cbs{OnDeviceOnline,
-					nullptr, // on_device_offline（先不实现）
-					OnNewMetadata,
-					OnTransferProgress,
-					OnError};
-
-	const char* name_utf8 = "Windows-PC";
-	CbConfig	cfg{{name_utf8, (uint32_t)std::strlen(name_utf8)}, 0, 1};
-
-	int rc = g_cb_init(&cfg, &cbs);
-	if (rc != 0)
-	{
-		MessageBoxW(nullptr, L"cb_init failed", L"FFI", MB_OK | MB_ICONERROR);
-		return;
-	}
-	// ---- 写入一条最小元数据（测试用） ----
-	if (g_cb_store_metadata)
-	{
-		const char* id	= "item-demo-001";
-		const char* dev = "device-A";
-		const char* acc = "account-1";
-		const char* pm	= "text/plain";
-
-		CbStr	  id_s{id, (uint32_t)strlen(id)};
-		CbStr	  dev_s{dev, (uint32_t)strlen(dev)};
-		CbStr	  acc_s{acc, (uint32_t)strlen(acc)};
-		CbStr	  pm_s{pm, (uint32_t)strlen(pm)};
-		CbStr	  sha{nullptr, 0};
-		CbStrList empty{nullptr, 0};
-
-		// created_at/ expires_at 随便填；size_bytes 这里写 5
-		CbMeta m{
-			id_s,		// item_id
-			dev_s,		// owner_device_id（先用作来源）
-			acc_s,		// owner_account_id
-			empty,		// kinds
-			empty,		// mimes
-			pm_s,		// preferred_mime
-			5,			// size_bytes
-			sha,		// sha256
-			1720000000, // created_at
-			0			// expires_at
-		};
-		g_cb_store_metadata(&m);
-	}
-
-	
-
-	// 然后再：
-	if (g_cb_history_list)
-		g_cb_history_list(0, 20);
-}
-
-// （可选）应用退出时清理
-void StopCoreFFI()
-{
-	if (g_cb_shutdown)
-		g_cb_shutdown();
-	if (g_core)
-	{
-		FreeLibrary(g_core);
-		g_core = nullptr;
-	}
-}
-} // namespace
+    // Append a log line into TextBlock named "LogBox" on the UI thread
+    void AppendLogUI(std::wstring const& line)
+    {
+        if (auto w = g_mainWindowWeak.get()) {
+            auto dq = w.DispatcherQueue();
+            dq.TryEnqueue([w, line]() {
+                if (auto fe = w.Content().try_as<FrameworkElement>()) {
+                    if (auto tb = fe.FindName(L"LogBox").try_as<Microsoft::UI::Xaml::Controls::TextBlock>()) {
+                        auto old = tb.Text();
+                        tb.Text(old.empty() ? winrt::hstring{ line } : old + L"\n" + winrt::hstring{ line });
+                    }
+                }
+            });
+        }
+    }
+} // anonymous namespace
 
 namespace winrt::ClipBridgeShell::implementation
 {
-App::App()
-{
-#if defined _DEBUG && !defined DISABLE_XAML_GENERATED_BREAK_ON_UNHANDLED_EXCEPTION
-	UnhandledException(
-		[](IInspectable const&, UnhandledExceptionEventArgs const& e)
-		{
-			if (IsDebuggerPresent())
-			{
-				auto errorMessage = e.Message();
-				__debugbreak();
-			}
-		});
-#endif
+    App::App()
+    {
+        // NOTE: Do NOT call InitializeComponent() here while XAML codegen is unstable.
+        // Window and Core init still work without it for now.
+    }
+
+    void App::OnLaunched(LaunchActivatedEventArgs const&)
+    {
+        // 1) Create and show main window
+        auto window = make<MainWindow>();
+        g_mainWindowWeak = window;
+        window.Activate();
+
+        // Set default size
+        window.AppWindow().Resize(winrt::Windows::Graphics::SizeInt32{ 900, 600 });
+
+        // 2) Build Core config and ensure directories
+        CoreHost::Config cfg{};
+        cfg.device_name = GetDeviceName();
+
+        auto base = JoinPath(GetLocalAppData(), L"ClipBridge");
+        cfg.data_dir  = JoinPath(base, L"data");
+        cfg.cache_dir = JoinPath(base, L"cache");
+        cfg.log_dir   = JoinPath(base, L"logs");
+
+        EnsureDirExists(cfg.data_dir);
+        EnsureDirExists(cfg.cache_dir);
+        EnsureDirExists(cfg.log_dir);
+
+        cfg.cache_limit_bytes = 1024ull * 1024 * 1024; // 1 GiB
+        cfg.history_limit     = 2000;
+        cfg.mdns_enabled      = true;
+        cfg.mdns_port         = 0;
+        cfg.quic_port         = 0;
+        cfg.trust_known_devices_only = false;
+        cfg.require_encryption       = false;
+
+        // 3) Init Core
+        if (!CoreHost::Instance().Init(cfg)) {
+            auto err = CoreHost::Instance().LastError();
+            std::wstring msg = L"[Core] init failed, code=" + std::to_wstring(err.code);
+            if (!err.message.empty()) {
+                msg += L", msg=" + err.message;
+            }
+            AppendLogUI(msg);
+        } else {
+            AppendLogUI(L"[Core] initialized");
+        }
+
+        // 4) Subscribe Core events (log to UI)
+        CoreHost::Instance().AddDeviceOnline(
+            [&](std::string_view json_dev) {
+                AppendLogUI(L"Device online: " + clipbridge::Utf8ToWide(json_dev));
+            });
+        CoreHost::Instance().AddDeviceOffline(
+            [&](std::string_view dev_id) {
+                AppendLogUI(L"Device offline: " + clipbridge::Utf8ToWide(dev_id));
+            });
+        CoreHost::Instance().AddNewMetadata(
+            [&](std::string_view json_meta) {
+                AppendLogUI(L"New meta: " + clipbridge::Utf8ToWide(json_meta));
+            });
+        CoreHost::Instance().AddTransferProgress(
+            [&](std::string_view item_id, uint64_t done, uint64_t total) {
+                std::wstring s = L"Transfer " + clipbridge::Utf8ToWide(item_id)
+                               + L": " + std::to_wstring(done) + L"/" + std::to_wstring(total);
+                AppendLogUI(s);
+            });
+        CoreHost::Instance().AddError(
+            [&](int code, std::string_view msg) {
+                std::wstring s = L"[Core error " + std::to_wstring(code) + L"] "
+                               + clipbridge::Utf8ToWide(msg);
+                AppendLogUI(s);
+            });
+
+        // 5) Shutdown Core when window closes
+        window.Closed([](auto&&, auto&&) {
+            CoreHost::Instance().Shutdown();
+        });
+
+        // UI ready message
+        AppendLogUI(L"[UI] MainWindow ready");
+    }
 }
-
-void App::OnLaunched([[maybe_unused]] LaunchActivatedEventArgs const& e)
-{
-	window = make<MainWindow>(); // 构造函数里已 InitializeComponent()
-	window.Activate();
-
-	// 退出时释放 core_ffi_windows.dll
-	window.Closed([](auto&&, auto&&) { StopCoreFFI(); });
-
-    App::SetMainWindow(window);
-
-	StartCoreFFI();
-}
-} // namespace winrt::ClipBridgeShell::implementation

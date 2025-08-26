@@ -7,14 +7,16 @@
     <Page Include="MainWindow.xaml" />
   </ItemGroup>
   <ItemGroup>
-    <Midl Include="MainWindow.idl" />
-  </ItemGroup>
-  <ItemGroup>
     <ClCompile Include="pch.cpp" />
     <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
+    <ClCompile Include="CoreHost.cpp" />
+    <ClCompile Include="ClipboardWatcher.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />
+    <ClInclude Include="CoreHost.h" />
+    <ClInclude Include="ClipboardWatcher.h" />
+    <ClInclude Include="cb_ffi.h" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="Assets\Wide310x150Logo.scale-200.png">

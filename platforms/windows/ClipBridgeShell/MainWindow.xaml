@@ -3,15 +3,26 @@
     x:Class="ClipBridgeShell.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:ClipBridgeShell"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    Title="ClipBridgeShell">
+    Title="ClipBridge (Windows Shell)">
 
-    <Grid Padding="12">
-        <ScrollViewer>
-            <TextBlock x:Name="LogBox" TextWrapping="Wrap"/>
+    <Grid RowDefinitions="Auto,*" Padding="12">
+        <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button x:Name="BtnPaste" Content="测试粘贴(文本)" Click="OnTestPasteClick" />
+            <Button x:Name="BtnPause" Content="暂停/恢复" Click="OnPauseClick" />
+            <Button x:Name="BtnPruneCache" Content="清理缓存" Click="OnPruneCacheClick" />
+            <Button x:Name="BtnPruneHistory" Content="清理历史" Click="OnPruneHistoryClick" />
+            <TextBlock Text="最近 item_id：" VerticalAlignment="Center" Margin="16,0,4,0"/>
+            <TextBlock x:Name="LastIdBox" VerticalAlignment="Center" />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <TextBlock x:Name="LogBox"
+                       FontFamily="Consolas"
+                       TextWrapping="Wrap"
+                       IsTextSelectionEnabled="True" />
         </ScrollViewer>
     </Grid>
 </Window>
