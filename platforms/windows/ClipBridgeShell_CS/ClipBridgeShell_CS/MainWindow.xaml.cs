@@ -1,6 +1,7 @@
-﻿using ClipBridgeShell_CS.Helpers;
+using ClipBridgeShell_CS.Helpers;
 
 using Windows.UI.ViewManagement;
+using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS;
 
@@ -16,7 +17,8 @@ public sealed partial class MainWindow : WindowEx
 
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets/WindowIcon.ico"));
         Content = null;
-        Title = "AppDisplayName".GetLocalized();
+        var loc = Localizer.Get();
+        Title = loc.GetLocalizedString("AppDisplayName");   // 对应 Resources.resw -> AppDisplayName.Text/Content 等
 
         // Theme change code picked from https://github.com/microsoft/WinUI-Gallery/pull/1239
         dispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();

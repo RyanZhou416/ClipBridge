@@ -1,4 +1,5 @@
-﻿using ClipBridgeShell_CS.Activation;
+using System.Globalization;
+using ClipBridgeShell_CS.Activation;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Contracts.Services;
 using ClipBridgeShell_CS.Core.Services;
@@ -12,6 +13,9 @@ using ClipBridgeShell_CS.Views;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Windows.Storage;
+using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS;
 
@@ -39,10 +43,17 @@ public partial class App : Application
         return service;
     }
 
-    public static WindowEx MainWindow { get; } = new MainWindow();
+    //public static WindowEx MainWindow { get; } = new MainWindow();
+    public static WindowEx? MainWindow
+    {
+        get; set;
+    }
 
     public static UIElement? AppTitlebar { get; set; }
-
+    public static NavigationViewItem? SettingsNavItem
+    {
+        get; set;
+    }
     public App()
     {
         InitializeComponent();
@@ -104,8 +115,74 @@ public partial class App : Application
     {
         base.OnLaunched(args);
 
-        App.GetService<IAppNotificationService>().Show(string.Format("AppNotificationSamplePayload".GetLocalized(), AppContext.BaseDirectory));
+        App.GetService<IAppNotificationService>()
+           .Show(string.Format("AppNotificationSamplePayload".GetLocalized(), AppContext.BaseDirectory));
 
+        // ① 初始化 Localizer（打包应用版）
+        await InitializeLocalizer();
+
+        // ② 再走 Template Studio 原有流程（里面会调用 ActivationService）
         await App.GetService<IActivationService>().ActivateAsync(args);
+
+        // 任意你能看到输出的地方加（比如 App.OnLaunched 或 SettingsPage 构造里）
+        
+    }
+
+    private async Task InitializeLocalizer()
+    {
+        // 1) 准备 LocalFolder\Strings（保持你原有的代码）
+        StorageFolder localFolder = ApplicationData.Current.LocalFolder;
+        StorageFolder stringsFolder = await localFolder.CreateFolderAsync("Strings", CreationCollisionOption.OpenIfExists);
+        const string resw = "Resources.resw";
+        await CreateStringResourceFileIfNotExists(stringsFolder, "en-US", resw);
+        await CreateStringResourceFileIfNotExists(stringsFolder, "zh-CN", resw);
+
+        // 2) 读取已保存的语言；如果没有 → 第一次启动，用系统语言推断一个
+        var settings = App.GetService<ILocalSettingsService>();
+        var saved = await settings.ReadSettingAsync<string>("PreferredLanguage");
+        string defaultLang = NormalizeLanguageTag(saved ?? CultureInfo.CurrentUICulture.Name);
+
+        // 如果是第一次启动（没有 PreferredLanguage），保存下来
+        if (string.IsNullOrEmpty(saved))
+        {
+            await settings.SaveSettingAsync("PreferredLanguage", defaultLang);
+            // 你也可以顺手保存一个 “IsFirstRun = false”
+            await settings.SaveSettingAsync("IsFirstRun", false);
+        }
+
+        // 3) 用默认语言构建 Localizer
+        _ = await new LocalizerBuilder()
+            .AddStringResourcesFolderForLanguageDictionaries(stringsFolder.Path)
+            .SetOptions(o => o.DefaultLanguage = defaultLang)
+            .Build();
+    }
+
+    // 规范化常见语言代码：en -> en-US，zh / zh-Hans -> zh-CN
+    private static string NormalizeLanguageTag(string? t)
+    {
+        if (string.IsNullOrWhiteSpace(t)) return "en-US";
+        t = t.Trim();
+        if (t.Equals("en", StringComparison.OrdinalIgnoreCase)) return "en-US";
+        if (t.Equals("zh", StringComparison.OrdinalIgnoreCase)) return "zh-CN";
+        if (t.Equals("zh-Hans", StringComparison.OrdinalIgnoreCase)) return "zh-CN";
+        return t;
+    }
+
+    private static async Task CreateStringResourceFileIfNotExists(StorageFolder stringsFolder, string language, string resourceFileName)
+    {
+        StorageFolder languageFolder = await stringsFolder.CreateFolderAsync(
+            language, CreationCollisionOption.OpenIfExists);
+
+        string resourceFilePath = Path.Combine(stringsFolder.Name, language, resourceFileName);
+        StorageFile resourceFile = await LoadStringResourcesFileFromAppResource(resourceFilePath);
+
+        
+        _ = await resourceFile.CopyAsync(languageFolder, resourceFileName, NameCollisionOption.ReplaceExisting);
+    }
+
+    private static async Task<StorageFile> LoadStringResourcesFileFromAppResource(string filePath)
+    {
+        Uri resourcesFileUri = new($"ms-appx:///{filePath}");
+        return await StorageFile.GetFileFromApplicationUriAsync(resourcesFileUri);
     }
 }

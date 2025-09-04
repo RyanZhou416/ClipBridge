@@ -173,4 +173,22 @@
   &lt;/actions&gt;
 &lt;/toast&gt;</value>
   </data>
+  <data name="Settings_LanguageHeader.Text" xml:space="preserve">
+    <value>语言</value>
+  </data>
+  <data name="Settings_LanguageCombo.PlaceholderText" xml:space="preserve">
+    <value>选择一种语言</value>
+  </data>
+  <data name="Settings_Lang_English.Content" xml:space="preserve">
+    <value>英语</value>
+  </data>
+  <data name="Settings_Lang_Chinese.Content" xml:space="preserve">
+    <value>简体中文</value>
+  </data>
+  <data name="Settings_CurrentLanguageTip.Text" xml:space="preserve">
+    <value>立即生效，无需重启。</value>
+  </data>
+  <data name="Shell_Settings.Content" xml:space="preserve">
+    <value>设置</value>
+  </data>
 </root>

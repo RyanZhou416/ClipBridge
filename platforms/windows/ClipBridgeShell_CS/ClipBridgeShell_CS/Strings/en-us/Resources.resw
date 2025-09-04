@@ -173,4 +173,22 @@
   &lt;/actions&gt;
 &lt;/toast&gt;</value>
   </data>
+  <data name="Settings_LanguageHeader.Text" xml:space="preserve">
+    <value>Language</value>
+  </data>
+  <data name="Settings_LanguageCombo.PlaceholderText" xml:space="preserve">
+    <value>Pick a language</value>
+  </data>
+  <data name="Settings_Lang_English.Content" xml:space="preserve">
+    <value>English</value>
+  </data>
+  <data name="Settings_Lang_Chinese.Content" xml:space="preserve">
+    <value>Chinese (Simplified)</value>
+  </data>
+  <data name="Settings_CurrentLanguageTip.Text" xml:space="preserve">
+    <value>Switching is instant. No restart needed.</value>
+  </data>
+  <data name="Shell_Settings.Content" xml:space="preserve">
+    <value>Settings</value>
+  </data>
 </root>

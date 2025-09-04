@@ -1,13 +1,15 @@
-﻿using ClipBridgeShell_CS.Contracts.Services;
+using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Helpers;
 using ClipBridgeShell_CS.ViewModels;
 
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
 using Windows.System;
+using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS.Views;
 
@@ -33,7 +35,7 @@ public sealed partial class ShellPage : Page
         App.MainWindow.ExtendsContentIntoTitleBar = true;
         App.MainWindow.SetTitleBar(AppTitleBar);
         App.MainWindow.Activated += MainWindow_Activated;
-        AppTitleBarText.Text = "AppDisplayName".GetLocalized();
+        AppTitleBarText.Text = WinUI3Localizer.Localizer.Get().GetLocalizedString("AppDisplayName");
     }
 
     private void OnLoaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
@@ -81,5 +83,16 @@ public sealed partial class ShellPage : Page
         var result = navigationService.GoBack();
 
         args.Handled = result;
+    }
+
+    private void NavigationViewControl_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (NavigationViewControl.SettingsItem is NavigationViewItem settings)
+        {
+            App.SettingsNavItem = settings;
+            var loc = Localizer.Get();
+            settings.Content = loc.GetLocalizedString("Shell_Settings");
+            AutomationProperties.SetName(settings, loc.GetLocalizedString("Shell_Settings"));
+        }
     }
 }

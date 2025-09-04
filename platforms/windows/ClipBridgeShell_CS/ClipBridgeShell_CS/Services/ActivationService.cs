@@ -1,4 +1,4 @@
-﻿using ClipBridgeShell_CS.Activation;
+using ClipBridgeShell_CS.Activation;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Views;
 
@@ -25,6 +25,11 @@ public class ActivationService : IActivationService
     {
         // Execute tasks before activation.
         await InitializeAsync();
+
+        if (App.MainWindow == null)
+        {
+            App.MainWindow = new MainWindow();
+        }
 
         // Set the MainWindow Content.
         if (App.MainWindow.Content == null)
