@@ -1,13 +1,13 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
     <RootNamespace>ClipBridgeShell_CS.Tests.MSTest</RootNamespace>
-    <TargetPlatform>Win32</TargetPlatform>
+    <Platforms>x86;x64;arm64</Platforms>
     <IsPackable>false</IsPackable>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <UseWinUI>true</UseWinUI>
-	<WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+	<WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
     <ProjectPriFileName>resources.pri</ProjectPriFileName>
   </PropertyGroup>
   <ItemGroup>
