@@ -8,13 +8,55 @@
     xmlns:xaml="using:Microsoft.UI.Xaml"
     xmlns:l="using:WinUI3Localizer"
     mc:Ignorable="d">
+    <!-- 资源：卡片样式、标题/说明文本样式 -->
     <Page.Resources>
         <helpers:EnumToBooleanConverter x:Key="EnumToBooleanConverter" />
+        <!-- 卡片通用样式（Windows 11 风格） -->
+        <Style x:Key="SettingsCardStyle" TargetType="Border">
+            <!-- 如果你的 WinAppSDK 版本有 Card* 资源，优先使用；否则退回到系统画刷 -->
+            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="12" />
+            <Setter Property="Padding" Value="16" />
+            <Setter Property="Margin" Value="0,12,0,0" />
+        </Style>
+
+        <!-- 分组标题（如 “Appearance & behavior” / “About”） -->
+        <Style x:Key="GroupHeaderTextStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Margin" Value="0,24,0,8"/>
+        </Style>
+
+        <!-- 每项左侧主标题 -->
+        <Style x:Key="SettingTitleTextStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+
+        <!-- 每项左侧说明文字 -->
+        <Style x:Key="SettingDescTextStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="Margin" Value="0,2,0,0"/>
+        </Style>
     </Page.Resources>
-    <Grid>
-        <StackPanel
+    <ScrollViewer>
+        <Grid HorizontalAlignment="Center" MaxWidth="860" Padding="24,16,24,48">
+            <TextBlock l:Uids.Uid="Shell_Settings.Content" 
+            x:Name="PageHeader"
+            MaxWidth="1064"
+            Margin="36,24,36,0"
+            AutomationProperties.HeadingLevel="Level1"
+            Style="{StaticResource TitleTextBlockStyle}"
+            />
+
+
+
+            <StackPanel
             x:Name="ContentArea">
-            <TextBlock l:Uids.Uid="Settings_Personalization" Style="{ThemeResource SubtitleTextBlockStyle}" />
+            <TextBlock l:Uids.Uid="Settings_Personalization" Style="{StaticResource GroupHeaderTextStyle}" />
             <StackPanel Margin="{StaticResource SmallTopBottomMargin}">
                 <TextBlock l:Uids.Uid="Settings_Theme" />
 
@@ -82,4 +124,7 @@
             </StackPanel>
         </StackPanel>
     </Grid>
+
+        
+    </ScrollViewer>
 </Page>
