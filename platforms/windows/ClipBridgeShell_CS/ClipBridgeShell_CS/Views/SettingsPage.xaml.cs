@@ -1,8 +1,10 @@
+using System.Globalization;
 using System.Linq;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Windows.Storage;
 using WinUI3Localizer;
 
 
@@ -106,4 +108,69 @@ public sealed partial class SettingsPage : Page
     }
 
 
+    private async void ResetSettings_Click(object sender, RoutedEventArgs e)
+    {
+        var loc = Localizer.Get();
+        var dlg = new ContentDialog
+        {
+            Title = Localizer.Get().GetLocalizedString("Settings_ResetConfirm_Title"),
+            Content = loc.GetLocalizedString("Settings_ResetConfirm_Content"),
+            PrimaryButtonText = loc.GetLocalizedString("Settings_ResetConfirm_Primary"),
+            CloseButtonText = loc.GetLocalizedString("Settings_ResetConfirm_Secondary"),
+            XamlRoot = this.Content.XamlRoot
+        };
+        var result = await dlg.ShowAsync();
+        if (result != ContentDialogResult.Primary) return;
+
+        // 2) 清空 LocalSettings（保存的所有首选项都会被清掉）
+        ApplicationData.Current.LocalSettings.Values.Clear();
+
+        // 3) 决定“重置后的语言” = 系统 UI 语言（规范化成我们支持的标记）
+        string defaultLang = NormalizeLanguageTag(CultureInfo.CurrentUICulture.Name);
+
+        // 4) 切换 Localizer 到默认语言（立即热刷新 UI）
+        loc.SetLanguage(defaultLang);
+
+        // 5) 刷新“代码里赋值”的文本
+        if (App.MainWindow is not null)
+            App.MainWindow.Title = loc.GetLocalizedString("AppDisplayName");
+
+        if (App.AppTitlebar is TextBlock tb)
+            tb.Text = loc.GetLocalizedString("AppDisplayName");
+
+        if (App.SettingsNavItem is NavigationViewItem settingsItem)
+            settingsItem.Content = loc.GetLocalizedString("Shell_Settings");
+
+        // 6) 让语言下拉框选中新的语言
+        foreach (var it in LanguageCombo.Items.OfType<ComboBoxItem>())
+        {
+            if (it.Tag?.ToString().Equals(defaultLang, StringComparison.OrdinalIgnoreCase) == true)
+            {
+                LanguageCombo.SelectedItem = it;
+                break;
+            }
+        }
+
+        // 7) 把“重置后的默认值”写回 LocalSettings（以后启动也按这个来）
+        await App.GetService<ILocalSettingsService>().SaveSettingAsync("PreferredLanguage", defaultLang);
+
+        // 8) 提示成功（可选）
+        var done = new ContentDialog
+        {
+            Title = loc.GetLocalizedString("Settings_ResetDone"),
+            PrimaryButtonText = "OK",
+            XamlRoot = this.Content.XamlRoot
+        };
+        await done.ShowAsync();
+    }
+
+    private static string NormalizeLanguageTag(string? t)
+    {
+        if (string.IsNullOrWhiteSpace(t)) return "en-US";
+        t = t.Trim();
+        if (t.Equals("en", StringComparison.OrdinalIgnoreCase)) return "en-US";
+        if (t.Equals("zh", StringComparison.OrdinalIgnoreCase)) return "zh-CN";
+        if (t.Equals("zh-Hans", StringComparison.OrdinalIgnoreCase)) return "zh-CN";
+        return t;
+    }
 }

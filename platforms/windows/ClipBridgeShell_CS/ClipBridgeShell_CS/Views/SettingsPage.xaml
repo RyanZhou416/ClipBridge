@@ -64,9 +64,9 @@
                     <ComboBoxItem Tag="en-US" l:Uids.Uid="Settings_Lang_English"/>
                     <ComboBoxItem Tag="zh-CN" l:Uids.Uid="Settings_Lang_Chinese"/>
                 </ComboBox>
-
                 <!-- 可选：当前语言提示 -->
                 <TextBlock l:Uids.Uid="Settings_CurrentLanguageTip" />
+                <Button Click="ResetSettings_Click" l:Uids.Uid="Settings_ResetButton" Margin="0,16,0,0"/>
                 <Button Content="Show LocalFolder Path" Click="ShowLocalFolder_Click" /><!-- 用于显示应用文件夹路径，可删除 -->
             </StackPanel>
             <TextBlock l:Uids.Uid="Settings_About" Style="{ThemeResource SubtitleTextBlockStyle}" />

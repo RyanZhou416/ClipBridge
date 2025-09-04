@@ -12,14 +12,14 @@
 
   <Identity
     Name="40a26821-a97d-4eb8-ae89-804c2cccf4a0"
-    Publisher="CN=12693"
-    Version="1.0.0.0" />
+    Publisher="CN=Ryan416"
+    Version="1.0.4.0" />
     
   <mp:PhoneIdentity PhoneProductId="40a26821-a97d-4eb8-ae89-804c2cccf4a0" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
     
   <Properties>
     <DisplayName>ClipBridgeShell_CS</DisplayName>
-    <PublisherDisplayName>12693</PublisherDisplayName>
+    <PublisherDisplayName>Ryan416</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 

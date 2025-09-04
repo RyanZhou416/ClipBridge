@@ -118,7 +118,7 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
   <data name="AppDisplayName" xml:space="preserve">
-    <value>Clip Bridge</value>
+    <value>剪切桥</value>
   </data>
   <data name="AppDescription" xml:space="preserve">
     <value>ClipBridgeShell_CS</value>
@@ -180,7 +180,7 @@
     <value>选择一种语言</value>
   </data>
   <data name="Settings_Lang_English.Content" xml:space="preserve">
-    <value>英语</value>
+    <value>英语 - English</value>
   </data>
   <data name="Settings_Lang_Chinese.Content" xml:space="preserve">
     <value>简体中文</value>
@@ -190,5 +190,23 @@
   </data>
   <data name="Shell_Settings.Content" xml:space="preserve">
     <value>设置</value>
+  </data>
+  <data name="Settings_ResetButton.Content" xml:space="preserve">
+    <value>重置设置</value>
+  </data>
+  <data name="Settings_ResetConfirm_Title" xml:space="preserve">
+    <value>确认重置？</value>
+  </data>
+  <data name="Settings_ResetConfirm_Primary" xml:space="preserve">
+    <value>重置</value>
+  </data>
+  <data name="Settings_ResetConfirm_Secondary" xml:space="preserve">
+    <value>取消</value>
+  </data>
+  <data name="Settings_ResetDone" xml:space="preserve">
+    <value>已重置设置</value>
+  </data>
+  <data name="Settings_ResetConfirm_Content" xml:space="preserve">
+    <value>这将清除你的首选项为默认</value>
   </data>
 </root>

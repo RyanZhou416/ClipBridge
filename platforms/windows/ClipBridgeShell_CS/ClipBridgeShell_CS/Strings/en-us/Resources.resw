@@ -183,12 +183,30 @@
     <value>English</value>
   </data>
   <data name="Settings_Lang_Chinese.Content" xml:space="preserve">
-    <value>Chinese (Simplified)</value>
+    <value>Simplified Chinese - 简体中文</value>
   </data>
   <data name="Settings_CurrentLanguageTip.Text" xml:space="preserve">
     <value>Switching is instant. No restart needed.</value>
   </data>
   <data name="Shell_Settings.Content" xml:space="preserve">
     <value>Settings</value>
+  </data>
+  <data name="Settings_ResetButton.Content" xml:space="preserve">
+    <value>Reset settings</value>
+  </data>
+  <data name="Settings_ResetConfirm_Title" xml:space="preserve">
+    <value>Reset settings?</value>
+  </data>
+  <data name="Settings_ResetConfirm_Primary" xml:space="preserve">
+    <value>Reset</value>
+  </data>
+  <data name="Settings_ResetConfirm_Secondary" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="Settings_ResetDone" xml:space="preserve">
+    <value>Settings have been reset</value>
+  </data>
+  <data name="Settings_ResetConfirm_Content" xml:space="preserve">
+    <value>This will clear all your preferences to default</value>
   </data>
 </root>
