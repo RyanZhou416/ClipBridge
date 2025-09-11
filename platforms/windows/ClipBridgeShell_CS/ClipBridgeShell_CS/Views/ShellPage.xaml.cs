@@ -44,6 +44,8 @@ public sealed partial class ShellPage : Page
 
         KeyboardAccelerators.Add(BuildKeyboardAccelerator(VirtualKey.Left, VirtualKeyModifiers.Menu));
         KeyboardAccelerators.Add(BuildKeyboardAccelerator(VirtualKey.GoBack));
+
+
     }
 
     private void MainWindow_Activated(object sender, WindowActivatedEventArgs args)
@@ -95,4 +97,6 @@ public sealed partial class ShellPage : Page
             AutomationProperties.SetName(settings, loc.GetLocalizedString("Shell_Settings"));
         }
     }
+
+
 }

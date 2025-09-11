@@ -4,6 +4,7 @@ using ClipBridgeShell_CS.Views;
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using static ClipBridgeShell_CS.App;
 
 namespace ClipBridgeShell_CS.Services;
 

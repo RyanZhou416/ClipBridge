@@ -1,6 +1,7 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 
 using Microsoft.UI;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 
@@ -82,6 +83,9 @@ internal class TitleBarHelper
                 SendMessage(hwnd, WMACTIVATE, WAACTIVE, IntPtr.Zero);
                 SendMessage(hwnd, WMACTIVATE, WAINACTIVE, IntPtr.Zero);
             }
+            var winId = Win32Interop.GetWindowIdFromWindow(hwnd);
+            var appWindow = AppWindow.GetFromWindowId(winId);
+            appWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
         }
     }
 

@@ -8,6 +8,7 @@ using Windows.Storage;
 using WinUI3Localizer;
 
 
+
 namespace ClipBridgeShell_CS.Views;
 
 // TODO: Set the URL for your privacy policy by updating SettingsPage_PrivacyTermsLink.NavigateUri in Resources.resw.
@@ -38,10 +39,22 @@ public sealed partial class SettingsPage : Page
 
     private void SettingsPage_Loaded(object sender, RoutedEventArgs e)
     {
-        var loc = Localizer.Get();
-        var current = loc.GetCurrentLanguage(); // 可能返回 "en" / "zh" / "zh-Hans" / "en-US" 等
+        // 1) 让主题下拉框显示当前主题
+        var themeSvc = App.GetService<IThemeSelectorService>();
+        var currentTheme = themeSvc is not null ? themeSvc.Theme : ElementTheme.Default; // Theme 从 LocalSettings 加载过来
+        foreach (var it in ThemeCombo.Items.OfType<ComboBoxItem>())
+        {
+            if (string.Equals(it.Tag?.ToString(), currentTheme.ToString(), StringComparison.OrdinalIgnoreCase))
+            {
+                ThemeCombo.SelectedItem = it;
+                break;
+            }
+        }
 
-        var tag = NormalizeTag(current);
+        var loc = Localizer.Get();
+        var currentLan = loc.GetCurrentLanguage(); // 可能返回 "en" / "zh" / "zh-Hans" / "en-US" 等
+
+        var tag = NormalizeTag(currentLan);
         foreach (var it in LanguageCombo.Items.OfType<ComboBoxItem>())
         {
             if (string.Equals(it.Tag?.ToString(), tag, StringComparison.OrdinalIgnoreCase))
@@ -173,4 +186,18 @@ public sealed partial class SettingsPage : Page
         if (t.Equals("zh-Hans", StringComparison.OrdinalIgnoreCase)) return "zh-CN";
         return t;
     }
+    private async void ThemeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ThemeCombo?.SelectedItem is ComboBoxItem item && item.Tag is string tag &&
+            Enum.TryParse<ElementTheme>(tag, out var theme))
+        {
+            // 2) 通过服务真正切换 + 持久化（这是原来 RadioButton 的实质动作）
+            var themeSvc = App.GetService<IThemeSelectorService>();
+            await themeSvc.SetThemeAsync(theme); // 更新 RequestedTheme & 标题栏 & 保存到 LocalSettings
+
+            // 3)（可选）把 VM 的 ElementTheme 也同步一下，便于界面上其它绑定立即反映
+            ViewModel.ElementTheme = theme;
+        }
+    }
+
 }

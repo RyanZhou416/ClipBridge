@@ -135,7 +135,7 @@
   <data name="Settings_Personalization.Text" xml:space="preserve">
     <value>个性化</value>
   </data>
-  <data name="Settings_Theme.Text" xml:space="preserve">
+  <data name="Settings_Theme.Header" xml:space="preserve">
     <value>主题</value>
   </data>
   <data name="Settings_Theme_Light.Content" xml:space="preserve">
@@ -173,7 +173,7 @@
   &lt;/actions&gt;
 &lt;/toast&gt;</value>
   </data>
-  <data name="Settings_LanguageHeader.Text" xml:space="preserve">
+  <data name="Settings_LanguageCombo.Header" xml:space="preserve">
     <value>语言</value>
   </data>
   <data name="Settings_LanguageCombo.PlaceholderText" xml:space="preserve">
@@ -185,10 +185,10 @@
   <data name="Settings_Lang_Chinese.Content" xml:space="preserve">
     <value>简体中文</value>
   </data>
-  <data name="Settings_CurrentLanguageTip.Text" xml:space="preserve">
+  <data name="Settings_LanguageCombo.Description" xml:space="preserve">
     <value>立即生效，无需重启。</value>
   </data>
-  <data name="Shell_Settings.Content" xml:space="preserve">
+  <data name="Shell_Settings.Text" xml:space="preserve">
     <value>设置</value>
   </data>
   <data name="Settings_ResetButton.Content" xml:space="preserve">

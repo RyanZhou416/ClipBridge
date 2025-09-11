@@ -7,124 +7,95 @@
     xmlns:helpers="using:ClipBridgeShell_CS.Helpers"
     xmlns:xaml="using:Microsoft.UI.Xaml"
     xmlns:l="using:WinUI3Localizer"
-    mc:Ignorable="d">
-    <!-- 资源：卡片样式、标题/说明文本样式 -->
+    mc:Ignorable="d"
+    xmlns:ctk="using:CommunityToolkit.WinUI.Controls"
+    xmlns:ui="using:CommunityToolkit.WinUI">
     <Page.Resources>
         <helpers:EnumToBooleanConverter x:Key="EnumToBooleanConverter" />
-        <!-- 卡片通用样式（Windows 11 风格） -->
-        <Style x:Key="SettingsCardStyle" TargetType="Border">
-            <!-- 如果你的 WinAppSDK 版本有 Card* 资源，优先使用；否则退回到系统画刷 -->
-            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
-            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
-            <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="12" />
-            <Setter Property="Padding" Value="16" />
-            <Setter Property="Margin" Value="0,12,0,0" />
-        </Style>
-
-        <!-- 分组标题（如 “Appearance & behavior” / “About”） -->
+        <!-- 模仿 WinUI Gallery 的分组标题样式 -->
         <Style x:Key="GroupHeaderTextStyle" TargetType="TextBlock">
-            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="FontSize" Value="20"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Margin" Value="0,24,0,8"/>
-        </Style>
-
-        <!-- 每项左侧主标题 -->
-        <Style x:Key="SettingTitleTextStyle" TargetType="TextBlock">
-            <Setter Property="FontSize" Value="16"/>
-            <Setter Property="FontWeight" Value="SemiBold"/>
-        </Style>
-
-        <!-- 每项左侧说明文字 -->
-        <Style x:Key="SettingDescTextStyle" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}"/>
-            <Setter Property="TextWrapping" Value="Wrap"/>
-            <Setter Property="Margin" Value="0,2,0,0"/>
+            
         </Style>
     </Page.Resources>
-    <ScrollViewer>
-        <Grid HorizontalAlignment="Center" MaxWidth="860" Padding="24,16,24,48">
-            <TextBlock l:Uids.Uid="Shell_Settings.Content" 
-            x:Name="PageHeader"
-            MaxWidth="1064"
-            Margin="36,24,36,0"
-            AutomationProperties.HeadingLevel="Level1"
-            Style="{StaticResource TitleTextBlockStyle}"
-            />
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <!-- 固定页眉 -->
+            <RowDefinition Height="*"/>
+            <!-- 可滚动正文 -->
+        </Grid.RowDefinitions>
+        <!-- Row 0: 页眉（不随滚动），与内容同一中栏 -->
+        <StackPanel Grid.Row="0"
+              Padding="36,24,36,4">
+              
+              
+            <StackPanel MaxWidth="1064">
+            <TextBlock l:Uids.Uid="Shell_Settings.Text" 
+               Style="{StaticResource TitleTextBlockStyle}"/>
+            </StackPanel>
+        </StackPanel>
 
+        <ScrollViewer Grid.Row="1"
+                      Padding="36,0,36,0"
+                VerticalScrollMode="Auto"
+                VerticalScrollBarVisibility="Auto"
+                HorizontalScrollMode="Disabled"
+                HorizontalScrollBarVisibility="Disabled"
+                >
+            <Border HorizontalAlignment="Stretch">
+                <StackPanel x:Name="ContentArea"
+                    MaxWidth="1064"
+                    HorizontalAlignment="Stretch"
+                    Spacing="{StaticResource SettingsItemSpacing}">
+                    <TextBlock l:Uids.Uid="Settings_Personalization" Style="{StaticResource GroupHeaderTextStyle}" />
+                    <StackPanel Margin="{StaticResource SmallTopBottomMargin}">
+                        <TextBlock l:Uids.Uid="Settings_Theme" />
+                        <!-- 主题 -->
+                        <ctk:SettingsCard l:Uids.Uid="Settings_Theme" HeaderIcon="{ui:FontIcon Glyph=&#xE771;}" HorizontalAlignment="Stretch">
+                            <ComboBox x:Name="ThemeCombo"
+                                      Width="240"
+                                      SelectionChanged="ThemeCombo_SelectionChanged">
+                                <ComboBoxItem Tag="Default" l:Uids.Uid="Settings_Theme_Default"/>
+                                <ComboBoxItem Tag="Light"   l:Uids.Uid="Settings_Theme_Light"/>
+                                <ComboBoxItem Tag="Dark"    l:Uids.Uid="Settings_Theme_Dark"/>
+                            </ComboBox>
+                        </ctk:SettingsCard>
+                    </StackPanel>
 
+                <!-- 语言设置区块 -->
+                <TextBlock l:Uids.Uid="Settings_LanguageHeader" />
+                <StackPanel Margin="{StaticResource SmallTopBottomMargin}">
+                    <ctk:SettingsCard l:Uids.Uid="Settings_LanguageCombo" HeaderIcon="{ui:FontIcon Glyph=&#xE8C1;}" HorizontalAlignment="Stretch">
+                        <ComboBox x:Name="LanguageCombo"
+                                  Width="240"
+                                  SelectionChanged="LanguageCombo_SelectionChanged">
+                            <ComboBoxItem Tag="en-US" l:Uids.Uid="Settings_Lang_English"/>
+                            <ComboBoxItem Tag="zh-CN" l:Uids.Uid="Settings_Lang_Chinese"/>
+                        </ComboBox>
+                    </ctk:SettingsCard>
 
-            <StackPanel
-            x:Name="ContentArea">
-            <TextBlock l:Uids.Uid="Settings_Personalization" Style="{StaticResource GroupHeaderTextStyle}" />
-            <StackPanel Margin="{StaticResource SmallTopBottomMargin}">
-                <TextBlock l:Uids.Uid="Settings_Theme" />
+                    <Button Click="ResetSettings_Click" l:Uids.Uid="Settings_ResetButton"/>
+                    <Button Content="Show LocalFolder Path" Click="ShowLocalFolder_Click" />
+                    <!-- 用于显示应用文件夹路径，可删除 -->
+                </StackPanel>
+
+                <StackPanel Margin="{StaticResource SmallTopBottomMargin}">
+                    <TextBlock l:Uids.Uid="Settings_About" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                </StackPanel>
 
                 <StackPanel Margin="{StaticResource XSmallTopMargin}">
-                    <RadioButton
-                        l:Uids.Uid="Settings_Theme_Light"
-                        Command="{x:Bind ViewModel.SwitchThemeCommand}"
-                        IsChecked="{x:Bind ViewModel.ElementTheme, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Light, Mode=OneWay}"
-                        FontSize="15"
-                        GroupName="AppTheme">
-                        <RadioButton.CommandParameter>
-                            <xaml:ElementTheme>Light</xaml:ElementTheme>
-                        </RadioButton.CommandParameter>
-                    </RadioButton>
-                    <RadioButton
-                        l:Uids.Uid="Settings_Theme_Dark"
-                        Command="{x:Bind ViewModel.SwitchThemeCommand}"
-                        IsChecked="{x:Bind ViewModel.ElementTheme, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Dark, Mode=OneWay}"
-                        FontSize="15"
-                        GroupName="AppTheme">
-                        <RadioButton.CommandParameter>
-                            <xaml:ElementTheme>Dark</xaml:ElementTheme>
-                        </RadioButton.CommandParameter>
-                    </RadioButton>
-                    <RadioButton
-                        l:Uids.Uid="Settings_Theme_Default"
-                        Command="{x:Bind ViewModel.SwitchThemeCommand}"
-                        IsChecked="{x:Bind ViewModel.ElementTheme, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Default, Mode=OneWay}"
-                        FontSize="15"
-                        GroupName="AppTheme">
-                        <RadioButton.CommandParameter>
-                            <xaml:ElementTheme>Default</xaml:ElementTheme>
-                        </RadioButton.CommandParameter>
-                    </RadioButton>
-                </StackPanel>
-            </StackPanel>
-            <!-- 语言设置区块 -->
-            <StackPanel Spacing="8" Margin="0,16,0,0">
-                <!-- 标题 -->
-                <TextBlock l:Uids.Uid="Settings_LanguageHeader" />
+                    <TextBlock Text="{x:Bind ViewModel.VersionDescription, Mode=OneWay}" Style="{ThemeResource BodyTextBlockStyle}" />
 
-                <!-- 下拉框：用 Tag 保存语言代码 -->
-                <ComboBox x:Name="LanguageCombo"
-              Width="240"
-              SelectionChanged="LanguageCombo_SelectionChanged"
-              l:Uids.Uid="Settings_LanguageCombo">
-                    <ComboBoxItem Tag="en-US" l:Uids.Uid="Settings_Lang_English"/>
-                    <ComboBoxItem Tag="zh-CN" l:Uids.Uid="Settings_Lang_Chinese"/>
-                </ComboBox>
-                <!-- 可选：当前语言提示 -->
-                <TextBlock l:Uids.Uid="Settings_CurrentLanguageTip" />
-                <Button Click="ResetSettings_Click" l:Uids.Uid="Settings_ResetButton" Margin="0,16,0,0"/>
-                <Button Content="Show LocalFolder Path" Click="ShowLocalFolder_Click" /><!-- 用于显示应用文件夹路径，可删除 -->
-            </StackPanel>
-            <TextBlock l:Uids.Uid="Settings_About" Style="{ThemeResource SubtitleTextBlockStyle}" />
-
-            <StackPanel Margin="{StaticResource XSmallTopMargin}">
-                <TextBlock Text="{x:Bind ViewModel.VersionDescription, Mode=OneWay}" Style="{ThemeResource BodyTextBlockStyle}" />
-
-                <TextBlock
+                    <TextBlock
                     l:Uids.Uid="Settings_AboutDescription"
                     Margin="{StaticResource XSmallTopMargin}"
                     Style="{ThemeResource BodyTextBlockStyle}" />
-                <HyperlinkButton l:Uids.Uid="SettingsPage_PrivacyTermsLink" Margin="{StaticResource SettingsPageHyperlinkButtonMargin}" />
+                    <HyperlinkButton l:Uids.Uid="SettingsPage_PrivacyTermsLink" Margin="{StaticResource SettingsPageHyperlinkButtonMargin}" />
+                </StackPanel>
             </StackPanel>
-        </StackPanel>
-    </Grid>
-
-        
+        </Border>
     </ScrollViewer>
+    </Grid>
 </Page>

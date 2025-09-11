@@ -12,9 +12,13 @@ using ClipBridgeShell_CS.Views;
 
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.UI;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using WinRT.Interop;
 using Windows.Storage;
+using WinRT.Interop;
 using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS;
@@ -185,4 +189,6 @@ public partial class App : Application
         Uri resourcesFileUri = new($"ms-appx:///{filePath}");
         return await StorageFile.GetFileFromApplicationUriAsync(resourcesFileUri);
     }
+
+    
 }
