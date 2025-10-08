@@ -209,4 +209,7 @@
   <data name="Settings_ResetConfirm_Content" xml:space="preserve">
     <value>这将清除你的首选项为默认</value>
   </data>
+  <data name="MainPage_Header" xml:space="preserve">
+    <value>主页</value>
+  </data>
 </root>

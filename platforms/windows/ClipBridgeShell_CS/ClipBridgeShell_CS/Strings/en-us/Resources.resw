@@ -209,4 +209,7 @@
   <data name="Settings_ResetConfirm_Content" xml:space="preserve">
     <value>This will clear all your preferences to default</value>
   </data>
+  <data name="MainPage_Header" xml:space="preserve">
+    <value>Main</value>
+  </data>
 </root>

@@ -8,6 +8,18 @@
     mc:Ignorable="d">
 
     <Grid x:Name="ContentArea">
-        
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <!-- 固定页眉 -->
+            <RowDefinition Height="*"/>
+            <!-- 可滚动正文 -->
+        </Grid.RowDefinitions>
+        <StackPanel Grid.Row="0"
+                    Padding="36,24,36,4">
+            <StackPanel MaxWidth="1064">
+                <TextBlock l:Uids.Uid="MainPage_Header.Text"
+                           Style="{StaticResource TitleTextBlockStyle}"/>
+            </StackPanel>
+        </StackPanel>
     </Grid>
 </Page>
