@@ -1,4 +1,4 @@
-# ClipBridge / CB — 项目背景总览（贴给新会话用）
+# ClipBridge项目总览
 
 ## 0) 项目简介
 
@@ -9,40 +9,41 @@
 - **编译指令**：
   - WinUI / C# shell 调用 Rust DLL（只构建名为 core-ffi-windows 的 crate）：`cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc`
   - 全量测试（构建整个 workspace 所有成员）：`cargo build --release --target x86_64-pc-windows-msvc
-`
+  `
 ------
 
 ## 1) 功能与阶段目标
 
 ### v1（Windows MVP + 基础核心）
 
-- 局域网自动发现（mDNS/Bonjour）
-- 端到端加密连接（自签证书 + 指纹固定 / 或 Noise）
+- 局域网自动发现
+- 端到端加密连接
+- 同局域网内多设备同账号之间共享剪切板
 - **Lazy Fetch**：复制时广播“元数据”，粘贴时拉取正文
-- 支持类型：**文本**、**图片**、**文件**（文件/图片按需拉取）
-- Windows 外壳：托盘图标、主窗口（登录/选择设备/基础设置）、暂停/退出菜单
+- **剪贴板历史**：本地持久化（SQLite/KV），在各设备同步**历史元数据**；
+- 支持类型：**文本**、**图片**、**文件**（先不管应用内复制和特殊格式）
+- Windows 外壳：托盘图标、主窗口、呼出小窗
 - 全局热键：默认 **Ctrl+Shift+V**（Win+V 为系统保留）
 
 ### v2（核心升级 + 历史）
 
-- **剪贴板历史**：本地持久化（SQLite/KV），在各设备同步**历史元数据**；粘贴时再取正文
-- 历史小窗（快捷键呼出）与主窗历史页
-- 过滤与安全：敏感内容排除、设备 ACL、到期时间
+- Android外壳
+- 添加云端账号，可以云端同步剪切板
+- 定向传输文件
 
 ### 未来
 
-- WAN 直连/中继（QUIC + 自建信令/中继）
 - macOS / Linux 外壳
-- 设备分组、权限与密钥轮换
+- 同账号内设备分组共享
 
 ------
 
-## 2) 架构与协议（简版）
+## 2) 架构与协议
 
 ### 2.1 分层
 
 - **Rust 核心 (Core)**
-   发现与会话、加密、传输（HTTP/3/QUIC 或 gRPC/HTTP2）、缓存（LRU + sha256 去重）、元数据/正文编解码、Lazy Fetch 请求处理、事件回调。
+   /* 需要明确核心和外壳分工 */
 - **平台外壳 (Shell)**
    集成系统剪贴板与 UI（Windows：C#/WinUI 3；Android：Java；macOS：Swift/ObjC；Linux：Qt/GTK 之后再定）。调用核心 API，接收核心事件。
 
