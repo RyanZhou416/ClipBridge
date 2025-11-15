@@ -1,3 +1,4 @@
+#顶层Cargo.toml
 [workspace]
 resolver = "2"
 
@@ -8,3 +9,10 @@ members = [
 ]
 
 # 如果以后新增子工程，按相对路径加到 members 即可
+
+[workspace.package]
+edition = "2021"
+authors = ["Ryan Zhou <zxr1269335000@gmail.com>"]
+description = "A cross-platform clipboard sync tool."
+license = "MIT"
+repository = "https://github.com/RyanZhou416/ClipBridge"

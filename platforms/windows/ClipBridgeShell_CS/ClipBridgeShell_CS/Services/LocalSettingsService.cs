@@ -1,4 +1,5 @@
-﻿using ClipBridgeShell_CS.Contracts.Services;
+﻿//platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/Services/LocalSettingsService.cs
+using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Contracts.Services;
 using ClipBridgeShell_CS.Core.Helpers;
 using ClipBridgeShell_CS.Helpers;

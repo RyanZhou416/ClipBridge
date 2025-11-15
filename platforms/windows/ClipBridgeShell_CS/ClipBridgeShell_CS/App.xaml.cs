@@ -1,4 +1,7 @@
+//platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/App.xaml.cs
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using ClipBridgeShell_CS.Activation;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Contracts.Services;
@@ -9,17 +12,18 @@ using ClipBridgeShell_CS.Notifications;
 using ClipBridgeShell_CS.Services;
 using ClipBridgeShell_CS.ViewModels;
 using ClipBridgeShell_CS.Views;
-
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using WinRT.Interop;
+using Microsoft.Windows.AppNotifications.Builder;
 using Windows.Storage;
 using WinRT.Interop;
+using WinRT.Interop;
 using WinUI3Localizer;
+using Microsoft.Windows.AppNotifications.Builder;
 
 namespace ClipBridgeShell_CS;
 
@@ -119,8 +123,7 @@ public partial class App : Application
     {
         base.OnLaunched(args);
 
-        App.GetService<IAppNotificationService>()
-           .Show(string.Format("AppNotificationSamplePayload".GetLocalized(), AppContext.BaseDirectory));
+        //App.GetService<IAppNotificationService>().Show(string.Format("AppNotificationSamplePayload".GetLocalized(), AppContext.BaseDirectory));
 
         // ① 初始化 Localizer（打包应用版）
         await InitializeLocalizer();
@@ -128,8 +131,8 @@ public partial class App : Application
         // ② 再走 Template Studio 原有流程（里面会调用 ActivationService）
         await App.GetService<IActivationService>().ActivateAsync(args);
 
-        // 任意你能看到输出的地方加（比如 App.OnLaunched 或 SettingsPage 构造里）
-        
+        PrintCoreDllInfo();
+
     }
 
     private async Task InitializeLocalizer()
@@ -180,7 +183,7 @@ public partial class App : Application
         string resourceFilePath = Path.Combine(stringsFolder.Name, language, resourceFileName);
         StorageFile resourceFile = await LoadStringResourcesFileFromAppResource(resourceFilePath);
 
-        
+
         _ = await resourceFile.CopyAsync(languageFolder, resourceFileName, NameCollisionOption.ReplaceExisting);
     }
 
@@ -190,5 +193,47 @@ public partial class App : Application
         return await StorageFile.GetFileFromApplicationUriAsync(resourcesFileUri);
     }
 
-    
+    private void PrintCoreDllInfo()
+    {
+        try
+        {
+            string dllName = "core_ffi_windows.dll";
+            string dllPath = Path.Combine(AppContext.BaseDirectory, dllName);
+
+            string header, body;
+            if (File.Exists(dllPath))
+            {
+                FileInfo info = new FileInfo(dllPath);
+                header = dllName;
+                body =
+                    $"{info.DirectoryName}\n" +
+                    $"大小: {info.Length:N0} 字节\n" +
+                    $"创建: {info.CreationTime}\n" +
+                    $"修改: {info.LastWriteTime}";
+            }
+            else
+            {
+                header = dllName;
+                body = $"未找到该文件\n路径: {dllPath}";
+            }
+
+            var builder = new AppNotificationBuilder()
+                .AddText(header)
+                .AddText(body);
+
+            string payloadXml = builder.BuildNotification().Payload;
+            App.GetService<IAppNotificationService>().Show(payloadXml);
+        }
+        catch (Exception ex)
+        {
+            var builder = new AppNotificationBuilder()
+                .AddText("读取 DLL 信息失败")
+                .AddText(ex.Message);
+
+            string payloadXml = builder.BuildNotification().Payload;
+            App.GetService<IAppNotificationService>().Show(payloadXml);
+        }
+    }
+
+
 }

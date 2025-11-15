@@ -120,6 +120,9 @@
   <data name="AppDisplayName" xml:space="preserve">
     <value>Clip Bridge</value>
   </data>
+  <data name="AppName.Text" xml:space="preserve">
+    <value>Clip Bridge</value>
+  </data>
   <data name="AppDescription" xml:space="preserve">
     <value>ClipBridgeShell_CS</value>
   </data>
@@ -191,7 +194,7 @@
   <data name="Shell_Settings.Text" xml:space="preserve">
     <value>Settings</value>
   </data>
-  <data name="Settings_ResetButton.Content" xml:space="preserve">
+  <data name="Settings_Reset_SettingsCard.Header" xml:space="preserve">
     <value>Reset settings</value>
   </data>
   <data name="Settings_ResetConfirm_Title" xml:space="preserve">
@@ -211,5 +214,20 @@
   </data>
   <data name="MainPage_Header" xml:space="preserve">
     <value>Main</value>
+  </data>
+  <data name="Settings_Reset_SettingsCard.Description" xml:space="preserve">
+    <value>Irreversible!</value>
+  </data>
+  <data name="Settings_Reset_Button.Content" xml:space="preserve">
+    <value>Reset settings</value>
+  </data>
+  <data name="Settings_ShowLocalFolder_SettingsCard.Description" xml:space="preserve">
+    <value>Show Local Folder</value>
+  </data>
+  <data name="Settings_ShowLocalFolder_SettingsCard.Header" xml:space="preserve">
+    <value>Show LocalFolder Path</value>
+  </data>
+  <data name="Settings_ShowLocalFolder_Button.Content" xml:space="preserve">
+    <value>Show LocalFolder Path</value>
   </data>
 </root>

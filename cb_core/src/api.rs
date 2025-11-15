@@ -406,7 +406,6 @@ impl CbCore {
             .append_history(&rec.meta, HistoryKind::PasteLocal)
             .ok();
 
-
         let out = LocalContentRef {
             sha256_hex: rec.meta.sha256_hex,
             path: final_path,
@@ -443,7 +442,66 @@ impl CbCore {
             .prune_history()
             .map_err(|e| CbError::new(CbErrorKind::Storage, e.to_string()))
     }
-}
+
+
+    // === LOGS API (methods on CbCore): BEGIN ===
+
+        pub fn logs_write(
+            &self,
+            level: i32,
+            category: &str,
+            message: &str,
+            exception: Option<&str>,
+            props_json: Option<&str>,
+        ) -> CbResult<i64> {
+            self.storage
+                .logs_insert(level, category, message, exception, props_json)
+                .map_err(|e| CbError::new(CbErrorKind::Storage, e.to_string()))
+        }
+
+        pub fn logs_query_after_id(
+            &self,
+            after_id: i64,
+            level_min: i32,
+            like: Option<&str>,
+            limit: i64,
+        ) -> CbResult<Vec<crate::proto::LogRow>> {
+            self.storage
+                .logs_select_after_id(after_id, level_min, like, limit)
+                .map_err(|e| CbError::new(CbErrorKind::Storage, e.to_string()))
+        }
+
+        pub fn logs_query_range(
+            &self,
+            start_ms: i64,
+            end_ms: i64,
+            level_min: i32,
+            like: Option<&str>,
+            limit: i64,
+            offset: i64,
+        ) -> CbResult<Vec<crate::proto::LogRow>> {
+            self.storage
+                .logs_select_range(start_ms, end_ms, level_min, like, limit, offset)
+                .map_err(|e| CbError::new(CbErrorKind::Storage, e.to_string()))
+        }
+
+        pub fn logs_delete_before(&self, cutoff_ms: i64) -> CbResult<i64> {
+            self.storage
+                .logs_delete_before(cutoff_ms)
+                .map_err(|e| CbError::new(CbErrorKind::Storage, e.to_string()))
+        }
+
+        pub fn logs_stats(&self) -> CbResult<crate::proto::LogStats> {
+            self.storage
+                .logs_stats()
+                .map_err(|e| CbError::new(CbErrorKind::Storage, e.to_string()))
+        }
+    }
+    // === LOGS API (methods on CbCore): END ===
+
+
+
+
 
 // ------------------------------ 工具 -----------------------------------------------
 fn gen_uuid_v4() -> String {
@@ -459,8 +517,8 @@ mod tests {
     use super::*;
     use crate::proto::{ClipboardSnapshot, PROTOCOL_VERSION};
     use serde_json::json;
-    use std::sync::Mutex;
     use std::path::PathBuf;
+    use std::sync::Mutex;
 
     struct MemStore(Mutex<std::collections::HashMap<String, Vec<u8>>>);
     impl SecureStore for MemStore {

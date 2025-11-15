@@ -120,6 +120,9 @@
   <data name="AppDisplayName" xml:space="preserve">
     <value>剪切桥</value>
   </data>
+  <data name="AppName.Text" xml:space="preserve">
+    <value>剪切桥</value>
+  </data>
   <data name="AppDescription" xml:space="preserve">
     <value>ClipBridgeShell_CS</value>
   </data>
@@ -191,7 +194,7 @@
   <data name="Shell_Settings.Text" xml:space="preserve">
     <value>设置</value>
   </data>
-  <data name="Settings_ResetButton.Content" xml:space="preserve">
+  <data name="Settings_Reset_SettingsCard.Header" xml:space="preserve">
     <value>重置设置</value>
   </data>
   <data name="Settings_ResetConfirm_Title" xml:space="preserve">
@@ -211,5 +214,20 @@
   </data>
   <data name="MainPage_Header" xml:space="preserve">
     <value>主页</value>
+  </data>
+  <data name="Settings_Reset_SettingsCard.Description" xml:space="preserve">
+    <value>不可恢复！</value>
+  </data>
+  <data name="Settings_Reset_Button.Content" xml:space="preserve">
+    <value>重置设置</value>
+  </data>
+  <data name="Settings_ShowLocalFolder_SettingsCard.Description" xml:space="preserve">
+    <value>仅供测试</value>
+  </data>
+  <data name="Settings_ShowLocalFolder_SettingsCard.Header" xml:space="preserve">
+    <value>显示 LocalFolder 路径</value>
+  </data>
+  <data name="Settings_ShowLocalFolder_Button.Content" xml:space="preserve">
+    <value>显示 LocalFolder 路径</value>
   </data>
 </root>

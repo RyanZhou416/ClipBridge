@@ -14,13 +14,15 @@
 
 use std::{
     ffi::{CStr, CString},
-    os::raw::{c_char, c_int, c_uint, c_ulonglong, c_ushort},
+    os::raw::{c_char, c_int, c_uint, c_ulonglong, c_ushort,c_longlong},
     sync::{Mutex, Arc},
+    ptr
 };
 
 use once_cell::sync::OnceCell;
 
 use cb_core::prelude::*;
+use cb_core::{api, proto};
 
 // ----------------------------- 全局状态 ---------------------------------------------
 
@@ -482,6 +484,134 @@ pub extern "C" fn cb_free(p: *mut c_char) {
     if p.is_null() { return; }
     unsafe { drop(CString::from_raw(p)); }
 }
+// === LOGS FFI: BEGIN (REPLACE the whole cb_logs_* block) ===
+
+#[no_mangle]
+pub extern "C" fn cb_logs_write(
+    level: c_int,
+    category: *const c_char,
+    message: *const c_char,
+    exception_or_null: *const c_char,
+    props_json_or_null: *const c_char,
+    out_id: *mut c_longlong,
+) -> c_int {
+    if out_id.is_null() { return CB_ERR_INVALID_ARG; }
+    let category = match cstr_required("category", category) { Ok(s) => s, Err(code) => return code };
+    let message  = match cstr_required("message",  message)  { Ok(s) => s, Err(code) => return code };
+    let exception = cstr_opt(exception_or_null);
+    let props     = cstr_opt(props_json_or_null);
+
+    let st = state().lock().unwrap();
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
+
+    match core.logs_write(level as i32, &category, &message, exception.as_deref(), props.as_deref()) {
+        Ok(id) => { unsafe { *out_id = id as c_longlong; } CB_OK }
+        Err(e) => map_core_err(&e),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cb_logs_query_after_id(
+    after_id: c_longlong,
+    level_min: c_int,
+    like_or_null: *const c_char,
+    limit: c_int,
+    out_json_array: *mut *mut c_char,
+) -> c_int {
+    if out_json_array.is_null() { return CB_ERR_INVALID_ARG; }
+    let like = cstr_opt(like_or_null);
+
+    let st = state().lock().unwrap();
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
+
+    match core.logs_query_after_id(after_id as i64, level_min as i32, like.as_deref(), limit as i64) {
+        Ok(rows) => match serde_json::to_string(&rows) {
+            Ok(js) => set_out_json(out_json_array, js),
+            Err(_) => CB_ERR_INTERNAL,
+        },
+        Err(e) => map_core_err(&e),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cb_logs_query_range(
+    start_ms: c_longlong,
+    end_ms: c_longlong,
+    level_min: c_int,
+    like_or_null: *const c_char,
+    limit: c_int,
+    offset: c_int,
+    out_json_array: *mut *mut c_char,
+) -> c_int {
+    if out_json_array.is_null() { return CB_ERR_INVALID_ARG; }
+    let like = cstr_opt(like_or_null);
+
+    let st = state().lock().unwrap();
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
+
+    match core.logs_query_range(
+        start_ms as i64,
+        end_ms as i64,
+        level_min as i32,
+        like.as_deref(),
+        limit  as i64,
+        offset as i64,
+    ) {
+        Ok(rows) => match serde_json::to_string(&rows) {
+            Ok(js) => set_out_json(out_json_array, js),
+            Err(_) => CB_ERR_INTERNAL,
+        },
+        Err(e) => map_core_err(&e),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cb_logs_delete_before(
+    cutoff_ms: c_longlong,
+    out_deleted: *mut c_longlong,
+) -> c_int {
+    if out_deleted.is_null() { return CB_ERR_INVALID_ARG; }
+
+    let st = state().lock().unwrap();
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
+
+    match core.logs_delete_before(cutoff_ms as i64) {
+        Ok(n)  => { unsafe { *out_deleted = n as c_longlong; } CB_OK }
+        Err(e) => map_core_err(&e),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cb_logs_stats(out_json: *mut *mut c_char) -> c_int {
+    if out_json.is_null() { return CB_ERR_INVALID_ARG; }
+
+    let st = state().lock().unwrap();
+    let core = match st.core.as_ref() {
+        Some(c) => c,
+        None => return CB_ERR_INIT_FAILED,
+    };
+
+    match core.logs_stats() {
+        Ok(sta) => match serde_json::to_string(&sta) {
+            Ok(js) => set_out_json(out_json, js),
+            Err(_) => CB_ERR_INTERNAL,
+        },
+        Err(e) => map_core_err(&e),
+    }
+}
+// === LOGS FFI: END ===
 
 // ----------------------------- FileSecureStore 实现 -------------------------------
 // 简单的“文件型安全存储”，写在 <data_dir>/keystore/<alias> 文件里。

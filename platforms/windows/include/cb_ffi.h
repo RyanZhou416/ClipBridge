@@ -72,3 +72,52 @@ void cb_free(void* p);
 #ifdef __cplusplus
 }
 #endif
+
+// ===== Logs API (SQLite-backed) =====
+
+// 写入一条日志
+// level: 0..6 (Trace..Critical)
+// category/message: UTF-8, required
+// exception_or_null / props_json_or_null: UTF-8 or NULL
+// out_id: 返回自增ID
+int cb_logs_write(
+    int level,
+    const char* category,
+    const char* message,
+    const char* exception_or_null,
+    const char* props_json_or_null,
+    long long* out_id);
+
+// tail: 取 id>after_id 的最新 limit 条，按 id ASC
+// like_or_null: 用于 message/category 的 LIKE 过滤（两侧自动加 %）或 NULL
+// out_json_array: UTF-8 JSON 数组字符串（由 cb_free 释放）
+int cb_logs_query_after_id(
+    long long after_id,
+    int level_min,
+    const char* like_or_null,
+    int limit,
+    char** out_json_array);
+
+// 历史分页查询：按时间范围 + 级别 + 关键词（可空），按 time_unix DESC
+int cb_logs_query_range(
+    long long start_ms,
+    long long end_ms,
+    int level_min,
+    const char* like_or_null,
+    int limit,
+    int offset,
+    char** out_json_array);
+
+// 按时间阈值删除旧日志（time_unix < cutoff_ms）
+// out_deleted: 实际删除条数
+int cb_logs_delete_before(
+    long long cutoff_ms,
+    long long* out_deleted);
+
+// 返回统计：{count, first_ms, last_ms, by_level:[...]}
+// 结果为 UTF-8 JSON（由 cb_free 释放）
+int cb_logs_stats(
+    char** out_json);
+
+// 约定：out_json / out_json_array 由 cb_free 释放
+// void cb_free(char* p);  // 你已有

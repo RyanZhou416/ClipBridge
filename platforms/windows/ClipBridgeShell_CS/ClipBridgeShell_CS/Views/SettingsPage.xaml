@@ -14,9 +14,10 @@
         <helpers:EnumToBooleanConverter x:Key="EnumToBooleanConverter" />
         <!-- 模仿 WinUI Gallery 的分组标题样式 -->
         <Style x:Key="GroupHeaderTextStyle" TargetType="TextBlock">
-            <Setter Property="FontSize" Value="20"/>
+            <Setter Property="FontSize" Value="15"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            
+            <Setter Property="Padding" Value="0,0,0,0"/>
+            <Setter Property="Margin" Value="0,0,0,0"/>
         </Style>
     </Page.Resources>
     <Grid>
@@ -29,8 +30,6 @@
         <!-- Row 0: 页眉（不随滚动），与内容同一中栏 -->
         <StackPanel Grid.Row="0"
               Padding="36,24,36,4">
-              
-              
             <StackPanel MaxWidth="1064">
             <TextBlock l:Uids.Uid="Shell_Settings.Text" 
                Style="{StaticResource TitleTextBlockStyle}"/>
@@ -42,18 +41,20 @@
                 VerticalScrollMode="Auto"
                 VerticalScrollBarVisibility="Auto"
                 HorizontalScrollMode="Disabled"
-                HorizontalScrollBarVisibility="Disabled"
-                >
+                HorizontalScrollBarVisibility="Disabled">
             <Border HorizontalAlignment="Stretch">
                 <StackPanel x:Name="ContentArea"
                     MaxWidth="1064"
                     HorizontalAlignment="Stretch"
-                    Spacing="{StaticResource SettingsItemSpacing}">
-                    <TextBlock l:Uids.Uid="Settings_Personalization" Style="{StaticResource GroupHeaderTextStyle}" />
-                    <StackPanel Margin="{StaticResource SmallTopBottomMargin}">
-                        <TextBlock l:Uids.Uid="Settings_Theme" />
+                    Spacing="{StaticResource SettingsGroupSpacing}"
+                    Padding="0,0,0,0"
+                    Margin="0,0,0,0">
+                    <StackPanel Spacing="{StaticResource SettingsItemSpacing}">
+                        <TextBlock l:Uids.Uid="Settings_Personalization" Style="{StaticResource GroupHeaderTextStyle}"/>
                         <!-- 主题 -->
-                        <ctk:SettingsCard l:Uids.Uid="Settings_Theme" HeaderIcon="{ui:FontIcon Glyph=&#xE771;}" HorizontalAlignment="Stretch">
+                        <ctk:SettingsCard l:Uids.Uid="Settings_Theme"
+                                          HeaderIcon="{ui:FontIcon Glyph=&#xE771;}"
+                                          HorizontalAlignment="Stretch">
                             <ComboBox x:Name="ThemeCombo"
                                       Width="240"
                                       SelectionChanged="ThemeCombo_SelectionChanged">
@@ -62,40 +63,45 @@
                                 <ComboBoxItem Tag="Dark"    l:Uids.Uid="Settings_Theme_Dark"/>
                             </ComboBox>
                         </ctk:SettingsCard>
+
+                        <!-- 语言设置区块 -->
+                        <ctk:SettingsCard l:Uids.Uid="Settings_LanguageCombo"
+                                          HeaderIcon="{ui:FontIcon Glyph=&#xE8C1;}"
+                                          HorizontalAlignment="Stretch">
+                            <ComboBox x:Name="LanguageCombo"
+                                      Width="240"
+                                      SelectionChanged="LanguageCombo_SelectionChanged">
+                                <ComboBoxItem Tag="en-US" l:Uids.Uid="Settings_Lang_English"/>
+                                <ComboBoxItem Tag="zh-CN" l:Uids.Uid="Settings_Lang_Chinese"/>
+                            </ComboBox>
+                        </ctk:SettingsCard>
                     </StackPanel>
+                    
+                    <StackPanel Spacing="{StaticResource SettingsItemSpacing}">
+                        <TextBlock l:Uids.Uid="Settings_Personalization" Style="{StaticResource GroupHeaderTextStyle}"/>
+                        <!-- 用于显示应用文件夹路径，可删除 -->
+                        <ctk:SettingsCard l:Uids.Uid="Settings_Reset_SettingsCard"
+                                          HeaderIcon="{ui:FontIcon Glyph=&#xEBC4;}"
+                                          HorizontalAlignment="Stretch">
+                                <Button Click="ResetSettings_Click" Width="180" l:Uids.Uid="Settings_Reset_Button"/>
+                        </ctk:SettingsCard>
 
-                <!-- 语言设置区块 -->
-                <TextBlock l:Uids.Uid="Settings_LanguageHeader" />
-                <StackPanel Margin="{StaticResource SmallTopBottomMargin}">
-                    <ctk:SettingsCard l:Uids.Uid="Settings_LanguageCombo" HeaderIcon="{ui:FontIcon Glyph=&#xE8C1;}" HorizontalAlignment="Stretch">
-                        <ComboBox x:Name="LanguageCombo"
-                                  Width="240"
-                                  SelectionChanged="LanguageCombo_SelectionChanged">
-                            <ComboBoxItem Tag="en-US" l:Uids.Uid="Settings_Lang_English"/>
-                            <ComboBoxItem Tag="zh-CN" l:Uids.Uid="Settings_Lang_Chinese"/>
-                        </ComboBox>
-                    </ctk:SettingsCard>
+                        <ctk:SettingsCard l:Uids.Uid="Settings_ShowLocalFolder_SettingsCard"
+                                          HeaderIcon="{ui:FontIcon Glyph=&#xE71B;}"
+                                          HorizontalAlignment="Stretch">
+                            <Button Click="ShowLocalFolder_Click" Width="180" l:Uids.Uid="Settings_ShowLocalFolder_Button"/>
+                        </ctk:SettingsCard>
+                    </StackPanel>
+                    
 
-                    <Button Click="ResetSettings_Click" l:Uids.Uid="Settings_ResetButton"/>
-                    <Button Content="Show LocalFolder Path" Click="ShowLocalFolder_Click" />
-                    <!-- 用于显示应用文件夹路径，可删除 -->
+                    <StackPanel Spacing="{StaticResource SettingsItemSpacing}">
+                        <TextBlock l:Uids.Uid="Settings_About" Style="{StaticResource GroupHeaderTextStyle}"/>
+                        <TextBlock l:Uids.Uid="AppName"/>
+                        <TextBlock l:Uids.Uid="Settings_AboutDescription"/>
+                        <HyperlinkButton l:Uids.Uid="SettingsPage_PrivacyTermsLink" Margin="{StaticResource SettingsPageHyperlinkButtonMargin}" />
+                    </StackPanel>
                 </StackPanel>
-
-                <StackPanel Margin="{StaticResource SmallTopBottomMargin}">
-                    <TextBlock l:Uids.Uid="Settings_About" Style="{ThemeResource SubtitleTextBlockStyle}" />
-                </StackPanel>
-
-                <StackPanel Margin="{StaticResource XSmallTopMargin}">
-                    <TextBlock Text="{x:Bind ViewModel.VersionDescription, Mode=OneWay}" Style="{ThemeResource BodyTextBlockStyle}" />
-
-                    <TextBlock
-                    l:Uids.Uid="Settings_AboutDescription"
-                    Margin="{StaticResource XSmallTopMargin}"
-                    Style="{ThemeResource BodyTextBlockStyle}" />
-                    <HyperlinkButton l:Uids.Uid="SettingsPage_PrivacyTermsLink" Margin="{StaticResource SettingsPageHyperlinkButtonMargin}" />
-                </StackPanel>
-            </StackPanel>
-        </Border>
-    </ScrollViewer>
+            </Border>
+        </ScrollViewer>
     </Grid>
 </Page>

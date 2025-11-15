@@ -99,6 +99,24 @@ impl Storage {
             CREATE INDEX IF NOT EXISTS idx_history_created ON history(created_at);
         "#,
         )?;
+        // ---- Logs 表（新增）----
+        conn.execute_batch(
+            r#"
+          CREATE TABLE IF NOT EXISTS logs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            time_unix  INTEGER NOT NULL,  -- ms since epoch
+            level      INTEGER NOT NULL,  -- 0..6
+            category   TEXT    NOT NULL,
+            message    TEXT    NOT NULL,
+            exception  TEXT,
+            props_json TEXT
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_logs_time ON logs(time_unix);
+          CREATE INDEX IF NOT EXISTS idx_logs_lvl  ON logs(level);
+          CREATE INDEX IF NOT EXISTS idx_logs_cat  ON logs(category);
+        "#,
+        )?;
         Ok(())
     }
 
@@ -219,8 +237,7 @@ impl Storage {
                 let created_at: i64 = row.get(9)?;
                 let present: i64 = row.get(10)?;
 
-                let mimes: Vec<String> =
-                    serde_json::from_str(&mimes_json).unwrap_or_default();
+                let mimes: Vec<String> = serde_json::from_str(&mimes_json).unwrap_or_default();
                 let preview: Json = serde_json::from_str(&preview_json).unwrap_or(Json::Null);
 
                 let meta = ItemMeta {
@@ -236,10 +253,7 @@ impl Storage {
                     uri,
                     created_at,
                 };
-                Ok(ItemRecord {
-                    meta,
-                    present: present != 0,
-                })
+                Ok(ItemRecord { meta, present: present != 0 })
             })
             .optional()?;
 
@@ -266,11 +280,7 @@ impl Storage {
                  ORDER BY h.seq_id DESC
                  LIMIT ?2 OFFSET ?3
                 "#,
-                vec![
-                    Box::new(kind_as_str(k)),
-                    Box::new(limit as i64),
-                    Box::new(offset as i64),
-                ],
+                vec![Box::new(kind_as_str(k)), Box::new(limit as i64), Box::new(offset as i64)],
             )
         } else {
             (
@@ -297,8 +307,7 @@ impl Storage {
             let mimes_json: String = row.get(5)?;
 
             let preview: Json = serde_json::from_str(&preview_json).unwrap_or(Json::Null);
-            let mimes: Vec<String> =
-                serde_json::from_str(&mimes_json).unwrap_or_default();
+            let mimes: Vec<String> = serde_json::from_str(&mimes_json).unwrap_or_default();
 
             out.push(HistoryEntry {
                 seq_id,
@@ -342,11 +351,7 @@ impl Storage {
     }
 
     /// 近似 LRU 的缓存清理（按 `CacheLimits`）：超限则从最旧的 present 开始删。
-    pub fn prune_cache(
-        &self,
-        cas: &CasPaths,
-        limits: &CacheLimits,
-    ) -> rusqlite::Result<()> {
+    pub fn prune_cache(&self, cas: &CasPaths, limits: &CacheLimits) -> rusqlite::Result<()> {
         // 估算当前 present 总体积与条数（用元数据 size_bytes）
         let (mut total_bytes, mut total_items) = self.cache_counters()?;
 
@@ -399,11 +404,7 @@ impl Storage {
         let keep = HISTORY_KEEP;
         let max_seq: Option<i64> = self
             .conn
-            .query_row(
-                r#"SELECT MAX(seq_id) FROM history"#,
-                [],
-                |row| row.get(0),
-            )
+            .query_row(r#"SELECT MAX(seq_id) FROM history"#, [], |row| row.get(0))
             .optional()?;
 
         if let Some(max_seq) = max_seq {
@@ -421,12 +422,146 @@ impl Storage {
     // ---- 内部小工具 ----
 
     fn cache_counters(&self) -> rusqlite::Result<(u64, u64)> {
-        let mut stmt = self.conn.prepare(
-            r#"SELECT IFNULL(SUM(size_bytes),0), COUNT(1) FROM items WHERE present=1"#,
-        )?;
-        let (sum_bytes, cnt): (i64, i64) = stmt.query_row([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut stmt = self
+            .conn
+            .prepare(r#"SELECT IFNULL(SUM(size_bytes),0), COUNT(1) FROM items WHERE present=1"#)?;
+        let (sum_bytes, cnt): (i64, i64) =
+            stmt.query_row([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok((sum_bytes as u64, cnt as u64))
     }
+    // =============== Logs: 写入 / tail / 历史 / 清理 / 统计 ===============
+
+    pub fn logs_insert(
+        &self,
+        level: i32,
+        category: &str,
+        message: &str,
+        exception: Option<&str>,
+        props_json: Option<&str>,
+    ) -> rusqlite::Result<i64> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap()
+            .as_millis() as i64;
+        self.conn.execute(
+            "INSERT INTO logs(time_unix, level, category, message, exception, props_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![now_ms, level, category, message, exception, props_json],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn logs_select_after_id(
+        &self,
+        after_id: i64,
+        level_min: i32,
+        like: Option<&str>,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::proto::LogRow>> {
+        let mut sql = String::from(
+            "SELECT id, time_unix, level, category, message, exception, props_json
+           FROM logs WHERE id > ?1 AND level >= ?2");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(after_id), Box::new(level_min)];
+
+        if let Some(pat) = like {
+            sql.push_str(" AND (message LIKE ?3 OR category LIKE ?3)");
+            args.push(Box::new(format!("%{}%", pat)));
+            sql.push_str(" ORDER BY id ASC LIMIT ?4");
+            args.push(Box::new(limit));
+        } else {
+            sql.push_str(" ORDER BY id ASC LIMIT ?3");
+            args.push(Box::new(limit));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(args.iter()))?;
+
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(crate::proto::LogRow {
+                id: r.get(0)?,
+                time_unix: r.get(1)?,
+                level: r.get(2)?,
+                category: r.get(3)?,
+                message: r.get(4)?,
+                exception: r.get(5)?,
+                props_json: r.get(6)?,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn logs_select_range(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+        level_min: i32,
+        like: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> rusqlite::Result<Vec<crate::proto::LogRow>> {
+        let mut sql = String::from(
+            "SELECT id, time_unix, level, category, message, exception, props_json
+           FROM logs WHERE time_unix BETWEEN ?1 AND ?2 AND level >= ?3");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(start_ms), Box::new(end_ms), Box::new(level_min)];
+
+        if let Some(pat) = like {
+            sql.push_str(" AND (message LIKE ?4 OR category LIKE ?4)");
+            args.push(Box::new(format!("%{}%", pat)));
+            sql.push_str(" ORDER BY time_unix DESC LIMIT ?5 OFFSET ?6");
+            args.push(Box::new(limit));
+            args.push(Box::new(offset));
+        } else {
+            sql.push_str(" ORDER BY time_unix DESC LIMIT ?4 OFFSET ?5");
+            args.push(Box::new(limit));
+            args.push(Box::new(offset));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(args.iter()))?;
+
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(crate::proto::LogRow {
+                id: r.get(0)?,
+                time_unix: r.get(1)?,
+                level: r.get(2)?,
+                category: r.get(3)?,
+                message: r.get(4)?,
+                exception: r.get(5)?,
+                props_json: r.get(6)?,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn logs_delete_before(&self, cutoff_ms: i64) -> rusqlite::Result<i64> {
+        let n = self.conn.execute(
+            "DELETE FROM logs WHERE time_unix < ?1",
+            [cutoff_ms],
+        )?;
+        Ok(n as i64)
+    }
+
+    pub fn logs_stats(&self) -> rusqlite::Result<crate::proto::LogStats> {
+        let mut s = crate::proto::LogStats::default();
+        s.count = self.conn.query_row("SELECT COUNT(*) FROM logs", [], |r| r.get::<_, i64>(0))?;
+        s.first_ms = self.conn.query_row("SELECT MIN(time_unix) FROM logs", [], |r| r.get::<_, Option<i64>>(0))?;
+        s.last_ms  = self.conn.query_row("SELECT MAX(time_unix) FROM logs", [], |r| r.get::<_, Option<i64>>(0))?;
+        let mut stmt = self.conn.prepare("SELECT level, COUNT(*) FROM logs GROUP BY level")?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let lvl: i32 = r.get(0)?;
+            let cnt: i64 = r.get(1)?;
+            if (0..=6).contains(&lvl) {
+                s.by_level[lvl as usize] = cnt;
+            }
+        }
+        Ok(s)
+    }
+    // ========================== Logs 结束 ==========================
+
 }
 
 // --------------------------- 工具函数与映射 -----------------------------------------

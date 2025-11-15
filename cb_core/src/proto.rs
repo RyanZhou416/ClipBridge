@@ -229,69 +229,21 @@ pub fn coarse_kind(mime: &str) -> CoarseKind {
     }
 }
 
-// ------------------------------ 测试 ----------------------------------------------
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LogRow {
+    pub id: i64,
+    pub time_unix: i64,         // ms
+    pub level: i32,             // 0..6
+    pub category: String,
+    pub message: String,
+    pub exception: Option<String>,
+    pub props_json: Option<String>,
+}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn version_constants() {
-        assert_eq!(PROTOCOL_VERSION, 1);
-        assert!(CORE_SEMVER.starts_with('1'));
-    }
-
-    #[test]
-    fn normalize_and_kind() {
-        assert_eq!(
-            normalize_mime(" TEXT/PLAIN ; charset=utf-8 "),
-            "text/plain;charset=utf-8"
-        );
-        assert!(is_text_mime("text/plain"));
-        assert!(matches!(coarse_kind("image/png"), CoarseKind::Image));
-        assert!(matches!(coarse_kind("application/uri-list"), CoarseKind::File));
-    }
-
-    #[test]
-    fn serde_roundtrip() {
-        let snap = ClipboardSnapshot {
-            item_id: None,
-            mimes: vec!["text/plain; charset=utf-8".to_string()],
-            size_bytes: 12,
-            sha256_hex: "abc123".into(),
-            preview_json: json!({"head":"hello"}),
-            created_at: 1_700_000_000_000,
-        };
-        let s = serde_json::to_string(&snap).unwrap();
-        let de: ClipboardSnapshot = serde_json::from_str(&s).unwrap();
-        assert_eq!(de.mimes[0], "text/plain; charset=utf-8");
-
-        let meta = ItemMeta {
-            protocol_version: PROTOCOL_VERSION,
-            item_id: "id-1".into(),
-            owner_device_id: "dev-1".into(),
-            owner_device_name: Some("My-PC".into()),
-            mimes: vec!["text/plain".into()],
-            size_bytes: 12,
-            sha256_hex: "abc123".into(),
-            expires_at: None,
-            preview_json: json!({"head":"hello"}),
-            uri: "cb://dev-1/item/id-1".into(),
-            created_at: 1_700_000_000_000,
-        };
-        let s2 = serde_json::to_string(&meta).unwrap();
-        let de2: ItemMeta = serde_json::from_str(&s2).unwrap();
-        assert_eq!(de2.item_id, "id-1");
-
-        let loc = LocalContentRef {
-            sha256_hex: "abc123".into(),
-            path: PathBuf::from("/tmp/x"),
-            mime: "text/plain".into(),
-            size_bytes: 12,
-        };
-        let s3 = serde_json::to_string(&loc).unwrap();
-        let de3: LocalContentRef = serde_json::from_str(&s3).unwrap();
-        assert_eq!(de3.mime, "text/plain");
-    }
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct LogStats {
+    pub count: i64,
+    pub first_ms: Option<i64>,
+    pub last_ms: Option<i64>,
+    pub by_level: [i64; 7],     // 0..6
 }

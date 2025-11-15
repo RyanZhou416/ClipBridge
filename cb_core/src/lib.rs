@@ -1,6 +1,6 @@
 //cb_core/src/lib.rs
 
-mod api;
+pub mod api;
 pub mod proto;
 pub(crate) mod storage;
 
