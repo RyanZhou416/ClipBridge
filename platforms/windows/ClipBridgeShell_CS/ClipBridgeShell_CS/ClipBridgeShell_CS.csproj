@@ -23,6 +23,7 @@
     <AppxBundle>Always</AppxBundle>
     <AppInstallerUri>C:\Users\12693\Downloads</AppInstallerUri>
     <AppxBundlePlatforms>x86|x64</AppxBundlePlatforms>
+    <RustTargetDir>C:\Project\ClipBridge\target\x86_64-pc-windows-msvc\release</RustTargetDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -65,4 +66,11 @@
   <PropertyGroup Condition="'$(DisableHasPackageAndPublishMenuAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
     <HasPackageAndPublishMenu>true</HasPackageAndPublishMenu>
   </PropertyGroup>
+    <Target Name="CopyCoreFfiDll" AfterTargets="Build">
+        <Message Text="Copying core_ffi_windows.dll from Rust target to $(OutDir)" Importance="high" />
+        <Copy
+            SourceFiles="$(RustTargetDir)\core_ffi_windows.dll"
+            DestinationFolder="$(OutDir)"
+            SkipUnchangedFiles="true" />
+    </Target>
 </Project>
