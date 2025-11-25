@@ -1,0 +1,665 @@
+# ClipBridge 项目文档
+
+## 0) 项目简介
+
+- **名称**：ClipBridge（简称 **CB**）
+- **定位**：跨平台剪贴板同步工具，先 **局域网 (LAN)**，后期支持 **跨外网 (WAN)**。
+- **核心卖点**：**Lazy Fetch 按需取用**——复制时只广播**元数据**，粘贴时才向源设备拉取**正文**（文本/图片/文件），节省网络与功耗。
+- **目标平台**：Windows（先做外壳 MVP）→ Android（外壳）→ v1 核心（剪贴板历史与同步）→ macOS / Linux（外壳）。
+- **编译指令**：
+  - WinUI / C# shell 调用 Rust DLL（只构建名为 core-ffi-windows 的 crate）：`cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc`
+  - 全量测试（构建整个 workspace 所有成员）：`cargo build --release --target x86_64-pc-windows-msvc
+  `
+------
+
+## 1) 功能与阶段目标
+
+### v1（Windows MVP + 基础核心）
+
+- 局域网自动发现
+- 端到端加密连接
+- 同局域网内多设备同账号之间共享剪切板
+- **Lazy Fetch**：复制时广播“元数据”，粘贴时拉取正文
+- **剪贴板历史**：本地持久化（SQLite/KV），在各设备同步**历史元数据**；
+- 支持类型：**文本**、**图片**、**文件**（先不管应用内复制和特殊格式）
+- Windows 外壳：托盘图标、主窗口、呼出小窗
+- 全局热键：默认 **Ctrl+Shift+V**（Win+V 为系统保留）
+
+### v2（核心升级 + 历史）
+
+- Android外壳
+- 添加云端账号，可以云端同步剪切板
+- 定向传输文件
+
+### 未来
+
+- macOS / Linux 外壳
+- 同账号内设备分组共享
+
+------
+
+## 2) 架构与协议
+
+### 2.1 分层
+
+- **Rust 核心 (Core)**
+   /* 需要明确核心和外壳分工 */
+- **平台外壳 (Shell)**
+   集成系统剪贴板与 UI（Windows：C#/WinUI 3；Android：Java；macOS：Swift/ObjC；Linux：Qt/GTK 之后再定）。调用核心 API，接收核心事件。
+
+### 2.2 数据流
+
+- **复制**：外壳监听系统剪贴板 → 解析类型/大小/哈希 → 调核心广播**元数据**给配对设备。
+- **粘贴**：外壳以“延迟渲染/承诺数据”的方式持有剪贴板 → 粘贴触发 → 调核心按需向源设备拉取正文 → 回填系统剪贴板 → 应用完成粘贴。
+
+### 2.3 元数据结构（示例）
+
+```json
+{
+  "protocol_version": 1,
+  "item_id": "uuid",
+  "owner_device_id": "device_A",
+  "types": ["text/plain", "image/png", "application/octet-stream"],
+  "size": 1048576,
+  "sha256": "…",
+  "expires_at": 1690000000,
+  "preview": "文本前若干字/缩略图hash",
+  "uri": "cb://device_A/item/uuid",
+  "created_at": 1690000000
+}
+```
+
+### 2.4 发现 / 连接 / 安全
+
+- **发现**：mDNS/Bonjour，广播服务 `_lanclip._tcp`
+- **连接**：QUIC(HTTP/3，Rust `quinn`) 或 gRPC(HTTP/2，`tonic`)
+- **加密**：TLS 1.3（自签 + 指纹固定）或 Noise（x25519）
+- **配对**：首次扫码/指纹确认 → 建立信任（持久化设备公钥）
+
+### 2.5 平台要点
+
+- **Windows**：**Win32 延迟渲染**（`SetClipboardData` + `WM_RENDERFORMAT/WM_RENDERALLFORMATS`、`CF_UNICODETEXT`、`CF_DIB`、`CF_HDROP`），C++/WinUI 3 外壳。
+- **Android**（Java 外壳，后继）：
+  - 前台服务 + 常驻通知；
+  - 通过 **ContentProvider URI** 提供大内容（粘贴时触发拉取）；
+  - JNI 调 Rust FFI `.so`（非必须先做）。
+
+------
+
+## 3) 技术选型与接口
+
+### 3.1 语言/框架
+
+- **核心**：Rust（tokio、quinn/tonic、rustls、mdns、lru 等）
+- **Windows 外壳**：C++ + WinUI 3（C++/WinRT），必要处使用 Win32 API
+- **Android 外壳**：Java（UI 设计器），JNI 连接 Rust（后做）
+
+### 3.2 Core ↔ Shell 接口（方向）
+
+- Shell → Core：`cb_init(config) / cb_send_metadata(meta) / cb_request_content(item_id, mime) / cb_pause(bool) / cb_shutdown()`
+- Core → Shell（回调）：`on_device_online(info) / on_device_offline(id) / on_new_metadata(meta) / on_transfer_progress(id, sent, total) / on_error(code,msg)`
+
+------
+
+**已验证**（在仓库根）：
+
+```powershell
+cargo metadata     # OK
+cargo build        # OK（core、core-ffi-windows、core-ffi-android 都能编过）
+```
+
+------
+
+## 5) Windows 外壳（WinUI 3）当前策略
+
+- 模板：基于 Template Studio for WinUI3，已打包（MSIX）
+- UI 骨架：左侧 NavigationView（设备 / 日志 / 设置）+ 右侧 Frame
+- **语言与主题**：已集成 WinUI3Localizer插件，实现中/英文热切换（不重建窗口），主题支持系统/深色/浅色热切换
+- **设置持久化**：通过 LocalSettingsService 保存用户首选项（语言、主题等），支持首次启动自动选择系统语言
+- **ClipboardWatcher（核心交互版）**：
+    - 监听系统剪贴板（文本已打通）→ 组装 JSON 快照 → 调用 `cb_ingest_local_copy` → 返回 `item_id`
+    - 支持 Pause/Resume，析构时解绑事件；UTF-8/ASCII 清理完成
+    - 缺失 DLL 时优雅降级，生成占位 `item_id` 供 UI 测试
+- **MainWindow**：
+    - 显示最近 `item_id`，滚动日志
+    - 提供按钮：`Test Paste`（占位，等待接 CoreHost 粘贴通路）、Pause/Resume、Prune Cache/History（占位）
+- **本地化 UI**：NavigationView 的设备/日志/设置、Shell 标题、对话框等均随语言热切换
+- **FFI 接线**：运行时动态加载 `core_ffi_windows.dll`；后续将统一由 CoreHost 封装 API
+- **托盘**：Win32 Shell_NotifyIcon，左键主窗，右键菜单（暂停/退出）
+- **热键**：RegisterHotKey，默认 Ctrl+Shift+V（Win+V 为系统保留）
+
+------
+
+## 6) CI / 代码规范（已配置）
+
+- **CI**：`.github/workflows/ci.yml`
+  - Rust（fmt/clippy/test/cargo-deny）
+  - Windows（MSBuild 构建 WinUI 3 工程；可选先编 FFI 再复制 DLL）
+  - Android（`./gradlew -p platforms/android lint assembleDebug`）
+- **格式化与检查**
+  - `.editorconfig`（全项目）
+  - `rustfmt.toml`（Rust）
+  - `.clang-format`（C++，Tab=4）
+  - `.clang-tidy`（C++ 静态分析）
+  - `deny.toml`（漏洞与许可证审计）
+
+------
+
+## 7) 关键设计决策
+
+- **按需取用**（复制只发元数据；粘贴再取正文）
+- **缓存**：LRU + sha256 去重；图片可缓存缩略图；可设置上限
+- **环路防止**：元数据含 `origin_device_id` + 时间窗去抖
+- **安全**：端到端加密 + 设备配对指纹；可撤销信任
+- **默认快捷键**：`Ctrl+Shift+V`（可配置）
+- **Windows 懒取实现**：Win32 延迟渲染（`WM_RENDERFORMAT` 等）；文件使用 `CF_HDROP`，图片 `CF_DIB/PNG`
+- **Android 懒取实现（后续）**：`ContentProvider` URI + Foreground Service
+
+------
+
+## 8) 页面UI设计
+### 8.1 主页
+![img.png](Assets/Picture/img.png)
+主页类似WinUI3 Gallery，有可滚动的方框（可点击，带透明效果。方框里的元素有对应文件类型的图标，复制内容的简述，来源，大小），里面是最近的十个历史记录，点击后跳转到剪切板历史页面的详情界面。
+滑动到最后是全部历史按钮，点击后会跳转到剪切板历史页面。
+
+主页下方是仪表盘，显示各种数据：保存的历史数量，总占用内存和硬盘空间，已连接的局域网设备和状态。
+
+### 8.2 剪切板历史
+剪切板历史页面上方有一个不滑动的菜单栏，包括各种功能按钮：清空剪切板历史，保留选择的历史，删除选择的历史，全选，取消全选……
+
+剪切板历史页面主体是一个列表，每一项都是一个剪切板历史，可以被批量框选。列表元素从做到右以此是框选栏，用于选择需要的元素；图标，对应复制的内容的类型；内容名称；内容预览；来源；大小；锁定按钮；拖动区域
+
+剪切板历史的第一项有的背景颜色不同，因为它是可以被直接复制出去的，也就是说如果粘贴那就会把列表的第一项粘贴上去。用户可以使用拖动区域移动列表元素到第一项以直接粘贴它。
+
+# ClipBridge Core 规范（v0 初稿）
+
+## 0) 设计原则
+
+* **共享内核**：所有跨平台逻辑尽量放 Core（发现/会话、协议、缓存、历史、Lazy Fetch）。
+* **按需取用**（Lazy Fetch）：复制只广播**元数据**；粘贴/点击时才拉**正文**。
+* **事件驱动**：Core 通过回调把设备上下线/新元数据/传输进度推给壳。
+* **可演进协议**：带 `protocol_version`；新增字段向后兼容。
+* **低耦合**：壳只做系统集成（UI、剪贴板、托盘、热键、系统秘钥存取）。
+
+---
+
+## 1) Core Rust 公共 API（给壳/FFI 上层用）
+
+### 1.1 生命周期与配置
+
+```rust
+/// Core 入口：一个进程内只持有一个实例
+pub struct CbCore;
+
+#[derive(Clone, Debug)]
+pub struct CbConfig {
+    pub device_name: String,          // 展示名
+    pub data_dir: std::path::PathBuf, // DB/元数据
+    pub cache_dir: std::path::PathBuf,// 正文 CAS
+    pub log_dir: Option<std::path::PathBuf>,
+    pub limits: CacheLimits,
+    pub net: NetOptions,
+    pub security: SecurityOptions,
+}
+
+#[derive(Clone, Debug)]
+pub struct CacheLimits {
+    pub max_cache_bytes: u64,         // 正文缓存上限
+    pub max_history_items: u32,       // 历史数量上限
+    pub item_ttl_secs: Option<u64>,   // 可选过期
+}
+
+#[derive(Clone, Debug)]
+pub struct NetOptions {
+    pub enable_mdns: bool,
+    pub service_name: String,         // _lanclip._tcp
+    pub port: u16,                    // 0 = 动态
+    pub prefer_quic: bool,            // QUIC/HTTP3 or gRPC
+}
+
+#[derive(Clone, Debug)]
+pub struct SecurityOptions {
+    pub allow_unpaired: bool,         // 首次临时信任
+    pub key_alias: String,            // 壳侧安全存储 key 名
+}
+
+/// 回调接口（壳实现；Core 在 tokio 线程调用）
+pub trait CbCallbacks: Send + Sync + 'static {
+    fn on_device_online(&self, info: DeviceInfo);
+    fn on_device_offline(&self, device_id: String);
+    fn on_new_metadata(&self, meta: ItemMeta);
+    fn on_transfer_progress(&self, item_id: String, sent: u64, total: u64);
+    fn on_error(&self, err: CbError);
+}
+
+/// 初始化/关闭
+impl CbCore {
+    pub async fn new(cfg: CbConfig, cb: Box<dyn CbCallbacks>, sec: Box<dyn SecureStore>) -> Result<Self, CbError>;
+    pub async fn shutdown(self) -> Result<(), CbError>;
+}
+```
+
+### 1.2 安全存储（由壳实现，Core 调用）
+
+```rust
+pub trait SecureStore: Send + Sync + 'static {
+    fn get_secret(&self, key: &str) -> Result<Option<Vec<u8>>, CbError>;
+    fn set_secret(&self, key: &str, value: &[u8]) -> Result<(), CbError>;
+}
+```
+
+### 1.3 业务入口（壳 → Core）
+
+```rust
+// 本机复制事件：由壳解析剪贴板后调用
+pub async fn ingest_local_copy(&self, snapshot: ClipboardSnapshot) -> Result<String /*item_id*/, CbError>;
+
+// 收到远端元数据：由网络层或壳（调试时）调用
+pub async fn ingest_remote_metadata(&self, meta: ItemMeta) -> Result<(), CbError>;
+
+// 历史/查询
+pub async fn list_history(&self, q: HistoryQuery) -> Result<Vec<HistoryEntry>, CbError>;
+pub async fn get_item(&self, item_id: &str) -> Result<ItemRecord, CbError>;
+
+// Lazy Fetch：确保正文在本地缓存（若没有会去源设备取回）
+pub async fn ensure_content_cached(&self, item_id: &str, prefer_mime: Option<String>) -> Result<LocalContentRef, CbError>;
+
+// 控制/清理
+pub async fn pause(&self, yes: bool) -> Result<(), CbError>;
+pub async fn prune_cache(&self) -> Result<(), CbError>;
+pub async fn prune_history(&self) -> Result<(), CbError>;
+```
+
+---
+
+## 2) 数据模型（Core 层 DTO）
+
+```rust
+#[derive(Clone, Debug)]
+pub struct DeviceInfo {
+    pub device_id: String,        // 派生自公钥指纹
+    pub name: String,
+    pub last_seen: i64,           // unix ts
+    pub trusted: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClipboardSnapshot {
+    pub item_id: String,          // uuid v4（壳可传入；为空则 core 生成）
+    pub mimes: Vec<String>,       // ["text/plain","text/html","image/png","application/octet-stream"]
+    pub size_bytes: u64,
+    pub sha256_hex: String,
+    pub preview_json: Option<String>, // 文本前缀/文件列表摘要/图像缩略信息
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ItemMeta {
+    pub protocol_version: u32,
+    pub item_id: String,
+    pub owner_device_id: String,
+    pub mimes: Vec<String>,
+    pub size_bytes: u64,
+    pub sha256_hex: String,
+    pub expires_at: Option<i64>,
+    pub preview_json: Option<String>,
+    pub uri: String,              // cb://{owner}/item/{item_id}
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct HistoryQuery {
+    pub limit: u32,
+    pub offset: u32,
+    pub kind: Option<HistoryKind>,      // 过滤
+}
+#[derive(Clone, Debug)]
+pub enum HistoryKind { CopyLocal, RecvRemote, PasteLocal }
+
+#[derive(Clone, Debug)]
+pub struct HistoryEntry {
+    pub seq_id: i64,
+    pub item_id: String,
+    pub summary: String,           // 供 UI 展示（从 preview_json 生成）
+    pub created_at: i64,
+    pub owner_device_id: String,
+    pub mimes: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ItemRecord {
+    pub meta: ItemMeta,
+    pub present: bool,             // 正文是否已缓存
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalContentRef {
+    pub sha256_hex: String,
+    pub path: std::path::PathBuf,  // CAS 文件路径
+    pub mime: String,
+    pub size_bytes: u64,
+}
+```
+
+---
+
+## 3) 错误与版本
+
+```rust
+#[derive(thiserror::Error, Debug, Clone)]
+pub enum CbErrorKind {
+    #[error("not found")] NotFound,
+    #[error("forbidden")] Forbidden,
+    #[error("timeout")] Timeout,
+    #[error("network")] Network,
+    #[error("db")] Db,
+    #[error("io")] Io,
+    #[error("proto incompatible")] Protocol,
+    #[error("invalid input: {0}")] Invalid(String),
+    #[error("internal")] Internal,
+}
+
+#[derive(Debug, Clone)]
+pub struct CbError {
+    pub kind: CbErrorKind,
+    pub code: i32,            // 映射给 FFI 使用的数值
+    pub message: String,
+}
+
+pub const PROTOCOL_VERSION: u32 = 1;      // 协议版本
+pub const CORE_SEMVER: &str = "0.1.0";    // Core 自身版本
+```
+
+---
+
+## 4) FFI（C ABI）接口（给 C++/Java 调）
+
+### 4.1 C 头文件（壳侧直接包含）
+
+```c
+// cb_core_ffi.h — 所有字符串均为 UTF-8；Core 分配的内存须用 cb_free 释放
+#ifdef __cplusplus
+extern "C" {
+#endif
+typedef void (*cb_device_online_cb)(const char* json_device);
+typedef void (*cb_device_offline_cb)(const char* device_id);
+typedef void (*cb_new_metadata_cb)(const char* json_meta);
+typedef void (*cb_transfer_progress_cb)(const char* item_id, unsigned long long sent, unsigned long long total);
+typedef void (*cb_error_cb)(int code, const char* message);
+
+typedef struct {
+    cb_device_online_cb device_online;
+    cb_device_offline_cb device_offline;
+    cb_new_metadata_cb new_metadata;
+    cb_transfer_progress_cb transfer_progress;
+    cb_error_cb on_error;
+} cb_callbacks;
+
+typedef struct {
+    const char* device_name;
+    const char* data_dir;
+    const char* cache_dir;
+    const char* log_dir;      // 可为 NULL
+    unsigned long long max_cache_bytes;
+    unsigned int max_history_items;
+    int item_ttl_secs;        // -1 表示 none
+    int enable_mdns;          // bool
+    const char* service_name;
+    unsigned short port;      // 0 动态
+    int prefer_quic;          // bool
+    const char* key_alias;    // 安全存储 key
+} cb_config;
+
+// 生命周期
+int cb_init(const cb_config* cfg, const cb_callbacks* cbs);  // 0=ok
+int cb_shutdown(void);
+
+// 业务
+// json 参数与返回值使用统一 JSON schema（见协议），返回字符串由 Core 分配，需 cb_free 释放
+int cb_ingest_local_copy(const char* json_snapshot, /*out*/char** out_item_id);
+int cb_ingest_remote_metadata(const char* json_meta);
+
+int cb_list_history(unsigned int limit, unsigned int offset, /*out*/char** out_json_array);
+int cb_get_item(const char* item_id, /*out*/char** out_json_record);
+
+int cb_ensure_content_cached(const char* item_id, const char* prefer_mime_or_null,
+                             /*out*/char** out_json_localref);
+
+int cb_pause(int yes);
+int cb_prune_cache(void);
+int cb_prune_history(void);
+
+// 内存释放
+void cb_free(void* p);
+
+// 安全存储（可选：回调/或壳自己保管；若用回调再补函数指针注册，略）
+#ifdef __cplusplus
+}
+#endif
+```
+
+> 说明：
+>
+> * **序列化统一用 JSON**，跨语言最省事；字段就是 Rust DTO/协议的镜像。
+> * FFI 返回字符串由 Core 分配，壳侧必须调用 `cb_free` 释放。
+> * 回调也统一 JSON 负载，避免结构体对齐问题。
+
+---
+
+## 5) 协议（网络）要点
+
+### 5.1 元数据（广播/点对点都可用）
+
+```json
+{
+  "protocol_version": 1,
+  "item_id": "uuid",
+  "owner_device_id": "device_A",
+  "mimes": ["text/plain","image/png"],
+  "size_bytes": 1048576,
+  "sha256_hex": "…",
+  "expires_at": 1700000000,
+  "preview_json": "{…}",
+  "uri": "cb://device_A/item/uuid",
+  "created_at": 1700000000
+}
+```
+
+### 5.2 发现与连接
+
+* **发现**：mDNS 广播服务 `_lanclip._tcp.local`（TXT 中含 `device_id`, `name`, `proto=1`）
+* **连接**：优先 **QUIC/HTTP3**（如 `quinn`）；备选 **gRPC/HTTP2**（`tonic`）
+* **安全**：TLS 1.3（rustls）+ 设备公钥指纹**固定**（首次配对时回调给壳确认/展示）
+
+### 5.3 拉取正文（Lazy Fetch）
+
+* `GET /items/{item_id}?mime={mime}` → `200` 流式正文
+* 失败码：`404` 不存在/过期，`403` 未配对，`410` 删除，`5xx` 内部错误
+
+---
+
+## 6) 数据库与缓存（摘要）
+
+* SQLite（WAL），表：`devices / items / item_mimes / history / content_cache`
+* 正文缓存为 **文件**（CAS：`<cache>/blobs/sha256/xx/sha256`），DB 只记录 `sha256_hex`、路径、大小、`present`、`last_access`
+* 清理策略：超容量/TTL/历史上限触发时清旧
+
+---
+
+## 7) 线程/运行时
+
+* Core 内部使用 **tokio**（单实例运行时）
+* 网络 IO、DB 操作（阻塞）通过 `spawn_blocking` 或专用线程池
+* 回调到壳：由 Core 的内部线程直接调用（壳需线程安全）
+
+---
+
+## 8) 流程（序列图概览）
+
+* **本机复制**：壳监听 → 生成 `ClipboardSnapshot` → `ingest_local_copy` → Core 写 DB + 广播 `ItemMeta` → 壳收到 `on_new_metadata`（可更新 UI）
+* **他机粘贴我机数据**：对方 `ensure_content_cached` → 向我发 `GET /items/{id}` → 我流式返回正文
+* **我机粘贴他机数据**：壳调用 `ensure_content_cached` → Core 拉流 → 写 CAS → 返回 `LocalContentRef` → 壳填系统剪贴板
+
+---
+
+## 9) 测试与模拟
+
+* 单测：元数据生成/去重/DB 迁移/清理策略
+* 集成测（本机起两实例）：环回端到端 Lazy Fetch（文本/图片/文件）
+* 模拟网络抖动、超时、重试；大文件分块与取消
+* FFI 冒烟测：`cb_init`→`cb_ingest_local_copy`→`cb_list_history`→`cb_ensure_content_cached` 链条跑通
+
+---
+
+## 10) 仓库结构
+
+```
+cb_core/                  # lib：对外公开 API（mod api / storage / net / proto）
+  src/
+    api.rs             # CbCore、公有 DTO、错误
+    storage.rs         # rusqlite 封装、CAS
+    net/               # mdns, quic/grpc, tls
+    proto.rs           # 序列化/反序列化、版本
+    lib.rs             # re-export
+platforms/
+  windows/core-ffi/    # FFI 动态库，桥接 JSON <-> Rust API
+  android/core-ffi/    # 同上（JNI 挂钩可后加）
+```
+# 目前为止的进度总览
+## 1) 核心库 `cb_core`（v1 骨架齐全）
+
+* 目录与入口
+
+    * `lib.rs`：组织模块、导出对外 API，公开 `proto`，内部 `storage/net` 用 `pub(crate)` 封装；提供 `prelude`（已按你选择恢复）。
+* 协议/数据模型
+
+    * `proto.rs`：`DeviceInfo` / `ClipboardSnapshot` / `ItemMeta` / `LocalContentRef`，以及 `PROTOCOL_VERSION=1`、`CORE_SEMVER="1.0.0"`；含辅助函数（MIME 判定等）。
+* 对外 API
+
+    * `api.rs`：`CbCore::init / ingest_local_copy / ingest_remote_metadata / ensure_content_cached / list_history / get_item / prune_cache / prune_history / pause / shutdown`；
+    * 去重逻辑改为返回 `Option<String>`（命中则复用已有 `item_id`）。
+    * `ensure_content_cached` 已改为经 `QuicClient::fetch_lazy`（进度回调打通）。
+* 存储与缓存
+
+    * `storage.rs`：SQLite 表 `items/history`，JSON 字段存 `TEXT`；CAS 路径 `<cache>/<aa>/<sha256>`；
+    * 提供 `upsert_item / get_item / list_history / mark_present / write_blob / dedup_recent / prune_cache / prune_history`。
+* 网络占位
+
+    * `net/mdns.rs`：发现线程句柄，生命周期管理；签名固定，便于后续接入真 mDNS。
+    * `net/quic.rs`：`QuicClient::new / fetch_lazy(...)`，v1 先返回占位内容并透传进度。
+
+## 2) FFI
+
+* 头文件
+
+    * `cb_ffi.h`：**C 结构体**`cb_config` + **JSON 负载**的业务函数；回调表 `cb_callbacks`（进度为非 JSON，其余 JSON）；统一 `cb_free(void*)`；返回码规范（0=OK，其他对应错误类型）。
+* Windows 桥
+
+    * `platforms/windows/core-ffi/src/lib.rs`：
+
+        * `#[no_mangle] extern "C"` 实现；
+        * `cb_init(const cb_config*, const cb_callbacks*)` 结构体入参 → 映射 `CbConfig`；
+        * 其它函数收/发 UTF-8 JSON（解析/序列化用 `serde_json`）；
+        * 回调桥 `CallbackBridge` 把 Core 回调转到 C 函数指针；
+        * 版本查询直接读取 `cb_core::proto::CORE_SEMVER / PROTOCOL_VERSION`；
+        * 简单 `FileSecureStore`（`<data_dir>/keystore/<alias>`）作为 v1 的设备 ID 存取。
+
+## 3) 构建状态 & 依赖
+
+* `cargo check`：`cb_core` 与 `core-ffi-windows` **通过**（仅有少量“未使用”警告，属预期，等 UI 接入就会消散）。
+* 关键依赖：
+
+    * `cb_core`：`serde/serde_json`、`uuid = { features=["v4"] }`、`rand`、`rusqlite = { features=["bundled"] }`。
+    * `core-ffi-windows`：`once_cell`、`serde/serde_json`、本地依赖 `cb_core`。
+
+## 4) 接口对齐《需求.md》检查（✅=已对齐）
+
+* `cb_init`：结构体 `cb_config`（✅）
+* 其它函数：JSON 入/出（✅）
+* 回调：`device_online/offline`、`new_metadata`、`transfer_progress`、`on_error(code,msg)`（✅）
+* 释放：`cb_free`（✅）
+* 字符串：UTF-8（✅）
+* 错误：返回码 + 回调（✅）
+
+# 仍是占位/待办（到“可用 v1”的清单）
+
+* **WinUI 接线**
+
+    * 监听系统剪贴板 → 组装 `ClipboardSnapshot` → `cb_ingest_local_copy`；
+    * 粘贴动作 → `cb_ensure_content_cached` → 读取 `LocalContentRef.path` 注入系统剪贴板。
+* **iOS 侧桥接**
+
+    * 复用同一份 `cb_ffi.h`；用 Swift/ObjC 按同样 JSON 对接。
+* **网络真实实现**
+
+    * `mdns.rs` 接入真实 mDNS/Bonjour；
+    * `quic.rs` 用 `quinn/rustls` 实现 Lazy Fetch；考虑断点续传/校验。
+* **策略收尾**
+
+    * `prune_history` 策略细化（按 TTL/上限/时间）；
+    * 错误分类与日志细化；
+    * 清理当前“未使用”警告（接入后自然减少）。
+
+
+# 进度（截至 2025-08-20）
+
+## 构建与工程状态
+
+* 已确认 WinUI 代码生成不产出 `App.xaml.g.cpp`；改为 **条件包含 `App.g.cpp`**，并在工程中加入 `$(GeneratedFilesDir); $(GeneratedFilesDir)\sources` 到附加包含目录。
+* `App.xaml` 标记为 `ApplicationDefinition`，`MainWindow.xaml` 标记为 `Page`，生成目录内容正常（`*.xaml.g.h`、`Xaml*Provider.g.cpp` 等）。
+* 清理了潜在编码问题：ChatGPT生成的代码有时有编码问题，影响vs编译。要检查是否提供了 **纯 ASCII** 版本；另外提供了 PowerShell 脚本用于批量移除占位符并统一 UTF-8（按需）。
+* 现存编译问题已逐步定位并修复到“仅功能接线层面”的剩余项，不再有生成文件名导致的阻塞。
+
+### 本地化与用户设置
+
+- 已集成 WinUI3Localizer，支持不重建窗口的中英热切换
+- SettingsPage 内提供下拉框切换语言，实时刷新 UI 与 Shell 标题、NavigationView 设置按钮
+- 支持 LocalSettingsService 持久化保存 PreferredLanguage、PreferredTheme 等首选项
+- 支持 Reset 功能：清空 LocalSettings，恢复为系统语言，UI 立即刷新
+## Windows 壳（WinUI3）
+
+* **ClipboardWatcher（核心交互版，文本通路已跑通）**
+
+    * 监听 `Clipboard::ContentChanged` → 读取文本 → 组装 **最小快照 JSON**（protocol\_version/mimes/size/preview）。
+    * 尝试动态加载 `core_ffi_windows.dll` 并调用 **`cb_ingest_local_copy`**；成功则回传核心生成的 `item_id`。
+    * 若 DLL 或符号缺失，**优雅降级**：仍触发回调，返回形如 `local-<tick>` 的占位 `item_id`，便于 UI 测试。
+    * 回调：
+
+        * `OnItemId(std::string)`：交付新 `item_id`（UTF-8）。
+        * `OnLog(const wchar_t*)`：可读日志。
+    * 支持 `Start/Stop`，析构时正确解绑事件；修正了 `hstring -> wstring` 转换错误；全部 ASCII。
+* **MainWindow**
+
+    * 集成 `ClipboardWatcher` 核心交互版：显示最近 `item_id`（`LastIdBox`），滚动日志（`LogBox`）。
+    * 提供按钮：`Test Paste`（占位，等待 CoreHost 粘贴通路接线）、`Pause/Resume`（控制 Watcher）、`Prune Cache/History`（占位）。
+    * 采用条件包含 `MainWindow.g.cpp`；命名空间与投影类型一致；ASCII。
+
+## Core 交互面
+
+* 目前 **由 ClipboardWatcher 直接动态解析** `cb_ingest_local_copy` 完成“复制侧”入库；无强依赖时可本地降级。
+* `CoreHost` 仍为最小骨架（`LoadLibrary`/`cb_init`/`cb_shutdown` 占位）；**计划把 FFI 封装上移到 CoreHost**，由壳层只调用高层 API。
+
+## 功能闭环现状
+
+* **复制（文本）**：OK
+  监听 → 生成快照 → 调核心（或降级）→ 拿到 `item_id` → UI 日志展示。
+* **粘贴（文本）**：**未接线**
+  需要在 `Test Paste` 按钮里用延迟提供者向 Core 拉取正文（`EnsureContentCached` 或等价接口），再把文本放入 `DataPackage`。
+* **多 MIME**（HTML/Bitmap/File 等）：**未实现**（当前仅文本）。
+
+## 待办（按优先级）
+
+1. 在 **CoreHost** 内新增并暴露：
+
+    * `IngestLocalText(const std::string& utf8, std::string& out_item_id)`
+    * `EnsureContentCached(const std::string& item_id, const char* mime) -> std::string json_or_path`
+    * `Pause(bool)`, `PruneCache()`, `PruneHistory()`
+      并把 `ClipboardWatcher` 里对 FFI 的直接调用迁移到 CoreHost。
+2. 完成 **粘贴通路**：`Test Paste` 使用 `DataProviderHandler` 延迟向 Core 拉取文本并设置到剪贴板。
+3. 将同步 `.get()` 调用改为 **协程 `co_await`**，避免 UI 阻塞。
+4. 扩展 **MIME 支持**（HTML、图片、文件），完善快照 JSON 字段（hash、owner\_device 等）。
+5. 统一工程的 **/utf-8 编译开关** 或继续保持 ASCII 源码策略，清理遗留非 ASCII。
+6. 错误码与日志规范化：统一核心返回值、壳层提示文案与 Telemetry 点。
+7. 打包与部署：将 `core_ffi_windows.dll` 放入可执行目录，或配置 PATH；添加基本安装脚本。
+
