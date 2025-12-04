@@ -95,18 +95,10 @@
 - **Android 外壳**：Java（UI 设计器），JNI 连接 Rust（后做）
 
 ### 3.2 Core ↔ Shell 接口（方向）
-
+#### 3.2.1 Windows端
 - Shell → Core：`cb_init(config) / cb_send_metadata(meta) / cb_request_content(item_id, mime) / cb_pause(bool) / cb_shutdown()`
 - Core → Shell（回调）：`on_device_online(info) / on_device_offline(id) / on_new_metadata(meta) / on_transfer_progress(id, sent, total) / on_error(code,msg)`
 
-------
-
-**已验证**（在仓库根）：
-
-```powershell
-cargo metadata     # OK
-cargo build        # OK（core、core-ffi-windows、core-ffi-android 都能编过）
-```
 
 ------
 
@@ -132,7 +124,7 @@ cargo build        # OK（core、core-ffi-windows、core-ffi-android 都能编�
 
 ## 6) CI / 代码规范（已配置）
 
-- **CI**：`.github/workflows/ci.yml`
+- **CI**：`.github/workflows/ci.yml`（未实现任何内容，只是占位返回通过的结果）
   - Rust（fmt/clippy/test/cargo-deny）
   - Windows（MSBuild 构建 WinUI 3 工程；可选先编 FFI 再复制 DLL）
   - Android（`./gradlew -p platforms/android lint assembleDebug`）
@@ -145,19 +137,7 @@ cargo build        # OK（core、core-ffi-windows、core-ffi-android 都能编�
 
 ------
 
-## 7) 关键设计决策
-
-- **按需取用**（复制只发元数据；粘贴再取正文）
-- **缓存**：LRU + sha256 去重；图片可缓存缩略图；可设置上限
-- **环路防止**：元数据含 `origin_device_id` + 时间窗去抖
-- **安全**：端到端加密 + 设备配对指纹；可撤销信任
-- **默认快捷键**：`Ctrl+Shift+V`（可配置）
-- **Windows 懒取实现**：Win32 延迟渲染（`WM_RENDERFORMAT` 等）；文件使用 `CF_HDROP`，图片 `CF_DIB/PNG`
-- **Android 懒取实现（后续）**：`ContentProvider` URI + Foreground Service
-
-------
-
-## 8) 页面UI设计
+## 8) Windows端页面UI设计
 ### 8.1 主页
 ![img.png](Assets/Picture/img.png)
 主页类似WinUI3 Gallery，有可滚动的方框（可点击，带透明效果。方框里的元素有对应文件类型的图标，复制内容的简述，来源，大小），里面是最近的十个历史记录，点击后跳转到剪切板历史页面的详情界面。
