@@ -71,9 +71,9 @@
 
 ### 2.4 发现 / 连接 / 安全
 
-- **发现**：mDNS/Bonjour，广播服务 `_lanclip._tcp`
-- **连接**：QUIC(HTTP/3，Rust `quinn`) 或 gRPC(HTTP/2，`tonic`)
-- **加密**：TLS 1.3（自签 + 指纹固定）或 Noise（x25519）
+- **发现**：mDNS/Bonjour，广播服务 `_lanclip._udp`
+- **连接**：QUIC(Rust `quinn`)，如果不支持就退回TCP。QUIC支持多路复用，可以为每类消息使用一个 stream。为了减少建立连接成本，最好每两台设备之间保持一个长期 QUIC 连接。
+- **加密**：QUIC自带加密。退回TCP时使用TLS 1.3（自签 + 指纹固定）或 Noise（x25519）
 - **配对**：首次扫码/指纹确认 → 建立信任（持久化设备公钥）
 
 ### 2.5 平台要点
@@ -83,6 +83,12 @@
   - 前台服务 + 常驻通知；
   - 通过 **ContentProvider URI** 提供大内容（粘贴时触发拉取）；
   - JNI 调 Rust FFI `.so`（非必须先做）。
+
+### 2.6 设备ID
+/* 需要实现设备ID唯一化，避免冲突 */
+
+### 2.6 公钥/私钥
+/* 需要实现安全的公钥/私钥 */
 
 ------
 
@@ -195,7 +201,7 @@ pub struct NetOptions {
     pub enable_mdns: bool,
     pub service_name: String,         // _lanclip._tcp
     pub port: u16,                    // 0 = 动态
-    pub prefer_quic: bool,            // QUIC/HTTP3 or gRPC
+    pub prefer_quic: bool,            // QUIC
 }
 
 #[derive(Clone, Debug)]
@@ -449,12 +455,13 @@ void cb_free(void* p);
 ### 5.2 发现与连接
 
 * **发现**：mDNS 广播服务 `_lanclip._tcp.local`（TXT 中含 `device_id`, `name`, `proto=1`）
-* **连接**：优先 **QUIC/HTTP3**（如 `quinn`）；备选 **gRPC/HTTP2**（`tonic`）
-* **安全**：TLS 1.3（rustls）+ 设备公钥指纹**固定**（首次配对时回调给壳确认/展示）
+* **连接**：优先 **QUIC**（如 `quinn`）；备选 **TCP**
+* **安全**：QUIC自带加密（退回TCP时使用TLS 1.3（rustls））+ 设备公钥指纹**固定**（首次配对时回调给壳确认/展示）
 
 ### 5.3 拉取正文（Lazy Fetch）
 
-* `GET /items/{item_id}?mime={mime}` → `200` 流式正文
+* Stream 1: control channel（传 item_meta）
+* Stream 2+: content fetch（正文传输）
 * 失败码：`404` 不存在/过期，`403` 未配对，`410` 删除，`5xx` 内部错误
 
 ---
