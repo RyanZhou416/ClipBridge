@@ -25,7 +25,7 @@ pub mod prelude {
         ItemRecord, CbResult, CbError, CbErrorKind,
     };
     pub use crate::proto::{
-        PROTOCOL_VERSION, CORE_SEMVER, DeviceInfo, ClipboardSnapshot, ItemMeta, LocalContentRef,
+        PROTOCOL_VERSION, DeviceInfo, ClipboardSnapshot, ItemMeta, LocalContentRef,
     };
 }
 

@@ -1631,28 +1631,238 @@ Windows外壳是左边菜单栏，右边内容的布局。菜单栏从上到下�
 
 ------
 
-# 6) 开发和代码规范
-## 6.1 开发规范
+# 6) 开发和工程规范
 
-### 6.1.1 版本管理 /* 可能有更好方法 */
-核心和所有外壳都在各自源代码根目录维护一个VERSION文件，记录各自当前版本。
-### 6.1.2 自动构建 /* 可能有更好方法 */
-如果检测到版本更新了，就使用工作流在github上构建并发布项目。注意只针对更新了的外壳进行构建以节约性能，然后对所有现有最新的外壳进行发布。发布的版本是单独计算的。比如目前发布版本是1.0.1，Windows端从1.2.1更新到1.2.2了，这样就会只针对Windows端进行构建，但是发布所有端，发布版本号更新到1.0.2。
+本章节定义 ClipBridge 在**多组件、多语言、多平台**背景下的工程治理规则，包括：
 
-## 6.2 代码规范
-- **CI**：`.github/workflows/ci.yml`（未实现任何内容，只是占位返回通过的结果）/* 我不知道这能干什么 */
-  - Rust（fmt/clippy/test/cargo-deny）
-  - Windows
-  - Android（`./gradlew -p platforms/android lint assembleDebug`）
-- **格式化与检查**
-  - `.editorconfig`（全项目）
-  - `rustfmt.toml`（Rust）
-  - `.clang-format`（C++，Tab=4）/* 原C++，需要改成C#的。 */
-  - `.clang-tidy`（C++ 静态分析）/* 原C++，需要改成C#的。 */
-  - `deny.toml`（漏洞与许可证审计）/* 不知道还是否适用 */
+* 版本管理原则
+* CI / CD 自动化机制
+* 代码格式与质量检查
+* 日常开发与发布的使用方式
 
-------
+这些规则的目标是：
 
+> **让组件可以独立演进、独立发布，同时保持仓库整体一致性与可维护性。**
+
+---
+
+## 6.1 版本管理（Versioning）
+
+### 6.1.1 分组件版本（Component-level Versioning）
+
+ClipBridge 采用 **分组件版本管理**，而不是全仓库单一版本号。
+
+当前组件包括：
+
+| 组件                | 路径                                      | 版本载体                    |
+| ----------------- | --------------------------------------- | ----------------------- |
+| Core（Rust）        | `cb_core/`                              | `Cargo.toml`            |
+| Windows FFI（Rust） | `platforms/windows/core-ffi/`           | `Cargo.toml`            |
+| Windows Shell（C#） | `platforms/windows/ClipBridgeShell_CS/` | `Directory.Build.props` |
+
+**原则：**
+
+* 每个组件都有自己独立的语义化版本号（SemVer）
+* 组件版本号只存在于其**构建系统权威文件**中
+* 不维护额外的 `VERSION` 文件，避免多源不一致
+
+---
+
+### 6.1.2 变更驱动版本（Conventional Commits）
+
+所有提交遵循 **Conventional Commits** 规范，例如：
+
+* `feat(core): add lazy fetch timeout`
+* `fix(win-shell): tray icon crash`
+* `refactor(win-ffi): simplify export boundary`
+
+**作用：**
+
+* 提交信息本身即是“变更语义”
+* 自动决定版本 bump（major / minor / patch）
+* 自动生成变更日志（changelog）
+
+---
+
+### 6.1.3 自动发版（release-please）
+
+ClipBridge 使用 **release-please（manifest mode）** 进行自动版本管理：
+
+* 监听 `main` 分支的提交历史
+* 按组件路径与 commit scope 生成 **Release PR**
+* 在 Release PR 中：
+
+  * 自动更新组件版本号
+  * 自动生成 changelog
+* 合并 Release PR 后：
+
+  * 自动创建 **组件级 tag**
+  * 触发对应组件的发布流程
+
+**示例 tag：**
+
+* `cb_core-0.2.0`
+* `platforms/windows/core-ffi-0.1.3`
+* `platforms/windows/ClipBridgeShell_CS-0.4.0`
+
+---
+
+## 6.2 CI / CD（持续集成与发布）
+
+### 6.2.1 CI 的职责（Pull Request 阶段）
+
+CI 的目标不是“构建一切”，而是：
+
+> **在合并前，验证改动不会破坏受影响的组件。**
+
+#### 路径感知（Path Filter）
+
+CI 根据 PR 中改动的路径决定执行哪些检查：
+
+* 修改 `cb_core/**` 或 `core-ffi/**` → 执行 Rust CI
+* 修改 `ClipBridgeShell_CS/**` → 执行 C# CI
+* 仅修改文档 → 不执行重型构建
+
+---
+
+### 6.2.2 Rust CI（Core / FFI）
+
+Rust 相关组件在 CI 中执行以下检查：
+
+* `cargo fmt --check`（格式）
+* `cargo clippy -D warnings`（静态分析）
+* `cargo test`（单元 / 集成测试）
+* `cargo deny`（依赖安全与许可证审计）
+
+---
+
+### 6.2.3 C# CI（Windows Shell）
+
+Windows Shell 在 CI 中执行：
+
+* `dotnet format --verify-no-changes`
+* `dotnet build -c Release`
+
+确保：
+
+* 代码格式与仓库规范一致
+* Release 配置下可正常构建
+
+---
+
+### 6.2.4 CD（基于 Tag 的发布）
+
+发布不依赖分支，而**只由 tag 触发**：
+
+* release-please 创建 tag
+* CI 根据 tag 前缀判断发布哪个组件
+* 只构建并上传对应组件的产物
+
+**当前发布策略：**
+
+| 组件            | 发布产物                |
+| ------------- | ------------------- |
+| Core          | 源码 + 可选构建产物         |
+| Windows FFI   | `.dll` / `.pdb`     |
+| Windows Shell | `.zip`（后续可升级为 MSIX） |
+
+---
+
+## 6.3 代码格式与质量检查
+
+### 6.3.1 全局格式规范（`.editorconfig`）
+
+* 全仓库统一使用 `.editorconfig`
+* **缩进使用 Tab（4）**
+* Rust / C# 共享基础规则
+* YAML / JSON / Markdown 使用空格，避免生态冲突
+
+---
+
+### 6.3.2 Rust 格式化（`rustfmt.toml`）
+
+* `hard_tabs = true`：缩进使用 Tab
+* 对齐允许使用空格（rustfmt 官方行为）
+* 与 `cargo fmt --check` 保持一致
+
+---
+
+### 6.3.3 C# 格式化（dotnet format）
+
+* 不使用 clang 系列工具
+* 由 `.editorconfig + dotnet format` 统一控制
+* Visual Studio / Rider / CI 行为一致
+
+---
+
+### 6.3.4 依赖安全（`deny.toml`）
+
+ClipBridge 使用 **cargo-deny** 进行供应链检查：
+
+* 已知安全漏洞：**CI 失败**
+* 许可证问题 / 多版本依赖：**CI 警告**
+* 未知 registry：**禁止**
+
+该策略在保证安全底线的同时，避免早期开发被过度阻断。
+
+---
+
+### 6.3.5 已弃用工具说明
+
+以下工具为历史 C++ 方案遗留，**已不再使用**：
+
+* `.clang-format`
+* `.clang-tidy`
+
+文档中不再作为现行规范。
+
+---
+
+## 6.4 日常开发与发布流程（How to use）
+
+### 6.4.1 日常开发
+
+1. 在功能分支开发
+2. 按 Conventional Commits 提交
+3. 提交 PR → CI 自动检查
+4. CI 通过后合并到 `main`
+
+---
+### 6.4.2 Conventional Commits 怎么用（写提交信息的规则）
+
+你每次 commit message 写成这样就行：
+
+* 改 Core：
+
+  * `feat(core): add lazy fetch timeout`
+  * `fix(core): handle offline device`
+* 改 win-ffi：
+
+  * `fix(win-ffi): export cb_free`
+* 改 win-shell：
+
+  * `feat(win-shell): add tray menu`
+* 改 CI：
+
+  * `ci: speed up cargo cache`
+* 改文档：
+
+  * `docs: update architecture notes`
+
+**重点：scope 要稳定**（`core / win-ffi / win-shell`），这样 release-please 的 changelog 才清晰。
+
+
+### 6.4.3 发版流程
+
+1. 合并功能 PR 到 `main`
+2. release-please 自动创建 Release PR
+3. 审核并合并 Release PR
+4. 自动打 tag
+5. 自动构建并发布对应组件产物
+
+**开发者不需要手动修改版本号或打 tag。**
+
+---
 
 
 

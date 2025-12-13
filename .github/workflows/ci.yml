@@ -1,20 +1,92 @@
-name: CI (minimal)
+name: ci
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
-    branches:
-      - main
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
 
 jobs:
-  noop:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      csharp: ${{ steps.filter.outputs.csharp }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'cb_core/**'
+              - 'platforms/windows/core-ffi/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+              - 'rustfmt.toml'
+            csharp:
+              - 'platforms/windows/ClipBridgeShell_CS/**'
+              - '**/*.sln'
+              - '**/*.csproj'
+              - '**/*.props'
+              - '**/*.targets'
+              - '.editorconfig'
+
+  rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: No-op step
-        run: |
-          echo "CI skipped: no checks for now."
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format (rustfmt)
+        run: cargo fmt --all -- --check
+
+      - name: Lint (clippy)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Supply-chain checks (cargo-deny)
+        run: cargo deny check advisories bans licenses sources
+
+  csharp:
+    needs: changes
+    if: needs.changes.outputs.csharp == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore platforms/windows/ClipBridgeShell_CS
+
+      - name: Format (dotnet format)
+        run: dotnet format platforms/windows/ClipBridgeShell_CS --verify-no-changes
+
+      - name: Build
+        run: dotnet build platforms/windows/ClipBridgeShell_CS -c Release --no-restore

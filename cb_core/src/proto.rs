@@ -25,7 +25,6 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// 核心库语义版本（面向**实现/发布**）。
 /// - 采用语义化版本规则：MAJOR.MINOR.PATCH。
-pub const CORE_SEMVER: &str = "1.0.0";
 
 /// 设备平台类型（用于日志/可观测；不参与协议分支逻辑）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -277,8 +277,8 @@ pub extern "C" fn cb_shutdown() {
 }
 
 #[no_mangle]
-pub extern "C" fn cb_get_version_string() -> *mut c_char {
-    to_cstring_ptr(cb_core::proto::CORE_SEMVER.to_string())
+pub extern "C" fn cb_get_version_string(){
+    //TODO 实现版本查询
 }
 
 #[no_mangle]

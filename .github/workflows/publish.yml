@@ -1,0 +1,89 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  win-ffi:
+    if: startsWith(github.ref_name, 'platforms/windows/core-ffi-')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Build DLL
+        run: cargo build --manifest-path platforms/windows/core-ffi/Cargo.toml --release --target x86_64-pc-windows-msvc
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            platforms/windows/core-ffi/target/x86_64-pc-windows-msvc/release/*.dll
+            platforms/windows/core-ffi/target/x86_64-pc-windows-msvc/release/*.pdb
+            platforms/windows/core-ffi/include/*.h
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  win-shell:
+    if: startsWith(github.ref_name, 'platforms/windows/ClipBridgeShell_CS-')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore platforms/windows/ClipBridgeShell_CS
+
+      - name: Build
+        run: dotnet build platforms/windows/ClipBridgeShell_CS -c Release --no-restore
+
+      # 先用 zip 方式交付最稳（后面你做 MSIX 再替换）
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "artifacts"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Compress-Archive -Path "platforms/windows/ClipBridgeShell_CS/**/bin/Release/**" -DestinationPath "$out/win-shell-${{ github.ref_name }}.zip" -Force
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            artifacts/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  core:
+    if: startsWith(github.ref_name, 'cb_core-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # 你要不要给 core 单独出包取决于你发布策略；先附带源码 tarball 就够了
+      - name: Build (optional)
+        run: cargo build --manifest-path cb_core/Cargo.toml --release
+
+      - name: Upload placeholder note
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body: |
+            Release for **cb_core**.
+            (If you want to publish core artifacts explicitly, we can attach built packages here.)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,30 +1,37 @@
-# 根 .editorconfig，所有子项目都会向上查找到它
 root = true
 
+# ===== Global defaults =====
 [*]
 charset = utf-8
 end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
-indent_style = space
+
+# Default to tabs everywhere
+indent_style = tab
 indent_size = 4
 
-# 文本/标记类文件：保持 2 空格缩进
-[*.{yml,yaml,json,xml,gradle,ts,tsx,js,css,scss}]
+# ===== Rust =====
+[*.rs]
+indent_style = tab
+indent_size = 4
+
+# ===== C# / .NET =====
+[*.{cs,csx}]
+indent_style = tab
+indent_size = 4
+
+# ===== Build / config files (spaces are standard here) =====
+[*.{yml,yaml,json}]
+indent_style = space
 indent_size = 2
 
-# Markdown：不要自动裁剪末尾空格（有时用于换行）
 [*.md]
+indent_style = space
+indent_size = 2
 trim_trailing_whitespace = false
 
-# Makefile 必须是 tab 缩进
-[Makefile]
-indent_style = tab
-
-# C/C++/Objective-C、Rust、Java/Kotlin：统一 4 空格
-[*.{c,cc,cpp,h,hpp,hxx,inl,ixx,mm,m,rs,java,kt,kts}]
-indent_size = 4
-
-# 项目脚本
-[*.{ps1,sh,bash}]
-indent_size = 4
+# ===== Misc =====
+[*.toml]
+indent_style = space
+indent_size = 2

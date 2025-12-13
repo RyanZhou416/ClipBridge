@@ -1,0 +1,31 @@
+{
+  "include-component-in-tag": true,
+  "include-v-in-tag": false,
+  "changelog-sections": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance" },
+    { "type": "refactor", "section": "Refactors" },
+    { "type": "docs", "section": "Documentation" },
+    { "type": "chore", "section": "Chores" },
+    { "type": "ci", "section": "CI" },
+    { "type": "test", "section": "Tests" }
+  ],
+  "packages": {
+    "cb_core": {
+      "path": "cb_core",
+      "release-type": "rust"
+    },
+    "platforms/windows/core-ffi": {
+      "path": "platforms/windows/core-ffi",
+      "release-type": "rust"
+    },
+    "platforms/windows/ClipBridgeShell_CS": {
+      "path": "platforms/windows/ClipBridgeShell_CS",
+      "release-type": "simple",
+      "extra-files": [
+        "platforms/windows/ClipBridgeShell_CS/Directory.Build.props"
+      ]
+    }
+  }
+}
