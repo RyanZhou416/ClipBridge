@@ -21,4 +21,5 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.8", features = ["v4", "fast-rng"] }
 rand = "0.9.2"
+base64 = "0.22"
 
