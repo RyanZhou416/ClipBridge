@@ -108,25 +108,31 @@ impl Core {
 
         if !cache.present || !self.inner.cas.blob_exists(&sha) {
             let tmp_name = format!("{}.tmp", plan.meta.item_id);
-            self.inner.cas.put_if_absent(&sha, &plan.content_bytes, &tmp_name)?;
-            store.mark_cache_present(&sha, now)?;
+
+            // 关键：并发情况下可能返回 Ok(false)，这不算错误
+            let _wrote = self.inner.cas.put_if_absent(&sha, &plan.content_bytes, &tmp_name)?;
+
+            // 只要最终 blob 存在，就认为 present=1
+            if self.inner.cas.blob_exists(&sha) {
+                store.mark_cache_present(&sha, now)?;
+            } else {
+                anyhow::bail!("CAS write failed: blob missing after put_if_absent");
+            }
         } else {
             store.touch_cache(&sha, now)?;
         }
 
-        // 事件 1：策略决定（壳可以用来决定要不要弹窗 / 是否自动预取）
-        let policy_evt = serde_json::json!({
-            "type": "ITEM_POLICY_DECIDED",
-            "item_id": plan.meta.item_id,
-            "needs_user_confirm": plan.needs_user_confirm,
-            "strategy": format!("{:?}", plan.strategy),
-        });
-        self.inner.emit(policy_evt.to_string());
+
+
 
         // 事件 2：meta 已添加，可更新 UI
         let meta_evt = serde_json::json!({
-            "type": "ITEM_META_ADDED",
-            "meta": plan.meta,
+          "type": "ITEM_META_ADDED",
+          "meta": plan.meta,
+          "policy": {
+            "needs_user_confirm": plan.needs_user_confirm,
+            "strategy": format!("{:?}", plan.strategy),
+          }
         });
         self.inner.emit(meta_evt.to_string());
 

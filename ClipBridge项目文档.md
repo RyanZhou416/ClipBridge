@@ -2242,7 +2242,13 @@ v1 必备事件类型（覆盖 M1~M3）：
 - `PEER_OFFLINE { device_id, reason? }`
 
 2) Meta
-- `ITEM_META_ADDED { item_meta }`
+* `ITEM_META_ADDED { meta, policy? }`
+
+  * `meta`：ItemMeta（必填）
+  * `policy`：可选，仅用于 UI 决策提示（不影响协议正确性）
+
+    * `needs_user_confirm: bool`
+    * `strategy: "MetaOnlyLazy" | "MetaPlusAutoPrefetch"`
 
 3) Transfer / Lazy Fetch
 - `TRANSFER_PROGRESS { transfer_id, bytes_done, bytes_total? }`
@@ -2782,6 +2788,12 @@ FFI 所有字符串都用 UTF-8 `char*`。
   - 必须通过 `cb_shutdown` 销毁（幂等：重复调用只生效一次）
   - `cb_shutdown` 完成后，Core 不得再触发任何回调
 
+**Handle 的 FFI 表示（v1 实现约定）**
+
+* `cb_init(...)` 同步返回统一 JSON envelope：`{"ok": true, "data": {"handle": <u64>}}`，其中 `handle` 是 Core 内部不透明指针地址按“指针宽度整数”导出（实现为 `usize`）。
+* 壳侧必须将该整数当作 **进程内指针** 使用：在后续调用中把它作为 `cb_handle*` 传回。
+* 该 handle **仅在创建它的同一进程内有效**：不得持久化、不得跨进程/跨机器传递。
+* `cb_shutdown(handle)` 会释放该指针指向的实例；释放后再次使用该 handle 属于未定义行为（壳侧需自行置空）。
 ---
 
 ### 4.8.5 回调接口（事件驱动：单入口）
@@ -3009,7 +3021,9 @@ CB_API const char* CB_CALL cb_get_status(cb_handle_t* handle);
 > 口径继承自 4.6：
 > - SQLite 使用 WAL；正文缓存为文件 CAS：`<cache>/blobs/sha256/xx/sha256`，DB 只记录 sha256、大小、present、last_access；清理由容量/TTL/历史上限触发
 > - 约束：`items.sha256` 必须可作为 CAS key；`content_cache` 以 sha256 为主键；`history` 不存大字段
-
+> - `UNIQUE(account_uid, item_id) ON CONFLICT IGNORE`
+> 语义：同一账号下，同一个 `item_id` 重复到达时只保留一条 history 记录（避免重放/重连导致历史膨胀）。
+> 如需“同 item 多次出现于历史”这种 UX，应该由 **生成新 item_id**（代表新的复制事件）实现，而不是复用老 item_id。
 ---
 
 ### 4.9.1 存储分层与“权威性”边界

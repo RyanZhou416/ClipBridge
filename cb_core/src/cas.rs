@@ -27,7 +27,14 @@ impl Cas {
     }
 
     /// 返回：是否发生了“新写入”
-    pub fn put_if_absent(&self, sha256_hex: &str, bytes: &[u8], tmp_name: &str) -> anyhow::Result<bool> {
+    pub fn put_if_absent(
+        &self,
+        sha256_hex: &str,
+        bytes: &[u8],
+        tmp_name: &str,
+    ) -> anyhow::Result<bool> {
+        use std::io;
+
         let dst = self.blob_path(sha256_hex);
         if dst.exists() {
             return Ok(false);
@@ -38,10 +45,30 @@ impl Cas {
 
         let tmp = self.tmp_dir.join(tmp_name);
         fs::write(&tmp, bytes)?;
-        // 原子替换：tmp -> dst
-        fs::rename(&tmp, &dst)?;
-        Ok(true)
+
+        // 最后再查一次，减少“覆盖写”的概率（仍可能竞态，但 worst case 写入相同内容）
+        if dst.exists() {
+            let _ = fs::remove_file(&tmp);
+            return Ok(false);
+        }
+
+        match fs::rename(&tmp, &dst) {
+            Ok(()) => Ok(true),
+
+            // 竞态：别人已经写好了（Windows 常见：AlreadyExists）
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&tmp);
+                Ok(false)
+            }
+
+            // 其他错误：清理 tmp，再向上抛
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                Err(e.into())
+            }
+        }
     }
+
 
     #[allow(dead_code)]
     pub fn cache_dir(&self) -> &Path {
