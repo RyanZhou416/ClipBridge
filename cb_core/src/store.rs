@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::model::{ItemKind, ItemMeta};
+use crate::model::{FileMeta, ItemKind, ItemMeta};
 
 pub struct Store {
     conn: Connection,
@@ -11,6 +11,8 @@ pub struct Store {
 pub struct CacheRow {
     pub present: bool,
 }
+
+
 
 impl Store {
     pub fn open(data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -21,6 +23,7 @@ impl Store {
         let conn = Connection::open(db_path)?;
         Self::init_pragmas(&conn)?;
         Self::migrate_v1(&conn)?;
+        Self::migrate_v2(&conn)?;
         Ok(Self { conn })
     }
 
@@ -85,6 +88,25 @@ impl Store {
         Ok(())
     }
 
+    fn migrate_v2(conn: &Connection) -> anyhow::Result<()> {
+        let user_version: i64 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
+        if user_version >= 2 {
+            return Ok(());
+        }
+
+        conn.execute_batch(
+            r#"
+            ALTER TABLE items ADD COLUMN files_json TEXT;
+
+            -- 防止同一个 item 被重复写入 history（最简单：加 unique index）
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_history_account_item ON history(account_uid, item_id);
+
+            PRAGMA user_version = 2;
+            "#,
+        )?;
+        Ok(())
+    }
+
     fn kind_to_str(k: &ItemKind) -> &'static str {
         match k {
             ItemKind::Text => "text",
@@ -102,7 +124,6 @@ impl Store {
     ) -> anyhow::Result<CacheRow> {
         let tx = self.conn.transaction()?;
 
-        // 1) content_cache：先占位（present=0），同 sha 主键去重 :contentReference[oaicite:8]{index=8}
         tx.execute(
             r#"INSERT OR IGNORE INTO content_cache
                (sha256_hex, total_bytes, present, last_access_ts_ms, created_ts_ms)
@@ -110,12 +131,13 @@ impl Store {
             params![meta.content.sha256, meta.content.total_bytes, now_ms, meta.created_ts_ms],
         )?;
 
-        // 2) items：允许“同 sha 不同 item_id”:contentReference[oaicite:9]{index=9}
         let preview_json = serde_json::to_string(&meta.preview)?;
+        let files_json = serde_json::to_string(&meta.files)?;
+
         tx.execute(
             r#"INSERT INTO items
-               (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, expires_ts_ms)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
+               (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, files_json, expires_ts_ms)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
             params![
                 meta.item_id,
                 Self::kind_to_str(&meta.kind),
@@ -125,18 +147,19 @@ impl Store {
                 meta.content.mime,
                 meta.content.sha256,
                 preview_json,
+                files_json,
                 meta.expires_ts_ms
             ],
         )?;
 
-        // 3) history：sort_ts_ms 固定用 created_ts_ms :contentReference[oaicite:10]{index=10}
+        // history：sort_ts_ms 固定用 created_ts_ms
+        // 如果同 (account_uid,item_id) 已经存在，unique index 会挡住；这里用 OR IGNORE 保证幂等
         tx.execute(
-            r#"INSERT INTO history(account_uid, item_id, sort_ts_ms, source_device_id)
+            r#"INSERT OR IGNORE INTO history(account_uid, item_id, sort_ts_ms, source_device_id)
                VALUES (?1, ?2, ?3, ?4)"#,
             params![account_uid, meta.item_id, meta.created_ts_ms, meta.source_device_id],
         )?;
 
-        // 读 present（可能已有=1）
         let present_i: i64 = tx
             .query_row(
                 "SELECT present FROM content_cache WHERE sha256_hex=?1",
@@ -150,26 +173,47 @@ impl Store {
         Ok(CacheRow { present: present_i != 0 })
     }
 
-    /// Phase C：CAS 写完后把 present=1，并 touch LRU
-    pub fn mark_cache_present(&mut self, sha256_hex: &str, now_ms: i64) -> anyhow::Result<()> {
-        self.conn.execute(
+    pub fn mark_cache_missing(&mut self, sha256_hex: &str, now_ms: i64) -> anyhow::Result<usize> {
+        let n = self.conn.execute(
             r#"UPDATE content_cache
-               SET present=1, last_access_ts_ms=?2
-               WHERE sha256_hex=?1"#,
+           SET present=0, last_access_ts_ms=?2
+           WHERE sha256_hex=?1"#,
             params![sha256_hex, now_ms],
         )?;
-        Ok(())
+        Ok(n)
     }
 
-    pub fn touch_cache(&mut self, sha256_hex: &str, now_ms: i64) -> anyhow::Result<()> {
-        self.conn.execute(
+    /// Phase C：CAS 写完后把 present=1，并 touch LRU
+    pub fn mark_cache_present(&mut self, sha256_hex: &str, now_ms: i64) -> anyhow::Result<usize> {
+        let n = self.conn.execute(
             r#"UPDATE content_cache
-               SET last_access_ts_ms=?2
-               WHERE sha256_hex=?1"#,
+           SET present=1, last_access_ts_ms=?2
+           WHERE sha256_hex=?1"#,
             params![sha256_hex, now_ms],
         )?;
-        Ok(())
+        Ok(n)
     }
+
+    pub fn touch_cache(&mut self, sha256_hex: &str, now_ms: i64) -> anyhow::Result<usize> {
+        let n = self.conn.execute(
+            r#"UPDATE content_cache
+           SET last_access_ts_ms=?2
+           WHERE sha256_hex=?1"#,
+            params![sha256_hex, now_ms],
+        )?;
+        Ok(n)
+    }
+
+
+    pub fn get_cache_present(&self, sha256_hex: &str) -> anyhow::Result<bool> {
+        let v: i64 = self.conn.query_row(
+            "SELECT present FROM content_cache WHERE sha256_hex=?1",
+            params![sha256_hex],
+            |r| r.get(0),
+        )?;
+        Ok(v != 0)
+    }
+
     pub fn cache_row_count_for_sha(&self, sha256_hex: &str) -> anyhow::Result<i64> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM content_cache WHERE sha256_hex=?1",
@@ -191,12 +235,16 @@ impl Store {
     pub fn list_history_metas(&self, account_uid: &str, limit: usize) -> anyhow::Result<Vec<ItemMeta>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
-                   i.size_bytes, i.mime, i.sha256_hex, i.preview_json, i.expires_ts_ms
+            SELECT
+                i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
+                i.size_bytes, i.mime, i.sha256_hex,
+                i.preview_json, i.files_json, i.expires_ts_ms,
+                cc.total_bytes
             FROM history h
             JOIN items i ON h.item_id = i.item_id
+            JOIN content_cache cc ON i.sha256_hex = cc.sha256_hex
             WHERE h.account_uid=?1 AND h.is_deleted=0
-            ORDER BY h.sort_ts_ms DESC
+            ORDER BY h.sort_ts_ms DESC, h.history_id DESC
             LIMIT ?2
             "#,
         )?;
@@ -214,6 +262,14 @@ impl Store {
             let preview: crate::model::ItemPreview =
                 serde_json::from_str(&preview_json).unwrap_or_default();
 
+            let files_json: Option<String> = r.get(8)?;
+            let files: Vec<FileMeta> = files_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Vec<FileMeta>>(s).ok())
+                .unwrap_or_default();
+
+            let total_bytes: i64 = r.get(10)?;
+
             Ok(ItemMeta {
                 ty: "ItemMeta".to_string(),
                 item_id: r.get(0)?,
@@ -226,10 +282,10 @@ impl Store {
                 content: crate::model::ItemContent {
                     mime: r.get(5)?,
                     sha256: r.get(6)?,
-                    total_bytes: r.get(4)?, // M0 里我们先让它等于 size_bytes
+                    total_bytes,
                 },
-                files: vec![],
-                expires_ts_ms: r.get(8)?,
+                files,
+                expires_ts_ms: r.get(9)?,
             })
         })?;
 
@@ -239,4 +295,55 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// History GC：只保留最新 keep_latest 条，其余软删除
+    pub fn soft_delete_history_keep_latest(&mut self, account_uid: &str, keep_latest: i64) -> anyhow::Result<i64> {
+        if keep_latest < 0 {
+            return Ok(0);
+        }
+        let before = self.conn.changes();
+        self.conn.execute(
+            r#"
+            UPDATE history
+            SET is_deleted=1
+            WHERE history_id IN (
+                SELECT history_id
+                FROM history
+                WHERE account_uid=?1 AND is_deleted=0
+                ORDER BY sort_ts_ms DESC, history_id DESC
+                LIMIT -1 OFFSET ?2
+            )
+            "#,
+            params![account_uid, keep_latest],
+        )?;
+        let after = self.conn.changes();
+        Ok((after - before) as i64)
+    }
+
+    /// Cache GC：挑 LRU（present=1）最旧的若干条
+    pub fn select_lru_present(&self, limit: i64) -> anyhow::Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT sha256_hex, total_bytes
+            FROM content_cache
+            WHERE present=1
+            ORDER BY last_access_ts_ms ASC, sha256_hex ASC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = stmt.query_map(params![limit], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut out = vec![];
+        for it in rows { out.push(it?); }
+        Ok(out)
+    }
+
+    pub fn sum_present_bytes(&self) -> anyhow::Result<i64> {
+        let s: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(total_bytes),0) FROM content_cache WHERE present=1",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(s)
+    }
+
 }

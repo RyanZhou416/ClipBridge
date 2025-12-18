@@ -21,8 +21,11 @@ typedef struct cb_handle cb_handle;
 CB_API const char* cb_init(const char* cfg_json, cb_on_event_fn on_event, void* user_data);
 CB_API const char* cb_shutdown(cb_handle* h);
 
-CB_API const char* cb_plan_local_ingest(cb_handle* h, const char* snapshot_json, int force);
-CB_API const char* cb_ingest_local_copy_with_force(cb_handle* h, const char* snapshot_json, int force);
+
+// share_mode 在 snapshot_json 中表达
+CB_API const char* cb_plan_local_ingest(cb_handle* h, const char* snapshot_json);
+CB_API const char* cb_ingest_local_copy(cb_handle* h, const char* snapshot_json);
+
 
 // 释放由 core-ffi 返回的字符串
 CB_API void cb_free_string(const char* s);

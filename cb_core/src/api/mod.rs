@@ -4,8 +4,10 @@ use crate::clipboard::{ClipboardSnapshot, LocalIngestDeps, IngestPlan, make_inge
 use crate::model::ItemMeta;
 
 /**
-Core 的门面，唯一稳定出口，定义了外界能看到的东西
-*/
+ * Core 的配置项。
+ *
+ * 定义了 Core 启动所需的设备 ID、名称、账户信息、存储路径以及各项限制策略。
+ */
 #[derive(Clone, Debug)]
 pub struct CoreConfig {
     pub device_id: String,     // 本机 device_id（先由壳传入）
@@ -15,8 +17,15 @@ pub struct CoreConfig {
     pub data_dir: String,      // 持久：core.db
     pub cache_dir: String,     // 可清空：CAS blobs/tmp
     pub limits: crate::policy::Limits,
+    pub gc_history_max_items: i64, // 历史条数上限（超过就 GC）
+    pub gc_cas_max_bytes: i64,     // blobs 总大小上限（超过就 GC）
 }
 
+/**
+ * 摄入计划的评估结果。
+ *
+ * 用于告知调用方该次摄入的元数据信息、是否需要用户确认以及采取的摄入策略。
+ */
 #[derive(Clone, Debug)]
 pub struct PlanResult {
     pub meta: crate::model::ItemMeta,
@@ -25,18 +34,33 @@ pub struct PlanResult {
 }
 
 
-/// 事件回调接口（Core → 壳）
+/**
+ * 事件回调接口（Core → 壳）。
+ *
+ * 壳层通过实现此接口来接收 Core 内部产生的事件（如新项目添加等）。
+ */
 pub trait CoreEventSink: Send + Sync + 'static {
     fn emit(&self, event_json: String);
 }
 
-// Core 是“权威实例句柄”（后面 FFI 会把它包成不透明 handle）
-#[derive(Clone)]
+/**
+ * ClipBridge Core 的权威句柄。
+ *
+ * 这是整个核心库的唯一入口点，通过它来调用所有的业务逻辑。
+ */#[derive(Clone)]
 pub struct Core {
     inner: Arc<Inner>,
 }
 
 impl Core {
+
+    /**
+    * 初始化核心实例。
+    *
+    * @param cfg 核心配置信息
+    * @param sink 事件回调接口实现
+    * @return 返回初始化完成的 Core 实例
+    */
     pub fn init(cfg: CoreConfig, sink: Arc<dyn CoreEventSink>) -> Self {
         let store = Store::open(&cfg.data_dir).expect("open store");
         let cas = Cas::new(&cfg.cache_dir).expect("init cas");
@@ -48,9 +72,20 @@ impl Core {
             store: Mutex::new(store),
             cas,
         };
-        Self { inner: Arc::new(inner) }
+        let core = Self { inner: Arc::new(inner) };
+        let _ = core.run_gc("Startup");
+        core
     }
 
+
+    /**
+    * 摄入本地剪贴板拷贝的内容。
+    *
+    * 这是一个组合操作，包含规划（plan）和应用（apply）两个阶段。
+    *
+    * @param snapshot 剪贴板内容快照
+    * @return 成功则返回新摄入项目的元数据
+    */
     pub fn ingest_local_copy(&self, snapshot: ClipboardSnapshot) -> anyhow::Result<ItemMeta> {
         // Step 1：只做计划，不碰 DB/CAS
         let plan = self.plan_local_ingest(&snapshot, false)?;
@@ -70,7 +105,16 @@ impl Core {
         store.list_history_metas(&self.inner.cfg.account_uid, limit)
     }
 
-
+    /**
+     * 规划本地内容的摄入流程。
+     *
+     * 此方法会根据当前的设备信息、账户配置以及安全限制（Limits），
+     * 对剪贴板快照进行评估并生成摄入计划（IngestPlan），但不会执行实际的存储或 CAS 写入操作。
+     *
+     * @param snapshot 剪贴板快照数据
+     * @param force 是否强制摄入（若为 true，则可能跳过某些交互确认逻辑，例如大小限制警告）
+     * @return 返回生成的摄入计划，若核心已关闭则返回错误
+     */
     pub fn plan_local_ingest(
         &self,
         snapshot: &ClipboardSnapshot,
@@ -97,47 +141,96 @@ impl Core {
         }
 
         let now = now_ms();
-        let meta_clone = plan.meta.clone(); // 准备给调用者返回
-
-        // Phase A：落库
-        let mut store = self.inner.store.lock().unwrap();
-        let cache = store.insert_meta_and_history(&self.inner.cfg.account_uid, &plan.meta, now)?;
-
-        // Phase B：CAS 去重写入
+        let meta_clone = plan.meta.clone();
         let sha = plan.meta.content.sha256.clone();
 
+        // Phase A：落库（只在这个 block 里持锁）
+        let cache = {
+            let mut store = self.inner.store.lock().unwrap();
+            store.insert_meta_and_history(&self.inner.cfg.account_uid, &plan.meta, now)?
+        };
+
+        // Phase B：CAS 去重写入（这里不持 store 锁）
         if !cache.present || !self.inner.cas.blob_exists(&sha) {
             let tmp_name = format!("{}.tmp", plan.meta.item_id);
-
-            // 关键：并发情况下可能返回 Ok(false)，这不算错误
             let _wrote = self.inner.cas.put_if_absent(&sha, &plan.content_bytes, &tmp_name)?;
 
-            // 只要最终 blob 存在，就认为 present=1
             if self.inner.cas.blob_exists(&sha) {
+                let mut store = self.inner.store.lock().unwrap();
                 store.mark_cache_present(&sha, now)?;
             } else {
                 anyhow::bail!("CAS write failed: blob missing after put_if_absent");
             }
         } else {
+            let mut store = self.inner.store.lock().unwrap();
             store.touch_cache(&sha, now)?;
         }
 
-
-
-
-        // 事件 2：meta 已添加，可更新 UI
+        // 事件（不需要 store 锁）
         let meta_evt = serde_json::json!({
-          "type": "ITEM_META_ADDED",
-          "meta": plan.meta,
-          "policy": {
-            "needs_user_confirm": plan.needs_user_confirm,
-            "strategy": format!("{:?}", plan.strategy),
-          }
-        });
+      "type": "ITEM_META_ADDED",
+      "meta": plan.meta,
+      "policy": {
+        "needs_user_confirm": plan.needs_user_confirm,
+        "strategy": format!("{:?}", plan.strategy),
+      }
+    });
         self.inner.emit(meta_evt.to_string());
+
+        // GC（现在一定不会死锁）
+        let _ = self.run_gc("AfterIngest");
 
         Ok(meta_clone)
     }
+
+
+    pub fn run_gc(&self, _reason: &str) -> anyhow::Result<()> {
+        if self.inner.is_shutdown.load(Ordering::Acquire) {
+            anyhow::bail!("core already shutdown");
+        }
+
+        let now = now_ms();
+
+        // 1) History GC
+        {
+            let mut store = self.inner.store.lock().unwrap();
+            let n = store.history_count_for_account(&self.inner.cfg.account_uid)?;
+            if self.inner.cfg.gc_history_max_items > 0 && n > self.inner.cfg.gc_history_max_items {
+                store.soft_delete_history_keep_latest(&self.inner.cfg.account_uid, self.inner.cfg.gc_history_max_items)?;
+            }
+        }
+
+        // 2) Cache GC（LRU）
+        if self.inner.cfg.gc_cas_max_bytes > 0 {
+            let mut cur = self.inner.cas.total_size_bytes()?;
+            while cur > self.inner.cfg.gc_cas_max_bytes {
+                let (sha, _expect_bytes) = {
+                    let store = self.inner.store.lock().unwrap();
+                    let cands = store.select_lru_present(1)?;
+                    if cands.is_empty() {
+                        break;
+                    }
+                    cands[0].clone()
+                };
+
+                let freed = self.inner.cas.remove_blob(&sha)?;
+                {
+                    let mut store = self.inner.store.lock().unwrap();
+                    store.mark_cache_missing(&sha, now)?;
+                }
+                if freed > 0 {
+                    cur -= freed;
+                } else {
+                    // 文件不存在/统计不准：重新扫一次，避免死循环
+                    cur = self.inner.cas.total_size_bytes()?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+
 
     pub fn plan_local_ingest_result(
         &self,
@@ -201,7 +294,6 @@ mod tests {
     struct PrintSink;
     impl CoreEventSink for PrintSink {
         fn emit(&self, event_json: String) {
-            println!("[core-event] {}", event_json);
         }
     }
 
@@ -216,7 +308,8 @@ mod tests {
             data_dir,
             cache_dir,
             limits: crate::policy::Limits::default(),
-
+            gc_history_max_items: 1000000,
+            gc_cas_max_bytes: 1_i64 << 60,
         };
 
         let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
@@ -242,6 +335,8 @@ mod tests {
             data_dir,
             cache_dir,
             limits: crate::policy::Limits::default(),
+            gc_history_max_items: 1000000,
+            gc_cas_max_bytes: 1_i64 << 60,
         };
 
         let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
@@ -283,7 +378,8 @@ mod tests {
             data_dir,
             cache_dir,
             limits: crate::policy::Limits::default(),
-
+            gc_history_max_items: 1000000,
+            gc_cas_max_bytes: 1_i64 << 60,
         };
 
         let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
@@ -327,6 +423,8 @@ mod tests {
             data_dir,
             cache_dir,
             limits: crate::policy::Limits::default(),
+            gc_history_max_items: 1000000,
+            gc_cas_max_bytes: 1_i64 << 60,
         };
         let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
         let core = Core::init(cfg, sink);
@@ -345,6 +443,100 @@ mod tests {
         // force=true 后就不需要 confirm
         let r2 = core.plan_local_ingest_result(&snap, true).unwrap();
         assert!(!r2.needs_user_confirm);
+
+        core.shutdown();
+    }
+
+    #[test]
+    fn ingest_same_image_dedup_cache() {
+        let (data_dir, cache_dir) = unique_dirs("img_dedup");
+        let cfg = CoreConfig {
+            device_id: "dev-1".to_string(),
+            device_name: "dev1".to_string(),
+            account_uid: "acct-img-1".to_string(),
+            account_tag: "acctTag".to_string(),
+            data_dir,
+            cache_dir,
+            limits: crate::policy::Limits::default(),
+            gc_history_max_items: 1000000,
+            gc_cas_max_bytes: 1_i64 << 60,
+        };
+
+        let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
+        let core = Core::init(cfg, sink);
+
+        let bytes = vec![7u8; 4096];
+        let ts1 = crate::util::now_ms();
+        let m1 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Image {
+            bytes: bytes.clone(),
+            mime: "image/png".to_string(),
+            ts_ms: ts1,
+        }).unwrap();
+
+        let ts2 = ts1 + 1;
+        let m2 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Image {
+            bytes,
+            mime: "image/png".to_string(),
+            ts_ms: ts2,
+        }).unwrap();
+
+        assert_ne!(m1.item_id, m2.item_id);
+        assert_eq!(m1.content.sha256, m2.content.sha256);
+
+        let store = core.inner.store.lock().unwrap();
+        let n_cache = store.cache_row_count_for_sha(&m1.content.sha256).unwrap();
+        assert_eq!(n_cache, 1);
+        assert!(core.inner.cas.blob_exists(&m1.content.sha256));
+
+        core.shutdown();
+    }
+
+    #[test]
+    fn gc_evicts_lru_when_over_cap() {
+        use std::time::Duration;
+        use std::thread::sleep;
+
+        let (data_dir, cache_dir) = unique_dirs("gc_cap");
+        let cfg = CoreConfig {
+            device_id: "dev-1".to_string(),
+            device_name: "dev1".to_string(),
+            account_uid: "acct-gc-1".to_string(),
+            account_tag: "acctTag".to_string(),
+            data_dir,
+            cache_dir,
+            limits: crate::policy::Limits::default(),
+            gc_history_max_items: 1000000,
+            gc_cas_max_bytes: 1200, // 1KB，故意很小
+        };
+
+        let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
+        let core = Core::init(cfg, sink);
+
+        let ts = crate::util::now_ms();
+        let m1 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Image {
+            bytes: vec![1u8; 800],
+            mime: "image/png".to_string(),
+            ts_ms: ts,
+        }).unwrap();
+
+        sleep(Duration::from_millis(5));
+
+        let m2 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Image {
+            bytes: vec![2u8; 800],
+            mime: "image/png".to_string(),
+            ts_ms: ts + 1,
+        }).unwrap();
+
+        // 触发后：更旧的 m1 应被淘汰（LRU）
+        assert!(!core.inner.cas.blob_exists(&m1.content.sha256));
+
+        let store = core.inner.store.lock().unwrap();
+        assert!(!store.get_cache_present(&m1.content.sha256).unwrap());
+        drop(store);
+        // 历史仍可列出（meta 不丢）
+        let list = core.list_history(10).unwrap();
+        assert!(list.iter().any(|x| x.item_id == m1.item_id));
+        assert!(list.iter().any(|x| x.item_id == m2.item_id));
 
         core.shutdown();
     }

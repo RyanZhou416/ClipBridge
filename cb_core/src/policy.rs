@@ -3,24 +3,30 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Limits {
+    // 软限制，在尝试拉取时如果超出限制外壳会弹窗确认
     pub soft_text_bytes: i64,
     pub soft_image_bytes: i64,
     pub soft_file_total_bytes: i64,
 
+    // 硬限制，在复制时超出了限制就不会广播元数据
     pub hard_text_bytes: i64,
     pub hard_image_bytes: i64,
     pub hard_file_total_bytes: i64,
+
+    // 文字自动拉取限制，超出了就不会在分析元数据的同时发送正文
+    pub text_auto_prefetch_bytes: i64,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            soft_text_bytes: 1 * 1024 * 1024,              // 1MB :contentReference[oaicite:1]{index=1}
-            soft_image_bytes: 30 * 1024 * 1024,            // 30MB :contentReference[oaicite:2]{index=2}
-            soft_file_total_bytes: 200 * 1024 * 1024,      // 200MB :contentReference[oaicite:3]{index=3}
-            hard_text_bytes: 16 * 1024 * 1024,             // 16MB :contentReference[oaicite:4]{index=4}
-            hard_image_bytes: 256 * 1024 * 1024,           // 256MB :contentReference[oaicite:5]{index=5}
-            hard_file_total_bytes: 2 * 1024 * 1024 * 1024, // 2GB :contentReference[oaicite:6]{index=6}
+            soft_text_bytes: 1 * 1024 * 1024,              // 1MB
+            soft_image_bytes: 30 * 1024 * 1024,            // 30MB
+            soft_file_total_bytes: 300 * 1024 * 1024,      // 300MB
+            hard_text_bytes: 16 * 1024 * 1024,             // 16MB
+            hard_image_bytes: 256 * 1024 * 1024,           // 256MB
+            hard_file_total_bytes: 2 * 1024 * 1024 * 1024, // 2GB
+            text_auto_prefetch_bytes: 256 * 1024,          // 256KB
         }
     }
 }
@@ -29,7 +35,7 @@ impl Default for Limits {
 pub enum MetaStrategy {
     /// 仅广播 meta；正文等用户粘贴/显式拉取（Lazy Fetch）
     MetaOnlyLazy,
-    /// meta 到达后自动触发一次 ensure_content_cached（仅 text 且 <= soft）
+    /// 广播 meta 并传输正文, 到达后自动触发一次 ensure_content_cached（仅 text 且 <= soft）
     MetaPlusAutoPrefetch,
 }
 
@@ -59,8 +65,7 @@ pub fn decide(kind: ItemKind, size_bytes: i64, force: bool, limits: &Limits) -> 
     };
 
     if size_bytes <= soft {
-        // 文档：只有 text 且 <= soft 才自动预取 :contentReference[oaicite:7]{index=7}
-        let strategy = if kind == ItemKind::Text {
+        let strategy = if kind == ItemKind::Text && size_bytes <= limits.text_auto_prefetch_bytes {
             MetaStrategy::MetaPlusAutoPrefetch
         } else {
             MetaStrategy::MetaOnlyLazy
@@ -68,7 +73,8 @@ pub fn decide(kind: ItemKind, size_bytes: i64, force: bool, limits: &Limits) -> 
         return PolicyOutcome::Allowed { strategy, needs_user_confirm: false };
     }
 
-    // 超过 soft：需要 shell 弹窗确认；若 force 则继续但不自动预取 :contentReference[oaicite:8]{index=8}
+
+    // 超过 soft：需要 shell 弹窗确认；若 force 则继续但不自动预取
     if force {
         PolicyOutcome::Allowed { strategy: MetaStrategy::MetaOnlyLazy, needs_user_confirm: false }
     } else {
@@ -83,14 +89,16 @@ mod tests {
     use crate::model::ItemKind;
 
     #[test]
-    fn text_auto_prefetch_under_soft() {
+    #[test]
+    fn text_auto_prefetch_under_threshold() {
         let lim = Limits::default();
-        let out = decide(ItemKind::Text, lim.soft_text_bytes, false, &lim);
+        let out = decide(ItemKind::Text, lim.text_auto_prefetch_bytes, false, &lim);
         assert_eq!(out, PolicyOutcome::Allowed {
             strategy: MetaStrategy::MetaPlusAutoPrefetch,
             needs_user_confirm: false
         });
     }
+
 
     #[test]
     fn reject_over_hard_cap() {

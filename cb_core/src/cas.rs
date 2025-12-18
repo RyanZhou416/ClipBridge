@@ -14,6 +14,7 @@ impl Cas {
         let tmp_dir = cache_dir.join("tmp");
         fs::create_dir_all(&blobs_dir)?;
         fs::create_dir_all(&tmp_dir)?;
+        println!("[cas] blobs_dir = {:?}", blobs_dir);
         Ok(Self { cache_dir, blobs_dir, tmp_dir })
     }
 
@@ -69,9 +70,40 @@ impl Cas {
         }
     }
 
+    pub fn total_size_bytes(&self) -> anyhow::Result<i64> {
+        fn dir_size(p: &Path) -> std::io::Result<u64> {
+            let mut sum = 0u64;
+            for e in fs::read_dir(p)? {
+                let e = e?;
+                let m = e.metadata()?;
+                if m.is_dir() {
+                    sum += dir_size(&e.path())?;
+                } else {
+                    sum += m.len();
+                }
+            }
+            Ok(sum)
+        }
+        let s = dir_size(&self.blobs_dir)?;
+        Ok(s as i64)
+    }
+
+    /// 删除 blob，返回释放的字节数（若不存在返回 0）
+    pub fn remove_blob(&self, sha256_hex: &str) -> anyhow::Result<i64> {
+        let p = self.blob_path(sha256_hex);
+        if !p.exists() {
+            return Ok(0);
+        }
+        let sz = p.metadata().map(|m| m.len() as i64).unwrap_or(0);
+        fs::remove_file(p)?;
+        Ok(sz)
+    }
+
 
     #[allow(dead_code)]
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
     }
+
+
 }
