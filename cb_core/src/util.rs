@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now_ms() -> i64 {
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    (d.as_millis() as i64)
+    d.as_millis() as i64
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {

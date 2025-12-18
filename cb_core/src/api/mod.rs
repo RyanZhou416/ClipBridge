@@ -299,14 +299,14 @@ mod tests {
 
     #[test]
     fn ingest_text_smoke() {
-        let (data_dir, cache_dir) = unique_dirs("dedup");
+        let dirs = unique_dirs("dedup");
         let cfg = CoreConfig {
             device_id: "dev-1".to_string(),
             device_name: "dev1".to_string(),
             account_uid: "acct-uid-1".to_string(),
             account_tag: "acctTag".to_string(),
-            data_dir,
-            cache_dir,
+            data_dir: dirs.data_dir.clone(),
+            cache_dir: dirs.cache_dir.clone(),
             limits: crate::policy::Limits::default(),
             gc_history_max_items: 1000000,
             gc_cas_max_bytes: 1_i64 << 60,
@@ -323,17 +323,18 @@ mod tests {
 
         assert_eq!(meta.kind, crate::model::ItemKind::Text);
         core.shutdown();
+        drop(core);
     }
     #[test]
     fn ingest_same_text_dedup_cache() {
-        let (data_dir, cache_dir) = unique_dirs("dedup");
+        let dirs = unique_dirs("dedup");
         let cfg = CoreConfig {
             device_id: "dev-1".to_string(),
             device_name: "dev1".to_string(),
             account_uid: "acct-uid-1".to_string(),
             account_tag: "acctTag".to_string(),
-            data_dir,
-            cache_dir,
+            data_dir: dirs.data_dir.clone(),
+            cache_dir: dirs.cache_dir.clone(),
             limits: crate::policy::Limits::default(),
             gc_history_max_items: 1000000,
             gc_cas_max_bytes: 1_i64 << 60,
@@ -369,14 +370,14 @@ mod tests {
 
     #[test]
     fn list_history_orders_newest_first() {
-        let (data_dir, cache_dir) = unique_dirs("dedup");
+        let dirs = unique_dirs("dedup");
         let cfg = CoreConfig {
             device_id: "dev-1".to_string(),
             device_name: "dev1".to_string(),
             account_uid: "acct-uid-2".to_string(),
             account_tag: "acctTag".to_string(),
-            data_dir,
-            cache_dir,
+            data_dir: dirs.data_dir.clone(),
+            cache_dir: dirs.cache_dir.clone(),
             limits: crate::policy::Limits::default(),
             gc_history_max_items: 1000000,
             gc_cas_max_bytes: 1_i64 << 60,
@@ -403,25 +404,71 @@ mod tests {
         assert_eq!(list[1].item_id, m1.item_id);
 
         core.shutdown();
+        drop(core);
     }
 
-    fn unique_dirs(tag: &str) -> (String, String) {
-        let uid = uuid::Uuid::new_v4().to_string();
-        let data = format!("./tmp_test/{}_data_{}", tag, uid);
-        let cache = format!("./tmp_test/{}_cache_{}", tag, uid);
-        (data, cache)
+    struct TestDirs {
+        root: std::path::PathBuf,
+        data_dir: String,
+        cache_dir: String,
     }
+
+    impl Drop for TestDirs {
+        fn drop(&mut self) {
+            // 如需保留现场排查：运行测试时加 CB_TEST_KEEP=1
+            if std::env::var_os("CB_TEST_KEEP").is_some() {
+                eprintln!("[test] keeping test dirs: {:?}", self.root);
+                return;
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn unique_dirs(tag: &str) -> TestDirs {
+        let uid = uuid::Uuid::new_v4().to_string();
+
+        // workspace: cb_core 的 CARGO_MANIFEST_DIR 一般是 <repo>/cb_core
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+        // 优先尊重 CARGO_TARGET_DIR；否则用 <repo>/target
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| manifest.join("..").join("target"));
+
+        // debug / release
+        let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+
+        // target/<profile>/clipbridge_tests/cb_core/<tag>_<uuid>/{data,cache}
+        let root = target
+            .join(profile)
+            .join("clipbridge_tests")
+            .join("cb_core")
+            .join(format!("{tag}_{uid}"));
+
+        let data = root.join("data");
+        let cache = root.join("cache");
+
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+
+        TestDirs {
+            root,
+            data_dir: data.to_string_lossy().to_string(),
+            cache_dir: cache.to_string_lossy().to_string(),
+        }
+    }
+
 
     #[test]
     fn plan_requires_confirm_over_soft() {
-        let (data_dir, cache_dir) = unique_dirs("plan_soft");
+        let dirs = unique_dirs("dedup");
         let cfg = CoreConfig {
             device_id: "dev-1".to_string(),
             device_name: "dev1".to_string(),
             account_uid: "acct-plan-1".to_string(),
             account_tag: "acctTag".to_string(),
-            data_dir,
-            cache_dir,
+            data_dir: dirs.data_dir.clone(),
+            cache_dir: dirs.cache_dir.clone(),
             limits: crate::policy::Limits::default(),
             gc_history_max_items: 1000000,
             gc_cas_max_bytes: 1_i64 << 60,
@@ -445,18 +492,19 @@ mod tests {
         assert!(!r2.needs_user_confirm);
 
         core.shutdown();
+        drop(core);
     }
 
     #[test]
     fn ingest_same_image_dedup_cache() {
-        let (data_dir, cache_dir) = unique_dirs("img_dedup");
+        let dirs = unique_dirs("dedup");
         let cfg = CoreConfig {
             device_id: "dev-1".to_string(),
             device_name: "dev1".to_string(),
             account_uid: "acct-img-1".to_string(),
             account_tag: "acctTag".to_string(),
-            data_dir,
-            cache_dir,
+            data_dir: dirs.data_dir.clone(),
+            cache_dir: dirs.cache_dir.clone(),
             limits: crate::policy::Limits::default(),
             gc_history_max_items: 1000000,
             gc_cas_max_bytes: 1_i64 << 60,
@@ -496,14 +544,14 @@ mod tests {
         use std::time::Duration;
         use std::thread::sleep;
 
-        let (data_dir, cache_dir) = unique_dirs("gc_cap");
+        let dirs = unique_dirs("dedup");
         let cfg = CoreConfig {
             device_id: "dev-1".to_string(),
             device_name: "dev1".to_string(),
             account_uid: "acct-gc-1".to_string(),
             account_tag: "acctTag".to_string(),
-            data_dir,
-            cache_dir,
+            data_dir: dirs.data_dir.clone(),
+            cache_dir: dirs.cache_dir.clone(),
             limits: crate::policy::Limits::default(),
             gc_history_max_items: 1000000,
             gc_cas_max_bytes: 1200, // 1KB，故意很小
@@ -539,6 +587,7 @@ mod tests {
         assert!(list.iter().any(|x| x.item_id == m2.item_id));
 
         core.shutdown();
+        drop(core);
     }
 
 }
