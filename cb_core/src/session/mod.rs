@@ -64,4 +64,12 @@ impl SessionHandle {
         let s = self.state.lock().unwrap();
         matches!(*s, SessionState::Online)
     }
+
+    pub fn is_finished(&self) -> bool {
+        let s = self.state.lock().unwrap();
+        matches!(*s, SessionState::Terminated)
+    }
 }
+
+#[cfg(test)]
+mod tests;

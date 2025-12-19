@@ -16,8 +16,8 @@ use crate::util::{now_ms, sha256_hex};
 use super::{SessionCmd, SessionHandle, SessionRole, SessionState, HandshakeStep};
 
 // 心跳配置
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 
 pub struct SessionActor {
     role: SessionRole,
@@ -122,64 +122,78 @@ impl SessionActor {
         };
 
         // 2. 开始握手
+        // 如果握手失败，直接返回，不需要触发后续的 PEER_OFFLINE (因为还没 Online 过)
         actor.start_handshake().await?;
 
-        // 3. 主循环
+        // 3. 主循环 (包裹在一个 block 中以捕获结果)
         let mut heartbeat_ticker = interval(HEARTBEAT_INTERVAL);
         heartbeat_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-        loop {
-            tokio::select! {
-                // A. 接收网络消息
-                msg = actor.reader.next() => {
-                    match msg {
-                        Some(Ok(m)) => {
-                            actor.last_active_at = now_ms();
-                            if let Err(e) = actor.handle_msg(m).await {
-                                actor.send_error_and_close("PROTOCOL_ERROR", &e.to_string()).await?;
-                                return Err(e);
+        let run_result: Result<()> = async {
+            loop {
+                tokio::select! {
+                    // A. 接收网络消息
+                    msg = actor.reader.next() => {
+                        match msg {
+                            Some(Ok(m)) => {
+                                actor.last_active_at = now_ms();
+                                if let Err(e) = actor.handle_msg(m).await {
+                                    actor.send_error_and_close("PROTOCOL_ERROR", &e.to_string()).await?;
+                                    return Err(e);
+                                }
                             }
+                            Some(Err(e)) => return Err(e.into()), // Codec 错误
+                            None => break, // 连接关闭
                         }
-                        Some(Err(e)) => return Err(e.into()), // Codec 错误
-                        None => break, // 连接关闭
                     }
-                }
 
-                // B. 接收本地命令
-                cmd = actor.cmd_rx.recv() => {
-                    match cmd {
-                        Some(SessionCmd::SendMeta(meta)) => {
-                            if actor.state == SessionState::Online {
-                                actor.writer.send(CtrlMsg::ItemMeta { item: meta }).await?;
+                    // B. 接收本地命令
+                    cmd = actor.cmd_rx.recv() => {
+                        match cmd {
+                            Some(SessionCmd::SendMeta(meta)) => {
+                                if actor.state == SessionState::Online {
+                                    actor.writer.send(CtrlMsg::ItemMeta { item: meta }).await?;
+                                }
                             }
+                            Some(SessionCmd::Shutdown) => {
+                                let _ = actor.writer.send(CtrlMsg::Close { reason: "Shutdown".into() }).await;
+                                break;
+                            }
+                            None => break,
                         }
-                        Some(SessionCmd::Shutdown) => {
-                            let _ = actor.writer.send(CtrlMsg::Close { reason: "Shutdown".into() }).await;
-                            break;
-                        }
-                        None => break,
                     }
-                }
 
-                // C. 心跳检查
-                _ = heartbeat_ticker.tick() => {
-                    actor.tick_heartbeat().await?;
+                    // C. 心跳检查
+                    _ = heartbeat_ticker.tick() => {
+                        actor.tick_heartbeat().await?;
+                    }
                 }
             }
-        }
+            Ok(())
+        }.await;
 
-        // 退出处理
+        // 4. 【关键修正】无论 run_result 是 Ok 还是 Err，这里都会执行
+        // 确保状态更新为 Terminated
         actor.update_state(SessionState::Terminated);
+
+        // 发送 PEER_OFFLINE 通知
         if let Some(did) = &actor.remote_device_id {
+            // 区分一下是正常关闭还是报错
+            let reason = match &run_result {
+                Ok(_) => "Connection closed".to_string(),
+                Err(e) => format!("Error: {}", e),
+            };
+
             let json = serde_json::json!({
                 "type": "PEER_OFFLINE",
                 "ts_ms": now_ms(),
-                "payload": { "device_id": did, "reason": "Connection closed" }
+                "payload": { "device_id": did, "reason": reason }
             });
             actor.sink.emit(json.to_string());
         }
 
-        Ok(())
+        // 最后再返回结果
+        run_result
     }
 
     // --- 状态辅助 ---

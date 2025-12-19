@@ -165,6 +165,11 @@ impl Transport {
         }
     }
 
+    pub fn is_ipv4(&self) -> bool {
+        // 如果获取失败，默认认为是 IPv4（为了兼容性）
+        self.endpoint.local_addr().map(|a| a.is_ipv4()).unwrap_or(true)
+    }
+
     pub fn shutdown(&self) {
         self.endpoint.close(0u32.into(), b"shutdown");
     }
