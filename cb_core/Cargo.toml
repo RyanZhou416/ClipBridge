@@ -22,4 +22,25 @@ serde_json = "1.0"
 uuid = { version = "1.8", features = ["v4", "fast-rng"] }
 rand = "0.9.2"
 base64 = "0.22"
+format = "0.2.4"
+env = "1.0.1"
+# --- 网络与异步 (M1) ---
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+bytes = "1"
+futures = "0.3"
 
+# --- QUIC & TLS (全栈使用 0.23 生态) ---
+# quinn 0.11 默认使用 rustls 0.23
+quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-tokio"] }
+# 显式使用 0.23，并开启 ring 特性 (必须，否则 quinn 无法创建默认 provider)
+rustls = { version = "0.23.35", features = ["ring", "std"] }
+# rcgen 0.13 配合 rustls 0.23 使用
+rcgen = "0.14.6"
+
+# --- 局域网发现 ---
+mdns-sd = "0.17.1"
+
+# --- 其他 ---
+thiserror = "1"
+rustls-pki-types = "1.13.2"

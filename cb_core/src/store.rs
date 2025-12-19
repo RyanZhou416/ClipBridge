@@ -24,6 +24,7 @@ impl Store {
         Self::init_pragmas(&conn)?;
         Self::migrate_v1(&conn)?;
         Self::migrate_v2(&conn)?;
+        Self::migrate_v3(&conn)?;
         Ok(Self { conn })
     }
 
@@ -102,6 +103,29 @@ impl Store {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_history_account_item ON history(account_uid, item_id);
 
             PRAGMA user_version = 2;
+            "#,
+        )?;
+        Ok(())
+    }
+
+    fn migrate_v3(conn: &Connection) -> anyhow::Result<()> {
+        let user_version: i64 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
+        if user_version >= 3 {
+            return Ok(());
+        }
+
+        conn.execute_batch(
+            r#"
+            -- TOFU 表：记录已信任的设备指纹
+            CREATE TABLE IF NOT EXISTS trusted_peers (
+                account_uid TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                fingerprint_sha256 TEXT NOT NULL, -- 证书指纹 (hex)
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (account_uid, device_id)
+            );
+
+            PRAGMA user_version = 3;
             "#,
         )?;
         Ok(())
@@ -344,6 +368,25 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(s)
+    }
+
+    /// 获取已保存的设备指纹
+    pub fn get_peer_fingerprint(&self, account_uid: &str, device_id: &str) -> anyhow::Result<Option<String>> {
+        let res: Option<String> = self.conn.query_row(
+            "SELECT fingerprint_sha256 FROM trusted_peers WHERE account_uid=?1 AND device_id=?2",
+            params![account_uid, device_id],
+            |r| r.get(0),
+        ).optional()?;
+        Ok(res)
+    }
+
+    /// 保存/更新设备指纹 (TOFU pinning)
+    pub fn save_peer_fingerprint(&mut self, account_uid: &str, device_id: &str, fingerprint: &str, now_ms: i64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO trusted_peers (account_uid, device_id, fingerprint_sha256, updated_at_ms) VALUES (?1, ?2, ?3, ?4)",
+            params![account_uid, device_id, fingerprint, now_ms]
+        )?;
+        Ok(())
     }
 
 }

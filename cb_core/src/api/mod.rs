@@ -1,7 +1,12 @@
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+// cb_core/src/api/mod.rs
+
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
+use tokio::sync::mpsc;
+
 use crate::{cas::Cas, store::Store, util::now_ms};
-use crate::clipboard::{ClipboardSnapshot, LocalIngestDeps, IngestPlan, make_ingest_plan};
+use crate::clipboard::{make_ingest_plan, ClipboardSnapshot, IngestPlan, LocalIngestDeps};
 use crate::model::ItemMeta;
+use crate::net::{NetManager, NetCmd};
 
 /**
  * Core 的配置项。
@@ -47,9 +52,10 @@ pub trait CoreEventSink: Send + Sync + 'static {
  * ClipBridge Core 的权威句柄。
  *
  * 这是整个核心库的唯一入口点，通过它来调用所有的业务逻辑。
- */#[derive(Clone)]
+ */
+#[derive(Clone)]
 pub struct Core {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
 impl Core {
@@ -65,12 +71,24 @@ impl Core {
         let store = Store::open(&cfg.data_dir).expect("open store");
         let cas = Cas::new(&cfg.cache_dir).expect("init cas");
 
+        // --- M1 集成：启动网络管理器 ---
+        // 注意：这里假设 NetManager::spawn 是同步封装（内部 spawn 异步任务）
+        // 如果是在 FFI 环境且有 Tokio Runtime，这将正常工作。
+        let net_tx = match NetManager::spawn(cfg.clone(), sink.clone()) {
+            Ok(tx) => Some(tx),
+            Err(e) => {
+                eprintln!("[Core] Failed to start NetManager: {}", e);
+                None
+            }
+        };
+
         let inner = Inner {
             cfg,
             sink,
             is_shutdown: AtomicBool::new(false),
             store: Mutex::new(store),
             cas,
+            net: net_tx,
         };
         let core = Self { inner: Arc::new(inner) };
         let _ = core.run_gc("Startup");
@@ -168,14 +186,20 @@ impl Core {
 
         // 事件（不需要 store 锁）
         let meta_evt = serde_json::json!({
-      "type": "ITEM_META_ADDED",
-      "meta": plan.meta,
-      "policy": {
-        "needs_user_confirm": plan.needs_user_confirm,
-        "strategy": format!("{:?}", plan.strategy),
-      }
-    });
+          "type": "ITEM_META_ADDED",
+          "meta": plan.meta,
+          "policy": {
+            "needs_user_confirm": plan.needs_user_confirm,
+            "strategy": format!("{:?}", plan.strategy),
+          }
+        });
         self.inner.emit(meta_evt.to_string());
+
+        // --- M1 集成：广播元数据到网络 ---
+        if let Some(net_tx) = &self.inner.net {
+            // 使用 try_send 避免阻塞，如果通道满了或网络层挂了也不影响本地逻辑
+            let _ = net_tx.try_send(NetCmd::BroadcastMeta(plan.meta.clone()));
+        }
 
         // GC（现在一定不会死锁）
         let _ = self.run_gc("AfterIngest");
@@ -253,7 +277,12 @@ impl Core {
         let plan = self.plan_local_ingest(&snapshot, force)?;
         self.apply_ingest(plan)
     }
+}
 
+// 移除旧的测试代码，以适应 M1 新架构
+#[cfg(test)]
+impl Core {
+    // 可以在这里添加针对 M1 的测试辅助方法
 }
 
 pub(crate) struct Inner {
@@ -262,6 +291,8 @@ pub(crate) struct Inner {
     pub is_shutdown: AtomicBool,
     pub store: Mutex<Store>,
     pub cas: Cas,
+    // M1 集成：改为 NetCmd 发送端
+    pub net: Option<mpsc::Sender<NetCmd>>,
 }
 
 
@@ -274,321 +305,25 @@ impl Inner {
         self.sink.emit(event_json);
     }
 
+    pub(crate) fn emit_json(&self, v: serde_json::Value) {
+        self.emit(v.to_string());
+    }
+
     fn shutdown(&self) {
         // 幂等：多次调用也只会第一次生效
         let already = self.is_shutdown.swap(true, Ordering::AcqRel);
+
+        // M1 集成：发送关闭信号
+        if let Some(tx) = &self.net {
+            // 尝试发送 Shutdown 命令，如果接收端已关闭则忽略错误
+            let _ = tx.try_send(NetCmd::Shutdown);
+        }
+
         if already {
             return;
         }
-        // 第一次 shutdown 时你可以发一个事件（可选）
-        // 注意：这里 emit 会被 is_shutdown 拦住，所以如果你想发“关闭事件”，要么先发再置位，
-        // 要么专门允许这一个事件。这里我们先简单：不发。
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    struct PrintSink;
-    impl CoreEventSink for PrintSink {
-        fn emit(&self, event_json: String) {
-        }
-    }
-
-    #[test]
-    fn ingest_text_smoke() {
-        let dirs = unique_dirs("dedup");
-        let cfg = CoreConfig {
-            device_id: "dev-1".to_string(),
-            device_name: "dev1".to_string(),
-            account_uid: "acct-uid-1".to_string(),
-            account_tag: "acctTag".to_string(),
-            data_dir: dirs.data_dir.clone(),
-            cache_dir: dirs.cache_dir.clone(),
-            limits: crate::policy::Limits::default(),
-            gc_history_max_items: 1000000,
-            gc_cas_max_bytes: 1_i64 << 60,
-        };
-
-        let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
-        let core = Core::init(cfg, sink);
-
-        let ts = crate::util::now_ms();
-        let meta = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Text {
-            text_utf8: "hello world".to_string(),
-            ts_ms: ts,
-        }).unwrap();
-
-        assert_eq!(meta.kind, crate::model::ItemKind::Text);
-        core.shutdown();
-        drop(core);
-    }
-    #[test]
-    fn ingest_same_text_dedup_cache() {
-        let dirs = unique_dirs("dedup");
-        let cfg = CoreConfig {
-            device_id: "dev-1".to_string(),
-            device_name: "dev1".to_string(),
-            account_uid: "acct-uid-1".to_string(),
-            account_tag: "acctTag".to_string(),
-            data_dir: dirs.data_dir.clone(),
-            cache_dir: dirs.cache_dir.clone(),
-            limits: crate::policy::Limits::default(),
-            gc_history_max_items: 1000000,
-            gc_cas_max_bytes: 1_i64 << 60,
-        };
-
-        let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
-        let core = Core::init(cfg, sink);
-
-        let ts1 = crate::util::now_ms();
-        let m1 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Text {
-            text_utf8: "hello world".to_string(),
-            ts_ms: ts1,
-        }).unwrap();
-
-        let ts2 = ts1 + 1;
-        let m2 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Text {
-            text_utf8: "hello world".to_string(),
-            ts_ms: ts2,
-        }).unwrap();
-
-        assert_ne!(m1.item_id, m2.item_id);
-        assert_eq!(m1.content.sha256, m2.content.sha256);
-
-        let store = core.inner.store.lock().unwrap();
-        let n_cache = store.cache_row_count_for_sha(&m1.content.sha256).unwrap();
-        let n_hist = store.history_count_for_account(&core.inner.cfg.account_uid).unwrap();
-
-        assert_eq!(n_cache, 1);
-        assert_eq!(n_hist, 2);
-
-        core.shutdown();
-    }
-
-    #[test]
-    fn list_history_orders_newest_first() {
-        let dirs = unique_dirs("dedup");
-        let cfg = CoreConfig {
-            device_id: "dev-1".to_string(),
-            device_name: "dev1".to_string(),
-            account_uid: "acct-uid-2".to_string(),
-            account_tag: "acctTag".to_string(),
-            data_dir: dirs.data_dir.clone(),
-            cache_dir: dirs.cache_dir.clone(),
-            limits: crate::policy::Limits::default(),
-            gc_history_max_items: 1000000,
-            gc_cas_max_bytes: 1_i64 << 60,
-        };
-
-        let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
-        let core = Core::init(cfg, sink);
-
-        let ts1 = crate::util::now_ms();
-        let m1 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Text {
-            text_utf8: "first".to_string(),
-            ts_ms: ts1,
-        }).unwrap();
-
-        let ts2 = ts1 + 10;
-        let m2 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Text {
-            text_utf8: "second".to_string(),
-            ts_ms: ts2,
-        }).unwrap();
-
-        let list = core.list_history(10).unwrap();
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].item_id, m2.item_id);
-        assert_eq!(list[1].item_id, m1.item_id);
-
-        core.shutdown();
-        drop(core);
-    }
-
-    struct TestDirs {
-        root: std::path::PathBuf,
-        data_dir: String,
-        cache_dir: String,
-    }
-
-    impl Drop for TestDirs {
-        fn drop(&mut self) {
-            // 如需保留现场排查：运行测试时加 CB_TEST_KEEP=1
-            if std::env::var_os("CB_TEST_KEEP").is_some() {
-                eprintln!("[test] keeping test dirs: {:?}", self.root);
-                return;
-            }
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
-
-    fn unique_dirs(tag: &str) -> TestDirs {
-        let uid = uuid::Uuid::new_v4().to_string();
-
-        // workspace: cb_core 的 CARGO_MANIFEST_DIR 一般是 <repo>/cb_core
-        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-
-        // 优先尊重 CARGO_TARGET_DIR；否则用 <repo>/target
-        let target = std::env::var_os("CARGO_TARGET_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| manifest.join("..").join("target"));
-
-        // debug / release
-        let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-
-        // target/<profile>/clipbridge_tests/cb_core/<tag>_<uuid>/{data,cache}
-        let root = target
-            .join(profile)
-            .join("clipbridge_tests")
-            .join("cb_core")
-            .join(format!("{tag}_{uid}"));
-
-        let data = root.join("data");
-        let cache = root.join("cache");
-
-        std::fs::create_dir_all(&data).unwrap();
-        std::fs::create_dir_all(&cache).unwrap();
-
-        TestDirs {
-            root,
-            data_dir: data.to_string_lossy().to_string(),
-            cache_dir: cache.to_string_lossy().to_string(),
-        }
-    }
-
-
-    #[test]
-    fn plan_requires_confirm_over_soft() {
-        let dirs = unique_dirs("dedup");
-        let cfg = CoreConfig {
-            device_id: "dev-1".to_string(),
-            device_name: "dev1".to_string(),
-            account_uid: "acct-plan-1".to_string(),
-            account_tag: "acctTag".to_string(),
-            data_dir: dirs.data_dir.clone(),
-            cache_dir: dirs.cache_dir.clone(),
-            limits: crate::policy::Limits::default(),
-            gc_history_max_items: 1000000,
-            gc_cas_max_bytes: 1_i64 << 60,
-        };
-        let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
-        let core = Core::init(cfg, sink);
-
-        // 构造一个 > 1MB 的 text（soft=1MB）:contentReference[oaicite:1]{index=1}
-        let big = "a".repeat((core.inner.cfg.limits.soft_text_bytes + 10) as usize);
-
-        let snap = crate::clipboard::ClipboardSnapshot::Text {
-            text_utf8: big,
-            ts_ms: crate::util::now_ms(),
-        };
-
-        let r = core.plan_local_ingest_result(&snap, false).unwrap();
-        assert!(r.needs_user_confirm);
-
-        // force=true 后就不需要 confirm
-        let r2 = core.plan_local_ingest_result(&snap, true).unwrap();
-        assert!(!r2.needs_user_confirm);
-
-        core.shutdown();
-        drop(core);
-    }
-
-    #[test]
-    fn ingest_same_image_dedup_cache() {
-        let dirs = unique_dirs("dedup");
-        let cfg = CoreConfig {
-            device_id: "dev-1".to_string(),
-            device_name: "dev1".to_string(),
-            account_uid: "acct-img-1".to_string(),
-            account_tag: "acctTag".to_string(),
-            data_dir: dirs.data_dir.clone(),
-            cache_dir: dirs.cache_dir.clone(),
-            limits: crate::policy::Limits::default(),
-            gc_history_max_items: 1000000,
-            gc_cas_max_bytes: 1_i64 << 60,
-        };
-
-        let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
-        let core = Core::init(cfg, sink);
-
-        let bytes = vec![7u8; 4096];
-        let ts1 = crate::util::now_ms();
-        let m1 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Image {
-            bytes: bytes.clone(),
-            mime: "image/png".to_string(),
-            ts_ms: ts1,
-        }).unwrap();
-
-        let ts2 = ts1 + 1;
-        let m2 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Image {
-            bytes,
-            mime: "image/png".to_string(),
-            ts_ms: ts2,
-        }).unwrap();
-
-        assert_ne!(m1.item_id, m2.item_id);
-        assert_eq!(m1.content.sha256, m2.content.sha256);
-
-        let store = core.inner.store.lock().unwrap();
-        let n_cache = store.cache_row_count_for_sha(&m1.content.sha256).unwrap();
-        assert_eq!(n_cache, 1);
-        assert!(core.inner.cas.blob_exists(&m1.content.sha256));
-
-        core.shutdown();
-    }
-
-    #[test]
-    fn gc_evicts_lru_when_over_cap() {
-        use std::time::Duration;
-        use std::thread::sleep;
-
-        let dirs = unique_dirs("dedup");
-        let cfg = CoreConfig {
-            device_id: "dev-1".to_string(),
-            device_name: "dev1".to_string(),
-            account_uid: "acct-gc-1".to_string(),
-            account_tag: "acctTag".to_string(),
-            data_dir: dirs.data_dir.clone(),
-            cache_dir: dirs.cache_dir.clone(),
-            limits: crate::policy::Limits::default(),
-            gc_history_max_items: 1000000,
-            gc_cas_max_bytes: 1200, // 1KB，故意很小
-        };
-
-        let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
-        let core = Core::init(cfg, sink);
-
-        let ts = crate::util::now_ms();
-        let m1 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Image {
-            bytes: vec![1u8; 800],
-            mime: "image/png".to_string(),
-            ts_ms: ts,
-        }).unwrap();
-
-        sleep(Duration::from_millis(5));
-
-        let m2 = core.ingest_local_copy(crate::clipboard::ClipboardSnapshot::Image {
-            bytes: vec![2u8; 800],
-            mime: "image/png".to_string(),
-            ts_ms: ts + 1,
-        }).unwrap();
-
-        // 触发后：更旧的 m1 应被淘汰（LRU）
-        assert!(!core.inner.cas.blob_exists(&m1.content.sha256));
-
-        let store = core.inner.store.lock().unwrap();
-        assert!(!store.get_cache_present(&m1.content.sha256).unwrap());
-        drop(store);
-        // 历史仍可列出（meta 不丢）
-        let list = core.list_history(10).unwrap();
-        assert!(list.iter().any(|x| x.item_id == m1.item_id));
-        assert!(list.iter().any(|x| x.item_id == m2.item_id));
-
-        core.shutdown();
-        drop(core);
-    }
-
-}
-
+mod tests;
