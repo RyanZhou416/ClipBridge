@@ -96,6 +96,7 @@ async fn main() {
         limits: cb_core::policy::Limits::default(),
         gc_history_max_items: 500,
         gc_cas_max_bytes: 100 * 1024 * 1024,
+        global_policy: Default::default(),
     };
 
     let core = Core::init(config, sink);

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::api::{Core, CoreConfig};
+use crate::api::GlobalPolicy::AllowAll;
 use crate::policy::Limits;
 
 use super::dirs::TestDirs;
@@ -46,6 +47,7 @@ impl TestCore {
             limits: Limits::default(),
             gc_history_max_items: 50_000,
             gc_cas_max_bytes: 1_i64 << 60,
+            global_policy: Default::default()
         };
 
         Self::with_cfg(crate_tag, test_tag, cfg)

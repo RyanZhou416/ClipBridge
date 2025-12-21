@@ -30,6 +30,12 @@ CB_API const char* cb_ingest_local_copy(cb_handle* h, const char* snapshot_json)
 // 释放由 core-ffi 返回的字符串
 CB_API void cb_free_string(const char* s);
 
+// 返回 {"ok":true, "data":[{"device_id":"...", "is_online":true}, ...]}
+CB_API const char* cb_list_peers(cb_handle* h);
+
+// 返回 {"ok":true, "data":{"status":"Running", ...}}
+CB_API const char* cb_get_status(cb_handle* h);
+
 #ifdef __cplusplus
 }
 #endif

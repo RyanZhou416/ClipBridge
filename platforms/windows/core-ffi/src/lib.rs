@@ -337,5 +337,47 @@ pub extern "C" fn cb_ingest_local_copy(h: *mut cb_handle, snapshot_json: *const 
     }
 }
 
+/// 获取当前在线设备列表
+///
+/// 返回格式：{"ok": true, "data": [{"device_id": "...", "is_online": true, ...}]}
+#[no_mangle]
+pub extern "C" fn cb_list_peers(h: *mut cb_handle) -> *const c_char {
+    let run = (|| -> anyhow::Result<String> {
+        if h.is_null() { anyhow::bail!("null handle"); }
+        let hh = unsafe { &mut *h };
+
+        // 调用 Core 的 list_peers
+        let peers = hh.core.list_peers()?;
+
+        // 序列化结果
+        Ok(ok_json(serde_json::json!(peers)))
+    })();
+
+    match run {
+        Ok(s) => ret(s),
+        Err(e) => ret(err_json("LIST_PEERS_FAILED", &format!("{e:#}"))),
+    }
+}
+
+/// 获取核心状态
+///
+/// 返回格式：{"ok": true, "data": {"status": "Running", "device_id": "...", ...}}
+#[no_mangle]
+pub extern "C" fn cb_get_status(h: *mut cb_handle) -> *const c_char {
+    let run = (|| -> anyhow::Result<String> {
+        if h.is_null() { anyhow::bail!("null handle"); }
+        let hh = unsafe { &mut *h };
+
+        let status = hh.core.get_status()?;
+
+        Ok(ok_json(status))
+    })();
+
+    match run {
+        Ok(s) => ret(s),
+        Err(e) => ret(err_json("GET_STATUS_FAILED", &format!("{e:#}"))),
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -147,25 +147,13 @@ impl DiscoveryService {
                         match event {
                             Ok(ServiceEvent::ServiceResolved(info)) => {
                                 if let Some(candidate) = parse_peer_candidate(&info, &local_account_tag, &local_device_id) {
-                                     if event_tx.send(DiscoveryEvent::CandidateFound(candidate)).await.is_err() { break; }
+                                     if event_tx.send(DiscoveryEvent::CandidateFound(candidate)).await.is_err() {
+                                         break;
+                                     }
                                 }
-                                if info.get_fullname().contains(&local_device_id) { continue; }
-
-                                // 修正点：直接使用 info.get_property_val_str
-                                let peer_acct = info.get_property_val_str("acct").unwrap_or("");
-                                let peer_did = info.get_property_val_str("did").unwrap_or("");
-                                if peer_acct != local_account_tag { continue; }
-                                if peer_did.is_empty() { continue; }
-                                let port = info.get_port();
-                                let addrs: Vec<String> = info.get_addresses().iter().map(|ip| format!("{}:{}", ip, port)).collect();
-                                if addrs.is_empty() { continue; }
-                                let caps_str = info.get_property_val_str("cap").unwrap_or("");
-                                let capabilities: Vec<String> = caps_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-                                let candidate = PeerCandidate { device_id: peer_did.to_string(), addrs, capabilities };
-                                if event_tx.send(DiscoveryEvent::CandidateFound(candidate)).await.is_err() { break; }
-
                             }
                             Ok(ServiceEvent::ServiceRemoved(_srv_type, fullname)) => {
+
                                 let parts: Vec<&str> = fullname.split('.').collect();
                                 if let Some(instance) = parts.first() {
                                     if *instance != local_device_id {

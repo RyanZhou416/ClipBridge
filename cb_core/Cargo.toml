@@ -44,3 +44,4 @@ mdns-sd = "0.17.1"
 # --- 其他 ---
 thiserror = "1"
 rustls-pki-types = "1.13.2"
+oneshot = "0.1.11"

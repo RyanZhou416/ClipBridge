@@ -91,6 +91,7 @@ pub fn parse_cfg(json: &str) -> anyhow::Result<cb_core::api::CoreConfig> {
         limits: c.limits.unwrap_or_default(),
         gc_history_max_items: c.gc_history_max_items.parse()?,
         gc_cas_max_bytes: c.gc_cas_max_bytes.parse()?,
+        global_policy: Default::default(),
     })
 }
 

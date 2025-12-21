@@ -24,6 +24,7 @@ pub struct CoreConfig {
     pub limits: crate::policy::Limits,
     pub gc_history_max_items: i64, // 历史条数上限（超过就 GC）
     pub gc_cas_max_bytes: i64,     // blobs 总大小上限（超过就 GC）
+    pub global_policy: GlobalPolicy,
 }
 
 /**
@@ -46,6 +47,37 @@ pub struct PlanResult {
  */
 pub trait CoreEventSink: Send + Sync + 'static {
     fn emit(&self, event_json: String);
+}
+
+/// 对外暴露的设备状态 DTO
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PeerStatus {
+    pub device_id: String,
+    pub state: PeerConnectionState,
+}
+
+/// 详细的连接状态枚举
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub enum PeerConnectionState {
+    Discovered,      // 知道地址，但在退避或未连接
+    Connecting,      // 正在 TCP/QUIC 握手
+    Handshaking,     // 正在 OPAQUE/TLS 验证
+    AccountVerified, // 账号已验证，正在查 Policy/TOFU
+    Online,          // 完全可用
+    Offline,         // 彻底断开
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GlobalPolicy {
+    AllowAll, // M1 默认：开发模式
+    DenyAll,  // 严格模式
+    // AskUser, // M2/M3: 需要 UI 介入
+}
+
+impl Default for GlobalPolicy {
+    fn default() -> Self {
+        GlobalPolicy::AllowAll
+    }
 }
 
 /**
@@ -277,6 +309,52 @@ impl Core {
         let plan = self.plan_local_ingest(&snapshot, force)?;
         self.apply_ingest(plan)
     }
+
+    /**
+     * 获取当前在线设备列表。
+     * * 这是一个同步阻塞调用，适合 FFI 使用。
+     * 它会向 NetManager 发送查询指令并等待结果返回。
+     */
+    pub fn list_peers(&self) -> anyhow::Result<Vec<PeerStatus>> {
+        if self.inner.is_shutdown.load(Ordering::Acquire) {
+            anyhow::bail!("core already shutdown");
+        }
+
+        // 检查网络层是否初始化
+        let Some(net_tx) = &self.inner.net else {
+            return Ok(vec![]); // 网络没起，返回空列表
+        };
+
+        // 1. 创建回传通道
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        // 2. 发送命令 (使用 blocking_send 确保发送成功，或者 try_send)
+        // 注意：net_tx 是 mpsc::Sender
+        net_tx.blocking_send(NetCmd::GetPeers(tx))
+            .map_err(|_| anyhow::anyhow!("NetManager channel closed"))?;
+
+        // 3. 阻塞等待回包
+        // 注意：因为我们是在 FFI 调用线程（非 Tokio 线程），使用 block_on 是安全的
+        let peers = futures::executor::block_on(rx)
+            .map_err(|_| anyhow::anyhow!("Failed to receive response from NetManager"))?;
+
+        Ok(peers)
+    }
+
+    /**
+     * 获取 Core 运行状态。
+     */
+    pub fn get_status(&self) -> anyhow::Result<serde_json::Value> {
+        // M1 阶段简单返回配置信息和运行状态
+        let is_shutdown = self.inner.is_shutdown.load(Ordering::Acquire);
+
+        Ok(serde_json::json!({
+            "status": if is_shutdown { "Shutdown" } else { "Running" },
+            "device_id": self.inner.cfg.device_id,
+            "account_tag": self.inner.cfg.account_tag,
+            "net_enabled": self.inner.net.is_some()
+        }))
+    }
 }
 
 // 移除旧的测试代码，以适应 M1 新架构
@@ -323,6 +401,7 @@ impl Inner {
             return;
         }
     }
+
 }
 
 #[cfg(test)]

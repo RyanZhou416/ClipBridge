@@ -3,13 +3,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
 
 use crate::discovery::{DiscoveryEvent, DiscoveryService, PeerCandidate};
 use crate::session::{SessionActor, SessionCmd, SessionHandle, SessionRole};
 use crate::transport::Transport;
 use crate::util::now_ms;
+use crate::api::PeerStatus;
 
 /// 网络层管理器
 pub struct NetManager {
@@ -40,6 +41,7 @@ struct BackoffState {
 #[derive(Debug)]
 pub enum NetCmd {
     BroadcastMeta(crate::model::ItemMeta),
+    GetPeers(oneshot::Sender<Vec<PeerStatus>>),
     Shutdown,
 }
 
@@ -50,29 +52,48 @@ impl NetManager {
     ) -> anyhow::Result<mpsc::Sender<NetCmd>> {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
-        // 端口 0 = 随机端口
-        let transport = Arc::new(Transport::new(0)?);
-        let port = transport.local_port()?;
+        std::thread::Builder::new()
+            .name("cb-net-manager".to_string())
+            .spawn(move || {
+                // 1. 创建专用的 Runtime
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to build NetManager runtime");
 
-        let (disc_tx, disc_rx) = mpsc::channel(32);
-        let discovery = DiscoveryService::spawn(config.clone(), port, disc_tx)?;
+                rt.block_on(async move {
+                    // 2. 在 Runtime 内部进行初始化 (Transport 需要绑定 Socket)
+                    match Transport::new(0) {
+                        Ok(transport) => {
+                            let transport = Arc::new(transport);
+                            let port = transport.local_port().unwrap_or(0);
 
-        let manager = Self {
-            config,
-            transport,
-            discovery,
-            sessions: Vec::new(),
-            pending_dials: HashSet::new(),
-            backoff_map: HashMap::new(),
-            known_peers: HashMap::new(),
-            cmd_rx,
-            discovery_rx: disc_rx,
-            event_sink,
-        };
-
-        tokio::spawn(async move {
-            manager.run().await;
-        });
+                            // 3. 启动 Discovery
+                            let (disc_tx, disc_rx) = mpsc::channel(32);
+                            match DiscoveryService::spawn(config.clone(), port, disc_tx) {
+                                Ok(discovery) => {
+                                    let manager = Self {
+                                        config,
+                                        transport,
+                                        discovery,
+                                        sessions: Vec::new(),
+                                        pending_dials: HashSet::new(),
+                                        backoff_map: HashMap::new(),
+                                        known_peers: HashMap::new(),
+                                        cmd_rx,
+                                        discovery_rx: disc_rx,
+                                        event_sink,
+                                    };
+                                    // 4. 运行主循环
+                                    manager.run().await;
+                                }
+                                Err(e) => eprintln!("[NetManager] Discovery spawn failed: {}", e),
+                            }
+                        }
+                        Err(e) => eprintln!("[NetManager] Transport init failed: {}", e),
+                    }
+                });
+            })?;
 
         Ok(cmd_tx)
     }
@@ -87,6 +108,11 @@ impl NetManager {
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
                         Some(NetCmd::BroadcastMeta(meta)) => self.broadcast_meta(meta).await,
+                        Some(NetCmd::GetPeers(reply_tx)) => {
+                            // [New] 处理查询请求
+                            let peers = self.get_peers_info();
+                            let _ = reply_tx.send(peers);
+                        }
                         Some(NetCmd::Shutdown) => {
                             self.shutdown().await;
                             break;
@@ -109,7 +135,8 @@ impl NetManager {
                             SessionRole::Server,
                             conn,
                             self.config.clone(),
-                            self.event_sink.clone()
+                            self.event_sink.clone(),
+                            None
                         );
                         self.sessions.push(handle);
                     }
@@ -123,6 +150,31 @@ impl NetManager {
         }
     }
 
+    /// 收集当前会话状态
+    fn get_peers_info(&self) -> Vec<PeerStatus> {
+        let mut peers = Vec::new();
+
+        // 1. 先把 Session 里的加进去
+        for s in &self.sessions {
+            peers.push(PeerStatus {
+                device_id: s.device_id(),
+                state: s.public_state(),
+            });
+        }
+
+        // 2. 再把 known_peers 里有但 session 里没有的加为 "Discovered" (可选，文档建议展示所有已发现设备)
+        for (did, _) in &self.known_peers {
+            if !peers.iter().any(|p| &p.device_id == did) {
+                peers.push(PeerStatus {
+                    device_id: did.clone(),
+                    state: crate::api::PeerConnectionState::Discovered,
+                });
+            }
+        }
+
+        peers
+    }
+
     async fn maintain_sessions(&mut self) {
         let now = now_ms();
 
@@ -131,9 +183,9 @@ impl NetManager {
         // 如果只是 Handshaking，不要清零，万一握手失败还得继续退避
         for s in &self.sessions {
             if s.is_online() {
-                if self.backoff_map.contains_key(&s.device_id) {
-                    println!("[Net] Session {} is stable (Online). Resetting backoff.", s.device_id);
-                    self.backoff_map.remove(&s.device_id);
+                if self.backoff_map.contains_key(&s.device_id()) {
+                    println!("[Net] Session {} is stable (Online). Resetting backoff.", s.device_id());
+                    self.backoff_map.remove(&s.device_id());
                 }
             }
         }
@@ -142,8 +194,8 @@ impl NetManager {
         let mut dead_ids = Vec::new();
         self.sessions.retain(|s| {
             if s.is_finished() { // 彻底挂了
-                if !s.device_id.starts_with("pending") {
-                    dead_ids.push(s.device_id.clone());
+                if !s.device_id().starts_with("pending") {
+                    dead_ids.push(s.device_id().clone());
                 }
                 false
             } else {
@@ -201,18 +253,17 @@ impl NetManager {
                 self.known_peers.insert(peer.device_id.clone(), peer.clone());
 
                 if self.config.device_id >= peer.device_id { return; }
-                if self.sessions.iter().any(|s| s.device_id == peer.device_id) { return; }
+                if self.sessions.iter().any(|s| s.device_id() == peer.device_id) { return; }
                 if self.pending_dials.contains(&peer.device_id) { return; }
 
-                // 检查退避
+                // 如果收到 mDNS 发现信号，即使在退避期，也认为是一个“值得重试”的新时机。
+                // 我们不清除 fail_count（如果这次又失败了，下次惩罚会更重），
+                // 但我们允许 bypass 这一次的时间检查。
                 if let Some(state) = self.backoff_map.get_mut(&peer.device_id) {
                     if now_ms() < state.next_retry_ts {
-                        // 还在冷却，不仅不连，还要忽略
-                        // 注意：我们已经在上面 insert 进 known_peers 了，
-                        // 所以等冷却时间一到，maintain_sessions 就能从 known_peers 拿到最新地址重连！
-                        // 这里不需要再做 cached_candidate 了。
-                        println!("[Net] Backoff active for {}. Address updated in book.", peer.device_id);
-                        return;
+                        println!("[Net] ⚡️ Discovery signal received for {}. Bypassing backoff wait (was waiting until {}).",
+                                 peer.device_id, state.next_retry_ts);
+                        // 不 return，直接往下走去 perform_dial
                     }
                 }
 
@@ -223,8 +274,16 @@ impl NetManager {
     }
 
     async fn broadcast_meta(&self, meta: crate::model::ItemMeta) {
+        if self.config.global_policy == crate::api::GlobalPolicy::DenyAll {
+            println!("[Policy] Broadcast DENIED by DenyAll policy.");
+            // 这里可以发一个 PolicyDeny 事件给 UI
+            return;
+        }
+
         for session in &self.sessions {
-            let _ = session.cmd_tx.send(SessionCmd::SendMeta(meta.clone())).await;
+            if session.is_online() {
+                let _ = session.cmd_tx.send(SessionCmd::SendMeta(meta.clone())).await;
+            }
         }
     }
 
@@ -258,16 +317,14 @@ impl NetManager {
         for addr in valid_addrs {
             match self.transport.connect(&addr.to_string()).await { // 注意：quinn connect 接受 &str 或 SocketAddr
                 Ok(conn) => {
-                    let mut handle = SessionActor::spawn(
+                    let handle = SessionActor::spawn(
                         SessionRole::Client,
                         conn,
                         self.config.clone(),
-                        self.event_sink.clone()
+                        self.event_sink.clone(),
+                        Some(peer.device_id.clone())
                     );
-                    handle.device_id = peer.device_id.clone();
                     self.sessions.push(handle);
-
-                    // 成功了！
                     success = true;
                     break;
                 }
@@ -300,3 +357,4 @@ impl NetManager {
         }
     }
 }
+

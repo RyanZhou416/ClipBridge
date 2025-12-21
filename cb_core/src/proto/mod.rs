@@ -13,39 +13,49 @@ pub struct AuthSessionFlags {
 }
 
 /// 控制平面消息定义
-/// 使用 tag="t", content="c" 模式让 JSON 更紧凑，例如 {"t":"Hello", "c":{...}}
+/// 使用 tag="t", content="c" 模式让 JSON 更紧凑
+///
+/// 修正 (Step 1): 添加 msg_id, reply_to 字段以符合文档 3.3.12.4
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "t", content = "c")]
 pub enum CtrlMsg {
     /// 1. 握手第一步: 客户端打招呼
     Hello {
+        msg_id: Option<String>, // [New]
         protocol_version: u32,
         device_id: String,
-        account_tag: String,     // 用于初筛
+        account_tag: String,
         capabilities: Vec<String>,
         client_nonce: Option<String>,
     },
 
     /// 2. 握手第二步: 服务端确认
     HelloAck {
+        reply_to: Option<String>, // [New]
         server_device_id: String,
         protocol_version: u32,
     },
 
-    // --- M1 新增: OPAQUE 握手相关 (目前用 mock 字符串) ---
+    // --- M1 新增: OPAQUE 握手相关 ---
 
     /// 3. OPAQUE Step 1: Client -> Server
     OpaqueStart {
-        opaque: String, // 实际应用中这里是 base64 编码的 bytes
+        msg_id: Option<String>,   // [New]
+        reply_to: Option<String>, // [New] (关联 HelloAck?)
+        opaque: String,
     },
 
     /// 4. OPAQUE Step 2: Server -> Client
     OpaqueResponse {
+        reply_to: Option<String>, // [New]
+        msg_id: Option<String>,   // [New]
         opaque: String,
     },
 
     /// 5. OPAQUE Step 3: Client -> Server
     OpaqueFinish {
+        reply_to: Option<String>, // [New]
+        msg_id: Option<String>,   // [New]
         opaque: String,
     },
 
@@ -53,63 +63,65 @@ pub enum CtrlMsg {
 
     /// 6. 握手成功
     AuthOk {
+        reply_to: Option<String>, // [New]
         session_flags: AuthSessionFlags,
     },
 
     /// 握手或鉴权失败
     AuthFail {
+        reply_to: Option<String>, // [New]
         error_code: String,
     },
 
     /// 心跳 Ping
     Ping {
+        msg_id: Option<String>, // [New]
         ts: i64,
     },
 
     /// 心跳 Pong
     Pong {
+        reply_to: Option<String>, // [New]
         ts: i64,
     },
 
     /// 广播元数据
     ItemMeta {
+        msg_id: Option<String>, // [New]
         item: crate::model::ItemMeta,
     },
 
     /// 通用错误
     Error {
+        reply_to: Option<String>, // [New]
         error_code: String,
         message: Option<String>,
     },
 
     /// 关闭连接
     Close {
+        msg_id: Option<String>, // [New]
         reason: String,
     },
 }
 
-/// QUIC 数据帧编解码器 (使用 JSON)
-/// 这是一个简单的基于长度前缀的编解码器
-pub struct CBFrameCodec;
-
+// ... CBFrameCodec 实现保持不变 ...
 use tokio_util::codec::{Decoder, Encoder};
 use bytes::{Buf, BufMut, BytesMut};
 use anyhow::Error;
 
-// 简单的长度前缀协议： [Length u32 LE] [JSON Body]
 const MAX_FRAME_SIZE: usize = 10 * 1024 * 1024; // 10MB
+
+pub struct CBFrameCodec;
 
 impl Encoder<CtrlMsg> for CBFrameCodec {
     type Error = Error;
-
     fn encode(&mut self, item: CtrlMsg, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let json_bytes = serde_json::to_vec(&item)?;
         let len = json_bytes.len();
-
         if len > MAX_FRAME_SIZE {
             return Err(anyhow::anyhow!("Frame too large"));
         }
-
         dst.reserve(4 + len);
         dst.put_u32_le(len as u32);
         dst.put_slice(&json_bytes);
@@ -120,13 +132,10 @@ impl Encoder<CtrlMsg> for CBFrameCodec {
 impl Decoder for CBFrameCodec {
     type Item = CtrlMsg;
     type Error = Error;
-
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if src.len() < 4 {
             return Ok(None);
         }
-
-        // 读取长度但不推进游标 (peek)
         let mut len_bytes = [0u8; 4];
         len_bytes.copy_from_slice(&src[..4]);
         let len = u32::from_le_bytes(len_bytes) as usize;
@@ -136,15 +145,12 @@ impl Decoder for CBFrameCodec {
         }
 
         if src.len() < 4 + len {
-            // 数据不够，等待更多数据
             src.reserve(4 + len - src.len());
             return Ok(None);
         }
 
-        // 数据足够，消耗数据
-        src.advance(4); // 跳过长度头
-        let data = src.split_to(len); // 提取 Body
-
+        src.advance(4);
+        let data = src.split_to(len);
         let msg = serde_json::from_slice(&data)?;
         Ok(Some(msg))
     }
