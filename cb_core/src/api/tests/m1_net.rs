@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use crate::api::*;
 use crate::clipboard::ClipboardSnapshot;
 use std::sync::Arc;
@@ -28,14 +29,21 @@ impl CoreEventSink for TestSink {
 fn create_test_core<F>(device_id: &str, uid: &str, config_modifier: F) -> (Arc<Core>, broadcast::Receiver<String>, tempfile::TempDir)
 where F: FnOnce(&mut CoreConfig)
 {
-    let dir = tempfile::tempdir().unwrap();
+    let mut base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    base.push("target");
+    base.push("debug");
+    base.push("clipbridge_tests");
+    std::fs::create_dir_all(&base).unwrap();
+
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("cb_{}_{}", device_id, uid))
+        .tempdir_in(&base)
+        .unwrap();
     let data_path = dir.path().to_string_lossy().to_string();
 
     let mut config = CoreConfig {
         device_id: device_id.to_string(),
         device_name: format!("Test Device {}", device_id),
-        // [修复] 使用 uid 作为 account_tag，确保不同测试用例之间的 mDNS 互相不可见
-        // 这样 test_broadcast 的设备绝不会去连 test_reconnect 的设备
         account_tag: uid.to_string(),
         account_uid: uid.to_string(),
         data_dir: data_path.clone(),
@@ -110,6 +118,15 @@ async fn test_m1_simulation_loopback() {
     }).await;
 
     assert!(connected, "Peers failed to connect via OPAQUE");
+
+    core_a.shutdown();
+    drop(core_a);
+    sleep(Duration::from_millis(200)).await; // 给后台线程一点时间退出（尤其 Windows）
+    core_b.shutdown();
+    drop(core_b);
+    sleep(Duration::from_millis(200)).await; // 给后台线程一点时间退出（尤其 Windows）
+
+
 }
 
 #[tokio::test]
@@ -151,6 +168,9 @@ async fn test_m1_data_broadcast() {
     }
 
     assert!(received, "Device B did not receive the broadcast metadata");
+    core_a.shutdown();
+    drop(core_a);
+    sleep(Duration::from_millis(200)).await; // 给后台线程一点时间退出（尤其 Windows）
 }
 
 #[tokio::test]
@@ -198,6 +218,9 @@ async fn test_m1_reconnection() {
     }).await;
 
     assert!(reconnected, "A failed to reconnect to B");
+    core_a.shutdown();
+    drop(core_a);
+    sleep(Duration::from_millis(200)).await; // 给后台线程一点时间退出（尤其 Windows）
 }
 
 #[tokio::test]
@@ -235,4 +258,7 @@ async fn test_m1_policy_deny() {
 
     assert!(!received, "Policy DenyAll failed! B received data.");
     println!("Policy check passed: Data was blocked.");
+    core_a.shutdown();
+    drop(core_a);
+    sleep(Duration::from_millis(200)).await; // 给后台线程一点时间退出（尤其 Windows）
 }
