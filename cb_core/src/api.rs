@@ -110,7 +110,7 @@ impl Core {
         // --- M1 集成：启动网络管理器 ---
         // 注意：这里假设 NetManager::spawn 是同步封装（内部 spawn 异步任务）
         // 如果是在 FFI 环境且有 Tokio Runtime，这将正常工作。
-        let net_tx = match NetManager::spawn(cfg.clone(), sink.clone(), store_arc.clone()) {
+        let net_tx = match NetManager::spawn(cfg.clone(), sink.clone(), store_arc.clone(),cas.clone()) {
             Ok(tx) => Some(tx),
             Err(e) => {
                 eprintln!("[Core] Failed to start NetManager: {}", e);
@@ -359,9 +359,51 @@ impl Core {
             "net_enabled": self.inner.net.is_some()
         }))
     }
+
+    pub fn ensure_content_cached(
+        &self,
+        item_id: &str,
+        file_id: Option<&str>
+    ) -> anyhow::Result<String> {
+        if self.inner.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
+            anyhow::bail!("core shutdown");
+        }
+
+        // 1. 检查本地是否已经有了？(Lazy optimization)
+        // 只有当 file_id 为空 (Text/Image) 时才能简单查 content_cache 表
+        // 如果是 FileList 里的子文件，逻辑更复杂，这里先统一交给 NetManager 处理，
+        // 或者也可以在这里先查 DB。为了架构解耦，建议发给 NetManager/Session 判断。
+
+        let Some(net_tx) = &self.inner.net else {
+            anyhow::bail!("network not initialized");
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        net_tx.blocking_send(crate::net::NetCmd::EnsureContentCached {
+            item_id: item_id.to_string(),
+            file_id: file_id.map(|s| s.to_string()),
+            force: false,
+            reply: tx,
+        }).map_err(|_| anyhow::anyhow!("NetManager closed"))?;
+
+        // 等待 NetManager 分配任务并返回 transfer_id
+        match futures::executor::block_on(rx) {
+            Ok(res) => res,
+            Err(_) => anyhow::bail!("Failed to get transfer_id"),
+        }
+    }
+
+    /// M3: 取消传输
+    pub fn cancel_transfer(&self, transfer_id: &str) {
+        if let Some(net_tx) = &self.inner.net {
+            let _ = net_tx.try_send(crate::net::NetCmd::CancelTransfer {
+                transfer_id: transfer_id.to_string(),
+            });
+        }
+    }
 }
 
-// 移除旧的测试代码，以适应 M1 新架构
 #[cfg(test)]
 impl Core {
     // 可以在这里添加针对 M1 的测试辅助方法

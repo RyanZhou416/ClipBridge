@@ -691,4 +691,27 @@ pub fn insert_meta_and_history(
         Ok(changes > 0)
     }
 
+    /// M3: 获取 item 的 owner (用于 NetManager 路由)
+    pub fn get_item_owner(&self, item_id: &str) -> anyhow::Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT owner_device_id FROM items WHERE item_id = ?")?;
+        let mut rows = stmt.query([item_id])?;
+        if let Some(row) = rows.next()? {
+            let owner: String = row.get(0)?;
+            Ok(Some(owner))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// M3: 获取 item 的 sha256 (用于 Session 发送文件)
+    pub fn get_item_sha256(&self, item_id: &str) -> anyhow::Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT sha256_hex FROM items WHERE item_id = ?")?;
+        let mut rows = stmt.query([item_id])?;
+        if let Some(row) = rows.next()? {
+            let sha: String = row.get(0)?;
+            Ok(Some(sha))
+        } else {
+            Ok(None)
+        }
+    }
 }

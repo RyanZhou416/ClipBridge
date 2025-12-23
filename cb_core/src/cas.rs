@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-
+#[derive(Clone, Debug)]
 pub struct Cas {
     cache_dir: PathBuf,
     blobs_dir: PathBuf,
@@ -105,5 +105,39 @@ impl Cas {
         &self.cache_dir
     }
 
+    /// M3: 获取一个用于传输的临时文件路径
+    /// 格式: <cache_dir>/tmp/<transfer_id>
+    pub fn get_tmp_path(&self, transfer_id: &str) -> PathBuf {
+        self.tmp_dir.join(transfer_id)
+    }
 
+    /// M3: 将临时文件“转正”为 Blob
+    /// 1. 检查 sha256 是否匹配 (Actor 已校验，这里主要是移动文件)
+    /// 2. 移动(rename)到 blobs 目录
+    /// 返回: 最终的 blob 路径
+    pub fn commit_tmp_file(&self, tmp_path: &Path, sha256: &str) -> anyhow::Result<PathBuf> {
+        let dst = self.blob_path(sha256);
+
+        // 1. 目标如果已存在，直接删除临时文件并返回成功
+        if dst.exists() {
+            let _ = fs::remove_file(tmp_path);
+            return Ok(dst);
+        }
+
+        // 2. 确保父目录存在
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // 3. 原子重命名
+        // 注意：跨分区 rename 可能会失败，但在 cache_dir 内部通常没问题
+        match fs::rename(tmp_path, &dst) {
+            Ok(_) => Ok(dst),
+            Err(e) => {
+                // 如果失败，清理临时文件
+                let _ = fs::remove_file(tmp_path);
+                Err(e.into())
+            }
+        }
+    }
 }

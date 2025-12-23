@@ -6,7 +6,7 @@ use crate::transport::{Connection, Transport};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
-
+use crate::cas::Cas;
 // --- 1. 测试辅助工具 ---
 
 // 一个简单的 Sink，把收到的事件存进内存列表，方便断言
@@ -64,6 +64,7 @@ struct TestContext {
     sink: Arc<TestSink>,
     transport: Arc<Transport>, // 保持引用防止 drop
     store: Arc<Mutex<Store>>,
+    cas: Cas,
 }
 
 async fn setup(name: &str, tag: &str) -> TestContext {
@@ -91,11 +92,12 @@ async fn setup(name: &str, tag: &str) -> TestContext {
     // 初始化 DB (为了 TOFU 表)
     let _ = Store::open(&config.data_dir).unwrap();
     let store = Arc::new(Mutex::new(Store::open(&config.data_dir).unwrap()));
+    let cas = Cas::new(&config.cache_dir).expect("Failed to init CAS");
     let sink = Arc::new(TestSink::new());
     // 端口传 0 让系统自动分配，避免端口冲突
     let transport = Arc::new(Transport::new(0).unwrap());
 
-    TestContext { config, sink, transport,store }
+    TestContext { config, sink, transport, store, cas}
 }
 
 // 建立两个 Transport 之间的真实连接
@@ -134,6 +136,7 @@ async fn test_handshake_success() {
         srv_ctx.config.clone(),
         srv_ctx.sink.clone(),
         srv_ctx.store.clone(),
+        srv_ctx.cas.clone(),
         None
     );
 
@@ -144,6 +147,7 @@ async fn test_handshake_success() {
         cli_ctx.config.clone(),
         cli_ctx.sink.clone(),
         srv_ctx.store.clone(),
+        srv_ctx.cas.clone(),
         Some("srv_ok".to_string())
     );
 
@@ -182,6 +186,7 @@ async fn test_auth_fail_tag_mismatch() {
         srv_ctx.config.clone(),
         srv_ctx.sink.clone(),
         srv_ctx.store.clone(),
+        srv_ctx.cas.clone(),
         None
     );
 
@@ -191,6 +196,7 @@ async fn test_auth_fail_tag_mismatch() {
         cli_ctx.config.clone(),
         cli_ctx.sink.clone(),
         srv_ctx.store.clone(),
+        srv_ctx.cas.clone(),
         Some("srv_diff".to_string())
     );
 
@@ -224,6 +230,7 @@ async fn test_tofu_reject_changed_fingerprint() {
         srv_ctx.config.clone(),
         srv_ctx.sink.clone(),
         srv_ctx.store.clone(),
+        srv_ctx.cas.clone(),
         None
     );
 
@@ -233,6 +240,7 @@ async fn test_tofu_reject_changed_fingerprint() {
         cli_ctx.config.clone(),
         cli_ctx.sink.clone(),
         srv_ctx.store.clone(),
+        srv_ctx.cas.clone(),
         Some("srv_hack".to_string())
     );
 

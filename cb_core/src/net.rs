@@ -28,7 +28,7 @@ pub struct NetManager {
     // 退避记录: device_id -> (失败次数, 下次重试的最早时间戳)
     backoff_map: HashMap<String, BackoffState>,
     known_peers: HashMap<String, PeerCandidate>,
-
+    cas: crate::cas::Cas,
     cmd_rx: mpsc::Receiver<NetCmd>,
     discovery_rx: mpsc::Receiver<DiscoveryEvent>,
     event_sink: Arc<dyn crate::api::CoreEventSink>,
@@ -45,6 +45,21 @@ pub enum NetCmd {
     BroadcastMeta(crate::model::ItemMeta),
     GetPeers(oneshot::Sender<Vec<PeerStatus>>),
     Shutdown,
+    /// 发起内容拉取请求 (Core -> Session)
+    EnsureContentCached {
+        item_id: String,
+        // FileList 需要指定 file_id，Image/Text 为 None
+        file_id: Option<String>,
+        // 强制重传？通常 false
+        force: bool,
+        // 返回 transfer_id (即 req_id)
+        reply: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
+    },
+
+    /// 取消传输
+    CancelTransfer {
+        transfer_id: String,
+    },
 }
 
 impl NetManager {
@@ -52,6 +67,7 @@ impl NetManager {
         config: crate::api::CoreConfig,
         event_sink: Arc<dyn crate::api::CoreEventSink>,
         store: Arc<Mutex<Store>>,
+        cas: crate::cas::Cas,
     ) -> anyhow::Result<mpsc::Sender<NetCmd>> {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
@@ -80,6 +96,7 @@ impl NetManager {
                                         transport,
                                         discovery,
                                         store,
+                                        cas,
                                         sessions: Vec::new(),
                                         pending_dials: HashSet::new(),
                                         backoff_map: HashMap::new(),
@@ -121,6 +138,40 @@ impl NetManager {
                             self.shutdown().await;
                             break;
                         }
+
+                        Some(NetCmd::EnsureContentCached { item_id, file_id, force: _, reply }) => {
+                            // 1. 查库找 owner (A 的 device_id)
+                            let owner_res = {
+                                let store = self.store.lock().unwrap();
+                                // 注意：这行末尾【不要】加分号
+                                store.get_item_owner(&item_id).ok().flatten()
+                            };
+
+                            if let Some(device_id) = owner_res {
+                                // 2. 找对应的 Session
+                                if let Some(session) = self.sessions.iter().find(|s| s.device_id() == device_id && s.is_online()) {
+                                    // 3. 发送命令给 SessionActor
+                                    let _ = session.cmd_tx.send(SessionCmd::RequestTransfer {
+                                        item_id,
+                                        file_id,
+                                        reply_tx: reply,
+                                    }).await;
+                                } else {
+                                    let _ = reply.send(Err(anyhow::anyhow!("Device {} not online", device_id)));
+                                }
+                            } else {
+                                 let _ = reply.send(Err(anyhow::anyhow!("Item not found or no owner info")));
+                            }
+                        }
+
+                        Some(NetCmd::CancelTransfer { transfer_id }) => {
+                            // 广播给所有 session 尝试取消 (因为 NetManager 不记录 transfer_id 属于哪个 session)
+                            // 或者 SessionHandle 可以返回它正在处理的 transfer_ids?
+                            // 简单做法：群发，SessionActor 发现不是自己的会忽略
+                            for s in &self.sessions {
+                                let _ = s.cmd_tx.send(SessionCmd::CancelTransfer { transfer_id: transfer_id.clone() }).await;
+                            }
+                        }
                         None => break,
                     }
                 }
@@ -140,8 +191,9 @@ impl NetManager {
                             conn,
                             self.config.clone(),
                             self.event_sink.clone(),
-                            self.store.clone(), // [新增] 传入 Store
-                            None
+                            self.store.clone(),
+                            self.cas.clone(),
+                            None,
                         );
                         self.sessions.push(handle);
                     }
@@ -348,7 +400,8 @@ impl NetManager {
                         self.config.clone(),
                         self.event_sink.clone(),
                         self.store.clone(),
-                        Some(peer.device_id.clone())
+                        self.cas.clone(),
+                        Some(peer.device_id.clone()),
                     );
                     self.sessions.push(handle);
                     success = true;

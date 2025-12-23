@@ -44,8 +44,20 @@ pub enum SessionRole {
 /// 发送给 Session Actor 的命令
 #[derive(Debug)]
 pub enum SessionCmd {
-    SendMeta(crate::model::ItemMeta), // 发送元数据
-    Shutdown,                         // 关闭会话
+    /// 发送元数据
+    SendMeta(crate::model::ItemMeta),
+    /// 关闭会话
+    Shutdown,                         
+    /// 请求向对端拉取文件 (B 端发起)
+    RequestTransfer {
+        item_id: String,
+        file_id: Option<String>,
+        reply_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>, // 返回 transfer_id
+    },
+    /// 取消本地发起的传输 (B 端取消)
+    CancelTransfer {
+        transfer_id: String,
+    },
 }
 
 /// Session 对外暴露的句柄 (线程安全)
