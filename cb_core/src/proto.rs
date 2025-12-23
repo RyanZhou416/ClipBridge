@@ -1,27 +1,22 @@
 // cb_core/src/proto.rs
-
 use serde::{Deserialize, Serialize};
+use anyhow::Result;
 
-/// 当前协议版本
+// 协议版本号
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// 会话标志位 (在 AuthOk 中返回)
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+// 鉴权成功后的会话标记
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSessionFlags {
-    /// 是否已完成账号所有权验证 (M1 Mock 阶段总是 true)
     pub account_verified: bool,
 }
 
-/// 控制平面消息定义
-/// 使用 tag="t", content="c" 模式让 JSON 更紧凑
-///
-/// 修正 (Step 1): 添加 msg_id, reply_to 字段以符合文档 3.3.12.4
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "t", content = "c")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CtrlMsg {
-    /// 1. 握手第一步: 客户端打招呼
+    // 1. 握手：Hello
     Hello {
-        msg_id: Option<String>, // [New]
+        msg_id: Option<String>,
         protocol_version: u32,
         device_id: String,
         account_tag: String,
@@ -29,78 +24,75 @@ pub enum CtrlMsg {
         client_nonce: Option<String>,
     },
 
-    /// 2. 握手第二步: 服务端确认
+    // 2. 握手：HelloAck
     HelloAck {
-        reply_to: Option<String>, // [New]
+        reply_to: Option<String>,
         server_device_id: String,
         protocol_version: u32,
     },
 
-    // --- M1 新增: OPAQUE 握手相关 ---
-
-    /// 3. OPAQUE Step 1: Client -> Server
-    OpaqueStart {
-        msg_id: Option<String>,   // [New]
-        reply_to: Option<String>, // [New] (关联 HelloAck?)
-        opaque: String,
-    },
-
-    /// 4. OPAQUE Step 2: Server -> Client
-    OpaqueResponse {
-        reply_to: Option<String>, // [New]
-        msg_id: Option<String>,   // [New]
-        opaque: String,
-    },
-
-    /// 5. OPAQUE Step 3: Client -> Server
-    OpaqueFinish {
-        reply_to: Option<String>, // [New]
-        msg_id: Option<String>,   // [New]
-        opaque: String,
-    },
-
-    // ----------------------------------------------------
-
-    /// 6. 握手成功
-    AuthOk {
-        reply_to: Option<String>, // [New]
-        session_flags: AuthSessionFlags,
-    },
-
-    /// 握手或鉴权失败
+    // 3. 鉴权失败
     AuthFail {
-        reply_to: Option<String>, // [New]
+        reply_to: Option<String>,
         error_code: String,
     },
 
-    /// 心跳 Ping
+    // --- OPAQUE 流程 (关键修改：opaque 字段改为 Vec<u8>) ---
+
+    // KE1
+    OpaqueStart {
+        msg_id: Option<String>,
+        reply_to: Option<String>,
+        opaque: Vec<u8>, // [修改] 从 String 改为 Vec<u8> 以支持真实加密数据
+    },
+
+    // KE2
+    OpaqueResponse {
+        msg_id: Option<String>,
+        reply_to: Option<String>,
+        opaque: Vec<u8>, // [修改] Vec<u8>
+    },
+
+    // KE3
+    OpaqueFinish {
+        msg_id: Option<String>,
+        reply_to: Option<String>,
+        opaque: Vec<u8>, // [修改] Vec<u8>
+    },
+
+    // --- 鉴权成功 ---
+    AuthOk {
+        reply_to: Option<String>,
+        session_flags: AuthSessionFlags,
+    },
+
+    // --- 业务与控制 ---
+
     Ping {
-        msg_id: Option<String>, // [New]
+        msg_id: Option<String>,
         ts: i64,
     },
-
-    /// 心跳 Pong
     Pong {
-        reply_to: Option<String>, // [New]
+        reply_to: Option<String>,
         ts: i64,
     },
 
-    /// 广播元数据
+    // 元数据广播
     ItemMeta {
-        msg_id: Option<String>, // [New]
-        item: crate::model::ItemMeta,
+        msg_id: Option<String>,
+        item: crate::api::ItemMeta,
     },
 
-    /// 通用错误
+    // 通用错误
     Error {
-        reply_to: Option<String>, // [New]
+        reply_to: Option<String>,
         error_code: String,
         message: Option<String>,
     },
 
-    /// 关闭连接
+    // 关闭连接
     Close {
-        msg_id: Option<String>, // [New]
+        msg_id: Option<String>,
         reason: String,
     },
 }

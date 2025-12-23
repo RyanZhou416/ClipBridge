@@ -10,7 +10,7 @@ use crate::discovery::{DiscoveryEvent, DiscoveryService, PeerCandidate};
 use crate::session::{SessionActor, SessionCmd, SessionHandle, SessionRole};
 use crate::transport::Transport;
 use crate::util::now_ms;
-use crate::api::PeerStatus;
+use crate::api::{PeerConnectionState, PeerStatus};
 
 /// 网络层管理器
 pub struct NetManager {
@@ -164,12 +164,32 @@ impl NetManager {
 
         // 2. 再把 known_peers 里有但 session 里没有的加为 "Discovered" (可选，文档建议展示所有已发现设备)
         for (did, _) in &self.known_peers {
-            if !peers.iter().any(|p| &p.device_id == did) {
-                peers.push(PeerStatus {
-                    device_id: did.clone(),
-                    state: crate::api::PeerConnectionState::Discovered,
-                });
+            if peers.iter().any(|p| &p.device_id == did) {
+                continue;
             }
+
+            // 优先级：Backoff > Connecting > Discovered
+            let now = now_ms();
+
+            let state = if let Some(bo) = self.backoff_map.get(did) {
+                if now < bo.next_retry_ts {
+                    PeerConnectionState::Backoff
+                } else if self.pending_dials.contains(did) {
+                    PeerConnectionState::Connecting
+                } else {
+                    // 到点但还没发起拨号：也可以认为是 Connecting 或 Discovered
+                    PeerConnectionState::Connecting
+                }
+            } else if self.pending_dials.contains(did) {
+                PeerConnectionState::Connecting
+            } else {
+                PeerConnectionState::Discovered
+            };
+
+            peers.push(PeerStatus {
+                device_id: did.clone(),
+                state,
+            });
         }
 
         peers

@@ -13,14 +13,12 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 anyhow = "1"
 rusqlite = { version = "0.37.0", features = ["bundled","chrono"] }
-directories = "6.0.0"
 sha2 = "0.10"
 hex = "0.4"
-once_cell = "1.19"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.8", features = ["v4", "fast-rng"] }
-rand = "0.9.2"
+rand = "0.8.5"
 base64 = "0.22"
 format = "0.2.4"
 env = "1.0.1"
@@ -41,7 +39,8 @@ rcgen = "0.14.6"
 # --- 局域网发现 ---
 mdns-sd = "0.17.1"
 
-# --- 其他 ---
-thiserror = "1"
-rustls-pki-types = "1.13.2"
-oneshot = "0.1.11"
+opaque-ke = { version = "3.0", features = ["std", "serde"] }
+bincode = "1.3"
+curve25519-dalek = { version = "4.1", features = ["rand_core", "digest"] }
+rand_chacha = "0.3.1"
+tempfile = "3.23.0"

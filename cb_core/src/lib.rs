@@ -17,5 +17,6 @@ pub mod discovery;
 pub mod session;
 pub mod api;
 pub mod transport;
+pub mod crypto;
 
 

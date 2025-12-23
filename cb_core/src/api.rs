@@ -4,7 +4,7 @@ use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use tokio::sync::mpsc;
 
 use crate::clipboard::{make_ingest_plan, ClipboardSnapshot, IngestPlan, LocalIngestDeps};
-use crate::model::ItemMeta;
+pub(crate) use crate::model::ItemMeta;
 use crate::net::{NetCmd, NetManager};
 use crate::{cas::Cas, store::Store, util::now_ms};
 
@@ -14,6 +14,7 @@ use crate::{cas::Cas, store::Store, util::now_ms};
  * 定义了 Core 启动所需的设备 ID、名称、账户信息、存储路径以及各项限制策略。
  */
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct CoreConfig {
     pub device_id: String,     // 本机 device_id（先由壳传入）
     pub device_name: String,   // 设备显示名
@@ -61,9 +62,11 @@ pub struct PeerStatus {
 pub enum PeerConnectionState {
     Discovered,      // 知道地址，但在退避或未连接
     Connecting,      // 正在 TCP/QUIC 握手
-    Handshaking,     // 正在 OPAQUE/TLS 验证
+    TransportReady,
+    AccountVerifying,
     AccountVerified, // 账号已验证，正在查 Policy/TOFU
     Online,          // 完全可用
+    Backoff,
     Offline,         // 彻底断开
 }
 

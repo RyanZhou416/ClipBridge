@@ -1,6 +1,6 @@
 use super::super::*;
 use std::ffi::{CStr, CString};
-use std::fs;
+use std::{fs, thread};
 use std::os::raw::{c_char, c_void};
 use std::path::PathBuf;
 use std::thread::sleep;
@@ -19,11 +19,18 @@ fn unique_test_root(sub: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+
+    // 获取当前线程 ID，确保并发测试绝对不会重名
+    let thread_id = format!("{:?}", thread::current().id())
+        .replace("ThreadId(", "")
+        .replace(")", "");
+
     test_target_dir()
         .join("debug")
         .join("clipbridge_tests")
         .join(sub)
-        .join(format!("run_{nanos}"))
+        // 路径格式：run_时间戳_线程ID
+        .join(format!("run_{}_{}", nanos, thread_id))
 }
 
 fn cleanup_dir(p: &PathBuf) {

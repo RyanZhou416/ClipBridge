@@ -5,5 +5,6 @@ mod plan;
 mod image;
 mod gc;
 mod m1_net;
+mod m1_opaque_integration;
 
 

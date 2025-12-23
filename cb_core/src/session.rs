@@ -81,12 +81,16 @@ impl SessionHandle {
 
     /// 映射内部状态到外部 API 状态
     pub fn public_state(&self) -> PeerConnectionState {
-        let s = self.state.lock().unwrap();
-        match *s {
-            SessionState::TransportReady => PeerConnectionState::Connecting,
-            SessionState::Handshaking(_) => PeerConnectionState::Handshaking,
+        let s = self.state.lock().unwrap().clone();
+        match s {
+            SessionState::TransportReady => PeerConnectionState::TransportReady,
+
+            SessionState::Handshaking(_) => PeerConnectionState::AccountVerifying,
+
             SessionState::AccountVerified => PeerConnectionState::AccountVerified,
             SessionState::Online => PeerConnectionState::Online,
+
+            // actor 结束了，按文档对外是 Offline（是否 Backoff 由 NetManager 决定）
             SessionState::Terminated => PeerConnectionState::Offline,
         }
     }
@@ -94,6 +98,7 @@ impl SessionHandle {
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(SessionCmd::Shutdown).await;
     }
+
 }
 
 #[cfg(test)]

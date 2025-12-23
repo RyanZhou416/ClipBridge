@@ -1,5 +1,3 @@
-// cb_core/src/session/actor.rs
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use anyhow::{Context, Result};
@@ -9,6 +7,18 @@ use tokio::time::{interval, MissedTickBehavior};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::api::{CoreConfig, CoreEventSink};
+use crate::crypto::{
+    CbClientLogin, CbServerLogin,
+    CbClientLoginState, CbServerLoginState,
+    p2p_get_server_registration, DefaultCipherSuite
+};
+// 只引入存在的结构体
+use opaque_ke::{
+    ClientLoginFinishParameters,
+    ServerLoginStartParameters
+};
+use rand::rngs::OsRng;
+
 use crate::proto::{CBFrameCodec, CtrlMsg, PROTOCOL_VERSION, AuthSessionFlags};
 use crate::transport::{Connection, SendStream, RecvStream};
 use crate::store::Store;
@@ -22,7 +32,7 @@ pub struct SessionActor {
     role: SessionRole,
     writer: FramedWrite<SendStream, CBFrameCodec>,
     reader: FramedRead<RecvStream, CBFrameCodec>,
-    config: CoreConfig,
+    config: Arc<CoreConfig>,
     sink: Arc<dyn CoreEventSink>,
     state_ref: Arc<Mutex<SessionState>>,
     peer_id_ref: Arc<Mutex<Option<String>>>,
@@ -31,6 +41,9 @@ pub struct SessionActor {
     remote_fingerprint: String,
     last_active_at: i64,
     cmd_rx: mpsc::Receiver<SessionCmd>,
+
+    opaque_client_state: Option<CbClientLoginState>,
+    opaque_server_state: Option<CbServerLoginState>,
 }
 
 impl SessionActor {
@@ -72,12 +85,13 @@ impl SessionActor {
         let actor_log_id = initial_did.clone();
         let state_ref_clone = state_ref.clone();
         let peer_id_ref_clone = peer_id_ref.clone();
+        let config_arc = Arc::new(config);
 
         tokio::spawn(async move {
             if let Err(e) = Self::run_actor(
                 role,
                 conn,
-                config,
+                config_arc,
                 sink,
                 state_ref_clone,
                 peer_id_ref_clone,
@@ -94,7 +108,7 @@ impl SessionActor {
     async fn run_actor(
         role: SessionRole,
         conn: Connection,
-        config: CoreConfig,
+        config: Arc<CoreConfig>,
         sink: Arc<dyn CoreEventSink>,
         state_ref: Arc<Mutex<SessionState>>,
         peer_id_ref: Arc<Mutex<Option<String>>>,
@@ -122,6 +136,8 @@ impl SessionActor {
             remote_fingerprint: fingerprint,
             last_active_at: now_ms(),
             cmd_rx,
+            opaque_client_state: None,
+            opaque_server_state: None,
         };
 
         actor.start_handshake().await?;
@@ -137,12 +153,6 @@ impl SessionActor {
                             Some(Ok(m)) => {
                                 actor.last_active_at = now_ms();
                                 if let Err(e) = actor.handle_msg(m).await {
-                                    // 如果 handle_msg 内部已经处理了业务错误（如 TOFU 失败），它应该已经发了 Error 帧。
-                                    // 这里我们为了保险，如果是 codec 解析错误等底层错误，才发 PROTOCOL_ERROR。
-                                    // 但区分起来比较麻烦。
-
-                                    // 简单策略：仅记录日志。我们假设 handle_msg 里的逻辑会负责“体面地拒绝”。
-                                    // 如果 handle_msg 只是单纯 crash，这里发一个 Generic Error 也没问题。
                                     println!("[Session] Error handling msg: {:?}", e);
                                     return Err(e);
                                 }
@@ -155,14 +165,14 @@ impl SessionActor {
                         match cmd {
                             Some(SessionCmd::SendMeta(meta)) => {
                                 if actor.state == SessionState::Online {
-                                    actor.writer.send(CtrlMsg::ItemMeta {
+                                    actor.send_ctrl(CtrlMsg::ItemMeta {
                                         msg_id: Some(uuid::Uuid::new_v4().to_string()),
                                         item: meta
                                     }).await?;
                                 }
                             }
                             Some(SessionCmd::Shutdown) => {
-                                let _ = actor.writer.send(CtrlMsg::Close {
+                                let _ = actor.send_ctrl(CtrlMsg::Close {
                                     msg_id: Some(uuid::Uuid::new_v4().to_string()),
                                     reason: "Shutdown".into()
                                 }).await;
@@ -196,16 +206,6 @@ impl SessionActor {
     }
 
     fn update_state(&mut self, new_state: SessionState) {
-        // Only log major transitions
-        match (&self.state, &new_state) {
-            (SessionState::Handshaking(_), SessionState::AccountVerified) => {
-                println!("[Session] Handshake OK, Account Verified. Checking TOFU...");
-            }
-            (SessionState::AccountVerified, SessionState::Online) => {
-                println!("[Session] TOFU OK. Session ONLINE.");
-            }
-            _ => {}
-        }
         self.state = new_state.clone();
         let mut s = self.state_ref.lock().unwrap();
         *s = new_state;
@@ -215,6 +215,10 @@ impl SessionActor {
         self.remote_device_id = Some(id.clone());
         let mut lock = self.peer_id_ref.lock().unwrap();
         *lock = Some(id);
+    }
+
+    async fn send_ctrl(&mut self, msg: CtrlMsg) -> Result<()> {
+        self.writer.send(msg).await.context("Failed to send CtrlMsg")
     }
 
     async fn start_handshake(&mut self) -> Result<()> {
@@ -229,7 +233,7 @@ impl SessionActor {
                     capabilities: vec!["text".into(), "image".into(), "file".into()],
                     client_nonce: Some(uuid::Uuid::new_v4().to_string()),
                 };
-                self.writer.send(msg).await?;
+                self.send_ctrl(msg).await?;
                 self.update_state(SessionState::Handshaking(HandshakeStep::WaitingForHelloAck));
             }
             SessionRole::Server => {
@@ -244,11 +248,11 @@ impl SessionActor {
             CtrlMsg::Hello { device_id, account_tag, msg_id, .. } => {
                 if self.role == SessionRole::Server {
                     if account_tag != self.config.account_tag {
-                        let _ = self.writer.send(CtrlMsg::AuthFail {
+                        let _ = self.send_ctrl(CtrlMsg::AuthFail {
                             reply_to: msg_id.clone(),
                             error_code: "AUTH_ACCOUNT_TAG_MISMATCH".into(),
                         }).await;
-                        let _ = self.writer.send(CtrlMsg::Close {
+                        let _ = self.send_ctrl(CtrlMsg::Close {
                             msg_id: None,
                             reason: "Auth failed".into(),
                         }).await;
@@ -256,7 +260,7 @@ impl SessionActor {
                     }
 
                     self.update_remote_id(device_id);
-                    self.writer.send(CtrlMsg::HelloAck {
+                    self.send_ctrl(CtrlMsg::HelloAck {
                         reply_to: msg_id,
                         server_device_id: self.config.device_id.clone(),
                         protocol_version: PROTOCOL_VERSION,
@@ -265,91 +269,59 @@ impl SessionActor {
                 }
             }
 
-            CtrlMsg::HelloAck { server_device_id, reply_to, .. } => {
+            CtrlMsg::HelloAck { server_device_id, .. } => {
                 if self.role == SessionRole::Client {
                     self.update_remote_id(server_device_id);
-                    self.writer.send(CtrlMsg::OpaqueStart {
-                        msg_id: Some(uuid::Uuid::new_v4().to_string()),
-                        reply_to: reply_to,
-                        opaque: "mock_ke1".into()
+                    self.start_opaque_login().await?;
+                }
+            }
+
+            CtrlMsg::OpaqueStart { opaque: bytes, .. } => {
+                if self.role == SessionRole::Server {
+                    self.handle_opaque_start(&bytes).await?;
+                }
+            }
+
+            CtrlMsg::OpaqueResponse { opaque: bytes, .. } => {
+                if self.role == SessionRole::Client {
+                    self.handle_opaque_response(&bytes).await?;
+                }
+            }
+
+            CtrlMsg::OpaqueFinish { msg_id, opaque: bytes, .. } => {
+                if self.role == SessionRole::Server {
+                    self.handle_opaque_finish(&bytes).await?;
+
+                    if let Err(e) = self.perform_tofu_check_async().await {
+                        let _ = self.send_ctrl(CtrlMsg::Error {
+                            reply_to: msg_id.clone(),
+                            error_code: "POLICY_REJECT".into(),
+                            message: Some(e.to_string()),
+                        }).await;
+                        return Err(e);
+                    }
+
+                    self.send_ctrl(CtrlMsg::AuthOk {
+                        reply_to: msg_id,
+                        session_flags: AuthSessionFlags { account_verified: true }
                     }).await?;
-                    self.update_state(SessionState::Handshaking(HandshakeStep::OpaqueResponse));
+
+                    self.transition_to_online().await?;
                 }
             }
 
-            CtrlMsg::OpaqueStart { msg_id, .. } => {
-                self.writer.send(CtrlMsg::OpaqueResponse {
-                    reply_to: msg_id,
-                    msg_id: Some(uuid::Uuid::new_v4().to_string()),
-                    opaque: "mock_ke2".into()
-                }).await?;
-                self.update_state(SessionState::Handshaking(HandshakeStep::OpaqueFinish));
-            }
-
-            CtrlMsg::OpaqueResponse { msg_id, .. } => {
-                self.writer.send(CtrlMsg::OpaqueFinish {
-                    reply_to: msg_id,
-                    msg_id: Some(uuid::Uuid::new_v4().to_string()),
-                    opaque: "mock_ke3".into()
-                }).await?;
-                self.update_state(SessionState::Handshaking(HandshakeStep::WaitingAuthOk));
-            }
-
-            // --- Server End of Handshake ---
-            CtrlMsg::OpaqueFinish { msg_id, .. } => {
-                // 1. 状态流转：账号已验证
-                self.update_state(SessionState::AccountVerified);
-
-                // 2. 执行 TOFU 检查 (Policy Check)
-                // [修改重点]：这里不再直接用 '?' 抛出错误，而是捕获错误进行处理
-                if let Err(e) = self.perform_tofu_check_async().await {
-                    let err_str = e.to_string();
-
-                    // 根据错误内容决定发送给对方的错误码
-                    let error_code = if err_str.contains("TLS_PIN_MISMATCH") {
-                        "TLS_PIN_MISMATCH" // 明确告诉对方：指纹不对
-                    } else {
-                        "POLICY_REJECT"    // 其他策略拒绝
-                    };
-
-                    // 先发送具体的错误消息给对方
-                    // (复用你已有的 send_error_and_close 或手动发送 CtrlMsg::Error)
-                    let _ = self.writer.send(CtrlMsg::Error {
-                        reply_to: msg_id.clone(), // 回复这条请求
-                        error_code: error_code.into(),
-                        message: Some(err_str),
-                    }).await;
-
-                    // 发完消息后，再返回 Err，触发本地断开
-                    return Err(e);
-                }
-
-                // 3. 如果没出错，才发送 AuthOk
-                self.writer.send(CtrlMsg::AuthOk {
-                    reply_to: msg_id,
-                    session_flags: AuthSessionFlags { account_verified: true }
-                }).await?;
-
-                // 4. 上线
-                self.set_online().await;
-            }
-
-            // --- Client End of Handshake ---
             CtrlMsg::AuthOk { .. } => {
-                // 1. Account Verified (Server said OK)
-                self.update_state(SessionState::AccountVerified);
-
-                // 2. Perform TOFU Check
-                self.perform_tofu_check_async().await?;
-
-                // 3. Go Online
-                self.set_online().await;
+                if self.role == SessionRole::Client {
+                    self.update_state(SessionState::AccountVerified);
+                    self.perform_tofu_check_async().await?;
+                    self.transition_to_online().await?;
+                }
             }
 
             CtrlMsg::AuthFail { error_code, .. } => anyhow::bail!("Remote AuthFail: {}", error_code),
 
             CtrlMsg::Ping { ts, msg_id } => {
-                self.writer.send(CtrlMsg::Pong { reply_to: msg_id, ts }).await?;
+                self.send_ctrl(CtrlMsg::Pong { reply_to: msg_id, ts }).await?;
             }
             CtrlMsg::Pong { .. } => {},
 
@@ -367,6 +339,107 @@ impl SessionActor {
             CtrlMsg::Error { error_code, message, .. } => anyhow::bail!("Remote error {}: {:?}", error_code, message),
             CtrlMsg::Close { .. } => anyhow::bail!("Remote closed connection"),
         }
+        Ok(())
+    }
+
+    // --- OPAQUE Core Logic (v3.0.0 Fixed) ---
+
+    async fn start_opaque_login(&mut self) -> anyhow::Result<()> {
+        let mut rng = OsRng;
+        // TODO: Consider using a dedicated 'pairing_secret' instead of 'account_uid' for stronger security in production.
+        let password = self.config.account_uid.as_bytes();
+
+        let start_result = CbClientLogin::start(&mut rng, password)
+            .map_err(|e| anyhow::anyhow!("OPAQUE start failed: {:?}", e))?;
+
+        self.opaque_client_state = Some(start_result.state);
+
+        let payload = bincode::serialize(&start_result.message)?;
+        self.send_ctrl(CtrlMsg::OpaqueStart {
+            msg_id: Some(uuid::Uuid::new_v4().to_string()),
+            reply_to: None,
+            opaque: payload
+        }).await?;
+
+        self.update_state(SessionState::Handshaking(HandshakeStep::OpaqueResponse));
+        Ok(())
+    }
+
+    async fn handle_opaque_response(&mut self, response_bytes: &[u8]) -> anyhow::Result<()> {
+        let client_state = self.opaque_client_state.take()
+            .ok_or_else(|| anyhow::anyhow!("Protocol error: Missing client state"))?;
+
+        let password = self.config.account_uid.as_bytes();
+
+        // [修复] 显式类型标注 (修复 E0277)
+        let server_response: opaque_ke::CredentialResponse<DefaultCipherSuite> =
+            bincode::deserialize(response_bytes)
+                .map_err(|_| anyhow::anyhow!("Invalid OpaqueResponse bytes"))?;
+
+        // [修复] v3.0.0 finish 不需要 rng (修复 E0061: 3 arguments)
+        let finish_result = client_state.finish(
+            password,
+            server_response,
+            ClientLoginFinishParameters::default(),
+        ).map_err(|e| anyhow::anyhow!("OPAQUE finish failed: {:?}", e))?;
+
+        let payload = bincode::serialize(&finish_result.message)?;
+        self.send_ctrl(CtrlMsg::OpaqueFinish {
+            msg_id: Some(uuid::Uuid::new_v4().to_string()),
+            reply_to: None,
+            opaque: payload
+        }).await?;
+
+        self.update_state(SessionState::Handshaking(HandshakeStep::WaitingAuthOk));
+        Ok(())
+    }
+
+    async fn handle_opaque_start(&mut self, start_bytes: &[u8]) -> anyhow::Result<()> {
+        let mut rng = OsRng;
+        let identifier = b"clipbridge-user";
+
+        // [修复] 参数类型 (修复 E0609)
+        let (server_setup, server_rec) = p2p_get_server_registration(&self.config.account_uid)?;
+
+        let client_message = bincode::deserialize(start_bytes)
+            .map_err(|_| anyhow::anyhow!("Invalid OpaqueStart bytes"))?;
+
+        // [修复] v3.0.0 start 6 arguments (修复 E0061)
+        // (rng, setup, user_record, message, server_id, params)
+        // 移除了 credential_request
+        let start_result = CbServerLogin::start(
+            &mut rng,
+            &server_setup,
+            Some(server_rec), // [修复] 传递 owned value (修复 E0308)
+            client_message,
+            identifier,
+            ServerLoginStartParameters::default(),
+        ).map_err(|e| anyhow::anyhow!("OPAQUE server start failed: {:?}", e))?;
+
+        self.opaque_server_state = Some(start_result.state);
+
+        let payload = bincode::serialize(&start_result.message)?;
+        self.send_ctrl(CtrlMsg::OpaqueResponse {
+            msg_id: Some(uuid::Uuid::new_v4().to_string()),
+            reply_to: None,
+            opaque: payload
+        }).await?;
+
+        self.update_state(SessionState::Handshaking(HandshakeStep::OpaqueFinish));
+        Ok(())
+    }
+
+    async fn handle_opaque_finish(&mut self, finish_bytes: &[u8]) -> anyhow::Result<()> {
+        let server_state = self.opaque_server_state.take()
+            .ok_or_else(|| anyhow::anyhow!("Protocol error: Missing server state"))?;
+
+        let client_message = bincode::deserialize(finish_bytes)
+            .map_err(|_| anyhow::anyhow!("Invalid OpaqueFinish bytes"))?;
+
+        let _session_key = server_state.finish(client_message)
+            .map_err(|e| anyhow::anyhow!("Authentication failed: {:?}", e))?;
+
+        self.update_state(SessionState::AccountVerified);
         Ok(())
     }
 
@@ -394,7 +467,7 @@ impl SessionActor {
         }).await?
     }
 
-    async fn set_online(&mut self) {
+    async fn transition_to_online(&mut self) -> Result<()> {
         self.update_state(SessionState::Online);
         if let Some(did) = &self.remote_device_id {
             let json = serde_json::json!({
@@ -404,11 +477,12 @@ impl SessionActor {
             });
             self.sink.emit(json.to_string());
         }
+        Ok(())
     }
 
     async fn tick_heartbeat(&mut self) -> Result<()> {
         if now_ms() - self.last_active_at > HEARTBEAT_TIMEOUT.as_millis() as i64 {
-            let _ = self.writer.send(CtrlMsg::Error {
+            let _ = self.send_ctrl(CtrlMsg::Error {
                 reply_to: None,
                 error_code: "TIMEOUT".into(),
                 message: Some("Heartbeat timeout".into())
@@ -416,20 +490,11 @@ impl SessionActor {
             anyhow::bail!("Heartbeat timeout");
         }
         if self.state == SessionState::Online {
-            self.writer.send(CtrlMsg::Ping {
+            self.send_ctrl(CtrlMsg::Ping {
                 msg_id: Some(uuid::Uuid::new_v4().to_string()),
                 ts: now_ms()
             }).await?;
         }
-        Ok(())
-    }
-
-    async fn send_error_and_close(&mut self, code: &str, msg: &str) -> Result<()> {
-        let _ = self.writer.send(CtrlMsg::Error {
-            reply_to: None,
-            error_code: code.into(),
-            message: Some(msg.into()),
-        }).await;
         Ok(())
     }
 }
