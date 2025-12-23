@@ -2,7 +2,7 @@ use crate::api::*;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
-
+use super::m1_net::create_test_core;
 // 本地实现的 Mock Event Sink
 struct TestSink {
     tx: broadcast::Sender<String>,
@@ -21,27 +21,7 @@ impl CoreEventSink for TestSink {
     }
 }
 
-// 本地辅助函数：创建临时的 Core 实例
-fn create_test_core(device_id: &str, uid: &str) -> (Arc<Core>, broadcast::Receiver<String>, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let config = CoreConfig {
-        device_id: device_id.to_string(),
-        device_name: format!("Test Device {}", device_id),
-        account_tag: "test_tag".to_string(),
-        account_uid: uid.to_string(), // 密码字段
-        // [修复 1] 移除了 account_key，因为 CoreConfig 中可能已经没有这个字段了
-        // 或者如果你的 Config 确实还有这个字段但改名了，请相应调整。
-        // 目前看来只要 account_uid 就够了。
-        data_dir: dir.path().to_string_lossy().to_string(),
-        ..Default::default()
-    };
 
-    let (sink, rx) = TestSink::new();
-    let core = Core::init(config, sink);
-
-    // [修复 2] 将 Core 包装进 Arc
-    (Arc::new(core), rx, dir)
-}
 
 #[tokio::test]
 async fn test_opaque_handshake_integration() {
@@ -49,8 +29,8 @@ async fn test_opaque_handshake_integration() {
 
     // 1. 初始化两个 Core
     // 使用下划线前缀避免未使用变量警告
-    let (_c1, mut c1_rx, _d1) = create_test_core("dev1", shared_uid);
-    let (_c2, mut c2_rx, _d2) = create_test_core("dev2", shared_uid);
+    let (_c1, mut c1_rx, _d1) = create_test_core("dev1", shared_uid,|_| {});
+    let (_c2, mut c2_rx, _d2) = create_test_core("dev2", shared_uid,|_| {});
 
     println!("Cores initialized. Waiting for mDNS discovery and OPAQUE handshake...");
 

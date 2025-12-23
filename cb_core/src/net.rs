@@ -11,13 +11,15 @@ use crate::session::{SessionActor, SessionCmd, SessionHandle, SessionRole};
 use crate::transport::Transport;
 use crate::util::now_ms;
 use crate::api::{PeerConnectionState, PeerStatus};
+use crate::store::Store;
+use std::sync::Mutex;
 
 /// 网络层管理器
 pub struct NetManager {
     config: crate::api::CoreConfig,
     transport: Arc<Transport>,
     discovery: DiscoveryService,
-
+    store: Arc<Mutex<Store>>,
     sessions: Vec<SessionHandle>,
 
     // 正在拨号中的集合 (防止并发拨号)
@@ -49,6 +51,7 @@ impl NetManager {
     pub fn spawn(
         config: crate::api::CoreConfig,
         event_sink: Arc<dyn crate::api::CoreEventSink>,
+        store: Arc<Mutex<Store>>,
     ) -> anyhow::Result<mpsc::Sender<NetCmd>> {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
@@ -76,6 +79,7 @@ impl NetManager {
                                         config,
                                         transport,
                                         discovery,
+                                        store,
                                         sessions: Vec::new(),
                                         pending_dials: HashSet::new(),
                                         backoff_map: HashMap::new(),
@@ -136,6 +140,7 @@ impl NetManager {
                             conn,
                             self.config.clone(),
                             self.event_sink.clone(),
+                            self.store.clone(), // [新增] 传入 Store
                             None
                         );
                         self.sessions.push(handle);
@@ -342,6 +347,7 @@ impl NetManager {
                         conn,
                         self.config.clone(),
                         self.event_sink.clone(),
+                        self.store.clone(),
                         Some(peer.device_id.clone())
                     );
                     self.sessions.push(handle);

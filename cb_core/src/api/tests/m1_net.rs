@@ -26,11 +26,10 @@ impl CoreEventSink for TestSink {
 }
 
 // 统一的 Core 创建函数
-fn create_test_core<F>(device_id: &str, uid: &str, config_modifier: F) -> (Arc<Core>, broadcast::Receiver<String>, tempfile::TempDir)
+pub(crate) fn create_test_core<F>(device_id: &str, uid: &str, config_modifier: F) -> (Arc<Core>, broadcast::Receiver<String>, tempfile::TempDir)
 where F: FnOnce(&mut CoreConfig)
 {
-    let mut base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    base.push("target");
+    let mut base = workspace_target_dir();
     base.push("debug");
     base.push("clipbridge_tests");
     std::fs::create_dir_all(&base).unwrap();
@@ -60,14 +59,14 @@ where F: FnOnce(&mut CoreConfig)
 }
 
 // 异步包装：将阻塞调用移到 blocking thread
-async fn list_peers_async(core: &Arc<Core>) -> Vec<PeerStatus> {
+pub(crate) async fn list_peers_async(core: &Arc<Core>) -> Vec<PeerStatus> {
     let c = core.clone();
     tokio::task::spawn_blocking(move || {
         c.list_peers().unwrap_or_default()
     }).await.unwrap()
 }
 
-async fn wait_for<F, Fut>(timeout: Duration, mut condition: F) -> bool
+pub(crate) async fn wait_for<F, Fut>(timeout: Duration, mut condition: F) -> bool
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
@@ -80,6 +79,24 @@ where
         sleep(Duration::from_millis(200)).await;
     }
     false
+}
+
+fn workspace_target_dir() -> PathBuf {
+    // 如果 cargo 明确给了 target dir（最标准）
+    if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        return PathBuf::from(dir);
+    }
+
+    // 否则：从当前 crate 的 manifest_dir 往上找 workspace 根
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    // 假设 workspace 结构是：
+    // <workspace>/cb_core
+    // <workspace>/Cargo.toml
+    manifest
+        .parent()        // 回到 workspace 根
+        .expect("cb_core should be inside workspace")
+        .join("target")
 }
 
 // --- 2. 测试用例 ---
@@ -100,10 +117,9 @@ fn test_core_api_basics() {
 
 #[tokio::test]
 async fn test_m1_simulation_loopback() {
-    let shared_uid = "m1_loopback_secret";
-
-    let (core_a, _rx_a, _dir_a) = create_test_core("dev_a", shared_uid, |_| {});
-    let (core_b, _rx_b, _dir_b) = create_test_core("dev_b", shared_uid, |_| {});
+    let shared_uid = format!("m1_loopback_secret{}", uuid::Uuid::new_v4());
+    let (core_a, _rx_a, _dir_a) = create_test_core("dev_a", &shared_uid, |_| {});
+    let (core_b, _rx_b, _dir_b) = create_test_core("dev_b", &shared_uid, |_| {});
 
     println!("Core A and B started. Waiting for discovery...");
 
@@ -171,14 +187,16 @@ async fn test_m1_data_broadcast() {
     core_a.shutdown();
     drop(core_a);
     sleep(Duration::from_millis(200)).await; // 给后台线程一点时间退出（尤其 Windows）
+    _core_b.shutdown();
+    drop(_core_b);
+    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
 async fn test_m1_reconnection() {
-    let shared_uid = "m1_recon_secret";
-
-    let (core_a, _rx_a, dir_a) = create_test_core("recon_a", shared_uid, |_| {});
-    let (core_b, _rx_b, _dir_b) = create_test_core("recon_b", shared_uid, |_| {});
+    let shared_uid = format!("m1_recon_secret{}", uuid::Uuid::new_v4());
+    let (core_a, _rx_a, dir_a) = create_test_core("recon_a", &shared_uid, |_| {});
+    let (core_b, _rx_b, _dir_b) = create_test_core("recon_b", &shared_uid, |_| {});
 
     println!("1. Waiting for initial connection...");
     let connected = wait_for(Duration::from_secs(5), || async {
@@ -209,7 +227,7 @@ async fn test_m1_reconnection() {
     }
 
     println!("3. Reviving B...");
-    let (_core_b_new, _rx_b_new, _dir_b_new) = create_test_core("recon_b", shared_uid, |_| {});
+    let (_core_b_new, _rx_b_new, _dir_b_new) = create_test_core("recon_b", &shared_uid, |_| {});
 
     println!("Waiting for reconnection...");
     let reconnected = wait_for(Duration::from_secs(10), || async {

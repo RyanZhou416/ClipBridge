@@ -41,7 +41,7 @@ pub struct SessionActor {
     remote_fingerprint: String,
     last_active_at: i64,
     cmd_rx: mpsc::Receiver<SessionCmd>,
-
+    store: Arc<Mutex<Store>>,
     opaque_client_state: Option<CbClientLoginState>,
     opaque_server_state: Option<CbServerLoginState>,
 }
@@ -52,6 +52,7 @@ impl SessionActor {
         conn: Connection,
         config: CoreConfig,
         sink: Arc<dyn CoreEventSink>,
+        store: Arc<Mutex<Store>>,
         expected_peer_id: Option<String>,
     ) -> SessionHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
@@ -70,10 +71,7 @@ impl SessionActor {
             None => "unknown".to_string(),
         };
 
-        let initial_did = match expected_peer_id {
-            Some(id) => id,
-            None => "pending_server".to_string(),
-        };
+        let initial_did = expected_peer_id.unwrap_or_else(|| "pending_server".to_string());
 
         let handle = SessionHandle {
             initial_id: initial_did.clone(),
@@ -93,6 +91,7 @@ impl SessionActor {
                 conn,
                 config_arc,
                 sink,
+                store,
                 state_ref_clone,
                 peer_id_ref_clone,
                 cmd_rx,
@@ -110,6 +109,7 @@ impl SessionActor {
         conn: Connection,
         config: Arc<CoreConfig>,
         sink: Arc<dyn CoreEventSink>,
+        store: Arc<Mutex<Store>>,
         state_ref: Arc<Mutex<SessionState>>,
         peer_id_ref: Arc<Mutex<Option<String>>>,
         cmd_rx: mpsc::Receiver<SessionCmd>,
@@ -129,6 +129,7 @@ impl SessionActor {
             reader,
             config,
             sink,
+            store,
             state_ref,
             peer_id_ref,
             state: SessionState::TransportReady,
@@ -327,12 +328,30 @@ impl SessionActor {
 
             CtrlMsg::ItemMeta { item, .. } => {
                 if self.state == SessionState::Online {
-                    let json = serde_json::json!({
-                        "type": "ITEM_META_ADDED",
-                        "ts_ms": now_ms(),
-                        "payload": { "meta": item }
-                    });
-                    self.sink.emit(json.to_string());
+                    let store = self.store.clone();
+                    let account_uid = self.config.account_uid.clone();
+                    let item_clone = item.clone();
+
+                    // [M2 实现]
+                    // 1. 切换到 blocking 线程去写库
+                    let is_new = tokio::task::spawn_blocking(move || {
+                        let mut guard = store.lock().unwrap();
+                        let now = now_ms();
+                        // 调用我们在 Step 1 写的函数
+                        guard.insert_remote_item(&account_uid, &item_clone, now)
+                    }).await??;
+
+                    // 2. 只有当是新数据时 (M2-2 幂等性)，才 emit 事件 (M2-1)
+                    if is_new {
+                        let json = serde_json::json!({
+                            "type": "ITEM_META_ADDED",
+                            "ts_ms": now_ms(),
+                            "payload": { "meta": item }
+                        });
+                        self.sink.emit(json.to_string());
+                    } else {
+                        // 可选：打印日志 "Ignored duplicate meta"
+                    }
                 }
             }
 

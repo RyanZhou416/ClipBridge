@@ -104,12 +104,13 @@ impl Core {
     */
     pub fn init(cfg: CoreConfig, sink: Arc<dyn CoreEventSink>) -> Self {
         let store = Store::open(&cfg.data_dir).expect("open store");
+        let store_arc = Arc::new(Mutex::new(store));
         let cas = Cas::new(&cfg.cache_dir).expect("init cas");
 
         // --- M1 集成：启动网络管理器 ---
         // 注意：这里假设 NetManager::spawn 是同步封装（内部 spawn 异步任务）
         // 如果是在 FFI 环境且有 Tokio Runtime，这将正常工作。
-        let net_tx = match NetManager::spawn(cfg.clone(), sink.clone()) {
+        let net_tx = match NetManager::spawn(cfg.clone(), sink.clone(), store_arc.clone()) {
             Ok(tx) => Some(tx),
             Err(e) => {
                 eprintln!("[Core] Failed to start NetManager: {}", e);
@@ -121,7 +122,7 @@ impl Core {
             cfg,
             sink,
             is_shutdown: AtomicBool::new(false),
-            store: Mutex::new(store),
+            store: store_arc,
             cas,
             net: net_tx,
         };
@@ -370,9 +371,8 @@ pub(crate) struct Inner {
     pub cfg: CoreConfig,
     pub sink: Arc<dyn CoreEventSink>,
     pub is_shutdown: AtomicBool,
-    pub store: Mutex<Store>,
+    pub store: Arc<Mutex<Store>>,
     pub cas: Cas,
-    // M1 集成：改为 NetCmd 发送端
     pub net: Option<mpsc::Sender<NetCmd>>,
 }
 

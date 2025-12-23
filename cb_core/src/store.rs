@@ -636,4 +636,59 @@ pub fn insert_meta_and_history(
         Ok(())
     }
 
+    // [新增] M2: 处理远端广播来的元数据
+    // 返回 true 表示这是新数据（需要触发事件），false 表示已存在（忽略）
+    pub fn insert_remote_item(
+        &mut self,
+        account_uid: &str,
+        meta: &ItemMeta,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        let tx = self.conn.transaction()?;
+
+        // 1. content_cache: 远端来的默认 present=0 (Lazy Fetch)
+        // 如果本地已存在(可能曾经下载过)，IGNORE 会保留原有状态
+        tx.execute(
+            r#"INSERT OR IGNORE INTO content_cache
+               (sha256_hex, total_bytes, present, last_access_ts_ms, created_ts_ms)
+               VALUES (?1, ?2, 0, ?3, ?4)"#,
+            params![meta.content.sha256, meta.content.total_bytes, now_ms, meta.created_ts_ms],
+        )?;
+
+        // 2. items: 插入元数据
+        let preview_json = serde_json::to_string(&meta.preview)?;
+        let files_json = serde_json::to_string(&meta.files)?;
+
+        tx.execute(
+            r#"INSERT OR IGNORE INTO items
+               (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, files_json, expires_ts_ms)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+            params![
+                meta.item_id,
+                Self::kind_to_str(&meta.kind),
+                meta.source_device_id,
+                meta.created_ts_ms,
+                meta.size_bytes,
+                meta.content.mime,
+                meta.content.sha256,
+                preview_json,
+                files_json,
+                meta.expires_ts_ms
+            ],
+        )?;
+
+        // 3. history: 插入历史
+        // 使用 INSERT OR IGNORE。如果 (account_uid, item_id) 已存在，则不执行插入，changes() 为 0
+        let changes = tx.execute(
+            r#"INSERT OR IGNORE INTO history(account_uid, item_id, sort_ts_ms, source_device_id)
+               VALUES (?1, ?2, ?3, ?4)"#,
+            params![account_uid, meta.item_id, meta.created_ts_ms, meta.source_device_id],
+        )?;
+
+        tx.commit()?;
+
+        // 如果 history 表发生了写入，说明这是一条新记录
+        Ok(changes > 0)
+    }
+
 }

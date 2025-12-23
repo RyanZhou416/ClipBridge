@@ -63,6 +63,7 @@ struct TestContext {
     config: CoreConfig,
     sink: Arc<TestSink>,
     transport: Arc<Transport>, // 保持引用防止 drop
+    store: Arc<Mutex<Store>>,
 }
 
 async fn setup(name: &str, tag: &str) -> TestContext {
@@ -89,12 +90,12 @@ async fn setup(name: &str, tag: &str) -> TestContext {
 
     // 初始化 DB (为了 TOFU 表)
     let _ = Store::open(&config.data_dir).unwrap();
-
+    let store = Arc::new(Mutex::new(Store::open(&config.data_dir).unwrap()));
     let sink = Arc::new(TestSink::new());
     // 端口传 0 让系统自动分配，避免端口冲突
     let transport = Arc::new(Transport::new(0).unwrap());
 
-    TestContext { config, sink, transport }
+    TestContext { config, sink, transport,store }
 }
 
 // 建立两个 Transport 之间的真实连接
@@ -132,6 +133,7 @@ async fn test_handshake_success() {
         srv_conn,
         srv_ctx.config.clone(),
         srv_ctx.sink.clone(),
+        srv_ctx.store.clone(),
         None
     );
 
@@ -141,6 +143,7 @@ async fn test_handshake_success() {
         cli_conn,
         cli_ctx.config.clone(),
         cli_ctx.sink.clone(),
+        srv_ctx.store.clone(),
         Some("srv_ok".to_string())
     );
 
@@ -178,6 +181,7 @@ async fn test_auth_fail_tag_mismatch() {
         srv_conn,
         srv_ctx.config.clone(),
         srv_ctx.sink.clone(),
+        srv_ctx.store.clone(),
         None
     );
 
@@ -186,6 +190,7 @@ async fn test_auth_fail_tag_mismatch() {
         cli_conn,
         cli_ctx.config.clone(),
         cli_ctx.sink.clone(),
+        srv_ctx.store.clone(),
         Some("srv_diff".to_string())
     );
 
@@ -218,6 +223,7 @@ async fn test_tofu_reject_changed_fingerprint() {
         srv_conn,
         srv_ctx.config.clone(),
         srv_ctx.sink.clone(),
+        srv_ctx.store.clone(),
         None
     );
 
@@ -226,6 +232,7 @@ async fn test_tofu_reject_changed_fingerprint() {
         cli_conn,
         cli_ctx.config.clone(),
         cli_ctx.sink.clone(),
+        srv_ctx.store.clone(),
         Some("srv_hack".to_string())
     );
 
