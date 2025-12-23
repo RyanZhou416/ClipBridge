@@ -1,12 +1,12 @@
-// cb_core/src/api/mod.rs
+// cb_core/src/api.rs
 
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use tokio::sync::mpsc;
 
-use crate::{cas::Cas, store::Store, util::now_ms};
 use crate::clipboard::{make_ingest_plan, ClipboardSnapshot, IngestPlan, LocalIngestDeps};
 use crate::model::ItemMeta;
-use crate::net::{NetManager, NetCmd};
+use crate::net::{NetCmd, NetManager};
+use crate::{cas::Cas, store::Store, util::now_ms};
 
 /**
  * Core 的配置项。

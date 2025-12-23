@@ -1,5 +1,5 @@
 pub mod prelude;
-pub mod api;
+
 
 pub mod model;
 pub mod util;
@@ -13,7 +13,9 @@ pub mod testsupport;
 pub mod net;
 pub mod proto;
 pub mod discovery;
-pub mod transport;
+
 pub mod session;
+pub mod api;
+pub mod transport;
 
 

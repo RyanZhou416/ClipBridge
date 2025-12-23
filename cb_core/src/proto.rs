@@ -1,4 +1,4 @@
-// cb_core/src/proto/mod.rs
+// cb_core/src/proto.rs
 
 use serde::{Deserialize, Serialize};
 

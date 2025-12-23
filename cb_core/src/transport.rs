@@ -1,4 +1,4 @@
-// cb_core/src/transport/mod.rs
+// cb_core/src/transport.rs
 
 mod cert;
 

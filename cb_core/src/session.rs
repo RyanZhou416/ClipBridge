@@ -1,4 +1,4 @@
-// cb_core/src/session/mod.rs
+// cb_core/src/session.rs
 
 mod actor;
 pub use actor::SessionActor; // 导出 Actor 供 NetManager 使用
