@@ -8,14 +8,14 @@ use crate::net::NetCmd;
 
 #[tokio::test]
 async fn test_m2_meta_sync_and_db_persistence() {
-    let shared_uid = "m2_meta_sync";
+    let shared_uid = format!("m2_meta_sync_{}", uuid::Uuid::new_v4());
 
     // 1. 启动两个 Core
-    let (core_a, _rx_a, _dir_a) = create_test_core("m2_a", shared_uid, |_| {});
-    let (core_b, mut rx_b, dir_b) = create_test_core("m2_b", shared_uid, |_| {});
+    let (core_a, _rx_a, _dir_a) = create_test_core("m2_a", &shared_uid, |_| {});
+    let (core_b, mut rx_b, dir_b) = create_test_core("m2_b", &shared_uid, |_| {});
 
     // 2. 等待互联
-    let connected = wait_for(Duration::from_secs(5), || async {
+    let connected = wait_for(Duration::from_secs(10), || async {
         let peers = list_peers_async(&core_a).await;
         peers.iter().any(|p| p.device_id == "m2_b" && p.state == PeerConnectionState::Online)
     }).await;

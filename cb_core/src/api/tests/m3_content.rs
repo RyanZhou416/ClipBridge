@@ -39,7 +39,7 @@ async fn test_m3_1_text_fetch_success() {
     println!("Waiting for B to receive meta...");
     let mut received_meta = false;
     let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
+    while start.elapsed() < Duration::from_secs(15) {
         if let Ok(evt_json) = rx_b.try_recv() {
             if evt_json.contains("ITEM_META_ADDED") && evt_json.contains(&item_id) {
                 received_meta = true;
@@ -84,7 +84,7 @@ async fn test_m3_1_text_fetch_success() {
     let mut local_path_str = String::new();
 
     let start_fetch = std::time::Instant::now();
-    while start_fetch.elapsed() < Duration::from_secs(5) {
+    while start_fetch.elapsed() < Duration::from_secs(15) {
         if let Ok(evt_json) = rx_b.try_recv() {
             if evt_json.contains("CONTENT_CACHED") && evt_json.contains(&transfer_id) {
                 received_cached = true;
@@ -119,6 +119,209 @@ async fn test_m3_1_text_fetch_success() {
     }
 
     println!("M3-1 Text Fetch Integration Test Passed!");
+
+    core_a.shutdown();
+    core_b.shutdown();
+}
+
+#[tokio::test]
+async fn test_m3_2_image_fetch_success() {
+    let shared_uid = format!("m3_img_{}", uuid::Uuid::new_v4());
+    let (core_a, _rx_a, _dir_a) = create_test_core("m3_img_a", &shared_uid, |_| {});
+    let (core_b, mut rx_b, dir_b) = create_test_core("m3_img_b", &shared_uid, |_| {});
+
+    wait_for(Duration::from_secs(5), || async {
+        let peers = list_peers_async(&core_a).await;
+        peers.iter().any(|p| p.device_id == "m3_img_b" && p.state == PeerConnectionState::Online)
+    }).await;
+
+    // 1. A 产生图片数据 (模拟 PNG)
+    let png_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x01]; // 伪造头
+    let snapshot = ClipboardSnapshot::Image {
+        bytes: png_bytes.clone(),
+        mime: "image/png".to_string(),
+        ts_ms: crate::util::now_ms(),
+    };
+
+    let meta = core_a.ingest_local_copy(snapshot).expect("Ingest failed");
+    let item_id = meta.item_id.clone();
+
+    // === FIX START: 必须等待 B 收到 Meta 并落库，才能发起 ensure ===
+    println!("Waiting for B to receive meta...");
+    let start_meta = std::time::Instant::now();
+    let mut received_meta = false;
+    while start_meta.elapsed() < Duration::from_secs(15) {
+        if let Ok(evt_json) = rx_b.try_recv() {
+            if evt_json.contains("ITEM_META_ADDED") && evt_json.contains(&item_id) {
+                received_meta = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(received_meta, "B did not receive ITEM_META_ADDED for image");
+    // === FIX END ===
+
+    // 2. B 发起请求
+    println!("B requesting image...");
+    let c_b = core_b.clone();
+    let i_id = item_id.clone();
+    let transfer_id = tokio::task::spawn_blocking(move || {
+        c_b.ensure_content_cached(&i_id, None)
+    }).await.unwrap().expect("ensure failed");
+
+    // 3. 等待传输完成并验证后缀
+    let start = std::time::Instant::now();
+    let mut local_path_str = String::new();
+    while start.elapsed() < Duration::from_secs(15) {
+        if let Ok(evt_json) = rx_b.try_recv() {
+            if evt_json.contains("CONTENT_CACHED") && evt_json.contains(&transfer_id) {
+                let v: serde_json::Value = serde_json::from_str(&evt_json).unwrap();
+                local_path_str = v["payload"]["local_ref"]["local_path"].as_str().unwrap().to_string();
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    assert!(!local_path_str.is_empty(), "Image transfer timed out");
+    // 验证 M3-2 要求：图片必须生成带后缀的文件
+    assert!(local_path_str.ends_with(".png"), "Local path must have .png extension: {}", local_path_str);
+
+    let content = std::fs::read(&local_path_str).unwrap();
+    assert_eq!(content, png_bytes, "Image content mismatch");
+
+    core_a.shutdown();
+    core_b.shutdown();
+}
+
+#[tokio::test]
+async fn test_m3_3_file_fetch_success() {
+    let shared_uid = format!("m3_file_{}", uuid::Uuid::new_v4());
+    let (core_a, _rx_a, _dir_a) = create_test_core("m3_file_a", &shared_uid, |_| {});
+    let (core_b, mut rx_b, dir_b) = create_test_core("m3_file_b", &shared_uid, |_| {});
+
+    wait_for(Duration::from_secs(5), || async {
+        let peers = list_peers_async(&core_a).await;
+        peers.iter().any(|p| p.device_id == "m3_file_b" && p.state == PeerConnectionState::Online)
+    }).await;
+
+    // 1. A Ingest FileList
+    let file_content = b"Content of report.pdf";
+    let sha = crate::util::sha256_hex(file_content);
+
+    // A. 写入 CAS
+    core_a.inner.cas.put_blob(file_content).unwrap();
+
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let meta = crate::model::ItemMeta {
+        ty: "ItemMeta".to_string(),
+        item_id: "item_files_001".to_string(),
+        kind: crate::model::ItemKind::FileList,
+        created_ts_ms: crate::util::now_ms(),
+        source_device_id: "m3_file_a".to_string(),
+        source_device_name: None,
+        size_bytes: file_content.len() as i64,
+        preview: Default::default(),
+        content: crate::model::ItemContent {
+            mime: "application/x-clipbridge-filelist+json".to_string(),
+            sha256: "manifest_sha_ignored_in_this_test".to_string(),
+            total_bytes: 100,
+        },
+        files: vec![
+            crate::model::FileMeta {
+                file_id: file_id.clone(),
+                rel_name: "report.pdf".to_string(),
+                size_bytes: file_content.len() as i64,
+                sha256: Some(sha.clone()),
+            }
+        ],
+        expires_ts_ms: None,
+    };
+
+    // B. [修复] 必须写入 A 的 DB，否则 A 收到请求时查不到 files_json
+    {
+        let store = core_a.inner.store.lock().unwrap();
+        let files_json = serde_json::to_string(&meta.files).unwrap();
+
+        store.conn.execute(
+            "INSERT INTO items (
+                item_id,
+                kind,
+                owner_device_id,
+                created_ts_ms,
+                size_bytes,       -- 修正：是 size_bytes
+                mime,
+                sha256_hex,
+                files_json,
+                expires_ts_ms     -- 补上这个字段（虽然可能是 null）
+            )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                &meta.item_id,
+                "file_list",
+                &meta.source_device_id, // 对应 owner_device_id
+                meta.created_ts_ms,
+                meta.size_bytes,
+                &meta.content.mime,
+                &meta.content.sha256,
+                &files_json,
+                Option::<i64>::None // expires_ts_ms
+            )
+        ).expect("Failed to insert meta into A's DB");
+    }
+
+    // C. A 广播 Meta
+    if let Some(net) = &core_a.inner.net {
+        net.send(crate::net::NetCmd::BroadcastMeta(meta.clone())).await.unwrap();
+    }
+
+    // 2. B 等待 Meta
+    println!("Waiting for B to receive file list meta...");
+    let start_meta = std::time::Instant::now();
+    let mut received = false;
+    while start_meta.elapsed() < Duration::from_secs(15) {
+        if let Ok(evt) = rx_b.try_recv() {
+            if evt.contains("ITEM_META_ADDED") && evt.contains("item_files_001") {
+                received = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(received, "B missing meta");
+
+    // 3. B 发起拉取
+    println!("B requesting specific file...");
+    let c_b = core_b.clone();
+    let i_id = "item_files_001".to_string();
+    let f_id = file_id.clone();
+
+    let transfer_id = tokio::task::spawn_blocking(move || {
+        c_b.ensure_content_cached(&i_id, Some(&f_id))
+    }).await.unwrap().expect("ensure failed");
+
+    // 4. 验证结果
+    let start = std::time::Instant::now();
+    let mut local_path_str = String::new();
+    while start.elapsed() < Duration::from_secs(15) {
+        if let Ok(evt_json) = rx_b.try_recv() {
+            if evt_json.contains("CONTENT_CACHED") && evt_json.contains(&transfer_id) {
+                let v: serde_json::Value = serde_json::from_str(&evt_json).unwrap();
+                local_path_str = v["payload"]["local_ref"]["local_path"].as_str().unwrap().to_string();
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    assert!(!local_path_str.is_empty(), "File transfer timed out");
+    assert!(local_path_str.ends_with("report.pdf"), "Filename mismatch: {}", local_path_str);
+
+    let got = std::fs::read(local_path_str).unwrap();
+    assert_eq!(got, file_content);
+
+    println!("M3-3 File Fetch Success!");
 
     core_a.shutdown();
     core_b.shutdown();

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::model::{FileMeta, ItemKind, ItemMeta};
 
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 pub struct CacheRow {
@@ -713,5 +713,34 @@ pub fn insert_meta_and_history(
         } else {
             Ok(None)
         }
+    }
+
+    /// M3: 获取 item 的 mime (用于 Session 发送 ContentBegin)
+    pub fn get_item_mime(&self, item_id: &str) -> anyhow::Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT mime FROM items WHERE item_id = ?")?;
+        let mut rows = stmt.query([item_id])?;
+        if let Some(row) = rows.next()? {
+            let mime: String = row.get(0)?;
+            Ok(Some(mime))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// M3-3: 获取 FileList 中指定 file_id 的详细信息 (sha256, rel_name, size)
+    pub fn get_file_meta(&self, item_id: &str, file_id: &str) -> anyhow::Result<Option<crate::model::FileMeta>> {
+        let mut stmt = self.conn.prepare("SELECT files_json FROM items WHERE item_id = ?")?;
+        let mut rows = stmt.query([item_id])?;
+
+        if let Some(row) = rows.next()? {
+            let json_str: Option<String> = row.get(0)?;
+            if let Some(s) = json_str {
+                let files: Vec<crate::model::FileMeta> = serde_json::from_str(&s).unwrap_or_default();
+                // 找到对应的 file_id
+                let target = files.into_iter().find(|f| f.file_id == file_id);
+                return Ok(target);
+            }
+        }
+        Ok(None)
     }
 }

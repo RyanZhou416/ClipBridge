@@ -41,6 +41,7 @@ enum ReceiverState {
         transfer_id: String,
         item_id: String,
         file_id: Option<String>, // 如果是 FileList 中的子文件
+        mime: String,
         tmp_path: PathBuf,
         writer: tokio::io::BufWriter<File>, // 异步写入
         hasher: Sha256,
@@ -425,8 +426,8 @@ impl SessionActor {
                 let transfer_id = msg_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 self.handle_content_get(transfer_id, item_id, file_id).await?;
             }
-            CtrlMsg::ContentBegin { req_id, item_id, file_id, total_bytes, sha256, mime: _ } => {
-                self.handle_content_begin(req_id, item_id, file_id, total_bytes, sha256).await?;
+            CtrlMsg::ContentBegin { req_id, item_id, file_id, total_bytes, sha256, mime} => {
+                self.handle_content_begin(req_id, item_id, file_id, total_bytes, sha256, mime).await?;
             }
             CtrlMsg::ContentEnd { req_id, sha256 } => {
                 self.handle_content_end(req_id, sha256).await?;
@@ -454,7 +455,8 @@ impl SessionActor {
         item_id: String,
         file_id: Option<String>,
         total_bytes: u64,
-        _expected_sha256: String
+        _expected_sha256: String,
+        mime: String
     ) -> Result<()> {
         println!("[Session] Starting transfer {}: {} bytes", transfer_id, total_bytes);
 
@@ -488,6 +490,7 @@ impl SessionActor {
             transfer_id,
             item_id,
             file_id,
+            mime,
             tmp_path,
             writer,
             hasher: Sha256::new(),
@@ -531,7 +534,7 @@ impl SessionActor {
         let prev_state = std::mem::replace(&mut self.receiver, ReceiverState::Idle);
 
         if let ReceiverState::Receiving {
-            transfer_id, item_id, file_id, tmp_path, mut writer, hasher, ..
+            transfer_id, item_id, file_id, mime, tmp_path, mut writer, hasher, ..
         } = prev_state {
             if transfer_id != req_id {
                 anyhow::bail!("Protocol mismatch: End frame id {} != current {}", req_id, transfer_id);
@@ -549,13 +552,47 @@ impl SessionActor {
                 return Ok(());
             }
 
-            // Commit to CAS
+            // Commit to Blob (CAS)
             let cas_clone = self.cas.clone();
+            let store_clone = self.store.clone(); // Need store to query filename
             let tmp_path_clone = tmp_path.clone();
             let sha_clone = expected_sha256.clone();
+            let mime_clone = mime.clone();
+            let item_id_clone = item_id.clone();
+            let file_id_clone = file_id.clone(); // Option<String>
+            let transfer_id_clone = transfer_id.clone();
 
             let final_path_res = tokio::task::spawn_blocking(move || {
-                cas_clone.commit_tmp_file(&tmp_path_clone, &sha_clone)
+                // A. 转正 Blob
+                let blob_path = cas_clone.commit_tmp_file(&tmp_path_clone, &sha_clone)?;
+
+                // B. 决定落地路径
+                if let Some(fid) = file_id_clone {
+                    // === M3-3: FileList 模式 ===
+                    // 查库获取原始文件名
+                    let store = store_clone.lock().unwrap();
+                    if let Some(fmeta) = store.get_file_meta(&item_id_clone, &fid)? {
+                        // 落地到 downloads/<transfer_id>/<rel_name>
+                        cas_clone.materialize_file(&sha_clone, &transfer_id_clone, &fmeta.rel_name)
+                    } else {
+                        // 异常：元数据对不上，只好返回 blob
+                        Ok(blob_path)
+                    }
+                } else {
+                    // === M3-1/2: Text/Image 模式 ===
+                    // (复用 Step 5 的逻辑: 根据 mime 生成后缀)
+                    // ... [Code from Step 5] ...
+                    let ext = match mime_clone.as_str() {
+                        "image/png" => Some("png"),
+                        "image/jpeg" | "image/jpg" => Some("jpg"),
+                        _ => None
+                    };
+                    if let Some(extension) = ext {
+                        cas_clone.materialize_blob(&sha_clone, extension)
+                    } else {
+                        Ok(blob_path)
+                    }
+                }
             }).await?;
 
             match final_path_res {
@@ -634,21 +671,33 @@ impl SessionActor {
             return Ok(());
         }
 
-        let file_path_res = {
+        // 同时查询路径和 MIME
+        let (file_path_res, mime_val) = {
             let store = self.store.lock().unwrap();
-            let sha256_res: Option<String> = if let Some(_fid) = &file_id {
-                // TODO: FileList logic
-                None
-            } else {
-                // 修复：使用 get_item_sha256
-                store.get_item_sha256(&item_id).unwrap_or(None)
-            };
 
-            if let Some(sha) = sha256_res {
-                let path = self.cas.blob_path(&sha);
-                if path.exists() { Some((path, sha)) } else { None }
+            if let Some(fid) = &file_id {
+                // === M3-3 FileList Logic ===
+                if let Some(file_meta) = store.get_file_meta(&item_id, fid).unwrap_or(None) {
+                    if let Some(sha) = file_meta.sha256 {
+                        let path = self.cas.blob_path(&sha);
+                        // FileList 子文件默认用通用流 MIME，接收端靠文件名识别
+                        let path_res = if path.exists() { Some((path, sha)) } else { None };
+                        (path_res, "application/octet-stream".to_string())
+                    } else {
+                        (None, "".to_string())
+                    }
+                } else {
+                    (None, "".to_string())
+                }
             } else {
-                None
+                // ... (Text/Image Logic from Step 5) ...
+                let sha = store.get_item_sha256(&item_id).unwrap_or(None);
+                let mime = store.get_item_mime(&item_id).unwrap_or(None).unwrap_or("application/octet-stream".to_string());
+                let path_res = if let Some(s) = sha {
+                    let path = self.cas.blob_path(&s);
+                    if path.exists() { Some((path, s)) } else { None }
+                } else { None };
+                (path_res, mime)
             }
         };
 
@@ -663,7 +712,7 @@ impl SessionActor {
                 file_id,
                 total_bytes,
                 sha256,
-                mime: "application/octet-stream".into(),
+                mime: mime_val,
             }).await?;
 
             self.sender = SenderState::Sending {

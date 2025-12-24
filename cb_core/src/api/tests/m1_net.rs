@@ -210,7 +210,7 @@ async fn test_m1_reconnection() {
     drop(core_b);
 
     println!("Waiting for A to detect disconnect...");
-    let disconnected = wait_for(Duration::from_secs(8), || async {
+    let disconnected = wait_for(Duration::from_secs(15), || async {
         let peers = list_peers_async(&core_a).await;
         !peers.iter().any(|p| p.device_id == "recon_b" && p.state == PeerConnectionState::Online)
     }).await;

@@ -1,5 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
 #[derive(Clone, Debug)]
 pub struct Cas {
     cache_dir: PathBuf,
@@ -139,5 +141,99 @@ impl Cas {
                 Err(e.into())
             }
         }
+    }
+
+    /// M3: 为 Blob 创建一个带后缀的“视图” (用于 Image/File)
+    /// 策略：尝试硬链接，不支持则复制。文件名为 <sha256>.<ext>，放在 blobs/views/ 目录下 (或 cache_dir/files)
+    pub fn materialize_blob(&self, sha256: &str, ext: &str) -> anyhow::Result<PathBuf> {
+        let blob_path = self.blob_path(sha256);
+        if !blob_path.exists() {
+            anyhow::bail!("Blob not found: {}", sha256);
+        }
+
+        // 构造目标路径：cache_dir/files/<sha256>.<ext>
+        // 这样可以避免同一个 sha 不同后缀的冲突，且易于清理
+        let views_dir = self.cache_dir.join("files");
+        if !views_dir.exists() {
+            fs::create_dir_all(&views_dir)?;
+        }
+
+        // 清理 ext 中的点，防止传入 ".png" 导致 "..png"
+        let safe_ext = ext.trim_start_matches('.');
+        let filename = format!("{}.{}", sha256, safe_ext);
+        let target_path = views_dir.join(filename);
+
+        if target_path.exists() {
+            return Ok(target_path);
+        }
+
+        // 尝试硬链接 (高性能)
+        if fs::hard_link(&blob_path, &target_path).is_err() {
+            // 硬链接失败（可能是跨分区），回退到复制
+            fs::copy(&blob_path, &target_path)?;
+        }
+
+        Ok(target_path)
+    }
+
+    /// M3-3: 为 Blob 创建指定文件名的“视图”
+    /// 路径: <cache_dir>/downloads/<transfer_id>/<filename>
+    /// 这样可以隔离不同传输的同名文件，且方便 Shell 访问
+    pub fn materialize_file(&self, sha256: &str, transfer_id: &str, filename: &str) -> anyhow::Result<PathBuf> {
+        let blob_path = self.blob_path(sha256);
+        if !blob_path.exists() {
+            anyhow::bail!("Blob not found: {}", sha256);
+        }
+
+        // 目录结构：cache/downloads/transfer_id/
+        let download_dir = self.cache_dir.join("downloads").join(transfer_id);
+        fs::create_dir_all(&download_dir)?;
+
+        let target_path = download_dir.join(filename);
+
+        // 如果文件已存在且 Hash 一致，直接返回（断点续传/幂等优化）
+        if target_path.exists() {
+            // 这里简略跳过 hash 校验，假设路径独占
+            return Ok(target_path);
+        }
+
+        // 尝试硬链接，失败则复制
+        if fs::hard_link(&blob_path, &target_path).is_err() {
+            fs::copy(&blob_path, &target_path)?;
+        }
+
+        Ok(target_path)
+    }
+
+    /// 辅助方法：直接将内存数据写入 Blob，返回 sha256
+    pub fn put_blob(&self, data: &[u8]) -> anyhow::Result<String> {
+        // 1. 计算 Hash
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let sha256 = hex::encode(hasher.finalize());
+
+        // 2. 检查是否已存在
+        let target_path = self.blob_path(&sha256);
+        if target_path.exists() {
+            return Ok(sha256);
+        }
+
+        // 3. 写入临时文件
+        // 使用一个随机 UUID 或简单名字做临时文件名
+        let tmp_name = format!("ingest_{}", uuid::Uuid::new_v4());
+        let tmp_path = self.tmp_dir.join(tmp_name);
+
+        {
+            let mut file = std::fs::File::create(&tmp_path)?;
+            file.write_all(data)?;
+            file.flush()?;
+        }
+
+        // 4. Commit (复用已有的 commit_tmp_file 或直接 rename)
+        // 这里直接调用我们在 Step 2 实现的 commit_tmp_file 即可
+        // 注意：commit_tmp_file 可能需要 public，或者在这里直接写 rename 逻辑
+        self.commit_tmp_file(&tmp_path, &sha256)?;
+
+        Ok(sha256)
     }
 }
