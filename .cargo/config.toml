@@ -1,0 +1,5 @@
+[env]
+CMAKE_GENERATOR = "Ninja"
+AWS_LC_SYS_CMAKE_GENERATOR = "Ninja"
+AWS_LC_SYS_C_STD = "11"
+AWS_LC_SYS_CFLAGS = "/experimental:c11atomics"
