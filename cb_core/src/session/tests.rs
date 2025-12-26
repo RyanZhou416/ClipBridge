@@ -83,10 +83,7 @@ async fn setup(name: &str, tag: &str) -> TestContext {
         // 注意：根据 api/mod.rs 的定义，data_dir 是 String 类型
         data_dir: path.to_string_lossy().to_string(),
         cache_dir: path.to_string_lossy().to_string(),
-        limits: Default::default(),
-        gc_history_max_items: 100,
-        gc_cas_max_bytes: 1024,
-        global_policy: Default::default()
+        app_config: Default::default(),
     };
 
     // 初始化 DB (为了 TOFU 表)

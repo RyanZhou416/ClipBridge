@@ -22,13 +22,13 @@ impl FakeTransport {
 
     /// 连接两个 TestCore，返回可断开的句柄
     pub fn connect_pair(&self, a: &TestCore, b: &TestCore) -> LinkHandle {
-        let a_id = a.core.inner.cfg.device_id.clone();
-        let b_id = b.core.inner.cfg.device_id.clone();
-        let a_name = a.core.inner.cfg.device_name.clone();
-        let b_name = b.core.inner.cfg.device_name.clone();
+        let a_id = a.core.inner.core_config.device_id.clone();
+        let b_id = b.core.inner.core_config.device_id.clone();
+        let a_name = a.core.inner.core_config.device_name.clone();
+        let b_name = b.core.inner.core_config.device_name.clone();
 
-        let a_tag = a.core.inner.cfg.account_tag.clone();
-        let b_tag = b.core.inner.cfg.account_tag.clone();
+        let a_tag = a.core.inner.core_config.account_tag.clone();
+        let b_tag = b.core.inner.core_config.account_tag.clone();
 
         // account_tag 不一致：按文档要求发 AUTH_ACCOUNT_TAG_MISMATCH（只对 A 侧）
         if a_tag != b_tag {

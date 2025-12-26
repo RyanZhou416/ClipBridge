@@ -79,10 +79,12 @@ pub fn mk_core(sub: &str, gc_history_max_items: i64, gc_cas_max_bytes: i64) -> (
         account_tag: "acctTag".to_string(),
         data_dir: dirs.data_dir.clone(),
         cache_dir: dirs.cache_dir.clone(),
-        limits: crate::policy::Limits::default(),
-        gc_history_max_items,
-        gc_cas_max_bytes,
-        global_policy: Default::default()
+		app_config: AppConfig {
+			size_limits: crate::policy::SizeLimits::default(),
+			global_policy: Default::default(),
+			gc_history_max_items,
+			gc_cas_max_bytes,
+		},
     };
 
     let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);

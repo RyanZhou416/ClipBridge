@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use crate::api::{Core, CoreConfig};
+use crate::api::{Core, CoreConfig,AppConfig};
 use crate::api::GlobalPolicy::AllowAll;
-use crate::policy::Limits;
+use crate::policy::SizeLimits;
 
 use super::dirs::TestDirs;
 use super::events::{EventAsserter, EventCollector};
@@ -44,10 +44,11 @@ impl TestCore {
             account_tag: account_tag.to_string(),
             data_dir: String::new(),
             cache_dir: String::new(),
-            limits: Limits::default(),
-            gc_history_max_items: 50_000,
-            gc_cas_max_bytes: 1_i64 << 60,
-            global_policy: Default::default()
+			app_config: AppConfig {
+				gc_history_max_items: 50_000,
+				gc_cas_max_bytes: 1_i64 << 60,
+				..Default::default()
+			},
         };
 
         Self::with_cfg(crate_tag, test_tag, cfg)

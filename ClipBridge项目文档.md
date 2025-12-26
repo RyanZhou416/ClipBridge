@@ -1427,7 +1427,7 @@ v1 中该尾帧为**可选**：实现可以只用 FIN 作为结束标志。
   "transfer_id": "uuid",
   "item_id": "uuid",
   "file_id": "uuid",
-  "rel_name": "Photos/a.png",  // Shell 负责按此相对路径重建文件
+  "rel_name": "Photos/a.png",
   "total_bytes": 987654,
   "sha256": "hex",
   "content_encoding": "identity"
@@ -2327,7 +2327,8 @@ v1 必备事件类型（覆盖 M1~M3）：
     {
       "rel_name": "Photos/a.png",
       "size_bytes": 123,
-      "sha256": "hex-optional"
+      "sha256": "hex-optional",
+      "abs_path": "C:\\Users\\...\\report.pdf"
     }
   ]
 }

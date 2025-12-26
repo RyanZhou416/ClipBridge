@@ -9,7 +9,10 @@ pub const PROTOCOL_VERSION: u32 = 2;
 #[derive(Debug)]
 pub enum CBFrame {
     Control(CtrlMsg), // JSON 信令 (Type=1)
-    Data(Bytes),      // 二进制文件块 (Type=2)
+	Data {
+		transfer_id: String,
+		data: Bytes,
+	},
 }
 
 // 帧类型常量
@@ -163,17 +166,25 @@ impl Encoder<CBFrame> for CBFrameCodec {
                 dst.put_u8(FRAME_TYPE_CTRL); // Type = 1
                 dst.put_slice(&json_bytes);
             }
-            CBFrame::Data(data) => {
-                let len = data.len() + 1; // +1 for Type byte
-                if len > MAX_FRAME_SIZE {
-                    return Err(anyhow::anyhow!("Binary frame too large"));
-                }
+			CBFrame::Data { transfer_id, data } => {
+				// 格式: [Len(4)][Type(1)][ID_Len(2)][ID_Bytes][Data]
+				let id_bytes = transfer_id.as_bytes();
+				let id_len = id_bytes.len();
+				if id_len > 65535 { return Err(anyhow::anyhow!("Transfer ID too long")); }
 
-                dst.reserve(4 + len);
-                dst.put_u32_le(len as u32);
-                dst.put_u8(FRAME_TYPE_DATA); // Type = 2
-                dst.put_slice(&data);
-            }
+				let frame_len = 1 + 2 + id_len + data.len(); // Type + ID_Len + ID + Data
+				if frame_len > MAX_FRAME_SIZE { return Err(anyhow::anyhow!("Frame too large")); }
+
+				dst.reserve(4 + frame_len);
+				dst.put_u32_le(frame_len as u32);
+				dst.put_u8(FRAME_TYPE_DATA);
+
+				// 写入 ID
+				dst.put_u16_le(id_len as u16);
+				dst.put_slice(id_bytes);
+				// 写入数据
+				dst.put_slice(&data);
+			}
         }
         Ok(())
     }
@@ -208,7 +219,7 @@ impl Decoder for CBFrameCodec {
         let type_byte = src[0];
 
         // 读取 Payload
-        let payload = src.split_to(len).split_off(1).freeze(); // split_off(1) 跳过 type byte
+		let mut payload = src.split_to(len).split_off(1);
 
         match type_byte {
             FRAME_TYPE_CTRL => {
@@ -216,7 +227,18 @@ impl Decoder for CBFrameCodec {
                 Ok(Some(CBFrame::Control(msg)))
             }
             FRAME_TYPE_DATA => {
-                Ok(Some(CBFrame::Data(payload)))
+				// 解码 ID
+				if payload.len() < 2 { return Err(anyhow::anyhow!("Data frame too short")); }
+				let id_len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+				payload.advance(2);
+
+				if payload.len() < id_len { return Err(anyhow::anyhow!("Data frame truncated ID")); }
+				let id_bytes = payload.split_to(id_len);
+				let transfer_id = String::from_utf8(id_bytes.to_vec())?;
+
+				// 剩下的就是 data
+				let data = payload.freeze();
+				Ok(Some(CBFrame::Data { transfer_id, data }))
             }
             _ => {
                 // 未知帧类型，如果是兼容性考虑可以选择忽略，这里先报错

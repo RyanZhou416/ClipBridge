@@ -351,11 +351,10 @@ impl NetManager {
     }
 
     async fn broadcast_meta(&self, meta: crate::model::ItemMeta) {
-        if self.config.global_policy == crate::api::GlobalPolicy::DenyAll {
-            println!("[Policy] Broadcast DENIED by DenyAll policy.");
-            // 这里可以发一个 PolicyDeny 事件给 UI
-            return;
-        }
+		if self.config.app_config.global_policy == crate::policy::GlobalPolicy::DenyAll {
+			println!("[Policy] Broadcast DENIED by DenyAll policy.");
+			return;
+		}
 
         for session in &self.sessions {
             if session.is_online() {

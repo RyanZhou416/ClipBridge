@@ -7,6 +7,7 @@ use crate::clipboard::{make_ingest_plan, ClipboardSnapshot, IngestPlan, LocalIng
 pub(crate) use crate::model::ItemMeta;
 use crate::net::{NetCmd, NetManager};
 use crate::{cas::Cas, store::Store, util::now_ms};
+pub use crate::policy::{AppConfig, GlobalPolicy};
 
 /**
  * Core 的配置项。
@@ -22,10 +23,7 @@ pub struct CoreConfig {
     pub account_tag: String,   // 账号
     pub data_dir: String,      // 持久：core.db
     pub cache_dir: String,     // 可清空：CAS blobs/tmp
-    pub limits: crate::policy::Limits,
-    pub gc_history_max_items: i64, // 历史条数上限（超过就 GC）
-    pub gc_cas_max_bytes: i64,     // blobs 总大小上限（超过就 GC）
-    pub global_policy: GlobalPolicy,
+	pub app_config: AppConfig,
 }
 
 /**
@@ -70,18 +68,7 @@ pub enum PeerConnectionState {
     Offline,         // 彻底断开
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum GlobalPolicy {
-    AllowAll, // M1 默认：开发模式
-    DenyAll,  // 严格模式
-    // AskUser, // M2/M3: 需要 UI 介入
-}
 
-impl Default for GlobalPolicy {
-    fn default() -> Self {
-        GlobalPolicy::AllowAll
-    }
-}
 
 /**
  * ClipBridge Core 的权威句柄。
@@ -119,7 +106,7 @@ impl Core {
         };
 
         let inner = Inner {
-            cfg,
+			core_config: cfg,
             sink,
             is_shutdown: AtomicBool::new(false),
             store: store_arc,
@@ -156,7 +143,7 @@ impl Core {
             anyhow::bail!("core already shutdown");
         }
         let store = self.inner.store.lock().unwrap();
-        store.list_history_metas(&self.inner.cfg.account_uid, limit)
+        store.list_history_metas(&self.inner.core_config.account_uid, limit)
     }
 
     /**
@@ -179,14 +166,14 @@ impl Core {
         }
 
         let deps = LocalIngestDeps {
-            device_id: &self.inner.cfg.device_id,
-            device_name: &self.inner.cfg.device_name,
-            account_uid: &self.inner.cfg.account_uid,
+            device_id: &self.inner.core_config.device_id,
+            device_name: &self.inner.core_config.device_name,
+            account_uid: &self.inner.core_config.account_uid,
         };
 
-        let limits = &self.inner.cfg.limits;
+		let size_limits = &self.inner.core_config.app_config.size_limits;
 
-        make_ingest_plan(&deps, snapshot, limits, force)
+        make_ingest_plan(&deps, snapshot, size_limits, force)
     }
 
     pub fn apply_ingest(&self, plan: IngestPlan) -> anyhow::Result<ItemMeta> {
@@ -201,7 +188,7 @@ impl Core {
         // Phase A：落库（只在这个 block 里持锁）
         let cache = {
             let mut store = self.inner.store.lock().unwrap();
-            store.insert_meta_and_history(&self.inner.cfg.account_uid, &plan.meta, now)?
+            store.insert_meta_and_history(&self.inner.core_config.account_uid, &plan.meta, now)?
         };
 
         // Phase B：CAS 去重写入（这里不持 store 锁）
@@ -252,51 +239,46 @@ impl Core {
         let now = now_ms();
 
         // 1) History GC
-        {
-            let mut store = self.inner.store.lock().unwrap();
-            let n = store.history_count_for_account(&self.inner.cfg.account_uid)?;
-            if self.inner.cfg.gc_history_max_items > 0 && n > self.inner.cfg.gc_history_max_items {
-                store.soft_delete_history_keep_latest(&self.inner.cfg.account_uid, self.inner.cfg.gc_history_max_items)?;
-            }
-        }
+		let max_history = self.inner.core_config.app_config.gc_history_max_items;
+		if max_history > 0 {
+			let mut store = self.inner.store.lock().unwrap();
+			let n = store.history_count_for_account(&self.inner.core_config.account_uid)?;
+			if n > max_history {
+				store.soft_delete_history_keep_latest(&self.inner.core_config.account_uid, max_history)?;
+			}
+		}
 
         // 2) Cache GC（LRU）
-        if self.inner.cfg.gc_cas_max_bytes > 0 {
-            let mut cur = self.inner.cas.total_size_bytes()?;
-            while cur > self.inner.cfg.gc_cas_max_bytes {
-                let (sha, _expect_bytes) = {
-                    let store = self.inner.store.lock().unwrap();
-                    let cands = store.select_lru_present(1)?;
-                    if cands.is_empty() {
-                        break;
-                    }
-                    cands[0].clone()
-                };
-
-                let freed = self.inner.cas.remove_blob(&sha)?;
-                {
-                    let mut store = self.inner.store.lock().unwrap();
-                    store.mark_cache_missing(&sha, now)?;
-                }
-                if freed > 0 {
-                    cur -= freed;
-                } else {
-                    // 文件不存在/统计不准：重新扫一次，避免死循环
-                    cur = self.inner.cas.total_size_bytes()?;
-                }
-            }
-        }
-
-        Ok(())
+		let max_cas = self.inner.core_config.app_config.gc_cas_max_bytes;
+		if max_cas > 0 {
+			let mut cur = self.inner.cas.total_size_bytes()?;
+			while cur > max_cas {
+				let (sha, _expect_bytes) = {
+					let store = self.inner.store.lock().unwrap();
+					let cands = store.select_lru_present(1)?;
+					if cands.is_empty() { break; }
+					cands[0].clone()
+				};
+				let freed = self.inner.cas.remove_blob(&sha)?;
+				{
+					let mut store = self.inner.store.lock().unwrap();
+					store.mark_cache_missing(&sha, now)?;
+				}
+				if freed > 0 {
+					cur -= freed;
+				} else {
+					cur = self.inner.cas.total_size_bytes()?;
+				}
+			}
+		}
+		Ok(())
     }
-
-
 
     pub fn plan_local_ingest_result(
         &self,
         snapshot: &crate::clipboard::ClipboardSnapshot,
         force: bool,
-    ) -> anyhow::Result<PlanResult> {
+    ) -> anyhow::Result<crate::api::PlanResult> {
         let plan = self.plan_local_ingest(snapshot, force)?;
         Ok(PlanResult {
             meta: plan.meta,
@@ -354,9 +336,10 @@ impl Core {
 
         Ok(serde_json::json!({
             "status": if is_shutdown { "Shutdown" } else { "Running" },
-            "device_id": self.inner.cfg.device_id,
-            "account_tag": self.inner.cfg.account_tag,
-            "net_enabled": self.inner.net.is_some()
+            "device_id": self.inner.core_config.device_id,
+            "account_tag": self.inner.core_config.account_tag,
+            "net_enabled": self.inner.net.is_some(),
+			"config": self.inner.core_config.app_config
         }))
     }
 
@@ -410,7 +393,7 @@ impl Core {
 }
 
 pub(crate) struct Inner {
-    pub cfg: CoreConfig,
+    pub core_config: CoreConfig,
     pub sink: Arc<dyn CoreEventSink>,
     pub is_shutdown: AtomicBool,
     pub store: Arc<Mutex<Store>>,

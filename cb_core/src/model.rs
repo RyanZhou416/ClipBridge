@@ -38,6 +38,8 @@ pub struct FileMeta {
     pub size_bytes: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub local_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,4 +59,14 @@ pub struct ItemMeta {
     pub files: Vec<FileMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_ts_ms: Option<i64>,
+}
+// [新增] 隐私清洗方法
+impl ItemMeta {
+	pub fn sanitize_for_broadcast(&mut self) {
+		self.source_device_name = None; // 可选：隐藏设备名细节
+		// 关键：清除所有文件的本地路径
+		for f in &mut self.files {
+			f.local_path = None;
+		}
+	}
 }

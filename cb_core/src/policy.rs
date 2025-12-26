@@ -1,8 +1,42 @@
 use crate::model::ItemKind;
 use serde::{Deserialize, Serialize};
 
+/// 所有的用户可配置项，统一管理
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Limits {
+pub struct AppConfig {
+	/// 传输大小限制
+	#[serde(default)]
+	pub size_limits: SizeLimits,
+
+	/// 全局安全策略
+	#[serde(default)]
+	pub global_policy: GlobalPolicy,
+
+	/// GC 配置：历史记录最大条数
+	#[serde(default = "default_gc_history")]
+	pub gc_history_max_items: i64,
+
+	/// GC 配置：CAS 缓存最大字节数
+	#[serde(default = "default_gc_cas")]
+	pub gc_cas_max_bytes: i64,
+}
+
+impl Default for AppConfig {
+	fn default() -> Self {
+		Self {
+			size_limits: SizeLimits::default(),
+			global_policy: GlobalPolicy::default(),
+			gc_history_max_items: default_gc_history(),
+			gc_cas_max_bytes: default_gc_cas(),
+		}
+	}
+}
+
+fn default_gc_history() -> i64 { 50_000 }
+fn default_gc_cas() -> i64 { 1024 * 1024 * 1024 } // 1GB
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SizeLimits {
     // 软限制，在尝试拉取时如果超出限制外壳会弹窗确认
     pub soft_text_bytes: i64,
     pub soft_image_bytes: i64,
@@ -17,7 +51,7 @@ pub struct Limits {
     pub text_auto_prefetch_bytes: i64,
 }
 
-impl Default for Limits {
+impl Default for SizeLimits {
     fn default() -> Self {
         Self {
             soft_text_bytes: 1 * 1024 * 1024,              // 1MB
@@ -29,6 +63,19 @@ impl Default for Limits {
             text_auto_prefetch_bytes: 256 * 1024,          // 256KB
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GlobalPolicy {
+	AllowAll, // M1 默认：开发模式
+	DenyAll,  // 严格模式
+	// AskUser, // M2/M3: 需要 UI 介入
+}
+
+impl Default for GlobalPolicy {
+	fn default() -> Self {
+		GlobalPolicy::AllowAll
+	}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,7 +93,7 @@ pub enum PolicyOutcome {
 }
 
 /// force=true 表示“用户已确认超出软限制仍要同步”
-pub fn decide(kind: ItemKind, size_bytes: i64, force: bool, limits: &Limits) -> PolicyOutcome {
+pub fn decide(kind: ItemKind, size_bytes: i64, force: bool, limits: &SizeLimits) -> PolicyOutcome {
     // 1) hard cap：必须拒绝
     let hard = match kind {
         ItemKind::Text => limits.hard_text_bytes,
@@ -91,7 +138,7 @@ mod tests {
     #[test]
     #[test]
     fn text_auto_prefetch_under_threshold() {
-        let lim = Limits::default();
+        let lim = SizeLimits::default();
         let out = decide(ItemKind::Text, lim.text_auto_prefetch_bytes, false, &lim);
         assert_eq!(out, PolicyOutcome::Allowed {
             strategy: MetaStrategy::MetaPlusAutoPrefetch,
@@ -102,7 +149,7 @@ mod tests {
 
     #[test]
     fn reject_over_hard_cap() {
-        let lim = Limits::default();
+        let lim = SizeLimits::default();
         let out = decide(ItemKind::Image, lim.hard_image_bytes + 1, true, &lim);
         assert_eq!(out, PolicyOutcome::RejectedHardCap { code: "ITEM_TOO_LARGE" });
     }

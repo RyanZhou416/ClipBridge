@@ -3,13 +3,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{FileMeta, ItemContent, ItemKind, ItemMeta, ItemPreview};
 use crate::util::{sha256_hex, truncate_chars};
-use crate::policy::{Limits, MetaStrategy, PolicyOutcome, decide};
+use crate::policy::{SizeLimits, MetaStrategy, PolicyOutcome, decide};
 
 const FILELIST_MIME: &str = "application/x-clipbridge-filelist+json";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClipboardFileEntry {
     pub rel_name: String,
+	#[serde(default)]
+	pub abs_path: Option<String>,
     pub size_bytes: i64,
     pub sha256: Option<String>,
 }
@@ -92,12 +94,13 @@ pub fn build_item_meta(deps: &LocalIngestDeps<'_>, snap: &ClipboardSnapshot) -> 
 
             let total_files_bytes: i64 = files.iter().map(|f| f.size_bytes).sum();
 
-            let metas: Vec<FileMeta> = files.iter().map(|f| FileMeta {
-                file_id: Uuid::new_v4().to_string(),
-                rel_name: f.rel_name.clone(),
-                size_bytes: f.size_bytes,
-                sha256: f.sha256.clone(),
-            }).collect();
+			let metas: Vec<FileMeta> = files.iter().map(|f| FileMeta {
+				file_id: Uuid::new_v4().to_string(),
+				rel_name: f.rel_name.clone(),
+				size_bytes: f.size_bytes,
+				sha256: f.sha256.clone(),
+				local_path: f.abs_path.clone(),
+			}).collect();
 
             ItemMeta {
                 ty: "ItemMeta".to_string(),
@@ -117,10 +120,10 @@ pub fn build_item_meta(deps: &LocalIngestDeps<'_>, snap: &ClipboardSnapshot) -> 
 }
 
 pub fn make_ingest_plan(
-    deps: &LocalIngestDeps<'_>,
-    snap: &ClipboardSnapshot,
-    limits: &Limits,
-    force: bool,
+	deps: &LocalIngestDeps<'_>,
+	snap: &ClipboardSnapshot,
+	limits: &SizeLimits,
+	force: bool,
 ) -> anyhow::Result<IngestPlan> {
     let meta = build_item_meta(deps, snap);
 
