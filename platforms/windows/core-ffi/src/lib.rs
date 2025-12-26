@@ -1,12 +1,12 @@
 mod bridge;
 mod error;
-    
+
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::ptr;
 use std::sync::Arc;
-
+use anyhow::Context;
 use cb_core::api::{Core, CoreEventSink};
 
 use crate::error::{err_json, ok_json};
@@ -46,9 +46,20 @@ fn cstr_to_str<'a>(p: *const c_char) -> anyhow::Result<&'a str> {
     Ok(s)
 }
 
+#[derive(serde::Deserialize)]
+struct HistoryQueryDto {
+	#[serde(default = "default_limit")]
+	limit: usize,
+	#[serde(default)]
+	cursor: Option<i64>, // 分页游标，可选
+}
+
+fn default_limit() -> usize { 20 }
+
 fn ret(s: String) -> *const c_char {
     CString::new(s).unwrap().into_raw()
 }
+
 
 /// # `cb_free_string`
 ///
@@ -70,11 +81,11 @@ fn ret(s: String) -> *const c_char {
 /// - 指针在被此函数释放后不得再次使用。
 ///
 /// # 示例 (C 代码集成)
-/// ```c
+/// ```c,ignore
 /// extern void cb_free_string(const char* s);
 ///
 /// // 假设某个函数返回了由 cb 库分配的字符串
-/// char* string = ...; 
+/// char* string = ...;
 /// cb_free_string(string);
 /// ```
 ///
@@ -377,6 +388,112 @@ pub extern "C" fn cb_get_status(h: *mut cb_handle) -> *const c_char {
         Ok(s) => ret(s),
         Err(e) => ret(err_json("GET_STATUS_FAILED", &format!("{e:#}"))),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct EnsureContentDto {
+	item_id: String,
+	file_id: Option<String>,
+	// prefer_peer: Option<String>, // 预留，Core API 升级后可传入
+}
+
+#[no_mangle]
+pub extern "C" fn cb_ensure_content_cached(h: *mut cb_handle, req_json: *const c_char) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let hh = unsafe { &mut *h };
+
+		let json_str = crate::cstr_to_str(req_json)?;
+		let dto: EnsureContentDto = serde_json::from_str(json_str).context("invalid json")?;
+
+		// 调用 Core API
+		let transfer_id = hh.core.ensure_content_cached(&dto.item_id, dto.file_id.as_deref())?;
+
+		Ok(crate::error::ok_json(serde_json::json!({ "transfer_id": transfer_id })))
+	})();
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("START_FETCH_FAILED", &format!("{e:#}"))),
+	}
+}
+
+#[no_mangle]
+pub extern "C" fn cb_cancel_transfer(h: *mut cb_handle, transfer_id_json: *const c_char) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let hh = unsafe { &mut *h };
+
+		let json_str = crate::cstr_to_str(transfer_id_json)?;
+		// 假设传入的是一个单纯的字符串 JSON，如 "uuid"
+		let tid: String = serde_json::from_str(json_str).context("invalid json string")?;
+
+		hh.core.cancel_transfer(&tid);
+		Ok(crate::error::ok_json(serde_json::json!({})))
+	})();
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("CANCEL_FAILED", &format!("{e:#}"))),
+	}
+}
+
+#[no_mangle]
+pub extern "C" fn cb_list_history(h: *mut cb_handle, query_json: *const c_char) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let hh = unsafe { &mut *h };
+
+		// 1. 解析入参
+		let json_str = crate::cstr_to_str(query_json)?;
+		let dto: HistoryQueryDto = serde_json::from_str(json_str).context("invalid query json")?;
+
+		// 2. 调用 Core
+		let items = hh.core.list_history(dto.limit, dto.cursor)?;
+
+		// 3. 包装返回
+		Ok(crate::error::ok_json(items))
+	})();
+
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("LIST_HISTORY_FAILED", &format!("{e:#}"))),
+	}
+}
+
+#[no_mangle]
+pub extern "C" fn cb_get_item_meta(h: *mut cb_handle, item_id_json: *const c_char) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let hh = unsafe { &mut *h };
+
+		// 1. 解析入参 (假设传入的是单纯的字符串 "uuid..."，或者是 { "item_id": "..." })
+		// 这里为了兼容性，支持直接传字符串，或者包含 item_id 的对象
+		let json_str = crate::cstr_to_str(item_id_json)?;
+
+		// 尝试解析为字符串
+		let item_id = if let Ok(s) = serde_json::from_str::<String>(json_str) {
+			s
+		} else {
+			// 尝试解析为对象
+			#[derive(serde::Deserialize)]
+			struct IdObj { item_id: String }
+			let obj: IdObj = serde_json::from_str(json_str).context("invalid item_id json")?;
+			obj.item_id
+		};
+
+		// 2. 调用 Core
+		let meta = hh.core.get_item_meta(&item_id)?;
+
+		// 3. 包装返回
+		match meta {
+			Some(m) => Ok(crate::error::ok_json(m)),
+			None => Err(anyhow::anyhow!("Item not found")),
+		}
+	})();
+
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("GET_ITEM_FAILED", &format!("{e:#}"))),
+	}
 }
 
 #[cfg(test)]

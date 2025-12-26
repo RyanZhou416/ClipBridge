@@ -70,3 +70,14 @@ impl ItemMeta {
 		}
 	}
 }
+
+#[derive(Debug, serde::Serialize)]
+pub struct CoreErrorPayload {
+	pub code: String,
+	pub message: String,
+	pub scope: String, // "Session", "Transfer", "Core"
+	pub retryable: bool,
+	pub affects_session: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub detail: Option<serde_json::Value>,
+}

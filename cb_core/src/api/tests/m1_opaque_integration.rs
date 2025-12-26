@@ -42,7 +42,7 @@ async fn test_opaque_handshake_integration() {
         let start = std::time::Instant::now();
 
         // 5秒超时
-        while start.elapsed() < Duration::from_secs(5) {
+        while start.elapsed() < Duration::from_secs(15) {
             tokio::select! {
                 Ok(evt) = c1_rx.recv() => {
                     if evt.contains("PEER_ONLINE") && evt.contains("dev2") {

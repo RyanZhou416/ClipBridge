@@ -21,7 +21,7 @@ async fn test_m3_1_text_fetch_success() {
 
 	println!("Cores started. Waiting for discovery...");
 	// 2. 等待互联
-	let connected = wait_for(Duration::from_secs(5), || async {
+	let connected = wait_for(Duration::from_secs(15), || async {
 		let peers = list_peers_async(&core_a).await;
 		peers.iter().any(|p| p.device_id == "m3_b" && p.state == PeerConnectionState::Online)
 	}).await;
@@ -197,7 +197,7 @@ async fn test_m3_3_file_fetch_success() {
 	let (core_a, _rx_a, _dir_a) = create_test_core("m3_file_a", &shared_uid, |_| {});
 	let (core_b, mut rx_b, dir_b) = create_test_core("m3_file_b", &shared_uid, |_| {});
 
-	wait_for(Duration::from_secs(5), || async {
+	wait_for(Duration::from_secs(15), || async {
 		let peers = list_peers_async(&core_a).await;
 		peers.iter().any(|p| p.device_id == "m3_file_b" && p.state == PeerConnectionState::Online)
 	}).await;

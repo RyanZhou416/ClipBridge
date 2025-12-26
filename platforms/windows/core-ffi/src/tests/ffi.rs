@@ -288,3 +288,52 @@ fn ffi_ingest_text_smoke() {
 		cleanup_dir(&root);
 	}
 }
+
+#[test]
+fn ffi_list_history_and_get_item() {
+	unsafe {
+		let (h, root) = init_handle();
+		let ts = now_ms();
+
+		// 1. 先插入一条数据
+		let snap = CString::new(format!(
+			r#"{{
+              "type":"ClipboardSnapshot",
+              "ts_ms":{ts},
+              "kind":"text",
+              "share_mode":"default",
+              "text":{{"utf8":"history_test_item"}}
+            }}"#
+		)).unwrap();
+
+		let out_ingest = cb_ingest_local_copy(h, snap.as_ptr());
+		let v_ingest: serde_json::Value = serde_json::from_str(&take_json(out_ingest)).unwrap();
+		assert!(v_ingest["ok"].as_bool().unwrap());
+		let item_id = v_ingest["data"]["meta"]["item_id"].as_str().unwrap().to_string();
+
+		// 2. 测试 list_history
+		// 构造查询参数：limit=10
+		let query = CString::new(r#"{"limit": 10}"#).unwrap();
+		let out_list = cb_list_history(h, query.as_ptr());
+		let v_list: serde_json::Value = serde_json::from_str(&take_json(out_list)).unwrap();
+
+		assert!(v_list["ok"].as_bool().unwrap(), "list_history failed");
+		let items = v_list["data"].as_array().unwrap();
+		assert!(!items.is_empty(), "history should not be empty");
+		assert_eq!(items[0]["item_id"], item_id, "first item should match");
+
+		// 3. 测试 get_item_meta
+		// 构造查询参数：直接传 item_id 的 JSON 字符串
+		let id_json = CString::new(serde_json::to_string(&item_id).unwrap()).unwrap();
+		let out_get = cb_get_item_meta(h, id_json.as_ptr());
+		let v_get: serde_json::Value = serde_json::from_str(&take_json(out_get)).unwrap();
+
+		assert!(v_get["ok"].as_bool().unwrap(), "get_item_meta failed");
+		assert_eq!(v_get["data"]["item_id"], item_id);
+		assert_eq!(v_get["data"]["preview"]["text"], "history_test_item");
+
+		// 4. 清理
+		let _ = take_json(cb_shutdown(h));
+		cleanup_dir(&root);
+	}
+}

@@ -21,7 +21,7 @@ fn list_history_orders_newest_first() {
         })
         .unwrap();
 
-    let list = core.list_history(10).unwrap();
+    let list = core.list_history(10, None).unwrap();
     assert!(list.len() >= 2);
 
     // newest first

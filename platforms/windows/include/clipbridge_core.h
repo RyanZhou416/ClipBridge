@@ -36,6 +36,20 @@ CB_API const char* cb_list_peers(cb_handle* h);
 // 返回 {"ok":true, "data":{"status":"Running", ...}}
 CB_API const char* cb_get_status(cb_handle* h);
 
+// M3: 确保内容缓存 (Lazy Fetch)
+// req_json: { "item_id": "...", "file_id": "opt", "prefer_peer": "opt" }
+CB_API const char* cb_ensure_content_cached(cb_handle* h, const char* req_json);
+
+// M3: 取消传输
+// transfer_id_json: "uuid-string"
+CB_API const char* cb_cancel_transfer(cb_handle* h, const char* transfer_id_json);
+
+// 历史查询
+CB_API const char* cb_list_history(cb_handle* h, const char* query_json);
+
+// 查询单条元数据
+CB_API const char* cb_get_item_meta(cb_handle* h, const char* item_id_json);
+
 #ifdef __cplusplus
 }
 #endif

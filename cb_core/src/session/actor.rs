@@ -709,27 +709,47 @@ impl SessionActor {
 				// 也可以 spawn 一个新的 task 去等，防止阻塞 Actor 处理其他消息，但这里简单处理即可
 				match reply_rx.await {
 					Ok(Ok(final_path)) => {
-						// DB 标记
 						let store = self.store.clone();
-						let sha_for_db = sha256.clone(); // 用片段 hash 记（M3 简化）
+						let sha_for_db = sha256.clone();
+						let iid = item_id.clone();
+						let fid = file_id.clone();
+						let final_path_str = final_path.to_string_lossy().to_string();
 
-						tokio::task::spawn_blocking(move || {
+						// 【新增】查询 DB 获取完整元数据
+						let meta_info = tokio::task::spawn_blocking(move || {
 							let mut guard = store.lock().unwrap();
-							// 注意：Resume 场景下这里应该 mark Full Hash，但我们上下文里只有 partial hash
-							// 在 MVP 中，假设一次传完，或者 Resume 后应用层自己做完整性校验
-							guard.mark_cache_present(&sha_for_db, now_ms())
+							guard.mark_cache_present(&sha_for_db, now_ms())?; // 原有逻辑 [cite: 298]
+
+							// 补充查询
+							let mime = guard.get_item_mime(&iid)?.unwrap_or_default();
+							// 简单判断类型
+							let kind = if fid.is_some() { "file" } else { "image" }; // 假设非 file_list 就是 image/text
+
+							Ok::<(String, String), anyhow::Error>((mime, kind.to_string()))
 						}).await??;
 
-						let local_ref = serde_json::json!({ "local_path": final_path.to_string_lossy() });
-						let evt = serde_json::json!({
-                            "type": "CONTENT_CACHED",
-                            "payload": {
-                                "transfer_id": transfer_id,
-                                "item_id": item_id,
-                                "file_id": file_id,
-                                "local_ref": local_ref
-                            }
-                        });
+						let (mime, kind) = meta_info;
+
+						// 【修改】构造符合文档的 local_ref
+						let local_ref = serde_json::json!({
+							"local_path": final_path_str,
+							"item_id": item_id,
+							"mime": mime,
+							"kind": kind,
+							"sha256": sha256, // 这个是片段 hash，完整版应该查 DB 拿完整 hash
+							"total_bytes": 0 // 这里应该填真实大小，可从 final_path metadata 读取
+						});
+
+										// 发送事件
+										let evt = serde_json::json!({
+							"type": "CONTENT_CACHED",
+							"payload": {
+								"transfer_id": transfer_id,
+								"item_id": item_id,
+								"file_id": file_id,
+								"local_ref": local_ref
+							}
+						});
 						self.sink.emit(evt.to_string());
 					}
 					Ok(Err(e)) => self.emit_transfer_failed(&req_id, "COMMIT_FAILED", &e.to_string()),
@@ -756,16 +776,31 @@ impl SessionActor {
 		Ok(())
 	}
 
-    fn emit_transfer_failed(&self, tid: &str, code: &str, msg: &str) {
-        let evt = serde_json::json!({
-            "type": "TRANSFER_FAILED",
-            "payload": {
-                "transfer_id": tid,
-                "error": { "code": code, "message": msg }
-            }
-        });
-        self.sink.emit(evt.to_string());
-    }
+	fn emit_transfer_failed(&self, tid: &str, code: &str, msg: &str) {
+		// 根据文档规则硬编码属性
+		let (retryable, affects_session) = match code {
+			"PERMISSION_DENIED" | "ITEM_NOT_FOUND" => (false, false),
+			"CONN_TIMEOUT" => (true, true),
+			_ => (false, false),
+		};
+
+		let payload = crate::model::CoreErrorPayload {
+			code: code.to_string(),
+			message: msg.to_string(),
+			scope: "Transfer".to_string(),
+			retryable,
+			affects_session,
+			detail: Some(serde_json::json!({ "transfer_id": tid })),
+		};
+
+		// 统一使用 TRANSFER_FAILED 或 CORE_ERROR
+		let evt = serde_json::json!({
+        "type": "TRANSFER_FAILED",
+        "ts_ms": crate::util::now_ms(),
+        "payload": payload
+    });
+		self.sink.emit(evt.to_string());
+	}
 
     // --- M3 Sender Logic ---
 	async fn handle_content_get(&mut self, transfer_id: String, item_id: String, file_id: Option<String>, offset: Option<u64>) -> Result<()> {

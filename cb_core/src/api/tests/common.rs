@@ -1,94 +1,47 @@
+// cb_core/src/api/tests/common.rs
 use super::super::*;
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread::sleep;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub struct TestDirs {
-    pub root: PathBuf,
-    pub data_dir: String,
-    pub cache_dir: String,
-}
+// 直接复用 testsupport 的目录夹具：
+// - target/<profile>/clipbridge_tests/cb_core/<test_tag>_<uuid>/{data,cache}
+// - 支持 CB_TEST_KEEP=1 保留现场
+pub use crate::testsupport::dirs::TestDirs;
 
-impl Drop for TestDirs {
-    fn drop(&mut self) {
-        if std::env::var_os("CB_TEST_KEEP").is_some() {
-            return;
-        }
-        // SQLite/WAL 句柄可能延迟释放：重试更稳
-        for _ in 0..10 {
-            if !self.root.exists() {
-                return;
-            }
-            if fs::remove_dir_all(&self.root).is_ok() {
-                return;
-            }
-            sleep(Duration::from_millis(20));
-        }
-    }
-}
-
-fn test_target_dir() -> PathBuf {
-    if let Some(p) = std::env::var_os("CARGO_TARGET_DIR") {
-        return PathBuf::from(p);
-    }
-    // 兜底：workspace 根的 target
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target")
-}
-
+/// 兼容旧测试调用：sub 就当作 test_tag 用
 pub fn unique_dirs(sub: &str) -> TestDirs {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-
-    let root = test_target_dir()
-        .join("debug")
-        .join("clipbridge_tests")
-        .join("cb_core")
-        .join(sub)
-        .join(format!("run_{nanos}"));
-
-    let data_path = root.join("data");
-    let cache_path = root.join("cache");
-    let _ = fs::create_dir_all(&data_path);
-    let _ = fs::create_dir_all(&cache_path);
-
-    TestDirs {
-        root,
-        data_dir: data_path.to_string_lossy().into_owned(),
-        cache_dir: cache_path.to_string_lossy().into_owned(),
-    }
+	TestDirs::new("cb_core", sub)
 }
 
 struct PrintSink;
 impl CoreEventSink for PrintSink {
-    fn emit(&self, _event_json: String) {
-        // 先不处理事件
-    }
+	fn emit(&self, _event_json: String) {
+		// 这些 api 单测暂时不依赖事件回调
+	}
 }
 
+/// 兼容旧测试调用：保留 mk_core(sub, gc_history_max_items, gc_cas_max_bytes)
 pub fn mk_core(sub: &str, gc_history_max_items: i64, gc_cas_max_bytes: i64) -> (Core, TestDirs) {
-    let dirs = unique_dirs(sub);
+	let dirs = unique_dirs(sub);
 
-    let cfg = CoreConfig {
-        device_id: "dev-1".to_string(),
-        device_name: "dev1".to_string(),
-        account_uid: "acct-uid-1".to_string(),
-        account_tag: "acctTag".to_string(),
-        data_dir: dirs.data_dir.clone(),
-        cache_dir: dirs.cache_dir.clone(),
+	let cfg = CoreConfig {
+		device_id: "dev-1".to_string(),
+		device_name: "dev1".to_string(),
+		account_uid: "acct-uid-1".to_string(),
+		account_tag: "acctTag".to_string(),
+
+		// 强制所有测试 DB/CAS 进入 testsupport 的测试目录（避免污染 repo 根目录）
+		data_dir: dirs.data_dir.clone(),
+		cache_dir: dirs.cache_dir.clone(),
+
 		app_config: AppConfig {
-			size_limits: crate::policy::SizeLimits::default(),
-			global_policy: Default::default(),
 			gc_history_max_items,
 			gc_cas_max_bytes,
+			..Default::default()
 		},
-    };
+	};
 
-    let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
-    let core = Core::init(cfg, sink);
+	let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);
+	let core = Core::init(cfg, sink);
 
-    (core, dirs)
+	(core, dirs)
 }

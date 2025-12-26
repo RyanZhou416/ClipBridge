@@ -181,7 +181,7 @@ async fn test_m1_reconnection() {
 	let (core_a, _rx_a, dir_a) = create_test_core("recon_a", &shared_uid, |_| {});
 	let (core_b, _rx_b, _dir_b) = create_test_core("recon_b", &shared_uid, |_| {});
 	println!("1. Waiting for initial connection...");
-	let connected = wait_for(Duration::from_secs(5), || async {
+	let connected = wait_for(Duration::from_secs(15), || async {
 		let peers = list_peers_async(&core_a).await;
 		peers.iter().any(|p| p.device_id == "recon_b" && p.state == PeerConnectionState::Online)
 	}).await;

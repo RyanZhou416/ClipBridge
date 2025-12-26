@@ -137,14 +137,7 @@ impl Core {
     pub fn shutdown(&self) {
         self.inner.shutdown();
     }
-
-    pub fn list_history(&self, limit: usize) -> anyhow::Result<Vec<crate::model::ItemMeta>> {
-        if self.inner.is_shutdown.load(Ordering::Acquire) {
-            anyhow::bail!("core already shutdown");
-        }
-        let store = self.inner.store.lock().unwrap();
-        store.list_history_metas(&self.inner.core_config.account_uid, limit)
-    }
+	
 
     /**
      * 规划本地内容的摄入流程。
@@ -343,11 +336,7 @@ impl Core {
         }))
     }
 
-    pub fn ensure_content_cached(
-        &self,
-        item_id: &str,
-        file_id: Option<&str>
-    ) -> anyhow::Result<String> {
+	pub fn ensure_content_cached(&self, item_id: &str, file_id: Option<&str>) -> anyhow::Result<String> {
         if self.inner.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
             anyhow::bail!("core shutdown");
         }
@@ -357,18 +346,17 @@ impl Core {
         // 如果是 FileList 里的子文件，逻辑更复杂，这里先统一交给 NetManager 处理，
         // 或者也可以在这里先查 DB。为了架构解耦，建议发给 NetManager/Session 判断。
 
-        let Some(net_tx) = &self.inner.net else {
-            anyhow::bail!("network not initialized");
-        };
+		let Some(net_tx) = &self.inner.net else {
+			anyhow::bail!("network not initialized");
+		};
+		let (tx, rx) = tokio::sync::oneshot::channel();
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-
-        net_tx.blocking_send(crate::net::NetCmd::EnsureContentCached {
-            item_id: item_id.to_string(),
-            file_id: file_id.map(|s| s.to_string()),
-            force: false,
-            reply: tx,
-        }).map_err(|_| anyhow::anyhow!("NetManager closed"))?;
+		net_tx.blocking_send(crate::net::NetCmd::EnsureContentCached {
+			item_id: item_id.to_string(),
+			file_id: file_id.map(|s| s.to_string()),
+			force: false,
+			reply: tx,
+		}).map_err(|_| anyhow::anyhow!("NetManager closed"))?;
 
         // 等待 NetManager 分配任务并返回 transfer_id
         match futures::executor::block_on(rx) {
@@ -385,11 +373,43 @@ impl Core {
             });
         }
     }
+
+	// [修改] 增强 list_history，虽然底层 store 可能只支持 limit，但 API 要预留 cursor 位置
+	pub fn list_history(&self, limit: usize, _cursor: Option<i64>) -> anyhow::Result<Vec<crate::model::ItemMeta>> {
+		if self.inner.is_shutdown.load(Ordering::Acquire) {
+			anyhow::bail!("core already shutdown");
+		}
+		let store = self.inner.store.lock().unwrap();
+		// 目前 store.rs 里的 list_history_metas 只接受 limit
+		// 后续你需要去 store.rs 实现基于 cursor 的分页
+		store.list_history_metas(&self.inner.core_config.account_uid, limit)
+	}
+
+	// [新增] 获取单条 Meta，供 FFI 调用
+	pub fn get_item_meta(&self, item_id: &str) -> anyhow::Result<Option<crate::model::ItemMeta>> {
+		if self.inner.is_shutdown.load(Ordering::Acquire) {
+			anyhow::bail!("core already shutdown");
+		}
+		let store = self.inner.store.lock().unwrap();
+
+		// 这里的 SQL 查询逻辑需要你确认 store.rs 里有没有。
+		// 如果 store.rs 还没有 get_item_meta，你需要去加一个简单的 select。
+		// 为了方便，这里暂时用 list_history 模拟（性能差，建议后续在 Store 实现专用查询）
+		let list = store.list_history_metas(&self.inner.core_config.account_uid, 100)?;
+		Ok(list.into_iter().find(|i| i.item_id == item_id))
+	}
 }
 
 #[cfg(test)]
 impl Core {
     // 可以在这里添加针对 M1 的测试辅助方法
+}
+
+pub struct ContentFetchRequest {
+	pub item_id: String,
+	pub file_id: Option<String>,
+	// pub prefer_peer: Option<String>, // 未来 M3 完整版添加
+	// pub is_force: bool,
 }
 
 pub(crate) struct Inner {
