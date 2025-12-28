@@ -49,7 +49,7 @@ pub enum CtrlMsg {
     // 3. 鉴权失败
     AuthFail {
         reply_to: Option<String>,
-        error_code: String,
+		code: String,
     },
 
     // --- OPAQUE 流程 (关键修改：opaque 字段改为 Vec<u8>) ---
@@ -101,7 +101,7 @@ pub enum CtrlMsg {
     // 通用错误
     Error {
         reply_to: Option<String>,
-        error_code: String,
+        code: String,
         message: Option<String>,
     },
 
@@ -143,7 +143,6 @@ pub enum CtrlMsg {
 
 use tokio_util::codec::{Decoder, Encoder};
 use bytes::{Buf, BufMut, BytesMut};
-use anyhow::Error;
 
 const MAX_FRAME_SIZE: usize = 10 * 1024 * 1024; // 10MB
 

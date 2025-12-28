@@ -43,12 +43,47 @@ enum ReceiverState {
         transfer_id: String,
         item_id: String,
         file_id: Option<String>, // 如果是 FileList 中的子文件
+		expected_sha256: String,
         mime: String,
 		tx: mpsc::Sender<ReceiverTaskMsg>,
         received_bytes: u64,
         total_bytes: u64,
         last_progress_emit: i64, // 用于节流 progress 事件
     },
+	// 已触发 Finish，等待落地结果（避免重复 Finish / 重复 End）
+	Committing {
+		transfer_id: String,
+		item_id: String,
+		file_id: Option<String>,
+		expected_sha256: String,
+		mime: String,
+		total_bytes: u64,
+		started_ts_ms: i64,
+	},
+
+	Done {
+		transfer_id: String,
+		item_id: String,
+		file_id: Option<String>,
+		sha256: String,
+		mime: String,
+		total_bytes: u64,
+		local_path: Option<String>,
+		done_ts_ms: i64,
+	},
+
+	Failed {
+		transfer_id: String,
+		code: String,
+		message: String,
+		ts_ms: i64,
+	},
+
+	Cancelled {
+		transfer_id: String,
+		reason: String,
+		ts_ms: i64,
+	},
 }
 
 /// 定义发送任务的消息
@@ -389,7 +424,7 @@ impl SessionActor {
                     if account_tag != self.config.account_tag {
                         let _ = self.send_ctrl(CtrlMsg::AuthFail {
                             reply_to: msg_id.clone(),
-                            error_code: "AUTH_ACCOUNT_TAG_MISMATCH".into(),
+                            code: "AUTH_ACCOUNT_TAG_MISMATCH".into(),
                         }).await;
                         let _ = self.send_ctrl(CtrlMsg::Close {
                             msg_id: None,
@@ -424,7 +459,7 @@ impl SessionActor {
                     if let Err(e) = self.perform_tofu_check_async().await {
                         let _ = self.send_ctrl(CtrlMsg::Error {
                             reply_to: msg_id.clone(),
-                            error_code: "POLICY_REJECT".into(),
+                            code: "POLICY_REJECT".into(),
                             message: Some(e.to_string()),
                         }).await;
                         return Err(e);
@@ -443,7 +478,7 @@ impl SessionActor {
                     self.transition_to_online().await?;
                 }
             }
-            CtrlMsg::AuthFail { error_code, .. } => anyhow::bail!("Remote AuthFail: {}", error_code),
+            CtrlMsg::AuthFail { code, .. } => anyhow::bail!("Remote AuthFail: {}", code),
             CtrlMsg::Ping { ts, msg_id } => {
                 self.send_ctrl(CtrlMsg::Pong { reply_to: msg_id, ts }).await?;
             }
@@ -474,7 +509,7 @@ impl SessionActor {
                     }
                 }
             }
-            CtrlMsg::Error { error_code, message, .. } => anyhow::bail!("Remote error {}: {:?}", error_code, message),
+            CtrlMsg::Error { code, message, .. } => anyhow::bail!("Remote error {}: {:?}", code, message),
             CtrlMsg::Close { .. } => anyhow::bail!("Remote closed connection"),
 
             // === M3: 传输逻辑 ===
@@ -509,7 +544,7 @@ impl SessionActor {
 		item_id: String,
 		file_id: Option<String>,
 		total_bytes: u64,
-		_file_sha256: String, // 注意：这是整个文件的 Hash，Resume 时不需要校验它
+		file_sha256: String, // 注意：这是整个文件的 Hash，Resume 时不需要校验它
 		mime: String
 	) -> Result<()> {
 		println!("[Session] Starting transfer {}: {} bytes (Mime: {})", req_id, total_bytes, mime);
@@ -524,7 +559,7 @@ impl SessionActor {
 			tokio::fs::create_dir_all(p).await?;
 		}
 
-		// [修改] 启动独立的 Writer Task
+		// 启动独立的 Writer Task
 		let (tx, mut rx) = mpsc::channel::<ReceiverTaskMsg>(32);
 
 		// Clone 需要的数据传入 Task
@@ -643,6 +678,7 @@ impl SessionActor {
 			transfer_id: req_id.clone(),
 			item_id,
 			file_id,
+			expected_sha256: file_sha256,
 			mime,
 			tx, // 保存 Sender
 			received_bytes: 0,
@@ -687,6 +723,7 @@ impl SessionActor {
 						*last_progress_emit = now;
 					}
 				}
+				_ => {}
 			}
 		}
 		Ok(())
@@ -920,7 +957,7 @@ impl SessionActor {
 			// 找不到文件，发送错误
 			self.send_ctrl(CtrlMsg::Error {
 				reply_to: Some(transfer_id),
-				error_code: "ITEM_NOT_FOUND".into(),
+				code: "ITEM_NOT_FOUND".into(),
 				message: Some("File content not found in CAS or local path".into()),
 			}).await?;
 		}
@@ -1070,7 +1107,7 @@ impl SessionActor {
 
     async fn tick_heartbeat(&mut self) -> Result<()> {
         if now_ms() - self.last_active_at > HEARTBEAT_TIMEOUT.as_millis() as i64 {
-            let _ = self.send_ctrl(CtrlMsg::Error { reply_to: None, error_code: "TIMEOUT".into(), message: Some("Heartbeat timeout".into()) }).await;
+            let _ = self.send_ctrl(CtrlMsg::Error { reply_to: None, code: "TIMEOUT".into(), message: Some("Heartbeat timeout".into()) }).await;
             anyhow::bail!("Heartbeat timeout");
         }
         if self.state == SessionState::Online {

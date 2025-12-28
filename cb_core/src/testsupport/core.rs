@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
 use crate::api::{Core, CoreConfig,AppConfig};
-use crate::api::GlobalPolicy::AllowAll;
-use crate::policy::SizeLimits;
 
 use super::dirs::TestDirs;
 use super::events::{EventAsserter, EventCollector};

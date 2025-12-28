@@ -4,7 +4,6 @@ mod error;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
-use std::ptr;
 use std::sync::Arc;
 use anyhow::Context;
 use cb_core::api::{Core, CoreEventSink};

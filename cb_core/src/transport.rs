@@ -2,10 +2,10 @@
 
 mod cert;
 
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use std::net::{SocketAddr, Ipv4Addr}; // Ipv6Addr 在 v1 暂不强制
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use quinn::{Endpoint, ServerConfig, TransportConfig, VarInt};

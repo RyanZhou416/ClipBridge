@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use anyhow::{Context, Error};
+use anyhow::Context;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::Deserialize;
