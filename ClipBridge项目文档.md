@@ -3317,7 +3317,7 @@ Core 只需要 2 个根目录：`data_dir`（持久）与 `cache_dir`（可清�
 排序规则（v1 固定）：
 - UI 查询历史时排序：`ORDER BY sort_ts_ms DESC, history_id DESC`
   - `history_id` 仅用于同一毫秒内的稳定 tie-break（不参与跨设备一致性）
-约束建议：
+  约束建议：
 - `history` 只负责排序与过滤，不重复存大字段
 
 #### D) content_cache（CAS 存在性 + 访问时间）
@@ -5530,7 +5530,6 @@ ClipBridge 使用 **cargo-deny** 进行供应链检查：
 **开发者不需要手动修改版本号或打 tag。**
 
 ---
-
 
 
 
