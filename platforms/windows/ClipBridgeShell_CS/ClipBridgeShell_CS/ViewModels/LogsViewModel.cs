@@ -4,11 +4,14 @@ using System.ComponentModel;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Input;
+using ClipBridgeShell_CS.Core.Contracts.Services;
+using ClipBridgeShell_CS.Core.Models;
+using ClipBridgeShell_CS.Interop;
+using ClipBridgeShell_CS.Models;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
-using ClipBridge.Interop;
-using ClipBridge.Models;
-using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace ClipBridgeShell_CS.ViewModels;
 
@@ -17,7 +20,8 @@ public sealed class LogsViewModel : ObservableObject
 
     // 可绑定到 ListView / ItemsRepeater
     public ObservableCollection<LogRow> Items { get; } = new();
-
+    private readonly ICoreHostService _coreHost;
+    private bool CanUseCore() => _coreHost.State == CoreState.Ready;
     // 过滤 & 状态
     private int _levelMin = 0;
     public int LevelMin
@@ -86,29 +90,56 @@ public sealed class LogsViewModel : ObservableObject
     }
 
     // 命令
-    public ICommand StartTailCmd  => new Relay(async _ => await StartTailAsync());
-    public ICommand StopTailCmd   => new Relay(_ => StopTail());
-    public ICommand ClearViewCmd  => new Relay(_ => { Items.Clear(); _lastId = 0; });
-    public ICommand RefreshStatsCmd => new Relay(async _ => await RefreshStatsAsync());
-    public ICommand QueryPageCmd  => new Relay(async _ => await QueryPageAsync());
-    public ICommand DeleteBeforeCmd => new Relay(async _ =>
-    {
-        var cutoff = DateTimeOffset.Now.AddDays(-7).ToUnixTimeMilliseconds(); // 示例：保留 7 天
-        var deleted = Native.LogsDeleteBefore(cutoff);
-        await RefreshStatsAsync();
-    });
-    public ICommand ExportCsvCmd => new Relay(async _ => await ExportCsvAsync());
+    public IRelayCommand StartTailCmd { get; }
+    public IRelayCommand StopTailCmd { get; }
+    public IRelayCommand ClearViewCmd { get; }
+    public IRelayCommand RefreshStatsCmd { get; }
+    public IRelayCommand QueryPageCmd { get; }
+    public IRelayCommand DeleteBeforeCmd { get; }
+    public IRelayCommand ExportCsvCmd { get; }
 
-    public LogsViewModel()
+    public LogsViewModel(ICoreHostService coreHost)
     {
-        // 默认启动 tail
-        _ = StartTailAsync();
-        _ = RefreshStatsAsync();
+        _coreHost = coreHost;
+
+        // 1. 初始化命令，绑定 CanExecute (CanUseCore)
+        StartTailCmd = new RelayCommand(async () => await StartTailAsync(), CanUseCore);
+
+        // Stop 和 Clear 不需要 Core，随时可用
+        StopTailCmd = new RelayCommand(StopTail);
+        ClearViewCmd = new RelayCommand(() => { Items.Clear(); _lastId = 0; });
+
+        RefreshStatsCmd = new RelayCommand(async () => await RefreshStatsAsync(), CanUseCore);
+        QueryPageCmd = new RelayCommand(async () => await QueryPageAsync(), CanUseCore);
+
+        DeleteBeforeCmd = new RelayCommand(async () =>
+        {
+            var cutoff = DateTimeOffset.Now.AddDays(-7).ToUnixTimeMilliseconds();
+            try
+            {
+                CoreInterop.LogsDeleteBefore(cutoff);
+                await RefreshStatsAsync();
+            }
+            catch (Exception ex) { /* TODO: Show error */ System.Diagnostics.Debug.WriteLine(ex); }
+        }, CanUseCore);
+
+        ExportCsvCmd = new RelayCommand(async () => await ExportCsvAsync()); // 导出现有数据不需要 Core
+
+        // 2. 订阅状态变化，以便自动刷新按钮状态
+        _coreHost.StateChanged += OnCoreStateChanged;
+
+        // 3. 尝试启动
+        if (CanUseCore())
+        {
+            _ = StartTailAsync();
+            _ = RefreshStatsAsync();
+        }
     }
 
     private async Task RefreshStatsAsync()
     {
-        Stats = Native.LogsStats();
+        if (!CanUseCore()) return;
+        Stats = CoreInterop.LogsStats();
         await Task.CompletedTask;
     }
 
@@ -116,6 +147,8 @@ public sealed class LogsViewModel : ObservableObject
     private async Task StartTailAsync()
     {
         StopTail();
+        if (!CanUseCore()) return; // 双重保险
+
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
         _timer.Tick += (_, __) => TickOnce();
         _timer.Start();
@@ -135,9 +168,16 @@ public sealed class LogsViewModel : ObservableObject
 
     private void TickOnce()
     {
+        // 如果运行中 Core 突然挂了，停止 Timer
+        if (!CanUseCore())
+        {
+            StopTail();
+            return;
+        }
+
         try
         {
-            var batch = Native.LogsQueryAfterId(_lastId, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, 500);
+            var batch = CoreInterop.LogsQueryAfterId(_lastId, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, 500);
             if (batch.Count == 0) return;
             foreach (var row in batch)
             {
@@ -148,7 +188,9 @@ public sealed class LogsViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            // 你可以把错误也写入日志：Native.LogsWrite(4, "LogsViewModel", $"Tail error: {ex.Message}", ex.ToString());
+            // 如果出错（例如 DLL 调用失败），停止 Tail
+            StopTail();
+            System.Diagnostics.Debug.WriteLine($"Tail error: {ex.Message}");
         }
     }
 
@@ -157,11 +199,12 @@ public sealed class LogsViewModel : ObservableObject
     // -------------------- 历史查询（分页） --------------------
     private async Task QueryPageAsync()
     {
+        if (!CanUseCore()) return;
         StopTail(); // 停止实时，以免干扰
         Items.Clear();
         var startMs = RangeStart.ToUnixTimeMilliseconds();
         var endMs = RangeEnd.ToUnixTimeMilliseconds();
-        var list = Native.LogsQueryRange(startMs, endMs, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, PageSize, PageIndex * PageSize);
+        var list = CoreInterop.LogsQueryRange(startMs, endMs, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, PageSize, PageIndex * PageSize);
         foreach (var row in list) Items.Add(row);
         await Task.CompletedTask;
     }
@@ -199,15 +242,20 @@ public sealed class LogsViewModel : ObservableObject
         }
         return s;
     }
-}
 
-// 超轻量 Relay
-public sealed class Relay : ICommand
-{
-    private readonly Action<object?> _a;
-    private readonly Func<object?, bool>? _can;
-    public Relay(Action<object?> a, Func<object?, bool>? can = null) { _a = a; _can = can; }
-    public bool CanExecute(object? parameter) => _can?.Invoke(parameter) ?? true;
-    public void Execute(object? parameter) => _a(parameter);
-    public event EventHandler? CanExecuteChanged { add { } remove { } }
+    // [新增] 状态变更处理
+    private void OnCoreStateChanged(CoreState state)
+    {
+        // 确保在 UI 线程刷新命令状态
+        App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+        {
+            StartTailCmd.NotifyCanExecuteChanged();
+            RefreshStatsCmd.NotifyCanExecuteChanged();
+            QueryPageCmd.NotifyCanExecuteChanged();
+            DeleteBeforeCmd.NotifyCanExecuteChanged();
+
+            // 如果 Core 挂了，强制停止 Tail 防止报错
+            if (state != CoreState.Ready) StopTail();
+        });
+    }
 }

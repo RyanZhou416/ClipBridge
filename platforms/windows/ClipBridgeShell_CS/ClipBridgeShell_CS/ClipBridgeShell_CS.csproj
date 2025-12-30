@@ -68,9 +68,6 @@
   </PropertyGroup>
     <Target Name="CopyCoreFfiDll" AfterTargets="Build">
         <Message Text="Copying core_ffi_windows.dll from Rust target to $(OutDir)" Importance="high" />
-        <Copy
-            SourceFiles="$(RustTargetDir)\core_ffi_windows.dll"
-            DestinationFolder="$(OutDir)"
-            SkipUnchangedFiles="true" />
+        <Copy SourceFiles="$(RustTargetDir)\core_ffi_windows.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
     </Target>
 </Project>

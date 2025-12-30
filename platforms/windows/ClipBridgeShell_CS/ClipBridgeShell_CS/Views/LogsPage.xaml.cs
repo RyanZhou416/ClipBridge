@@ -7,10 +7,11 @@ namespace ClipBridgeShell_CS.Views;
 
 public sealed partial class LogsPage : Page
 {
-    public LogsViewModel VM { get; } = new();
+    public LogsViewModel VM { get; }
 
     public LogsPage()
     {
+        VM = App.GetService<LogsViewModel>();
         InitializeComponent();
         DataContext = VM;
         VM.TailRequested += (_, __) =>

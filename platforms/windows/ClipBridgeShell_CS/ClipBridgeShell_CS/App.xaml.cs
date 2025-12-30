@@ -91,6 +91,11 @@ public partial class App : Application
             services.AddSingleton<ISampleDataService, SampleDataService>();
             services.AddSingleton<IFileService, FileService>();
 
+            //CB Core Host Service
+            services.AddSingleton<CoreHostService>();
+            services.AddSingleton<ICoreHostService, CoreHostService>();
+            services.AddSingleton<IClipboardService, ClipboardService>();
+
             // Views and ViewModels
             services.AddTransient<SettingsViewModel>();
             services.AddTransient<SettingsPage>();
@@ -105,6 +110,7 @@ public partial class App : Application
 
             // Configuration
             services.Configure<LocalSettingsOptions>(context.Configuration.GetSection(nameof(LocalSettingsOptions)));
+
         }).
         Build();
 
@@ -131,7 +137,10 @@ public partial class App : Application
         // ② 再走 Template Studio 原有流程（里面会调用 ActivationService）
         await App.GetService<IActivationService>().ActivateAsync(args);
 
+#if DEBUG
         PrintCoreDllInfo();
+#endif
+        _ = App.GetService<CoreHostService>().InitializeAsync();
 
     }
 

@@ -1,4 +1,4 @@
-﻿using ClipBridgeShell_CS.Contracts.Services;
+using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Helpers;
 
 using Microsoft.UI.Xaml;

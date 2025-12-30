@@ -9,17 +9,53 @@
       xmlns:l="using:WinUI3Localizer"
       Loaded="OnLoaded">
     <Grid>
-        
-        <Grid x:Name="AppTitleBar"
-        Canvas.ZIndex="1"
-        Height="{Binding ElementName=NavigationViewControl, Path=CompactPaneLength}"
-        IsHitTestVisible="True"
-        Background="Transparent"
-        VerticalAlignment="Top">
+		<Grid.RowDefinitions>
+			<!-- 0: TitleBar（用 CompactPaneLength 作为高度） -->
+			<RowDefinition Height="{Binding ElementName=NavigationViewControl, Path=CompactPaneLength}" />
+			<!-- 1: Degraded InfoBar -->
+			<RowDefinition Height="Auto" />
+		</Grid.RowDefinitions>
+
+		<!-- Titlebar -->
+		<Grid x:Name="AppTitleBar"
+		Grid.Row="0"
+		Canvas.ZIndex="1"
+		Height="{Binding ElementName=NavigationViewControl, Path=CompactPaneLength}"
+		IsHitTestVisible="True"
+		Background="Transparent"
+		VerticalAlignment="Top">
             <Image Source="/Assets/WindowIcon.ico" HorizontalAlignment="Left" Width="16" Height="16" />
             <TextBlock x:Name="AppTitleBarText" VerticalAlignment="Center" TextWrapping="NoWrap" Style="{StaticResource CaptionTextBlockStyle}" Margin="28,0,0,0"/>
         </Grid>
-        <NavigationView x:Name="NavigationViewControl"
+
+		<!-- Global degraded banner -->
+		<InfoBar Grid.Row="1"
+         IsOpen="{x:Bind ViewModel.IsCoreDegraded, Mode=OneWay}"
+         IsClosable="True"
+         Severity="Error"
+         Title="Core unavailable"
+         Message="{x:Bind ViewModel.CoreDegradedMessage, Mode=OneWay}">
+
+			<InfoBar.ActionButton>
+				<DropDownButton Content="Actions">
+					<DropDownButton.Flyout>
+						<MenuFlyout>
+							<MenuFlyoutItem Text="Retry"
+                                    Command="{x:Bind ViewModel.RetryCoreInitCommand}" />
+							<MenuFlyoutSeparator />
+							<MenuFlyoutItem Text="Copy diagnostics"
+                                    Command="{x:Bind ViewModel.CopyDiagnosticsCommand}" />
+							<MenuFlyoutItem Text="Open Logs"
+                                    Command="{x:Bind ViewModel.OpenLogsCommand}" />
+						</MenuFlyout>
+					</DropDownButton.Flyout>
+				</DropDownButton>
+			</InfoBar.ActionButton>
+
+		</InfoBar>
+
+		<!-- NavigationView -->
+		<NavigationView x:Name="NavigationViewControl"
                         Canvas.ZIndex="0"
                         IsBackButtonVisible="Visible"
                         IsBackEnabled="{x:Bind ViewModel.IsBackEnabled, Mode=OneWay}"
@@ -34,17 +70,17 @@
                 <!-- TODO: Update item titles by updating <x:Uid>.Content entries in Strings/en-us/Resources.resw. https://docs.microsoft.com/windows/uwp/app-resources/localize-strings-ui-manifest#refer-to-a-string-resource-identifier-from-xaml TODO: Update item icons by updating FontIcon.Glyph properties. https://docs.microsoft.com/windows/apps/design/style/segoe-fluent-icons-font#icon-list -->
                 <NavigationViewItem l:Uids.Uid="Shell_Main" helpers:NavigationHelper.NavigateTo="ClipBridgeShell_CS.ViewModels.MainViewModel">
                     <NavigationViewItem.Icon>
-                        <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xe7c3;"/>
+						<FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE80F;"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem l:Uids.Uid="Shell_Devices" helpers:NavigationHelper.NavigateTo="ClipBridgeShell_CS.ViewModels.DevicesViewModel">
                     <NavigationViewItem.Icon>
-                        <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xe80a;"/>
+						<FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xEA6C;"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem l:Uids.Uid="Shell_Logs" helpers:NavigationHelper.NavigateTo="ClipBridgeShell_CS.ViewModels.LogsViewModel">
                     <NavigationViewItem.Icon>
-                        <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xe7c3;"/>
+						<FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE756;"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
             </NavigationView.MenuItems>
