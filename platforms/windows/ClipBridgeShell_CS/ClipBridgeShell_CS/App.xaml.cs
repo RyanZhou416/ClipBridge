@@ -91,6 +91,9 @@ public partial class App : Application
             services.AddSingleton<ISampleDataService, SampleDataService>();
             services.AddSingleton<IFileService, FileService>();
 
+            services.AddSingleton<Stores.HistoryStore>();
+            services.AddSingleton<EventPumpService>();
+
             //CB Core Host Service
             services.AddSingleton<CoreHostService>();
             services.AddSingleton<ICoreHostService, CoreHostService>();

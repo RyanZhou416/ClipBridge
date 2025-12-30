@@ -9,6 +9,7 @@ using ClipBridgeShell_CS.Core.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
 using ClipBridgeShell_CS.Core.Services;
 using ClipBridgeShell_CS.Interop;
+using ClipBridgeShell_CS.Stores;
 
 namespace ClipBridgeShell_CS.Services;
 
@@ -18,7 +19,8 @@ public sealed class CoreHostService : ICoreHostService
     private CoreInterop.CbOnEventFn? _onEventThunk;
     private GCHandle _selfHandle;
     private IntPtr _coreHandle = IntPtr.Zero;
-    private static bool _isResolverSet = false; // [FIX] 防止重复设置 Resolver
+    private static bool _isResolverSet = false;
+    private readonly EventPumpService _eventPump;
 
     public CoreState State { get; private set; } = CoreState.NotLoaded;
     public CoreDiagnostics Diagnostics { get; } = new();
@@ -26,6 +28,11 @@ public sealed class CoreHostService : ICoreHostService
     public string? LastError
     {
         get; private set;
+    }
+
+    public CoreHostService(EventPumpService eventPump)
+    {
+        _eventPump = eventPump;
     }
 
     public async Task InitializeAsync(CancellationToken ct = default)
@@ -74,14 +81,8 @@ public sealed class CoreHostService : ICoreHostService
             // 5. 准备回调
             _onEventThunk = (eventJsonPtr, userData) =>
             {
-                // [FIX 3] 使用新加回来的 Helper 方法读取字符串
-                // 注意：这里我们只读不释放(通常 callback 的 string 是 const char* 借用)，
-                // 或者 Core 要求 copy。按头文件 "json 是临时指针，壳侧必须立刻拷贝"，
-                // Marshal.PtrToStringUTF8 会执行拷贝，所以没问题。
-                // 不要在回调里调用 cb_free_string，因为指针属于 Core 内部栈/堆。
                 var json = Marshal.PtrToStringUTF8(eventJsonPtr) ?? "{}";
-
-                // TODO: Push to EventPump
+                _eventPump.Enqueue(json);
             };
             if (!_selfHandle.IsAllocated) _selfHandle = GCHandle.Alloc(this);
             var userData = GCHandle.ToIntPtr(_selfHandle);
@@ -159,7 +160,6 @@ public sealed class CoreHostService : ICoreHostService
         }
 
         if (_selfHandle.IsAllocated) _selfHandle.Free();
-        _onEventThunk = null;
 
         SetState(CoreState.NotLoaded);
     }
