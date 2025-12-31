@@ -8,14 +8,18 @@ namespace ClipBridgeShell_CS.Services;
 public class EventPumpService
 {
     private readonly HistoryStore _historyStore;
+    private readonly PeerStore _peerStore;
+    private readonly TransferStore _transferStore;
 
     // 无锁队列：生产者是 Core FFI 回调，消费者是 ProcessEventsAsync
     private readonly Channel<string> _channel;
     private readonly CancellationTokenSource _cts = new();
 
-    public EventPumpService(HistoryStore historyStore)
+    public EventPumpService(HistoryStore historyStore, PeerStore peerStore, TransferStore transferStore)
     {
         _historyStore = historyStore;
+        _peerStore = peerStore;
+        _transferStore = transferStore;
 
         // 创建无界通道（v1 简单处理，避免丢消息）
         _channel = Channel.CreateUnbounded<string>();
@@ -65,14 +69,32 @@ public class EventPumpService
         // 2. 根据 type 路由到不同的 Store
         switch (envelope.Type)
         {
-            case "item_meta_added": // 兼容旧命名
+            // --- 历史记录事件 ---
+            case "item_meta_added":
             case "item_added":
-                // 二次解析 Payload
+            case "item_updated":
                 var meta = envelope.Payload.Deserialize<ItemMetaPayload>();
                 if (meta != null) _historyStore.Upsert(meta);
                 break;
 
-            // TODO: 这里后续添加 "transfer_progress", "peer_status" 等分支
+            // --- [新增] 设备/节点事件 ---
+            case "peer_found":
+            case "peer_changed":
+            case "peer_online":
+            case "peer_offline":
+                var peer = envelope.Payload.Deserialize<PeerMetaPayload>();
+                if (peer != null) _peerStore.Upsert(peer);
+                break;
+
+            // --- [新增] 传输进度事件 ---
+            case "transfer_progress":
+            case "transfer_update":
+            case "transfer_started":
+            case "transfer_completed":
+            case "transfer_failed":
+                var transfer = envelope.Payload.Deserialize<TransferUpdatePayload>();
+                if (transfer != null) _transferStore.Update(transfer);
+                break;
 
             default:
                 System.Diagnostics.Debug.WriteLine($"[EventPump] Unhandled event: {envelope.Type}");

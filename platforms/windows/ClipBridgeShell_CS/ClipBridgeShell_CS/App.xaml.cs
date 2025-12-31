@@ -21,9 +21,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.Windows.AppNotifications.Builder;
 using Windows.Storage;
 using WinRT.Interop;
-using WinRT.Interop;
 using WinUI3Localizer;
-using Microsoft.Windows.AppNotifications.Builder;
 
 namespace ClipBridgeShell_CS;
 
@@ -92,6 +90,8 @@ public partial class App : Application
             services.AddSingleton<IFileService, FileService>();
 
             services.AddSingleton<Stores.HistoryStore>();
+            services.AddSingleton<Stores.PeerStore>();
+            services.AddSingleton<Stores.TransferStore>();
             services.AddSingleton<EventPumpService>();
 
             //CB Core Host Service

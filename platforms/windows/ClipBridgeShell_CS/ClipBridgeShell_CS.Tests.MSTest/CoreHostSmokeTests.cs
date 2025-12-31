@@ -1,8 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using ClipBridgeShell_CS.Core.Models;
 using ClipBridgeShell_CS.Stores;
 
@@ -18,7 +13,9 @@ public class CoreHostSmokeTests
     public async Task Init_Shutdown_Loop_50()
     {
         var historyStore = new HistoryStore();
-        var eventPump = new ClipBridgeShell_CS.Services.EventPumpService(historyStore);
+        var peerStore = new PeerStore();
+        var transferStore = new TransferStore();
+        var eventPump = new ClipBridgeShell_CS.Services.EventPumpService(historyStore, peerStore, transferStore);
         var coreHost = new ClipBridgeShell_CS.Services.CoreHostService(eventPump);
 
         for (var i = 1; i <= 50; i++)
