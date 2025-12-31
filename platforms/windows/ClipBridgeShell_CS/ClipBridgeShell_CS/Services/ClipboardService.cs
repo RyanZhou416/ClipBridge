@@ -1,22 +1,44 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
-using System.Threading.Tasks;
 using ClipBridgeShell_CS.Contracts.Services;
+using ClipBridgeShell_CS.Core.Models;
 using Windows.ApplicationModel.DataTransfer;
+using System.Security.Cryptography;
 
 namespace ClipBridgeShell_CS.Services;
 
 public sealed class ClipboardService : IClipboardService
 {
-    public Task<bool> SetTextAsync(string text)
+    public event EventHandler? ContentChanged;
+    // 新增：记录最后一次由本应用写入内容的指纹
+    public string? LastWriteFingerprint { get; private set; }
+
+    public ClipboardService()
     {
-        var dp = new DataPackage();
-        dp.SetText(text);
-        Clipboard.SetContent(dp);
-        Clipboard.Flush();
-        return Task.FromResult(true);
+        // 订阅系统剪贴板事件并转发
+        Clipboard.ContentChanged += OnClipboardContentChanged;
+    }
+    private void OnClipboardContentChanged(object? sender, object e)
+    {
+        ContentChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public async Task<bool> SetTextAsync(string text)
+    {
+        try
+        {
+            var dp = new DataPackage();
+            dp.SetText(text);
+            Clipboard.SetContent(dp);
+            Clipboard.Flush();
+            LastWriteFingerprint = ComputeHash(text);
+            return await Task.FromResult(true);
+        } catch (Exception ex)
+        {
+            // 记录日志或忽略（剪贴板占用是常见错误）
+            System.Diagnostics.Debug.WriteLine($"Clipboard SetText failed: {ex.Message}");
+            return false;
+        }
     }
 
     public async Task<string?> GetTextAsync()
@@ -27,5 +49,58 @@ public sealed class ClipboardService : IClipboardService
             return await data.GetTextAsync();
         }
         return null;
+    }
+
+    public async Task<ClipboardSnapshot?> GetSnapshotAsync()
+    {
+        try
+        {
+            // 获取当前剪贴板视图
+            var data = Clipboard.GetContent();
+
+            // 1. 处理文本 (v1 优先支持)
+            if (data.Contains(StandardDataFormats.Text))
+            {
+                var text = await data.GetTextAsync();
+                if (string.IsNullOrEmpty(text))
+                    return null;
+
+                var ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                return new ClipboardSnapshot
+                {
+                    MimeType = "text/plain",
+                    Data = text,
+                    // 简单的预览：取前 50 个字符，移除换行
+                    PreviewText = text.Length > 50
+                        ? text.Substring(0, 50).Replace("\r", " ").Replace("\n", " ") + "..."
+                        : text.Replace("\r", " ").Replace("\n", " "),
+                    Timestamp = ts,
+                    Fingerprint = ComputeHash(text)
+                };
+            }
+
+            // TODO (M5.X): 处理 Bitmap 和 StorageItems (Files)
+
+            return null;
+        } catch (Exception ex)
+        {
+            // 剪贴板访问极易因其他程序占用而抛出异常，此时返回 null 即可，不要崩溃
+            System.Diagnostics.Debug.WriteLine($"Clipboard GetSnapshot failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 辅助：计算简单的 MD5 指纹
+    /// </summary>
+    /// <param name="input"></param>
+    /// <returns></returns>
+    private static string ComputeHash(string input)
+    {
+        if (string.IsNullOrEmpty(input))
+            return string.Empty;
+        var bytes = Encoding.UTF8.GetBytes(input);
+        var hashBytes = MD5.HashData(bytes);
+        return Convert.ToHexString(hashBytes);
     }
 }

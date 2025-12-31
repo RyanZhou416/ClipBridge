@@ -230,4 +230,19 @@
   <data name="Settings_ShowLocalFolder_Button.Content" xml:space="preserve">
     <value>Show LocalFolder Path</value>
   </data>
+  <data name="Settings_IsClipboardCaptureEnabled_SettingsCard.Header" xml:space="preserve">
+    <value>Enable Clipboard Capture</value>
+  </data>
+  <data name="Settings_Debugging.Text" xml:space="preserve">
+    <value>Debugging</value>
+  </data>
+  <data name="Settings_Clip.Text" xml:space="preserve">
+    <value>Clip</value>
+  </data>
+  <data name="Settings_IsClipboardCaptureEnabled_ToggleSwitch.OnContent" xml:space="preserve">
+    <value>Active</value>
+  </data>
+  <data name="Settings_IsClipboardCaptureEnabled_ToggleSwitch.OffContent" xml:space="preserve">
+    <value>Pause</value>
+  </data>
 </root>

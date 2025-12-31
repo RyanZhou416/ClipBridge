@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
-using ClipBridgeShell_CS.Core.Contracts.Services;
+using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
 using ClipBridgeShell_CS.Core.Services;
 using ClipBridgeShell_CS.Interop;
@@ -257,5 +257,26 @@ public sealed class CoreHostService : ICoreHostService
     public string GetDiagnosticsText()
     {
         return Diagnostics.ToClipboardText();
+    }
+
+    public async Task IngestLocalCopy(string snapshotJson)
+    {
+        if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
+            return;
+
+        await Task.Run(() =>
+        {
+            try
+            {
+                // 调用 Core FFI
+                var ptr = CoreInterop.cb_ingest_local_copy(_coreHandle, snapshotJson);
+                // 释放返回值内存（Core返回通常是确认信息或空，这里暂不处理返回值内容，但必须释放）
+                CoreInterop.cb_free_string(ptr);
+            } catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"IngestLocalCopy failed: {ex}");
+                // 可以在这里通过 EventPump 发送一个 error 事件给 UI，或者记录日志
+            }
+        });
     }
 }

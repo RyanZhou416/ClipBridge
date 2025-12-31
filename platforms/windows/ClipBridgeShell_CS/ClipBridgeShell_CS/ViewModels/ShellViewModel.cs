@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.Threading.Tasks;
 
 using ClipBridgeShell_CS.Contracts.Services;
-using ClipBridgeShell_CS.Core.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
 using ClipBridgeShell_CS.Views;
 

@@ -1,4 +1,4 @@
-﻿//platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/Services/LocalSettingsService.cs
+//platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/Services/LocalSettingsService.cs
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Contracts.Services;
 using ClipBridgeShell_CS.Core.Helpers;
@@ -25,6 +25,8 @@ public class LocalSettingsService : ILocalSettingsService
     private readonly string _localsettingsFile;
 
     private IDictionary<string, object> _settings;
+
+    public event EventHandler<string>? SettingChanged;
 
     private bool _isInitialized;
 
@@ -76,6 +78,7 @@ public class LocalSettingsService : ILocalSettingsService
         if (RuntimeHelper.IsMSIX)
         {
             ApplicationData.Current.LocalSettings.Values[key] = await Json.StringifyAsync(value);
+            SettingChanged?.Invoke(this, key);
         }
         else
         {
@@ -84,6 +87,9 @@ public class LocalSettingsService : ILocalSettingsService
             _settings[key] = await Json.StringifyAsync(value);
 
             await Task.Run(() => _fileService.Save(_applicationDataFolder, _localsettingsFile, _settings));
+
+            SettingChanged?.Invoke(this, key);
         }
     }
+
 }

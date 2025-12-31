@@ -3,7 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ClipBridgeShell_CS.Core.Models;
 
-namespace ClipBridgeShell_CS.Core.Contracts.Services;
+namespace ClipBridgeShell_CS.Contracts.Services;
 
 public interface ICoreHostService
 {
@@ -15,6 +15,6 @@ public interface ICoreHostService
 
     Task InitializeAsync(CancellationToken ct = default);
     Task ShutdownAsync(CancellationToken ct = default);
-
+    Task IngestLocalCopy(string snapshotJson);
     string GetDiagnosticsText();
 }

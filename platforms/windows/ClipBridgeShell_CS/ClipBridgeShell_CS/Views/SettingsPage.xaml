@@ -55,30 +55,43 @@
                         <ctk:SettingsCard l:Uids.Uid="Settings_Theme"
                                           HeaderIcon="{ui:FontIcon Glyph=&#xE771;}"
                                           HorizontalAlignment="Stretch">
-                            <ComboBox x:Name="ThemeCombo"
-                                      Width="240"
-                                      SelectionChanged="ThemeCombo_SelectionChanged">
-                                <ComboBoxItem Tag="Default" l:Uids.Uid="Settings_Theme_Default"/>
-                                <ComboBoxItem Tag="Light"   l:Uids.Uid="Settings_Theme_Light"/>
-                                <ComboBoxItem Tag="Dark"    l:Uids.Uid="Settings_Theme_Dark"/>
-                            </ComboBox>
-                        </ctk:SettingsCard>
+							<ComboBox x:Name="ThemeCombo"
+									  Width="240"
+									  ItemsSource="{x:Bind ViewModel.ThemeOptions, Mode=OneWay}"
+									  DisplayMemberPath="Label"
+									  SelectedItem="{x:Bind ViewModel.SelectedThemeOption, Mode=TwoWay}" />
+
+						</ctk:SettingsCard>
 
                         <!-- 语言设置区块 -->
                         <ctk:SettingsCard l:Uids.Uid="Settings_LanguageCombo"
                                           HeaderIcon="{ui:FontIcon Glyph=&#xE8C1;}"
                                           HorizontalAlignment="Stretch">
-                            <ComboBox x:Name="LanguageCombo"
-                                      Width="240"
-                                      SelectionChanged="LanguageCombo_SelectionChanged">
-                                <ComboBoxItem Tag="en-US" l:Uids.Uid="Settings_Lang_English"/>
-                                <ComboBoxItem Tag="zh-CN" l:Uids.Uid="Settings_Lang_Chinese"/>
-                            </ComboBox>
-                        </ctk:SettingsCard>
+							<ComboBox x:Name="LanguageCombo"
+									  Width="240"
+									  ItemsSource="{x:Bind ViewModel.LanguageOptions, Mode=OneWay}"
+									  DisplayMemberPath="Label"
+									  SelectedItem="{x:Bind ViewModel.SelectedLanguageOption, Mode=TwoWay}" />
+						</ctk:SettingsCard>
+
+						
+										  
                     </StackPanel>
-                    
-                    <StackPanel Spacing="{StaticResource SettingsItemSpacing}">
-                        <TextBlock l:Uids.Uid="Settings_Personalization" Style="{StaticResource GroupHeaderTextStyle}"/>
+
+					<StackPanel Spacing="{StaticResource SettingsItemSpacing}">
+						<TextBlock l:Uids.Uid="Settings_Clip" Style="{StaticResource GroupHeaderTextStyle}"/>
+						<!-- 剪贴板捕获开关 -->
+						<ctk:SettingsCard l:Uids.Uid="Settings_IsClipboardCaptureEnabled_SettingsCard"
+										  HeaderIcon="{ui:FontIcon Glyph=&#xE8C1;}"
+										  HorizontalAlignment="Stretch">
+							<ToggleSwitch AutomationProperties.Name="simple ToggleSwitch"
+										  IsOn="{x:Bind ViewModel.IsClipboardCaptureEnabled, Mode=TwoWay}"
+										  l:Uids.Uid="Settings_IsClipboardCaptureEnabled_ToggleSwitch"/>
+						</ctk:SettingsCard>
+					</StackPanel>
+					
+					<StackPanel Spacing="{StaticResource SettingsItemSpacing}">
+                        <TextBlock l:Uids.Uid="Settings_Debugging" Style="{StaticResource GroupHeaderTextStyle}"/>
                         <!-- 用于显示应用文件夹路径，可删除 -->
                         <ctk:SettingsCard l:Uids.Uid="Settings_Reset_SettingsCard"
                                           HeaderIcon="{ui:FontIcon Glyph=&#xEBC4;}"

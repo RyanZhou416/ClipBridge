@@ -113,6 +113,7 @@ public partial class App : Application
 
             // Configuration
             services.Configure<LocalSettingsOptions>(context.Configuration.GetSection(nameof(LocalSettingsOptions)));
+            services.AddSingleton<ClipboardWatcher>();
 
         }).
         Build();
@@ -140,10 +141,14 @@ public partial class App : Application
         // ② 再走 Template Studio 原有流程（里面会调用 ActivationService）
         await App.GetService<IActivationService>().ActivateAsync(args);
 
+
 #if DEBUG
         PrintCoreDllInfo();
 #endif
         _ = App.GetService<CoreHostService>().InitializeAsync();
+
+        // 启动剪贴板监听
+        App.GetService<ClipboardWatcher>().Initialize();
 
     }
 

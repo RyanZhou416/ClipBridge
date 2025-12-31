@@ -230,4 +230,19 @@
   <data name="Settings_ShowLocalFolder_Button.Content" xml:space="preserve">
     <value>显示 LocalFolder 路径</value>
   </data>
+  <data name="Settings_IsClipboardCaptureEnabled_SettingsCard.Header" xml:space="preserve">
+    <value>启用剪切板监听</value>
+  </data>
+  <data name="Settings_Debugging.Text" xml:space="preserve">
+    <value>开发选项</value>
+  </data>
+  <data name="Settings_Clip.Text" xml:space="preserve">
+    <value>剪切板</value>
+  </data>
+  <data name="Settings_IsClipboardCaptureEnabled_ToggleSwitch.OnContent" xml:space="preserve">
+    <value>启用</value>
+  </data>
+  <data name="Settings_IsClipboardCaptureEnabled_ToggleSwitch.OffContent" xml:space="preserve">
+    <value>暂停</value>
+  </data>
 </root>
