@@ -15,6 +15,7 @@ public class PageService : IPageService
     public PageService()
     {
         Configure<MainViewModel, MainPage>();
+        Configure<HistoryViewModel, HistoryPage>();
         Configure<DevicesViewModel, DevicesPage>();
         Configure<LogsViewModel, LogsPage>();
         Configure<SettingsViewModel, SettingsPage>();

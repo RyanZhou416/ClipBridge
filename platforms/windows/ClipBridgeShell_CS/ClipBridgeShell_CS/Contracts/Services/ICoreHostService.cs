@@ -17,4 +17,6 @@ public interface ICoreHostService
     Task ShutdownAsync(CancellationToken ct = default);
     Task IngestLocalCopy(string snapshotJson);
     string GetDiagnosticsText();
+    Task<HistoryPage> ListHistoryAsync(HistoryQuery query);
+    Task IngestLocalCopyAsync(ClipBridgeShell_CS.Core.Models.ClipboardSnapshot snapshot);
 }

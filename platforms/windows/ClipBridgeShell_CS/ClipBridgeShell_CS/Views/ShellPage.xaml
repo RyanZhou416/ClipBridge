@@ -73,17 +73,22 @@
 						<FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE80F;"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem l:Uids.Uid="Shell_Devices" helpers:NavigationHelper.NavigateTo="ClipBridgeShell_CS.ViewModels.DevicesViewModel">
+				<NavigationViewItem l:Uids.Uid="Shell_History" helpers:NavigationHelper.NavigateTo="ClipBridgeShell_CS.ViewModels.HistoryViewModel">
+					<NavigationViewItem.Icon>
+						<FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE81C;"/>
+					</NavigationViewItem.Icon>
+				</NavigationViewItem>
+				<NavigationViewItem l:Uids.Uid="Shell_Devices" helpers:NavigationHelper.NavigateTo="ClipBridgeShell_CS.ViewModels.DevicesViewModel">
                     <NavigationViewItem.Icon>
 						<FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xEA6C;"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem l:Uids.Uid="Shell_Logs" helpers:NavigationHelper.NavigateTo="ClipBridgeShell_CS.ViewModels.LogsViewModel">
-                    <NavigationViewItem.Icon>
+				<NavigationViewItem l:Uids.Uid="Shell_Logs" helpers:NavigationHelper.NavigateTo="ClipBridgeShell_CS.ViewModels.LogsViewModel">
+					<NavigationViewItem.Icon>
 						<FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE756;"/>
-                    </NavigationViewItem.Icon>
-                </NavigationViewItem>
-            </NavigationView.MenuItems>
+					</NavigationViewItem.Icon>
+				</NavigationViewItem>
+			</NavigationView.MenuItems>
             <Grid>
                 <Frame x:Name="NavigationFrame" />
             </Grid>

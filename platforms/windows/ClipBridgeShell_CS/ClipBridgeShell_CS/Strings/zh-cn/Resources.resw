@@ -245,4 +245,7 @@
   <data name="Settings_IsClipboardCaptureEnabled_ToggleSwitch.OffContent" xml:space="preserve">
     <value>暂停</value>
   </data>
+  <data name="Shell_History.Content" xml:space="preserve">
+    <value>历史</value>
+  </data>
 </root>

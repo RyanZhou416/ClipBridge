@@ -46,8 +46,8 @@ public class EventPumpTests
         // 3. Assert
         Assert.AreEqual(1, historyStore.Items.Count, "HistoryStore 应增加 1 条记录");
         var item = historyStore.Items[0];
-        Assert.AreEqual((ulong)1001, item.Id);
-        Assert.AreEqual("History Item Test", item.PreviewText);
+        Assert.AreEqual((ulong)1001, item.ItemId);
+        Assert.AreEqual("History Item Test", item.Preview);
 
         pump.Shutdown();
     }

@@ -445,13 +445,27 @@ pub extern "C" fn cb_list_history(h: *mut cb_handle, query_json: *const c_char) 
 		let json_str = crate::cstr_to_str(query_json)?;
 		let dto: HistoryQueryDto = serde_json::from_str(json_str).context("invalid query json")?;
 
-		// 2. 调用 Core
+		// 2. 调用 Core 获取列表
 		let items = hh.core.list_history(dto.limit, dto.cursor)?;
 
-		// 3. 包装返回
-		Ok(crate::error::ok_json(items))
-	})();
+		// 3. 【关键修改】构造分页结构
+		// 因为 Core 目前没有直接返回 next_cursor，我们这里简单推算：
+		// 如果返回数量等于 limit，说明可能还有下一页，取最后一条的时间戳做 cursor
+		let next_cursor = if items.len() >= dto.limit {
+			items.last().map(|i| i.created_ts_ms)
+		} else {
+			None
+		};
 
+		// 构造符合 C# HistoryPage 定义的 JSON 对象
+		let page_data = serde_json::json!({
+            "items": items,
+            "next_cursor": next_cursor
+        });
+
+		// 4. 包装返回
+		Ok(crate::error::ok_json(page_data))
+	})();
 	match run {
 		Ok(s) => crate::ret(s),
 		Err(e) => crate::ret(crate::error::err_json("LIST_HISTORY_FAILED", &format!("{e:#}"))),
@@ -492,6 +506,19 @@ pub extern "C" fn cb_get_item_meta(h: *mut cb_handle, item_id_json: *const c_cha
 	match run {
 		Ok(s) => crate::ret(s),
 		Err(e) => crate::ret(crate::error::err_json("GET_ITEM_FAILED", &format!("{e:#}"))),
+	}
+}
+
+/// 获取 FFI ABI 版本，用于 C# 侧兼容性检查
+#[no_mangle]
+pub extern "C" fn cb_get_ffi_version(major: *mut u32, minor: *mut u32) {
+	unsafe {
+		if !major.is_null() {
+			*major = 1; // 必须匹配 C# CB_FFI_ABI_MAJOR
+		}
+		if !minor.is_null() {
+			*minor = 0;
+		}
 	}
 }
 

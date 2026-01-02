@@ -38,13 +38,13 @@
                             CornerRadius="4" 
                             Padding="12" Margin="0,4,0,4">
 							<StackPanel>
-								<TextBlock Text="{x:Bind PreviewText}" FontWeight="Bold"/>
+								<TextBlock Text="{x:Bind Preview}" FontWeight="Bold"/>
 								<StackPanel Orientation="Horizontal" Spacing="8" Opacity="0.6">
-									<TextBlock Text="{x:Bind Id}"/>
+									<TextBlock Text="{x:Bind ItemId}"/>
 									<TextBlock Text="|"/>
-									<TextBlock Text="{x:Bind MimeType}"/>
+									<TextBlock Text="{x:Bind Mime}"/>
 									<TextBlock Text="|"/>
-									<TextBlock Text="{x:Bind DeviceId}"/>
+									<TextBlock Text="{x:Bind SourceDeviceId}"/>
 								</StackPanel>
 							</StackPanel>
 						</Border>

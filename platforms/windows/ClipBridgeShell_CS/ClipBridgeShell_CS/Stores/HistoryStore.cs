@@ -12,7 +12,7 @@ public class HistoryStore
     {
         TryEnqueue(() =>
         {
-            var existing = Items.FirstOrDefault(x => x.Id == meta.Id);
+            var existing = Items.FirstOrDefault(x => x.ItemId == meta.ItemId);
             if (existing != null)
             {
                 var index = Items.IndexOf(existing);

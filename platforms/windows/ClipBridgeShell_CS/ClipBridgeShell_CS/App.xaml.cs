@@ -1,7 +1,9 @@
-//platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/App.xaml.cs
+﻿//platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/App.xaml.cs
+
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+
 using ClipBridgeShell_CS.Activation;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Contracts.Services;
@@ -12,6 +14,7 @@ using ClipBridgeShell_CS.Notifications;
 using ClipBridgeShell_CS.Services;
 using ClipBridgeShell_CS.ViewModels;
 using ClipBridgeShell_CS.Views;
+
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.UI;
@@ -19,8 +22,11 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Windows.AppNotifications.Builder;
+
 using Windows.Storage;
+
 using WinRT.Interop;
+
 using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS;
@@ -115,6 +121,9 @@ public partial class App : Application
             services.Configure<LocalSettingsOptions>(context.Configuration.GetSection(nameof(LocalSettingsOptions)));
             services.AddSingleton<ClipboardWatcher>();
 
+            // History Service
+            services.AddTransient<HistoryViewModel>();
+            services.AddTransient<HistoryPage>();
         }).
         Build();
 

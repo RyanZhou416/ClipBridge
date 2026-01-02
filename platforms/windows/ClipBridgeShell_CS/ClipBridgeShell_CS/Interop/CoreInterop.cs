@@ -9,7 +9,8 @@ namespace ClipBridgeShell_CS.Interop;
 internal static class CoreInterop
 {
     // 注意：Windows 下实际文件可能是 core_ffi_windows.dll
-    private const string DllName = "core_ffi_windows";
+    private const string DllName = "core_ffi_windows.dll";
+    private static string? _customDllPath;
     private static readonly JsonSerializerOptions _jsonOpts = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -20,12 +21,11 @@ internal static class CoreInterop
     {
         NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, assembly, path) =>
         {
-            if (name == DllName)
+            if (name == DllName && !string.IsNullOrEmpty(_customDllPath))
             {
-                // 默认返回 Zero，由 ConfigureDllPath 显式设置后生效
-                // 或者在这里实现默认搜索逻辑 (如 AppContext.BaseDirectory/win-x64)
-                return IntPtr.Zero;
+                return NativeLibrary.Load(_customDllPath);
             }
+            // 返回 Zero 让它走默认逻辑（或者在这里处理默认路径）
             return IntPtr.Zero;
         });
     }
@@ -35,14 +35,7 @@ internal static class CoreInterop
     /// </summary>
     public static void ConfigureDllPath(string absPath)
     {
-        NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, assembly, path) =>
-        {
-            if (name == DllName)
-            {
-                return NativeLibrary.Load(absPath);
-            }
-            return IntPtr.Zero;
-        });
+        _customDllPath = absPath;
     }
 
     // ==========================================================
@@ -286,4 +279,59 @@ internal static class CoreInterop
     {
         return PtrToStringAndFree(ptr);
     }
+
+    /// <summary>
+    /// 查询历史记录 (Wrapper)
+    /// </summary>
+    public static ClipBridgeShell_CS.Core.Models.HistoryPage ListHistory(IntPtr handle, ClipBridgeShell_CS.Core.Models.HistoryQuery query)
+    {
+        if (handle == IntPtr.Zero)
+            return new();
+
+        var queryJson = JsonSerializer.Serialize(query, _jsonOpts);
+
+        // 调用 FFI
+        var jsonPtr = cb_list_history(handle, queryJson);
+
+        try
+        {
+            var json = PtrToStringAndFree(jsonPtr);
+
+            // 日志保持不变
+            System.Diagnostics.Debug.WriteLine("=====================================");
+            System.Diagnostics.Debug.WriteLine($"[CoreInterop] Query: {queryJson}");
+            System.Diagnostics.Debug.WriteLine($"[CoreInterop] Result: {json}");
+            System.Diagnostics.Debug.WriteLine("=====================================");
+
+            if (string.IsNullOrEmpty(json))
+                return new();
+
+            // 【核心修复 START】
+            // 1. 解析 JSON 文档
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            // 2. 检查 "ok"
+            if (root.TryGetProperty("ok", out var ok) && ok.GetBoolean())
+            {
+                // 3. 提取 "data" 节点
+                if (root.TryGetProperty("data", out var data))
+                {
+                    // 4. 将 "data" 节点反序列化为 HistoryPage
+                    // 注意：必须传入 _jsonOpts 以处理 snake_case (item_id -> ItemId)
+                    var page = data.Deserialize<ClipBridgeShell_CS.Core.Models.HistoryPage>(_jsonOpts);
+                    return page ?? new();
+                }
+            }
+            // 【核心修复 END】
+
+            return new();
+        } catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"ListHistory parsing failed: {ex}");
+            return new();
+        }
+    }
+
+
 }

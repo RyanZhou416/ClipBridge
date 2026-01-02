@@ -8,7 +8,7 @@ use cb_core::clipboard::{ClipboardFileEntry, ClipboardSnapshot};
 use cb_core::policy::SizeLimits;
 
 
-#[derive(Deserialize)]
+#[derive(Deserialize)] 
 pub struct FfiCfg {
     pub device_id: String,
     pub device_name: String,

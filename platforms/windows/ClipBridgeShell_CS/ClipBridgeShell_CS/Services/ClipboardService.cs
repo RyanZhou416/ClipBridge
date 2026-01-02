@@ -10,17 +10,44 @@ namespace ClipBridgeShell_CS.Services;
 public sealed class ClipboardService : IClipboardService
 {
     public event EventHandler? ContentChanged;
-    // 新增：记录最后一次由本应用写入内容的指纹
+    private readonly ICoreHostService _coreHostService;
+    // 记录最后一次由本应用写入内容的指纹
     public string? LastWriteFingerprint { get; private set; }
 
-    public ClipboardService()
+    public ClipboardService(ICoreHostService coreHostService)
     {
         // 订阅系统剪贴板事件并转发
         Clipboard.ContentChanged += OnClipboardContentChanged;
+        _coreHostService = coreHostService;
     }
-    private void OnClipboardContentChanged(object? sender, object e)
+    /// <summary>
+    /// 系统剪贴板内容变化回调
+    /// </summary>
+    private async void OnClipboardContentChanged(object? sender, object e)
     {
-        ContentChanged?.Invoke(this, EventArgs.Empty);
+        try
+        {
+            // 1. 获取最新快照
+            var snapshot = await GetSnapshotAsync();
+            if (snapshot == null)
+                return;
+
+            // 2. 防循环检查：如果指纹和最后一次写入的一致，说明是自己写的，忽略
+            if (!string.IsNullOrEmpty(LastWriteFingerprint) && snapshot.Fingerprint == LastWriteFingerprint)
+            {
+                System.Diagnostics.Debug.WriteLine("[Watcher] Ignored self-copy.");
+                return;
+            }
+
+            // 3. 调用 CoreHostService 写入数据库
+            await _coreHostService.IngestLocalCopyAsync(snapshot);
+
+            // 4. 触发内部事件（如果有其他 UI 监听）
+            ContentChanged?.Invoke(this, EventArgs.Empty);
+        } catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Watcher] Process clipboard change failed: {ex.Message}");
+        }
     }
 
     public async Task<bool> SetTextAsync(string text)
