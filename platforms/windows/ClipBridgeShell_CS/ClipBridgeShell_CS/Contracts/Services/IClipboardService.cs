@@ -17,4 +17,6 @@ public interface IClipboardService
     Task<string?> GetTextAsync();
     // 获取当前剪贴板的标准化快照
     Task<ClipboardSnapshot?> GetSnapshotAsync();
+    Task SetImageFromPathAsync(string path);
+    Task SetFilesFromPathsAsync(IReadOnlyList<string> paths);
 }

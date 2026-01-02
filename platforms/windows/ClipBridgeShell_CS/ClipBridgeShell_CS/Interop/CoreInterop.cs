@@ -298,10 +298,12 @@ internal static class CoreInterop
             var json = PtrToStringAndFree(jsonPtr);
 
             // 日志保持不变
+            /*
             System.Diagnostics.Debug.WriteLine("=====================================");
             System.Diagnostics.Debug.WriteLine($"[CoreInterop] Query: {queryJson}");
             System.Diagnostics.Debug.WriteLine($"[CoreInterop] Result: {json}");
             System.Diagnostics.Debug.WriteLine("=====================================");
+            */
 
             if (string.IsNullOrEmpty(json))
                 return new();

@@ -16,7 +16,8 @@ public class EventPumpTests
         var historyStore = new HistoryStore();
         var peerStore = new PeerStore();
         var transferStore = new TransferStore();
-        var pump = new EventPumpService(historyStore, peerStore, transferStore);
+        var awaiter = new ContentFetchAwaiter();
+        var pump = new EventPumpService(historyStore, peerStore, transferStore, awaiter);
         return (pump, historyStore, peerStore, transferStore);
     }
 

@@ -13,32 +13,38 @@ namespace ClipBridgeShell_CS.Core.Models.Events;
 public class TransferUpdatePayload
 {
     [JsonPropertyName("transfer_id")]
-    public ulong TransferId
-    {
-        get; set;
-    }  // 传输任务的唯一ID
+    public string TransferId { get; set; } = string.Empty; // 传输任务的唯一ID
 
     [JsonPropertyName("item_id")]
-    public ulong ItemId
-    {
-        get; set;
-    }      // 关联的历史记录ID
+    public string? ItemId { get; set; }      // 关联的历史记录ID
 
     [JsonPropertyName("state")]
     public string State { get; set; } = string.Empty;
     // 例如: "pending", "running", "completed", "failed", "cancelled"
 
-    [JsonPropertyName("processed_bytes")]
-    public long ProcessedBytes
-    {
-        get; set;
-    } // 已传输字节数
+    [JsonPropertyName("received")]
+    public long? Received { get; set; }
 
-    [JsonPropertyName("total_bytes")]
-    public long TotalBytes
-    {
-        get; set;
-    }     // 总字节数
+    [JsonPropertyName("total")]
+    public long? Total { get; set; }
+
+    [JsonPropertyName("bytes_done")]
+    public long? BytesDone { get; set; }
+
+    [JsonPropertyName("bytes_total")]
+    public long? BytesTotal { get; set; }
+
+    [JsonIgnore]
+    public long ProcessedBytes => Received ?? BytesDone ?? 0; // 已传输字节数
+
+    [JsonIgnore]
+    public long TotalBytes => Total ?? BytesTotal ?? 0;    // 总字节数
+
+    [JsonPropertyName("code")]
+    public string? Code { get; set; }
+
+    [JsonPropertyName("message")]
+    public string? Message { get; set; }
 
     [JsonPropertyName("error_msg")]
     public string? ErrorMessage

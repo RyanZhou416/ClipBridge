@@ -313,7 +313,7 @@ impl SessionActor {
                                 actor.send_data_chunk(transfer_id, data).await?;
                             }
                             UploadMsg::Done { transfer_id, sha256 } => {
-                                actor.send_ctrl(CtrlMsg::ContentEnd { req_id: transfer_id.clone(), sha256 }).await?;
+                                actor.send_ctrl(CtrlMsg::ContentEnd { req_id: transfer_id.clone() }).await?;
                                 actor.senders.remove(&transfer_id);
                             }
                             UploadMsg::Error { transfer_id, err } => {
@@ -418,7 +418,6 @@ impl SessionActor {
 
     async fn handle_control_msg(&mut self, msg: CtrlMsg) -> Result<()> {
         match msg {
-            // ... 原有的 Hello/Auth/Opaque/Ping 逻辑 ...
             CtrlMsg::Hello { device_id, account_tag, msg_id, .. } => {
                 if self.role == SessionRole::Server {
                     if account_tag != self.config.account_tag {
@@ -499,6 +498,8 @@ impl SessionActor {
                             "payload": { "meta": item }
                         });
                         self.sink.emit(json.to_string());
+						// 禁用核心的文字自动预取，而是在外壳实现。
+						/*
 						if item.kind == crate::model::ItemKind::Text {
 							if item.size_bytes <= self.config.app_config.size_limits.text_auto_prefetch_bytes {
 								println!("[Session] Auto-prefetching text item: {}", item.item_id);
@@ -506,6 +507,8 @@ impl SessionActor {
 								let _ = self.start_pull_request(item.item_id.clone(), None, tx).await;
 							}
 						}
+						*/
+
                     }
                 }
             }
@@ -520,8 +523,8 @@ impl SessionActor {
             CtrlMsg::ContentBegin { req_id, item_id, file_id, total_bytes, sha256, mime} => {
                 self.handle_content_begin(req_id, item_id, file_id, total_bytes, sha256, mime).await?;
             }
-            CtrlMsg::ContentEnd { req_id, sha256 } => {
-                self.handle_content_end(req_id, sha256).await?;
+            CtrlMsg::ContentEnd { req_id } => {
+                self.handle_content_end(req_id).await?;
             }
 			CtrlMsg::ContentCancel { req_id, reason } => {
 				// 1. 如果我是发送者：在 senders map 里找
@@ -729,15 +732,19 @@ impl SessionActor {
 		Ok(())
 	}
 
-	async fn handle_content_end(&mut self, req_id: String, sha256: String) -> Result<()> {
+	async fn handle_content_end(&mut self, req_id: String) -> Result<()> {
 		if let Some(state) = self.receivers.remove(&req_id) {
-			if let ReceiverState::Receiving { tx, item_id, file_id, transfer_id, .. } = state {
+			if let ReceiverState::Receiving {
+				tx, item_id, file_id, transfer_id,
+				expected_sha256, total_bytes,
+				..
+			} = state {
 				// 1. 创建回传通道
 				let (reply_tx, reply_rx) = oneshot::channel();
 
 				// 2. 发送 Finish 指令给 Writer Task
 				// 注意：这里的 sha256 是发送端传来的“本次传输片段 Hash”
-				if let Err(_) = tx.send(ReceiverTaskMsg::Finish { expected_sha256: sha256.clone(), reply_tx }).await {
+				if let Err(_) = tx.send(ReceiverTaskMsg::Finish { expected_sha256: expected_sha256.clone(), reply_tx }).await {
 					self.emit_transfer_failed(&req_id, "WRITE_TASK_DEAD", "Writer task crashed");
 					return Ok(());
 				}
@@ -747,7 +754,7 @@ impl SessionActor {
 				match reply_rx.await {
 					Ok(Ok(final_path)) => {
 						let store = self.store.clone();
-						let sha_for_db = sha256.clone();
+						let sha_for_db = expected_sha256.clone();
 						let iid = item_id.clone();
 						let fid = file_id.clone();
 						let final_path_str = final_path.to_string_lossy().to_string();
@@ -760,7 +767,15 @@ impl SessionActor {
 							// 补充查询
 							let mime = guard.get_item_mime(&iid)?.unwrap_or_default();
 							// 简单判断类型
-							let kind = if fid.is_some() { "file" } else { "image" }; // 假设非 file_list 就是 image/text
+							let kind = if fid.is_some() {
+								"file"
+							} else if mime.starts_with("text/") {
+								"text"
+							} else if mime.starts_with("image/") {
+								"image"
+							} else {
+								"file" // 或 "binary"，但要和文档一致
+							};
 
 							Ok::<(String, String), anyhow::Error>((mime, kind.to_string()))
 						}).await??;
@@ -773,12 +788,12 @@ impl SessionActor {
 							"item_id": item_id,
 							"mime": mime,
 							"kind": kind,
-							"sha256": sha256, // 这个是片段 hash，完整版应该查 DB 拿完整 hash
-							"total_bytes": 0 // 这里应该填真实大小，可从 final_path metadata 读取
+							"sha256": expected_sha256,
+							"total_bytes": total_bytes
 						});
 
-										// 发送事件
-										let evt = serde_json::json!({
+						// 发送事件
+						let evt = serde_json::json!({
 							"type": "CONTENT_CACHED",
 							"payload": {
 								"transfer_id": transfer_id,

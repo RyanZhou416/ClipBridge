@@ -22,6 +22,8 @@ public class IngestPolicyTests
         public Task<ClipboardSnapshot?> GetSnapshotAsync() => Task.FromResult<ClipboardSnapshot?>(null);
         public Task<bool> SetTextAsync(string text) => Task.FromResult(true);
         public Task<string?> GetTextAsync() => Task.FromResult<string?>(null);
+        public Task SetImageFromPathAsync(string path) => Task.CompletedTask;
+        public Task SetFilesFromPathsAsync(IReadOnlyList<string> paths) => Task.CompletedTask;
     }
 
     private FakeClipboardService _fakeService = null!;

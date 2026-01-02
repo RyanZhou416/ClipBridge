@@ -3,7 +3,8 @@ using System.Text;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
 using Windows.ApplicationModel.DataTransfer;
-using System.Security.Cryptography;
+using Windows.Storage;
+using Windows.Storage.Streams;
 
 namespace ClipBridgeShell_CS.Services;
 
@@ -52,20 +53,49 @@ public sealed class ClipboardService : IClipboardService
 
     public async Task<bool> SetTextAsync(string text)
     {
-        try
+        LastWriteFingerprint = ComputeHash(text);
+        // 最多重试 5 次
+        const int MaxRetries = 10;
+        // 每次等待 100ms
+        const int DelayMs = 100;
+
+        for (int i = 0; i < MaxRetries; i++)
         {
-            var dp = new DataPackage();
-            dp.SetText(text);
-            Clipboard.SetContent(dp);
-            Clipboard.Flush();
-            LastWriteFingerprint = ComputeHash(text);
-            return await Task.FromResult(true);
-        } catch (Exception ex)
-        {
-            // 记录日志或忽略（剪贴板占用是常见错误）
-            System.Diagnostics.Debug.WriteLine($"Clipboard SetText failed: {ex.Message}");
-            return false;
+            try
+            {
+                var dp = new DataPackage();
+                dp.SetText(text);
+
+                // 建议：显式指定要在 UI 线程操作（虽然 DataPackage 不强制，但 Flush 涉及系统状态）
+                // 如果你已经在 UI 线程，这行不是必须的，但加上更保险
+                Clipboard.SetContent(dp);
+                Clipboard.Flush();
+                return true; // 成功则退出
+            } catch (System.Runtime.InteropServices.COMException ex)
+            {
+                // 0x800401D0 (CLIPBRD_E_CANT_OPEN) 是剪贴板被占用
+                // 检查是否是最后一次重试
+                if (i == MaxRetries - 1 || (uint)ex.HResult != 0x800401D0)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[Clipboard] Fatal Error after retries: {ex.Message}");
+                    // 这里可以选择 throw，也可以 return false，取决于你是否想让上层知道
+                    throw;
+                }
+
+                // 剪贴板忙，稍等后重试
+                if (i == MaxRetries)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[Clipboard] Locked (0x800401D0), retried to max:{MaxRetries}...");
+                }
+                await Task.Delay(DelayMs);
+            } catch (Exception ex)
+            {
+                // 其他异常直接抛出
+                System.Diagnostics.Debug.WriteLine($"[Clipboard] EXCEPTION: {ex}");
+                throw;
+            }
         }
+        return false;
     }
 
     public async Task<string?> GetTextAsync()
@@ -129,5 +159,26 @@ public sealed class ClipboardService : IClipboardService
         var bytes = Encoding.UTF8.GetBytes(input);
         var hashBytes = MD5.HashData(bytes);
         return Convert.ToHexString(hashBytes);
+    }
+
+    public async Task SetImageFromPathAsync(string path)
+    {
+        var file = await StorageFile.GetFileFromPathAsync(path);
+        var dp = new DataPackage();
+        dp.SetBitmap(RandomAccessStreamReference.CreateFromFile(file));
+        Clipboard.SetContent(dp);
+        Clipboard.Flush();
+    }
+
+    public async Task SetFilesFromPathsAsync(IReadOnlyList<string> paths)
+    {
+        var items = new List<IStorageItem>(paths.Count);
+        foreach (var p in paths)
+            items.Add(await StorageFile.GetFileFromPathAsync(p));
+
+        var dp = new DataPackage();
+        dp.SetStorageItems(items);
+        Clipboard.SetContent(dp);
+        Clipboard.Flush();
     }
 }

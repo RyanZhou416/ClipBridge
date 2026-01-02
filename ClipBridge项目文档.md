@@ -4,7 +4,7 @@
 
 - **名称**：ClipBridge（简称 **CB**）
 - **定位**：跨平台剪贴板同步工具，先 **局域网 (LAN)**，后期支持 **跨外网 (WAN)**。
-- **核心卖点**：**Lazy Fetch + 文本自动预取**——复制时只广播**元数据**；默认在粘贴时才拉取**正文**（图片/文件），但**小文本（默认 ≤ 1MB）会在收到元数据后自动预取到本地缓存**，尽量避免粘贴等待。
+- **核心卖点**：**Lazy Fetch**——复制时只广播**元数据**；正文按需拉取并落入本机缓存（CAS）。外壳可在收到元数据后对“小文本”主动发起 `ensure_content_cached` 作为体验优化（v1 默认开启，触发点仍由外壳控制）。
 - **目标平台**：Windows（先做外壳 MVP）→ Android（外壳）→ v1 核心（剪贴板历史与同步）→ macOS / Linux（外壳）。
 - **编译指令**：
   - WinUI / C# shell 调用 Rust DLL（只构建名为 core-ffi-windows 的 crate）：`cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc`
@@ -18,7 +18,7 @@
 - 局域网自动发现
 - 端到端加密连接
 - 同局域网内多设备同账号之间共享剪切板
-- **Lazy Fetch**：复制时广播“元数据”；图片/文件默认在粘贴时拉取正文；**小文本（默认 ≤ 1MB）在收到元数据后自动预取**。
+- **Lazy Fetch**：复制时广播“元数据”；图片/文件默认在需要粘贴时拉取正文；小文本可由外壳在收到元数据后主动调用 `ensure_content_cached` 进行预取以降低粘贴等待（触发点由外壳决定，Core 不自行预取）。
 - **剪贴板历史**：本地持久化（SQLite/KV），在各设备同步**历史元数据**；
 - 支持类型：**文本**、**图片**、**文件**（先不管应用内复制和特殊格式）
 - Windows 外壳：托盘图标、主窗口、呼出小窗
@@ -82,16 +82,31 @@ Core 负责所有**跨平台一致**、与 UI 无关的能力，并且是“设�
     * 向壳暴露稳定 API（FFI / callback）
     * 以事件驱动方式通知壳：设备上下线、新元数据、传输进度、错误等
 
+* Core 不会因接收到 ItemMeta 或 UI 状态变化而自动拉取正文内容；
+  所有正文获取（文本 / 图片 / 文件）均由 Shell 显式请求触发。
+
 ### 2.1.2 平台外壳（Shell）
 
 Shell 负责所有**强依赖平台 API / 权限 / UI 交互**的能力，不直接实现网络协议，只通过 Core API 与内核交互：
 
 * **系统剪贴板集成**
 
-    * 监听系统剪贴板变化（copy）
-    * 读取本机剪贴板内容并生成 `ClipboardSnapshot`（bytes / 路径 / mime / 预览）
-    * 写入系统剪贴板（paste）
-    * 平台特性：延迟渲染 / Promise 数据（粘贴触发时再向 Core 拉正文）
+  * 监听系统剪贴板变化（copy），并把“本机新复制内容”提交给 Core（作为新的 item/meta）
+  * 将 Core 的“远端条目/历史条目”写入系统剪贴板（paste 之前确保数据可用）
+
+  * **粘贴触发时的数据就绪策略（v1 实现级约束）**
+    * v1 默认采用 **Eager Write（选中即写剪贴板）**：用户在 UI（历史面板/小窗）选中某条内容时：
+      1) Shell 向 Core 发起 `FetchContent(item_id, mime/part)`（若本地缓存未命中）
+      2) Core 拉取并落入本机缓存（CAS），返回“已就绪/本地路径或 bytes 句柄”
+      3) Shell 将真实数据写入系统剪贴板（文本/图片 bytes；文件为本地临时落盘路径列表）
+    * 用户随后按下 Ctrl+V 时，系统直接从剪贴板读取真实数据，不依赖 CB 在“按键瞬间”参与时序。
+
+  * **Win32 Delayed Rendering（可选优化，不作为 v1 前置条件）**
+    * 仅在需要“先把占位写入剪贴板，但数据要等到真正粘贴时才生成/拉取”的场景使用；
+      例如：未来做“一键粘贴/自动粘贴”、或需要把超大内容的生成延后到 paste 请求发生的那一刻。
+    * 若启用：Shell 可把 DataObject 以延迟渲染形式注册；当目标应用请求某格式数据时，
+      Shell 再向 Core 拉取/解码并即时提供。该机制属于 **Windows 平台增强**，不得影响跨平台核心协议。
+
 
 * **本地内容提供者（Local Content Provider）**
 
@@ -119,6 +134,11 @@ Shell 负责所有**强依赖平台 API / 权限 / UI 交互**的能力，不直
 
     * Shell 不维护“设备权威列表”和“会话状态”，只消费 Core 事件
     * Shell 不实现协议细节（广播/拉取/重试/流控），只调用 Core API。
+
+* Shell 负责决定正文拉取时机：
+  * 接收远端 ItemMeta 时，仅入库与展示，不自动拉取正文；
+  * 用户在 UI（主页 / 历史 / 小窗）选中条目时，可根据类型与大小策略触发正文拉取；
+  * 在执行粘贴 / 保存 / 导出前，必须确保对应内容已在本机可用。
 
 ---
 
@@ -481,10 +501,12 @@ ClipBridge 将“连接”分为两层抽象：
 ## 2.4 外壳要点
 
 - **Windows**：
-  * Win32 延迟渲染
-  * C#/WinUI 3 外壳。
-  * 快捷键呼起剪切板历史小窗（就像win+v），可以选择要复制的历史剪切板内容
-  * 任务栏常驻图标，左键打开主窗口，右键是选项栏
+  * C#/WinUI 3 外壳；必要处使用 Win32 API
+  * v1 默认交互：历史面板/小窗“选中条目立即写入系统剪贴板”（Eager Write），保证用户 Ctrl+V 直接可粘贴
+  * Win32 Delayed Rendering：作为可选优化保留（用于未来“一键粘贴/自动粘贴”或超大内容的按需生成），不作为 v1 MVP 前置
+  * 快捷键呼起剪贴板历史小窗（类似 Win+V），用户选择要复制的历史内容
+  * 任务栏常驻图标：左键打开主窗口，右键为选项菜单
+
 - **Android**（Java 外壳，后继）：
   * 常驻通知显示当前复制内容
   * 后台长期运行
@@ -504,6 +526,12 @@ ClipBridge 将“连接”分为两层抽象：
 ## 3.2 Core ↔ Shell 接口（方向）
 ### 3.2.1 Windows端
 - Shell → Core：`cb_init(config) / cb_send_metadata(meta) / cb_request_content(item_id, mime) / cb_pause(bool) / cb_shutdown()`
+  
+  - 说明（v1 固定语义）：
+    - `cb_request_content(item_id, mime)` 为“ensure”语义：仅表示请求 Core 确保该内容在本机可用；
+      不保证同步返回正文。实际结果由 Core 通过回调事件 `CONTENT_CACHED { LocalContentRef }` 交付给 Shell。
+    - 对 file_list 的单文件拉取，v1 可扩展为 `cb_request_file(item_id, file_id)`（或等价参数形式），语义同上。
+
 - Core → Shell（回调）：`on_device_online(info) / on_device_offline(id) / on_new_metadata(meta) / on_transfer_progress(id, sent, total) / on_error(code,msg)`
 
 ## 3.3 网络与安全（技术实现）
@@ -2447,7 +2475,10 @@ v1 必备事件类型（覆盖 M1~M3）：
 * `kind=image`：
   * 返回 `local_path`（指向 Core 管理目录中的图片文件）。
   * Shell 职责：读取该路径图片数据，转换为平台剪贴板支持的格式（如 Windows `CF_DIB` / `CF_BITMAP`）写入。
-
+  * 约束说明：
+    * image 类型对应的 local_path 必须指向 Core 管理的 CAS（或等价受管存储）中的文件；
+    * Core 不得将外部路径、临时下载路径或源应用路径直接暴露给 Shell；
+    * image 正文与 file 正文在存储一致性上遵循相同的 CAS 规则。
 
 * `kind=file`：
   * 返回 `local_path`（落盘结果）。
@@ -3182,23 +3213,40 @@ Network 返回（示例）：
 
 ### 4.8.9 Shell 侧最小使用流程（按这个写就能跑通）
 
+> 本节是“可落地的实现级流程”。关键口径：
+> - Core 负责：入库、去重、CAS、网络会话与传输、以及“缓存是否已就绪”的权威判断
+> - Shell 负责：UI/交互触发点、系统剪贴板写入、以及在合适时机调用 Core 拉取正文
+
 1. 调 `cb_init`（传 config + on_event 回调）
+  - 注意：回调可能不在 UI 线程；Shell 必须自行 marshal 到 UI 线程（见 4.5.2/并发模型）。
+
 2. on_event 收到：
-  * `PEER_ONLINE/OFFLINE`：更新 UI
-  * `ITEM_META_ADDED`：插入历史列表
-3. 本机复制变化：
-  * 组 `ClipboardSnapshot` JSON（4.6.2），根据外壳的“软限制”判断是否默认同步/本地保存/强制同步：
-    - `share_mode=default|local_only|force`
-  * 调 `cb_ingest_local_copy`
+  - `PEER_ONLINE/OFFLINE`：更新 UI
+  - `ITEM_META_ADDED`：把 meta 插入历史列表/主页 feed（本机与远端都统一处理）
 
-4. 对端接收与自动预取（仅 text）：
-  * 对端收到 `ITEM_META_ADDED` 后：
-    * 若 `kind=text` 且 `size_bytes <= text_auto_prefetch_bytes`（默认 256KB），Core 自动触发一次 `ensure_content_cached` 完成预取
-    * 否则保持 Lazy Fetch（用户粘贴或显式拉取时才传输正文）
+3. 本机复制变化（系统剪贴板 → Core）：
+  - Shell 组 `ClipboardSnapshot` JSON（4.6.2）
+  - 根据 UI/设置决定 `share_mode=default|local_only|force`
+  - 调 `cb_ingest_local_copy`
 
-5. 用户点击/粘贴历史条目（Lazy Fetch）：
-  * 对于图片/文件：组 req → 调 `cb_ensure_content_cached`
-  * 等 `CONTENT_CACHED` 事件拿 `LocalContentRef`（4.6.4）→ 写系统剪贴板
+4. 远端元数据到达（对端 `ITEM_META_ADDED`）时的 Shell 行为：
+  - **只更新 UI，不自动写系统剪贴板**
+  - 如需“收件箱式体验”（可选能力），由 Shell 决定是否对“文本且较小”的条目立即发起拉取：
+    - 条件建议：`kind=text` 且 `size_bytes <= text_auto_prefetch_bytes`
+    - 行为：Shell 调 `cb_ensure_content_cached(item_id)`，等待 `CONTENT_CACHED`
+  - 若不启用该体验：保持纯 Lazy Fetch，直到用户选中/粘贴时才拉取
+
+5. 用户在 UI 上“选中某条元数据并准备粘贴/复制到系统剪贴板”（核心触发点）：
+  - 触发来源：主页条目点击、历史页条目点击、QuickPaste 小窗条目点击、或快捷键“粘贴上一条/选中条目”等
+  - Shell 调用 `cb_ensure_content_cached(item_id, ...) -> transfer_id`
+  - Shell 等待事件：
+    - 成功：`CONTENT_CACHED { transfer_id, local_ref: LocalContentRef }`
+    - 失败：`TRANSFER_FAILED { transfer_id, error }`（或等价错误事件）
+  - Shell 拿到 `LocalContentRef` 后写入系统剪贴板（规则见 4.6.4 与 §5.4）
+
+6. 写入系统剪贴板成功后（可选）：
+  - Shell 可将该 item 标为“最近使用/置顶候选”
+  - v1 不要求自动模拟 Ctrl+V（未来能力可在 5.4/5.5 扩展）
 
 
 ---
@@ -3377,7 +3425,7 @@ Core 只需要 2 个根目录：`data_dir`（持久）与 `cache_dir`（可清�
 
 ### 4.9.6 Lazy Fetch：命中逻辑（读路径）
 
-当用户在本机触发“粘贴/展开详情/保存文件”时：
+当 Shell 针对某条 ItemMeta 显式请求正文内容时：
 1. 查 items 得到 `sha256_hex + mime + total_bytes`
 2. 查 content_cache：
   - `present=1` 且 CAS 文件存在：直接读本地 bytes（命中）
@@ -3385,6 +3433,14 @@ Core 只需要 2 个根目录：`data_dir`（持久）与 `cache_dir`（可清�
 3. 回源成功后：
   - 写入 CAS（tmp -> rename）
   - `UPDATE content_cache SET present=1, last_access_ts_ms=now`
+  - 
+#### Lazy Fetch 的结果交付约束
+
+Lazy Fetch 的执行结果，Core 仅通过事件形式向 Shell 交付 `LocalContentRef`。
+
+* Core 不通过同步返回值直接暴露正文数据；
+* Shell 必须等待对应的 `CONTENT_CACHED`（或等价）事件；
+* Shell 后续所有剪贴板写入、文件导出行为，均以 `LocalContentRef` 为输入。
 
 ---
 
@@ -3709,7 +3765,7 @@ GcReport 建议包含：
 - A 发布 file_list meta（包含 files[]）
 
 **输入**
-- B 对其中一个 file_id 发起 `ensure_content_cached(kind=file, file_id=...)`
+- B 对其中一个 file_id 发起 `ensure_file_cached(item_id, file_id)`
 
 **期望**
 - B 接收 FILE_BEGIN + raw bytes，落盘到受控目录
@@ -4225,14 +4281,129 @@ Windows 外壳在 v1 的职责是把 Core 的“网络/同步/历史/日志”�
 * 连续复制压测：UI 不冻结；事件队列不爆；关键事件不丢
 
 ---
+## 5.4 读取内容与写入系统剪贴板
 
-## 5.4 Quick Paste 呼出小窗
+本节定义 **平台外壳（Shell）如何基于 `ItemMeta` 获取正文内容，并将其写入系统剪贴板**。
+该流程是所有 UI 行为（主页、历史列表、Quick Paste 小窗）的底层依赖。
 
-### 5.4.1 目标
+### 5.4.1 设计目标与约束
+
+* Shell 不直接处理网络、去重或缓存一致性；
+* Shell 不解析或拼装远端协议数据；
+* Shell 只通过 Core 提供的接口与事件获取内容；
+* Shell 写入系统剪贴板的输入 **必须是 `LocalContentRef`**。
+
+---
+
+### 5.4.2 Shell 侧内容状态模型（实现级）
+
+对于每一条 `ItemMeta`，Shell 在本地维护如下状态之一：
+
+* **MetaOnly**
+
+  * 仅持有 `ItemMeta`；
+  * 尚未向 Core 请求正文内容。
+
+* **Fetching**
+
+  * 已向 Core 发起正文/文件请求；
+  * 等待 `LocalContentRef` 事件返回。
+
+* **Ready**
+
+  * 已收到 `LocalContentRef`；
+  * 对应内容已在本机可用，可写入系统剪贴板。
+
+该状态模型仅存在于 Shell 内部，不向 Core 暴露。
+
+---
+
+### 5.4.3 触发正文读取的时机
+
+Shell 在以下情况下可以或必须触发正文读取：
+
+1. **用户在 UI 中选中某条内容**
+
+* 主页当前条目
+* 历史列表点击
+* Quick Paste 小窗中选中
+2. **用户即将执行粘贴 / 保存 / 导出**
+
+* 若状态非 Ready，必须先拉取正文
+3. **Shell 收到远端 ItemMeta**
+
+* 仅进入 MetaOnly 状态
+* 不自动拉取正文
+
+---
+
+### 5.4.4 正文读取流程（Shell → Core）
+
+当 Shell 决定读取正文时，执行以下流程：
+
+1. 根据 `ItemMeta.kind` 判断类型：
+
+* `text / image`：调用
+  `ensure_content_cached(item_id, mime, mode)`
+* `file`：对 `files[]` 中的每个 `file_id` 调用
+  `ensure_file_cached(item_id, file_id, mode)`
+
+2. Shell 将该条目状态置为 **Fetching**；
+
+3. Shell 不阻塞 UI，不轮询，不假定同步返回；
+
+4. Shell 等待 Core 通过事件回调返回 `LocalContentRef`。
+
+---
+
+### 5.4.5 接收 LocalContentRef 与状态更新
+
+当 Shell 收到 Core 发出的 `CONTENT_CACHED`（或等价）事件时：
+
+1. 校验 `item_id / file_id` 与当前请求是否匹配；
+2. 将对应条目状态置为 **Ready**；
+3. 缓存 `LocalContentRef` 供后续使用。
+
+---
+
+### 5.4.6 写入系统剪贴板
+
+当条目状态为 **Ready** 时，Shell 按类型写入系统剪贴板：
+
+* **text**
+
+  * 使用 `LocalContentRef.text_utf8`
+* **image**
+
+  * 从 `LocalContentRef.local_path` 读取图片数据
+  * 写入系统剪贴板图像格式
+* **file**
+
+  * 将 `LocalContentRef.local_path`（或路径列表）
+    写入系统剪贴板文件列表格式
+
+Shell **不得**：
+
+* 在未 Ready 时写入占位数据；
+* 使用非 Core 管理的外部路径；
+* 直接复用远端来源路径。
+
+---
+
+### 5.4.7 与 Quick Paste 的关系
+
+* Quick Paste 仅负责 **UI 选择与触发**
+* 实际内容读取与剪贴板写入逻辑，**全部复用本节流程**
+* Quick Paste 不拥有独立的数据流或缓存逻辑
+
+---
+## 5.5 Quick Paste 呼出小窗
+
+### 5.5.1 目标
 
 提供一个可通过全局热键呼出的顶层小窗（类似 Win+V 的历史选择与粘贴），支持“键盘优先”的历史选择与粘贴；对大内容按 Lazy Fetch 拉取并显示进度，可取消。
 
-### 5.4.2 交互规格（必须严格定义）
+### 5.5.2 交互规格（必须严格定义）
 
 #### 呼出/关闭
 
@@ -4252,7 +4423,7 @@ Windows 外壳在 v1 的职责是把 Core 的“网络/同步/历史/日志”�
 * Ctrl+F：聚焦搜索框（可选）
 * Tab：搜索框与列表切换焦点（可选）
 
-### 5.4.3 窗口行为与样式约束
+### 5.5.3 窗口行为与样式约束
 
 * 顶层窗口、无标题栏、圆角、阴影（符合现代 Windows）
 * 不出现在任务栏，不进入 Alt-Tab（ToolWindow 行为）
@@ -4264,7 +4435,7 @@ Windows 外壳在 v1 的职责是把 Core 的“网络/同步/历史/日志”�
   * 显示前记录前台 hwnd
   * 关闭后尝试恢复前台（允许失败，但必须“尽力而为”）
 
-### 5.4.4 数据源策略（快开窗 + 可搜索）
+### 5.5.4 数据源策略（快开窗 + 可搜索）
 
 * 打开瞬间：使用 `HistoryStore` 的“最近 N 条”立即渲染（避免阻塞）
 * 后台刷新：调用 `cb_list_history` 拉取补齐（可分页）
@@ -4274,22 +4445,15 @@ Windows 外壳在 v1 的职责是把 Core 的“网络/同步/历史/日志”�
   * 调用 `cb_list_history(query_json)` 进行过滤
   * 搜索结果与 Store 结果合并规则必须明确（建议：搜索态只显示查询结果）
 
-### 5.4.5 粘贴链路（EnsureCached → 写剪贴板）
+### 5.5.5 粘贴链路（EnsureCached → 写剪贴板）
 
-QuickPaste 的执行链路不得单独实现，必须调用 `ApplySelectedToClipboard(item_id)`（见 5.7.8.2）。
+QuickPaste 的执行链路不得单独实现，和历史页面一样（见 5.4）。
 行为约束：
 
-* Enter：对当前选中条目调用 `ApplySelectedToClipboard(item_id)`
 * NeedsDownload：显示下载进度与可取消（若核心支持 cancel）
 * 成功写入剪贴板后：按设置决定是否自动关闭小窗；关闭后尽力恢复前台焦点
 * 写入失败（剪贴板占用）：按统一命令的重试与提示规则执行，不得额外弹窗阻塞用户输入
 
-#### 状态机（每条 item 的可见状态）
-
-* Ready：可直接写剪贴板
-* NeedsDownload：需要 EnsureCached
-* Downloading：显示进度与取消
-* Failed：显示错误摘要 + “重试”
 
 #### 执行流程（Enter）
 
@@ -4313,7 +4477,7 @@ QuickPaste 的执行链路不得单独实现，必须调用 `ApplySelectedToClip
 * 仍失败：显示“剪贴板被占用”并提供“重试”按钮
 * 必须保证：失败不触发重新下载（只重试写入）
 
-### 5.4.6 UI 结构占位（留出设计空间）
+### 5.5.6 UI 结构占位（留出设计空间）
 
 QuickPasteWindow 建议拆为三块区域：
 
@@ -4323,7 +4487,7 @@ QuickPasteWindow 建议拆为三块区域：
 
 > 视觉与交互细节可迭代，但窗口行为/状态机/快捷键必须先固定。
 
-### 5.4.7 验收标准与测试
+### 5.5.7 验收标准与测试
 
 * 热键稳定呼出/隐藏；失焦自动隐藏
 * 搜索可用；列表滚动不卡顿（至少 500 条）
@@ -4333,15 +4497,15 @@ QuickPasteWindow 建议拆为三块区域：
 
 ---
 
-## 5.5 统一日志系统（Core 权威库 + Shell 统一入口）
+## 5.6 统一日志系统（Core 权威库 + Shell 统一入口）
 
-### 5.5.1 目标
+### 5.6.1 目标
 
 * Core 作为日志权威库：持久化、查询、tail、清理、统计
 * Shell 统一使用 `ILogger` 写日志，最终落入 Core 日志库
 * Logs 页面提供“排障级”管理能力：时间段检索、关键字过滤、导出、保留期清理
 
-### 5.5.2 统一日志事件模型（Schema）
+### 5.6.2 统一日志事件模型（Schema）
 
 最少字段：
 
@@ -4354,7 +4518,7 @@ QuickPasteWindow 建议拆为三块区域：
 * `exception`（可空）
 * `props_json`（可空：transfer_id、item_id、peer_id、窗口状态等）
 
-### 5.5.3 Shell 写入路径（ILogger → Core）
+### 5.6.3 Shell 写入路径（ILogger → Core）
 
 * 提供 `CoreLoggerProvider`（或 Serilog Sink）作为唯一入口
 * Provider 内部必须：
@@ -4367,7 +4531,7 @@ QuickPasteWindow 建议拆为三块区域：
   * 方案 A：丢弃 Shell 日志但记录计数并提示（简单）
   * 方案 B（推荐）：写一个 Shell fallback rolling file，仅用于 Core 未加载阶段排障
 
-### 5.5.4 Logs 页面能力（管理功能）
+### 5.6.4 Logs 页面能力（管理功能）
 
 * 时间范围查询：start/end + 分页
 * Tail：after_id 增量追加
@@ -4381,7 +4545,7 @@ QuickPasteWindow 建议拆为三块区域：
   * 导出 CSV（对当前查询结果）
   * Stats：总条数、磁盘占用（如核心提供）
 
-### 5.5.5 保留期策略（Retention）
+### 5.6.5 保留期策略（Retention）
 
 * 设置项：`LogRetentionDays`
 * 执行策略：
@@ -4390,7 +4554,7 @@ QuickPasteWindow 建议拆为三块区域：
   * 之后每日执行一次（或每次启动足够，v1 可选）
 * 约束：清理必须只作用于 core_log_dir，不影响其它数据
 
-### 5.5.6 验收
+### 5.6.6 验收
 
 * Shell 与 Core 日志同屏可检索
 * Tail 不卡 UI，持续 10 分钟无内存膨胀（设定最大缓存条数）
@@ -4398,9 +4562,9 @@ QuickPasteWindow 建议拆为三块区域：
 
 -----
 
-## 5.6 权限、自动启动与后台留存（Policy + UX）
+## 5.7 权限、自动启动与后台留存（Policy + UX）
 
-### 5.6.1 目标
+### 5.7.1 目标
 
 在不引入“不可控后台行为”的前提下，实现可诊断、可配置、可关闭的系统级运行能力：
 
@@ -4409,7 +4573,7 @@ QuickPasteWindow 建议拆为三块区域：
 * 自动启动（尊重用户与系统禁用）
 * 通知与提示（可降级）
 
-### 5.6.2 权限与系统能力边界（v1 固定约束）
+### 5.7.2 权限与系统能力边界（v1 固定约束）
 
 #### 剪贴板读写
 
@@ -4433,7 +4597,7 @@ QuickPasteWindow 建议拆为三块区域：
   * 检测不到/发送失败时，降级为应用内提示（InfoBar/状态条）
   * 不将通知作为关键流程的唯一通道（例如失败必须在 UI 可见）
 
-### 5.6.3 后台留存（Close-to-tray）状态机
+### 5.7.3 后台留存（Close-to-tray）状态机
 
 #### 用户可配置策略（Settings）
 
@@ -4459,7 +4623,7 @@ QuickPasteWindow 建议拆为三块区域：
 * 首次 Close-to-tray 必须提示用户发生了什么，并提供“下次直接退出”的设置入口
 * 用户必须能明确退出（托盘菜单“退出”始终可见）
 
-### 5.6.4 自动启动（Startup）策略
+### 5.7.4 自动启动（Startup）策略
 
 #### Settings
 
@@ -4486,7 +4650,7 @@ QuickPasteWindow 建议拆为三块区域：
 * 必须尊重用户禁用（DisabledByUser 不得自动恢复）
 * 不支持的环境（未打包/无 AppIdentity）必须给出明确状态与解释
 
-### 5.6.5 热键管理（Hotkey Management）
+### 5.7.5 热键管理（Hotkey Management）
 
 #### Settings
 
@@ -4507,7 +4671,7 @@ QuickPasteWindow 建议拆为三块区域：
 * 进入后台留存：热键保持有效
 * 退出流程：注销热键，防止残留
 
-### 5.6.6 统一退出流程（必须唯一）
+### 5.7.6 统一退出流程（必须唯一）
 
 退出触发来源：
 
@@ -4529,7 +4693,7 @@ QuickPasteWindow 建议拆为三块区域：
 * 退出后无后台残留进程
 * 重启应用不出现“上次未正常关闭导致状态异常”（若出现必须可自恢复）
 
-### 5.6.7 诊断与可见性（用户能理解）
+### 5.7.7 诊断与可见性（用户能理解）
 
 * Settings 页面应显示：
 
@@ -4541,7 +4705,7 @@ QuickPasteWindow 建议拆为三块区域：
 
   * 包含版本、路径、状态、最近错误摘要
 
-### 5.6.8 验收与测试
+### 5.7.8 验收与测试
 
 * Close-to-tray：点 X 后仍可通过托盘恢复窗口，功能持续工作
 * Exit：托盘退出后进程完全结束、资源释放
@@ -4551,13 +4715,13 @@ QuickPasteWindow 建议拆为三块区域：
 
 ---
 
-## 5.7 UI 规划与页面规格
+## 5.8 UI 规划与页面规格
 
-### 5.7.1 目标
+### 5.8.1 目标
 
 将 v1 的 UI 以“可实现、可测试、可迭代设计”的方式规格化，统一信息架构与交互规则，并与 Stores 数据投影对齐。
 
-### 5.7.2 信息架构（IA）
+### 5.8.2 信息架构（IA）
 
 主窗口以左侧导航栏（NavigationView）组织：
 
@@ -4569,9 +4733,9 @@ QuickPasteWindow 建议拆为三块区域：
 
 QuickPasteWindow 独立于主窗口导航（顶层小窗），但共享 Stores 与命令。
 
-### 5.7.3 主页页面规格（Home / Dashboard）
+### 5.8.3 主页页面规格（Home / Dashboard）
 
-#### 5.7.3.1 目标
+#### 5.8.3.1 目标
 
 主页作为“剪贴板共享控制台（Dashboard）”，提供三类能力，并严格避免与 History/Devices/Settings 页面功能重复：
 
@@ -4579,7 +4743,7 @@ QuickPasteWindow 独立于主窗口导航（顶层小窗），但共享 Stores �
 2. **可操作的文字摘要**：以文字指标呈现共享策略、缓存/传输/开关状态，并提供一键动作（暂停采集/暂停分享/清空缓存等）。
 3. **图表化态势感知**：展示核心提供的缓存与网络占用随时间变化（轻量图表，便于判断系统是否正常工作）。
 
-#### 5.7.3.2 页面布局（自上而下三段式）
+#### 5.8.3.2 页面布局（自上而下三段式）
 
 主页采用固定三段式布局（自适应宽度，垂直滚动仅在小屏时启用）：
 
@@ -4591,16 +4755,16 @@ C) **底部：图表区（Cache + Network）**
 
 ---
 
-#### 5.7.3.3 顶部：Recent Items 横向卡片条（选中即写剪贴板）
+#### 5.8.3.3 顶部：Recent Items 横向卡片条（选中即写剪贴板）
 
-##### 5.7.3.3.1 可见条目与“显示全部历史”
+##### 5.8.3.3.1 可见条目与“显示全部历史”
 
 * 默认显示最近 **10** 个历史元数据条目（按时间倒序，最新在最前）。
 * 横向列表尾部固定一个“查看更多历史…”卡片/按钮：
 
   * 点击后跳转到 `History` 页面，并定位到最新条目（顶端）。
 
-##### 5.7.3.3.2 卡片信息结构（统一模板）
+##### 5.8.3.3.2 卡片信息结构（统一模板）
 
 每张卡片必须包含以下信息（避免 UI 各处不一致）：
 
@@ -4618,7 +4782,7 @@ C) **底部：图表区（Cache + Network）**
   * Ready / NeedsDownload / Downloading(含进度) / Failed(含短错误摘要)
   * 可选：大小（如 2.3 MB）
 
-##### 5.7.3.3.3 卡片右上角操作按钮（Lock / Delete）
+##### 5.8.3.3.3 卡片右上角操作按钮（Lock / Delete）
 
 每张卡片右上角提供两个小按钮：
 
@@ -4638,7 +4802,7 @@ C) **底部：图表区（Cache + Network）**
 
 > 删除语义的 v1 目标：先实现“本机隐藏”，不引入跨设备一致性复杂度；全局删除作为未来里程碑采用 Tombstone + GC（详见后续删除体系章节）。
 
-##### 5.7.3.3.4 选择模式（SelectionMode）与自动跟随规则
+##### 5.8.3.3.4 选择模式（SelectionMode）与自动跟随规则
 
 主页卡片条必须实现明确的选择模式，以定义“新元数据到达时是否抢占选中与剪贴板内容”。
 
@@ -4660,7 +4824,7 @@ v1 最小落地要求：
 * 必须实现 `FollowNewest` 与 `Locked`。
 * `Manual` 可作为 v1.1 增强；若暂不实现，则用户任何一次选择都视为 FollowNewest 的“最新提交”，并在新元数据到达时继续自动跟随。
 
-##### 5.7.3.3.5 “选中即写剪贴板”的提交（Commit）规则（防抖与可控性）
+##### 5.8.3.3.5 “选中即写剪贴板”的提交（Commit）规则（防抖与可控性）
 
 为避免用户滑动过程中造成剪贴板高频抖动，规定“选中提交（commit）”时机：
 
@@ -4673,7 +4837,7 @@ v1 最小落地要求：
 * 更新选中视觉效果（Selected 状态）
 * 触发“写剪贴板链路”（详见 5.7.3.3.6）
 
-##### 5.7.3.3.6 写剪贴板链路（复用 QuickPaste：EnsureCached → ClipboardWriter）
+##### 5.8.3.3.6 写剪贴板链路（复用 QuickPaste：EnsureCached → ClipboardWriter）
 
 主页卡片条写剪贴板必须复用 QuickPaste 的同一套命令与等待机制，避免逻辑分叉。
 
@@ -4700,7 +4864,7 @@ v1 最小落地要求：
 * 自动重试（短退避，上限 2 秒）
 * 仍失败：在中部文字区显示非阻塞提示（如“剪贴板被占用，稍后重试或再次选择”），并记录日志（进入 Core 权威日志库）。
 
-##### 5.7.3.3.7 新元数据到达时的自动写剪贴板规则
+##### 5.8.3.3.7 新元数据到达时的自动写剪贴板规则
 
 当 Core 产生新元数据（新条目进入 HistoryStore）时：
 
@@ -4709,9 +4873,9 @@ v1 最小落地要求：
 
 ---
 
-#### 5.7.3.4 中部：文字数据与操作区（状态与控制）
+#### 5.8.3.4 中部：文字数据与操作区（状态与控制）
 
-##### 5.7.3.4.1 必要状态字段（必须可见）
+##### 5.8.3.4.1 必要状态字段（必须可见）
 
 中部区域用于呈现“与控制直接相关”的文字状态，至少包含：
 
@@ -4730,7 +4894,7 @@ v1 最小落地要求：
 
 > 主页不展示日志统计与最近错误；相关信息仅在 Logs 页面查看。
 
-##### 5.7.3.4.2 必要操作按钮（v1 必做）
+##### 5.8.3.4.2 必要操作按钮（v1 必做）
 
 主页必须提供以下按钮（按钮可放在对应文字指标旁或统一操作区）：
 
@@ -4758,7 +4922,7 @@ v1 最小落地要求：
 
   * 打开 QuickPasteWindow（等同热键）
 
-##### 5.7.3.4.3 Share Targets 管理（v1：设备表 In/Out allowlist）
+##### 5.8.3.4.3 Share Targets 管理（v1：设备表 In/Out allowlist）
 
 主页 Share Targets 区域仅展示摘要与列表，不提供额外按钮（符合你的要求），管理通过右键菜单进行：
 
@@ -4774,9 +4938,9 @@ v1 最小落地要求：
 
 ---
 
-#### 5.7.3.5 底部：图表区
+#### 5.8.3.5 底部：图表区
 
-##### 5.7.3.5.1 图表清单（v1 必做）
+##### 5.8.3.5.1 图表清单（v1 必做）
 
 底部提供图表，用于“态势感知”，不承担复杂分析：
 
@@ -4804,7 +4968,7 @@ Network 占用图数据必须由 Core 提供权威统计接口（示例：`cb_ne
 
   * 横轴：时间（从24小时前到现在，后期可以做一个下拉框选择横轴时间）
   * 纵轴：过去 24 小时新增元数据数（三个折线：text/image/files）
-##### 5.7.3.5.2 数据来源（必须由 Core 提供）
+##### 5.8.3.5.2 数据来源（必须由 Core 提供）
 
 图表数据必须来自 Core（权威数据源），Shell 不做推断统计，以保证跨平台一致与准确性。
 
@@ -4823,7 +4987,7 @@ Shell 仅负责：
 
 ---
 
-#### 5.7.3.6 依赖与实现约束（工程落地要求）
+#### 5.8.3.6 依赖与实现约束（工程落地要求）
 
 * 主页所有业务动作不得直接调用 P/Invoke；必须通过 Service/Command（CoreHost/Stores/Policy）层完成。
 * 主页写剪贴板链路必须复用 QuickPaste 同一套命令与 awaiter（EnsureCached/TransferStore/CONTENT_CACHED）。
@@ -4834,7 +4998,7 @@ Shell 仅负责：
 
 ---
 
-#### 5.7.3.7 验收标准（v1）
+#### 5.8.3.7 验收标准（v1）
 
 1. Recent Items 显示最近 10 条；末尾“查看更多历史”跳转正常。
 2. 在 `FollowNewest` 下，新元数据到达后自动选中并写入系统剪贴板，选中效果正确。
@@ -4845,13 +5009,13 @@ Shell 仅负责：
 7. Cache 清理按钮可用且有二次确认；执行过程中 UI 有忙碌态反馈。
 8. 底部两张图表可展示随时间变化数据，数据来自 Core 接口，刷新不阻塞 UI。
 
-### 5.7.4 历史页面规格（History）
+### 5.8.4 历史页面规格（History）
 
-#### 5.7.4.1 目标
+#### 5.8.4.1 目标
 
 History 页面提供“全量历史浏览 + 精准定位 + 管理动作”，是 Home（最近 10 条）与 QuickPaste（临时呼出）之外的主入口。History 必须与 Home/QuickPaste 共享同一套条目状态机与操作命令，避免三套逻辑不一致。
 
-#### 5.7.4.2 列表展示与虚拟化分页（UI Virtualization）
+#### 5.8.4.2 列表展示与虚拟化分页（UI Virtualization）
 
 * **列表控件**：使用 WinUI 3 `ListView` 配合 `ItemsStackPanel`，必须开启 UI 虚拟化（默认行为），禁止将 ListView 放入 ScrollViewer 或 StackPanel 等无限高度容器中。
 * **数据源实现**：Shell 侧集合必须实现 `ISupportIncrementalLoading` 接口，支持滚动到底部自动触发加载。
@@ -4862,7 +5026,7 @@ History 页面提供“全量历史浏览 + 精准定位 + 管理动作”，是
 
 
 
-#### 5.7.4.3 实时数据流策略（智能静默插入）
+#### 5.8.4.3 实时数据流策略（智能静默插入）
 
 针对用户浏览过程中 `ITEM_META_ADDED` 新数据到达的场景，采用 **“智能静默插入（Smart Silent Insertion）”** 策略，以消除列表抖动（Scroll Jitter）：
 
@@ -4875,7 +5039,7 @@ History 页面提供“全量历史浏览 + 精准定位 + 管理动作”，是
 * 必须配置 `ItemsStackPanel.ItemsUpdatingScrollMode = KeepItemsInView`。
 * 必须在 UI 线程（Dispatcher）将新 Item 插入到集合头部（Index 0），利用 WinUI 的锚定机制处理视觉位置。
 
-#### 5.7.4.4 选中与写剪贴板行为（与主页一致）
+#### 5.8.4.4 选中与写剪贴板行为（与主页一致）
 
 History 的“选中写剪贴板”必须提供两种模式（由 Settings 控制）：
 
@@ -4890,7 +5054,7 @@ History 的“选中写剪贴板”必须提供两种模式（由 Settings 控�
 
 > 主页强制“选中即写”，History 建议默认不写，以避免用户浏览时频繁污染剪贴板；但文档必须允许用户统一成同一体验。
 
-#### 5.7.4.5 条目操作（Lock / Delete / Copy）
+#### 5.8.4.5 条目操作（Lock / Delete / Copy）
 
 每个条目提供以下动作（按钮/右键均可）：
 
@@ -4909,14 +5073,14 @@ History 的“选中写剪贴板”必须提供两种模式（由 Settings 控�
 
   * 未来采用 tombstone，同步到其它设备并触发 GC（v1 不实现，仅预留）
 
-#### 5.7.4.6 过滤与搜索（v1 最小集）
+#### 5.8.4.6 过滤与搜索（v1 最小集）
 
 * 关键字搜索（匹配 preview/文件名摘要/来源设备名）
 * 类型过滤（Text/Image/Files）
 * 状态过滤（NeedsDownload/Downloading/Failed）
 * 时间范围（可选）
 
-#### 5.7.4.7 验收标准（v1）
+#### 5.8.4.7 验收标准（v1）
 
 1. 全量历史可分页加载，滚动不卡顿。
 2. Copy/Lock/DeleteLocal 与主页语义一致，且跨页面联动正确（Home 顶部卡片条反映锁定/删除后状态）。
@@ -4924,13 +5088,13 @@ History 的“选中写剪贴板”必须提供两种模式（由 Settings 控�
 
 ---
 
-### 5.7.5 设备页面规格（Devices）与分享策略（v1 + vNext 伏笔）
+### 5.8.5 设备页面规格（Devices）与分享策略（v1 + vNext 伏笔）
 
-#### 5.7.5.1 目标
+#### 5.8.5.1 目标
 
 Devices 页面负责“设备发现与共享策略管理”。v1 采用“每设备 Inbound/Outbound allowlist”落地；文档预留 vNext 的“分享圈（Sharing Circles）”升级路径。
 
-#### 5.7.5.2 v1 页面结构（列表 + 右键管理）
+#### 5.8.5.2 v1 页面结构（列表 + 右键管理）
 
 * 展示所有检测到的设备（包含非本账号设备），并标注：
 
@@ -4940,7 +5104,7 @@ Devices 页面负责“设备发现与共享策略管理”。v1 采用“每设
   * Outbound allowed count（允许向其分享的设备数量）
   * Inbound allowed count（允许接收其分享的设备数量）
 
-#### 5.7.5.3 分享策略（v1：allowlist；vNext：Sharing Circles 预留）
+#### 5.8.5.3 分享策略（v1：allowlist；vNext：Sharing Circles 预留）
 
 v1 采用每设备 allowlist 的最小落地模型，对每个 peer 维护两个布尔策略：
 
@@ -4957,7 +5121,7 @@ vNext 预留：Sharing Circles（分享圈）
 * v1 allowlist 等价于隐式圈子 `Default` 的成员集合与策略子集，保证升级时不推翻现有配置。
 
 
-#### 5.7.5.4 设备右键菜单（v1 必做）
+#### 5.8.5.4 设备右键菜单（v1 必做）
 
 对每个设备提供右键菜单：
 
@@ -4968,7 +5132,7 @@ vNext 预留：Sharing Circles（分享圈）
 
 > Home 的 Share Targets 区域仅展示摘要与列表，不提供按钮；实际管理入口在 Devices（右键/详情面板）。
 
-#### 5.7.5.5 vNext：分享圈（Sharing Circles）伏笔（不实现，仅定义）
+#### 5.8.5.5 vNext：分享圈（Sharing Circles）伏笔（不实现，仅定义）
 
 为避免未来推翻 v1，文档预定义 Sharing Circles 概念：
 
@@ -4993,7 +5157,7 @@ vNext 预留：Sharing Circles（分享圈）
 * 圈子创建/重命名/删除
 * 设备可拖入多个圈子
 
-#### 5.7.5.6 验收标准（v1）
+#### 5.8.5.6 验收标准（v1）
 
 1. 设备发现与状态变化可见，右键可切换 In/Out。
 2. 切换策略后立即生效：Inbound 关闭后不再接收该 peer 元数据；Outbound 关闭后不再向其发送。
@@ -5001,9 +5165,9 @@ vNext 预留：Sharing Circles（分享圈）
 
 ---
 
-### 5.7.6 设置页面规格（Settings）
+### 5.8.6 设置页面规格（Settings）
 
-#### 5.7.6.1 目标
+#### 5.8.6.1 目标
 
 Settings 页面集中管理所有“策略性开关与阈值”，并明确区分：
 
@@ -5012,7 +5176,7 @@ Settings 页面集中管理所有“策略性开关与阈值”，并明确区�
 * limits：超限提示与默认动作
 * 快捷键/后台留存/自启：系统集成行为
 
-#### 5.7.6.2 必要分组（v1）
+#### 5.8.6.2 必要分组（v1）
 
 Settings 必须提供两个互相独立的全局开关，并与主页中部按钮双向同步（同一状态源）：
 
@@ -5052,15 +5216,15 @@ Settings 必须提供两个互相独立的全局开关，并与主页中部按�
 
 ---
 
-### 5.7.7 日志页面规格（Logs）
+### 5.8.7 日志页面规格（Logs）
 
 > 本节保留为调试用途，不出现在主页摘要中，但必须具备工程排障能力。
 
-#### 5.7.7.1 目标
+#### 5.8.7.1 目标
 
 提供 Core 权威日志库的查询、tail、过滤、导出与保留期清理能力；Shell 通过 ILogger 写入同一库（见 5.6 与日志系统章节）。
 
-#### 5.7.7.2 核心能力（v1）
+#### 5.8.7.2 核心能力（v1）
 
 * 时间范围查询（start/end）
 * level_min 过滤
@@ -5071,11 +5235,11 @@ Settings 必须提供两个互相独立的全局开关，并与主页中部按�
 
 ---
 
-### 5.7.8 统一命令与语义（跨 Home / History / QuickPaste 一致性）
+### 5.8.8 统一命令与语义（跨 Home / History / QuickPaste 一致性）
 
 > 这一节非常关键，用于防止三处 UI 行为不一致。建议写在 UI 章节末尾并作为实现约束。
 
-#### 5.7.8.1 统一状态机（ItemState）
+#### 5.8.8.1 统一状态机（ItemState）
 
 所有页面对条目状态的显示与行为必须一致：
 
@@ -5084,7 +5248,7 @@ Settings 必须提供两个互相独立的全局开关，并与主页中部按�
 * `Downloading(progress)`：显示进度，可取消（若核心支持）
 * `Failed(error)`：可重试（再次选中/Copy）
 
-#### 5.7.8.2 统一写剪贴板命令
+#### 5.8.8.2 统一写剪贴板命令
 
 命令名（建议）：
 
@@ -5096,7 +5260,7 @@ Settings 必须提供两个互相独立的全局开关，并与主页中部按�
 2. NeedsDownload → Core.EnsureCached → 等 CONTENT_CACHED → ClipboardWriter.Write
 3. 写入失败（剪贴板占用）→ 短退避重试（<=2 秒）→ 非阻塞提示
 
-#### 5.7.8.3 统一锁定语义
+#### 5.8.8.3 统一锁定语义
 
 * `Lock(item_id)`：进入 `SelectionMode=Locked(item_id)`
 * Locked 期间：
@@ -5104,7 +5268,7 @@ Settings 必须提供两个互相独立的全局开关，并与主页中部按�
   * 新元数据到达不抢占剪贴板
   * 删除 Locked 项会自动解除锁定并回到 FollowNewest
 
-#### 5.7.8.4 统一删除语义（v1）
+#### 5.8.8.4 统一删除语义（v1）
 
 * `DeleteLocal(item_id)`：本机隐藏，不广播、不影响其它设备
 * `DeleteEverywhere(item_id)`：vNext（tombstone + GC），v1 仅占位
@@ -5112,7 +5276,7 @@ Settings 必须提供两个互相独立的全局开关，并与主页中部按�
 ---
 
 
-### 5.7.5 Devices 页面规格
+### 5.8.5 Devices 页面规格
 
 * 列表字段：
 
@@ -5126,7 +5290,7 @@ Settings 必须提供两个互相独立的全局开关，并与主页中部按�
   * 刷新（若核心提供）
   * 复制设备信息（用于支持）
 
-### 5.7.6 Settings 页面规格（策略集中地）
+### 5.8.6 Settings 页面规格（策略集中地）
 
 Settings 分组：
 
@@ -5149,7 +5313,7 @@ Settings 分组：
   * LogRetentionDays
   * 最小日志级别（可选：仅影响 Shell 侧过滤输出）
 
-### 5.7.7 Logs 页面规格（统一日志中心）
+### 5.8.7 Logs 页面规格（统一日志中心）
 
 #### 查询
 
@@ -5168,9 +5332,9 @@ Settings 分组：
 
   * 从状态条/错误提示点击进入 Logs 并预填时间范围（例如最近 10 分钟）
 
-### 5.7.8 统一语义与命令（Home / History / QuickPaste 必须一致）
+### 5.8.8 统一语义与命令（Home / History / QuickPaste 必须一致）
 
-#### 5.7.8.1 统一条目状态机（ItemState）
+#### 5.8.8.1 统一条目状态机（ItemState）
 
 所有 UI（主页卡片条、History 列表、QuickPaste 列表）对条目状态显示与行为必须一致，状态集合固定为：
 
@@ -5184,7 +5348,7 @@ Settings 分组：
 * UI 不得各自引入额外状态名（避免漂移）
 * 同一 `item_id` 的状态由 Stores 投影为唯一真相源
 
-#### 5.7.8.2 统一写剪贴板命令（选中即写 / Copy 按钮共用）
+#### 5.8.8.2 统一写剪贴板命令（选中即写 / Copy 按钮共用）
 
 统一命令（建议命名）：
 
@@ -5200,7 +5364,7 @@ Settings 分组：
 
 * Home 的“选中即写”、History 的“Copy”、QuickPaste 的“Enter”必须调用同一命令，不得三套实现
 
-#### 5.7.8.3 统一锁定语义（Lock）
+#### 5.8.8.3 统一锁定语义（Lock）
 
 * `Lock(item_id)`：进入 `SelectionMode=Locked(item_id)`
 * Locked 期间：新元数据到达不抢占剪贴板内容
@@ -5210,19 +5374,19 @@ Settings 分组：
 
 * 删除 Locked 项时必须自动解除锁定并回到 FollowNewest（避免“锁定指向不存在条目”）
 
-#### 5.7.8.4 统一删除语义（v1：本机隐藏；vNext：全局 Tombstone）
+#### 5.8.8.4 统一删除语义（v1：本机隐藏；vNext：全局 Tombstone）
 
 * `DeleteLocal(item_id)`：仅本机隐藏，不广播、不影响其它设备
 * `DeleteEverywhere(item_id)`：vNext 占位（tombstone + GC），v1 不实现但可在 UI 预留入口（右键/二级确认）
 
 
-### 5.7.9 QuickPasteWindow UI 规格（与 5.4 对齐）
+### 5.8.9 QuickPasteWindow UI 规格（与 5.4 对齐）
 
 * 顶部搜索框（可选）
 * 列表：最近 N 条 + 状态徽标 + 进度条
 * 底部提示：快捷键帮助、错误提示、取消按钮（Downloading 时）
 
-### 5.7.10 验收与测试
+### 5.8.10 验收与测试
 
 * UI 与 Stores 解耦：页面不直接调用 FFI（只能调用 Service/VM 命令）
 * 快速打开：History 页面首屏 < 200ms（使用 Store 现有数据）
@@ -5231,13 +5395,13 @@ Settings 分组：
 
 ---
 
-## 5.8 打包发布、版本管理与回归测试
+## 5.9 打包发布、版本管理与回归测试
 
-### 5.8.1 目标
+### 5.9.1 目标
 
 形成可安装、可升级、可回归验证的发布链路，确保系统集成功能（托盘/热键/自启/剪贴板）在 Release 环境稳定。
 
-### 5.8.2 打包形态
+### 5.9.2 打包形态
 
 * v1 默认：MSIX（获得 AppIdentity，便于通知、自启、升级）
 * 调试形态：
@@ -5245,20 +5409,20 @@ Settings 分组：
   * Debug（不强依赖自启）
   * Release（完整功能验证）
 
-### 5.8.3 版本号与兼容策略
+### 5.9.3 版本号与兼容策略
 
 * Shell 版本号与 Core 版本号均应展示在 About/Diagnostics
 * 兼容性策略：
 
   * Shell 检测 Core ABI 版本（或导出符号版本）不匹配时进入 Degraded 并提示升级
 
-### 5.8.4 发布工件
+### 5.9.4 发布工件
 
 * MSIX 安装包
 * 变更日志（Changelog）
 * 诊断导出（日志导出 + 配置导出）用于用户反馈
 
-### 5.8.5 回归测试清单（最低集）
+### 5.9.5 回归测试清单（最低集）
 
 #### 生命周期
 
@@ -5290,7 +5454,7 @@ Settings 分组：
 * 自启启用/禁用状态正确（若环境支持）
 * 通知禁用时降级提示仍可见
 
-### 5.8.6 验收标准
+### 5.9.6 验收标准
 
 * Release 包在干净系统安装后可完成全套回归测试
 * 卸载不残留后台进程；数据目录按策略处理（保留/清理规则可后续定义）

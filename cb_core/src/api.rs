@@ -137,7 +137,7 @@ impl Core {
     pub fn shutdown(&self) {
         self.inner.shutdown();
     }
-	
+
 
     /**
      * 规划本地内容的摄入流程。
@@ -337,33 +337,112 @@ impl Core {
     }
 
 	pub fn ensure_content_cached(&self, item_id: &str, file_id: Option<&str>) -> anyhow::Result<String> {
-        if self.inner.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
-            anyhow::bail!("core shutdown");
-        }
+		if self.inner.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
+			anyhow::bail!("core shutdown");
+		}
 
-        // 1. 检查本地是否已经有了？(Lazy optimization)
-        // 只有当 file_id 为空 (Text/Image) 时才能简单查 content_cache 表
-        // 如果是 FileList 里的子文件，逻辑更复杂，这里先统一交给 NetManager 处理，
-        // 或者也可以在这里先查 DB。为了架构解耦，建议发给 NetManager/Session 判断。
+		// ---------- Fast path: 本机内容不走网络 ----------
+		// 1) 查元数据（至少要拿到 source_device_id + content.sha256/bytes）
+		if let Some(meta) = self.get_item_meta(item_id)? {
+			// 你 init 里叫 device_id；这里按你真实字段改
+			let my_device_id = &self.inner.core_config.device_id;
 
+			// 如果内容来源就是本机：直接查本地缓存/CAS
+			if meta.source_device_id == *my_device_id {
+				// v1：只处理 file_id == None 的简单类型（text/image）
+				if file_id.is_none() {
+					if let content = meta.content {
+						// cas_has：判断 sha256 对应 blob 是否存在
+						// 新逻辑：命中本机缓存也返回一个可等待的 transfer_id，并同步发 CONTENT_CACHED
+						if self.inner.cas.blob_exists(&content.sha256) {
+							let transfer_id = uuid::Uuid::new_v4().to_string();
+
+							// kind：与接收侧一致的简单判定（你接收侧也是这么做的）
+							let kind = if content.mime.starts_with("text/") {
+								"text"
+							} else if content.mime.starts_with("image/") {
+								"image"
+							} else {
+								"file"
+							};
+
+							// local_path：text 直接给 CAS 路径；image 建议 materialize 带扩展名（可选）
+							let local_path = if kind == "image" {
+								let ext = if content.mime == "image/png" {
+									Some("png")
+								} else if content.mime == "image/jpeg" {
+									Some("jpg")
+								} else if content.mime == "image/gif" {
+									Some("gif")
+								} else {
+									None
+								};
+
+								// cas.materialize_blob 已存在
+								self.inner
+									.cas
+									.materialize_blob(&content.sha256, ext.unwrap_or(""))?
+									.to_string_lossy()
+									.to_string()
+							} else {
+								self.inner
+									.cas
+									.blob_path(&content.sha256)
+									.to_string_lossy()
+									.to_string()
+							};
+
+							// local_ref 结构与接收侧保持一致
+							let local_ref = serde_json::json!({
+								"local_path": local_path,
+								"item_id": item_id,
+								"mime": content.mime,
+								"kind": kind,
+								"sha256": content.sha256,
+								"total_bytes": content.total_bytes
+							});
+
+							// CONTENT_CACHED 结构与接收侧保持一致
+							let evt = serde_json::json!({
+								"type": "CONTENT_CACHED",
+							"payload": {
+								"transfer_id": transfer_id,
+								"item_id": item_id,
+								"file_id": file_id,
+								"local_ref": local_ref
+							}
+						});
+
+							self.inner.emit_json(evt);
+
+							return Ok(transfer_id);
+						}
+					}
+				}
+			}
+		}
+
+		// ---------- Slow path: 需要走网络 ----------
 		let Some(net_tx) = &self.inner.net else {
 			anyhow::bail!("network not initialized");
 		};
+
 		let (tx, rx) = tokio::sync::oneshot::channel();
+		net_tx
+			.blocking_send(crate::net::NetCmd::EnsureContentCached {
+				item_id: item_id.to_string(),
+				file_id: file_id.map(|s| s.to_string()),
+				force: false,
+				reply: tx,
+			})
+			.map_err(|_| anyhow::anyhow!("NetManager closed"))?;
 
-		net_tx.blocking_send(crate::net::NetCmd::EnsureContentCached {
-			item_id: item_id.to_string(),
-			file_id: file_id.map(|s| s.to_string()),
-			force: false,
-			reply: tx,
-		}).map_err(|_| anyhow::anyhow!("NetManager closed"))?;
+		match futures::executor::block_on(rx) {
+			Ok(res) => res, // Ok(transfer_id) 或 Err(...)
+			Err(_) => anyhow::bail!("Failed to get transfer_id"),
+		}
+	}
 
-        // 等待 NetManager 分配任务并返回 transfer_id
-        match futures::executor::block_on(rx) {
-            Ok(res) => res,
-            Err(_) => anyhow::bail!("Failed to get transfer_id"),
-        }
-    }
 
     /// M3: 取消传输
     pub fn cancel_transfer(&self, transfer_id: &str) {

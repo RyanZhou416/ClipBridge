@@ -1,15 +1,20 @@
-using CommunityToolkit.Mvvm.ComponentModel;
-using CommunityToolkit.Mvvm.Input;
+using System.Diagnostics;
 using ClipBridgeShell_CS.Collections;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
 using ClipBridgeShell_CS.Core.Models.Events;
+using ClipBridgeShell_CS.Services;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 
 namespace ClipBridgeShell_CS.ViewModels;
 
 public partial class HistoryViewModel : ObservableRecipient
 {
     private readonly ICoreHostService _coreService;
+    private readonly ClipboardApplyService _clipboardApply;
+
+    public IAsyncRelayCommand<ItemMetaPayload> CopyCommand { get; }
 
     // 这是我们的“无限滚动”数据源，UI 的 ListView 将绑定到它
     public HistoryIncrementalCollection Source
@@ -25,10 +30,11 @@ public partial class HistoryViewModel : ObservableRecipient
     [ObservableProperty]
     private string? _selectedKind = null;
 
-    public HistoryViewModel(ICoreHostService coreService)
+    public HistoryViewModel(ICoreHostService coreService, ClipboardApplyService clipboardApply)
     {
         _coreService = coreService;
-
+        _clipboardApply = clipboardApply;
+        CopyCommand = new AsyncRelayCommand<ItemMetaPayload>(CopyAsync);
         // 初始化增量集合
         Source = new HistoryIncrementalCollection(_coreService);
 
@@ -73,4 +79,13 @@ public partial class HistoryViewModel : ObservableRecipient
     // TODO: 后续步骤将在此处添加“ItemClick”或“Copy”命令
     // [RelayCommand]
     // public async Task CopyItemAsync(ItemMetaPayload item) { ... }
+
+    private async Task CopyAsync(ItemMetaPayload? meta)
+    {
+        Debug.WriteLine($"[History.Copy] invoked item_id={meta?.ItemId}");
+        System.Diagnostics.Debug.WriteLine($"[History.Copy] invoked. meta={(meta == null ? "null" : $"{meta.ItemId} kind={meta.Kind} mime={meta.Content?.Mime} bytes={meta.Content?.TotalBytes}")}");
+        if (meta == null)
+            return;
+        await _clipboardApply.ApplyMetaToSystemClipboardAsync(meta);
+    }
 }

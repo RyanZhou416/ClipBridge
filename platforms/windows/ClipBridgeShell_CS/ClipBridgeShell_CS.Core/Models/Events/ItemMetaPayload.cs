@@ -39,6 +39,6 @@ public class ItemMetaPayload
     public string Sha256 => Content?.Sha256 ?? string.Empty;
 
     [JsonIgnore]
-    public string TotalBytes => Content?.Sha256 ?? string.Empty;
+    public string TotalBytes => (Content?.TotalBytes ?? 0).ToString();
 }
 

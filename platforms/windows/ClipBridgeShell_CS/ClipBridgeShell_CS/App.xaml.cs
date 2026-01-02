@@ -1,4 +1,4 @@
-﻿//platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/App.xaml.cs
+//platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/App.xaml.cs
 
 using System.Diagnostics;
 using System.Globalization;
@@ -98,12 +98,14 @@ public partial class App : Application
             services.AddSingleton<Stores.HistoryStore>();
             services.AddSingleton<Stores.PeerStore>();
             services.AddSingleton<Stores.TransferStore>();
+            services.AddSingleton<ContentFetchAwaiter>();
             services.AddSingleton<EventPumpService>();
 
             //CB Core Host Service
             services.AddSingleton<CoreHostService>();
             services.AddSingleton<ICoreHostService, CoreHostService>();
             services.AddSingleton<IClipboardService, ClipboardService>();
+            services.AddSingleton<ClipboardApplyService>();
 
             // Views and ViewModels
             services.AddTransient<SettingsViewModel>();

@@ -132,7 +132,6 @@ pub enum CtrlMsg {
     /// 内容传输结束 (A -> B)
     ContentEnd {
         req_id: String,
-        sha256: String, // 用于最终校验
     },
     /// 取消传输 (双向)
     ContentCancel {

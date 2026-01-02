@@ -435,4 +435,41 @@ public sealed class CoreHostService : ICoreHostService
             }
         });
     }
+
+    public async Task<string> EnsureContentCachedAsync(string itemId, string? fileId = null)
+    {
+        System.Diagnostics.Debug.WriteLine($"[CoreHost] EnsureContentCachedAsync enter item_id={itemId} file_id={fileId ?? "<null>"} state={State}");
+
+        return await Task.Run(() =>
+        {
+            var req = new
+            {
+                item_id = itemId,
+                file_id = fileId,
+                part = "content"
+            };
+            var json = JsonSerializer.Serialize(req, _jsonOpts);
+
+            System.Diagnostics.Debug.WriteLine($"[CoreHost] cb_ensure_content_cached req={json}");
+
+            var resPtr = CoreInterop.cb_ensure_content_cached(_coreHandle, json);
+            var resJson = CoreInterop.PtrToStringAndFree(resPtr);
+
+            System.Diagnostics.Debug.WriteLine($"[CoreHost] cb_ensure_content_cached resp={resJson}");
+
+            using var doc = JsonDocument.Parse(resJson);
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
+                throw new Exception($"ensure_content_cached failed: {resJson}");
+
+            var tid = root.GetProperty("data").GetProperty("transfer_id").GetString();
+            if (string.IsNullOrWhiteSpace(tid))
+                throw new Exception($"ensure_content_cached missing transfer_id: {resJson}");
+
+            return tid!;
+        });
+    }
+
+
 }
