@@ -6,9 +6,107 @@
 - **定位**：跨平台剪贴板同步工具，先 **局域网 (LAN)**，后期支持 **跨外网 (WAN)**。
 - **核心卖点**：**Lazy Fetch**——复制时只广播**元数据**；正文按需拉取并落入本机缓存（CAS）。外壳可在收到元数据后对“小文本”主动发起 `ensure_content_cached` 作为体验优化（v1 默认开启，触发点仍由外壳控制）。
 - **目标平台**：Windows（先做外壳 MVP）→ Android（外壳）→ v1 核心（剪贴板历史与同步）→ macOS / Linux（外壳）。
-- **编译指令**：
-  - WinUI / C# shell 调用 Rust DLL（只构建名为 core-ffi-windows 的 crate）：`cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc`
-  - 全量测试（构建整个 workspace 所有成员）：`cargo build --release --target x86_64-pc-windows-msvc`
+
+## 0.1 Core FFI 构建命令规范
+本节记录 ClipBridge Core 在 **Windows** 与 **Android** 平台上的标准导出（FFI）构建方式，用于外壳（Shell）与核心（Core）之间的 ABI 通信。
+
+### 0.1.1 Windows 平台（Windows Shell 使用）
+
+#### 0.1.1.1 前置条件
+
+* 已安装 Rust（MSVC toolchain）
+* 在 Windows 环境下构建（PowerShell / CMD 均可）
+* 使用仓库内的 `platforms/windows/core-ffi`
+
+#### 0.1.1.2 构建命令（Release）
+
+
+`cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc`
+
+
+#### 0.1.1.3 产物位置
+
+Release 构建完成后，DLL 位于：
+
+```
+target\release\core_ffi_windows.dll
+```
+
+（Rust 会将 crate 名 `core-ffi-windows` 转换为 `core_ffi_windows.dll`）
+
+#### 0.1.1.4 说明
+
+* 该 DLL 导出 **C ABI**（`cb_init / cb_ingest_local_copy / cb_ensure_content_cached / cb_shutdown / cb_free_string` 等）
+* Windows Shell 通过 `clipbridge_core.h` + P/Invoke / native binding 调用
+* 所有 API 使用 **JSON 字符串作为输入/输出**，事件通过回调函数返回 JSON
+
+---
+
+### 0.1.2 Android 平台
+
+#### 0.1.2.1 前置条件
+
+* 已安装 Rust
+* 已安装 Android NDK
+* 已配置环境变量（直接运行）：`.\scripts\setup-ndk.ps1`
+
+
+`cargo install cargo-ndk`
+
+* 已添加 Android Rust targets：
+
+`rustup target add aarch64-linux-android x86_64-linux-android`
+
+---
+
+#### 0.1.2.2 构建 arm64
+
+在**仓库根目录**执行：
+
+```
+cargo ndk -t arm64-v8a build -p core-ffi-android --release
+```
+
+#### 0.1.2.3 构建 x86_64
+
+```
+cargo ndk -t x86_64 build -p core-ffi-android --release
+```
+
+---
+
+#### 0.1.2.4 产物位置
+
+构建完成后，会生成如下文件：
+
+arm64:
+`
+target/aarch64-linux-android/release/libcore_ffi_android.so
+`
+
+x86_64:
+``
+
+说明：
+
+* crate 名 `core-ffi-android` → `libcore_ffi_android.so`
+* Android Java 侧通过：
+
+```java
+System.loadLibrary("core_ffi_android");
+```
+
+加载该库（不带 `lib` 前缀和 `.so` 后缀）
+
+---
+
+#### 0.1.2.5 说明
+
+* Android 版 core-ffi 与 Windows 版 **使用同一套 C ABI 与 JSON 协议**
+* Android Shell 通过 **JNI** 调用这些 C ABI 函数
+* Core 事件通过 `on_event(const char* json, void* user_data)` 回调进入 Java 层
+* Java 层需立即拷贝 JSON 字符串（回调期间指针有效）
+
 ------
 
 # 1) 功能与阶段目标

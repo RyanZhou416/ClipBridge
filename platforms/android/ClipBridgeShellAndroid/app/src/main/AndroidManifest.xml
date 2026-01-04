@@ -1,7 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
+	<!-- 网络（QUIC/mDNS 等） -->
+	<uses-permission android:name="android.permission.INTERNET" />
+	<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+	<!-- 前台服务 -->
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE"
+		tools:ignore="ForegroundServicesPolicy" />
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+	<!-- Android 13+ 通知权限（不加会导致前台通知可能不弹/受限） -->
+	<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -11,6 +21,11 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.ClipBridgeShellAndroid">
+		<service
+			android:name=".service.ClipBridgeForegroundService"
+			android:exported="false"
+			android:foregroundServiceType="dataSync"
+			tools:ignore="ForegroundServicePermission" />
         <activity
             android:name=".MainActivity"
             android:exported="true">

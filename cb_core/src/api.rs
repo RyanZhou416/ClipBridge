@@ -351,7 +351,7 @@ impl Core {
 			if meta.source_device_id == *my_device_id {
 				// v1：只处理 file_id == None 的简单类型（text/image）
 				if file_id.is_none() {
-					if let content = meta.content {
+					let content = meta.content;
 						// cas_has：判断 sha256 对应 blob 是否存在
 						// 新逻辑：命中本机缓存也返回一个可等待的 transfer_id，并同步发 CONTENT_CACHED
 						if self.inner.cas.blob_exists(&content.sha256) {
@@ -417,7 +417,7 @@ impl Core {
 
 							return Ok(transfer_id);
 						}
-					}
+
 				}
 			}
 		}
