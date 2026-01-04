@@ -89,7 +89,30 @@
 										  l:Uids.Uid="Settings_IsClipboardCaptureEnabled_ToggleSwitch"/>
 						</ctk:SettingsCard>
 					</StackPanel>
-					
+
+					<!-- 数据库 -->
+					<StackPanel Spacing="{StaticResource SettingsItemSpacing}">
+						<TextBlock l:Uids.Uid="Settings_Database" Style="{StaticResource GroupHeaderTextStyle}"/>
+						<!-- 删除云数据库（元数据库 core.db） -->
+						<ctk:SettingsCard l:Uids.Uid="Settings_DeleteCloudDb_SettingsCard"
+								  HeaderIcon="{ui:FontIcon Glyph=&#xE74D;}"
+								  HorizontalAlignment="Stretch">
+							<Button Click="DeleteCloudDb_Click"
+							Width="180"
+							l:Uids.Uid="Settings_DeleteCloudDb_Button"/>
+						</ctk:SettingsCard>
+
+						<!-- 删除缓存库（CAS blobs/tmp） -->
+						<ctk:SettingsCard l:Uids.Uid="Settings_DeleteCache_SettingsCard"
+								  HeaderIcon="{ui:FontIcon Glyph=&#xE74D;}"
+								  HorizontalAlignment="Stretch">
+							<Button Click="DeleteCache_Click"
+							Width="180"
+							l:Uids.Uid="Settings_DeleteCache_Button"/>
+						</ctk:SettingsCard>
+					</StackPanel>
+
+					<!-- Debugging -->
 					<StackPanel Spacing="{StaticResource SettingsItemSpacing}">
                         <TextBlock l:Uids.Uid="Settings_Debugging" Style="{StaticResource GroupHeaderTextStyle}"/>
                         <!-- 用于显示应用文件夹路径，可删除 -->
@@ -105,9 +128,9 @@
                             <Button Click="ShowLocalFolder_Click" Width="180" l:Uids.Uid="Settings_ShowLocalFolder_Button"/>
                         </ctk:SettingsCard>
                     </StackPanel>
-                    
 
-                    <StackPanel Spacing="{StaticResource SettingsItemSpacing}">
+					
+					<StackPanel Spacing="{StaticResource SettingsItemSpacing}">
                         <TextBlock l:Uids.Uid="Settings_About" Style="{StaticResource GroupHeaderTextStyle}"/>
                         <TextBlock l:Uids.Uid="AppName"/>
                         <TextBlock l:Uids.Uid="Settings_AboutDescription"/>

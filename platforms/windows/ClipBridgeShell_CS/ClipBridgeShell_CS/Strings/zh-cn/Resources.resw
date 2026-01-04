@@ -248,4 +248,61 @@
   <data name="Shell_History.Content" xml:space="preserve">
     <value>历史</value>
   </data>
+  <data name="Settings_Database" xml:space="preserve">
+    <value>数据库</value>
+  </data>
+  <data name="Settings_DeleteCloudDb_SettingsCard.Header" xml:space="preserve">
+    <value>删除元数据库</value>
+  </data>
+  <data name="Settings_DeleteCloudDb_SettingsCard.Description" xml:space="preserve">
+    <value>删除本地元数据数据库（core.db）。这将移除此设备上的历史记录和项目元数据。</value>
+  </data>
+  <data name="Settings_DeleteCloudDb_Button.Content" xml:space="preserve">
+    <value>删除数据库</value>
+  </data>
+  <data name="Settings_DeleteCache_SettingsCard.Header" xml:space="preserve">
+    <value>删除缓存</value>
+  </data>
+  <data name="Settings_DeleteCache_SettingsCard.Description" xml:space="preserve">
+    <value>删除缓存内容块和临时文件（CAS）。</value>
+  </data>
+  <data name="Settings_DeleteCache_Button.Content" xml:space="preserve">
+    <value>删除缓存</value>
+  </data>
+  <data name="Settings_DeleteCloudDbConfirm_Title" xml:space="preserve">
+    <value>删除元数据库？</value>
+  </data>
+  <data name="Settings_DeleteCloudDbConfirm_Content" xml:space="preserve">
+    <value>此操作无法撤销。应用程序将重启核心。</value>
+  </data>
+  <data name="Settings_DeleteCloudDbConfirm_Primary" xml:space="preserve">
+    <value>删除</value>
+  </data>
+  <data name="Settings_DeleteCloudDbConfirm_Secondary" xml:space="preserve">
+    <value>取消</value>
+  </data>
+  <data name="Settings_DeleteCloudDbDone" xml:space="preserve">
+    <value>数据库已删除。</value>
+  </data>
+  <data name="Settings_DeleteCloudDbFailed" xml:space="preserve">
+    <value>删除数据库失败。</value>
+  </data>
+  <data name="Settings_DeleteCacheConfirm_Title" xml:space="preserve">
+    <value>删除缓存？</value>
+  </data>
+  <data name="Settings_DeleteCacheConfirm_Content" xml:space="preserve">
+    <value>此操作无法撤销。应用程序将重启核心。</value>
+  </data>
+  <data name="Settings_DeleteCacheConfirm_Primary" xml:space="preserve">
+    <value>删除</value>
+  </data>
+  <data name="Settings_DeleteCacheConfirm_Secondary" xml:space="preserve">
+    <value>取消</value>
+  </data>
+  <data name="Settings_DeleteCacheDone" xml:space="preserve">
+    <value>缓存已删除。</value>
+  </data>
+  <data name="Settings_DeleteCacheFailed" xml:space="preserve">
+    <value>删除缓存失败。</value>
+  </data>
 </root>

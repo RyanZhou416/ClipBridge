@@ -19,8 +19,8 @@ public class CoreHostSmokeTests
         var historyStore = new HistoryStore();
         var peerStore = new PeerStore();
         var transferStore = new TransferStore();
-
-        var eventPump = new EventPumpService(historyStore, peerStore, transferStore);
+        var awaiter = new ContentFetchAwaiter();
+        var eventPump = new EventPumpService(historyStore, peerStore, transferStore, awaiter);
 
         var fileService = new FileService();
 

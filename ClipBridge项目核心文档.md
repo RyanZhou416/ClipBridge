@@ -744,7 +744,10 @@ v1 必备事件类型（覆盖 M1~M3）：
 * `kind=image`：
   * 返回 `local_path`（指向 Core 管理目录中的图片文件）。
   * Shell 职责：读取该路径图片数据，转换为平台剪贴板支持的格式（如 Windows `CF_DIB` / `CF_BITMAP`）写入。
-
+  * 约束说明：
+    * image 类型对应的 local_path 必须指向 Core 管理的 CAS（或等价受管存储）中的文件；
+    * Core 不得将外部路径、临时下载路径或源应用路径直接暴露给 Shell；
+    * image 正文与 file 正文在存储一致性上遵循相同的 CAS 规则。
 
 * `kind=file`：
   * 返回 `local_path`（落盘结果）。
@@ -1479,23 +1482,40 @@ Network 返回（示例）：
 
 ### 4.8.9 Shell 侧最小使用流程（按这个写就能跑通）
 
+> 本节是“可落地的实现级流程”。关键口径：
+> - Core 负责：入库、去重、CAS、网络会话与传输、以及“缓存是否已就绪”的权威判断
+> - Shell 负责：UI/交互触发点、系统剪贴板写入、以及在合适时机调用 Core 拉取正文
+
 1. 调 `cb_init`（传 config + on_event 回调）
+- 注意：回调可能不在 UI 线程；Shell 必须自行 marshal 到 UI 线程（见 4.5.2/并发模型）。
+
 2. on_event 收到：
-* `PEER_ONLINE/OFFLINE`：更新 UI
-* `ITEM_META_ADDED`：插入历史列表
-3. 本机复制变化：
-* 组 `ClipboardSnapshot` JSON（4.6.2），根据外壳的“软限制”判断是否默认同步/本地保存/强制同步：
-  - `share_mode=default|local_only|force`
-* 调 `cb_ingest_local_copy`
+- `PEER_ONLINE/OFFLINE`：更新 UI
+- `ITEM_META_ADDED`：把 meta 插入历史列表/主页 feed（本机与远端都统一处理）
 
-4. 对端接收与自动预取（仅 text）：
-* 对端收到 `ITEM_META_ADDED` 后：
-  * 若 `kind=text` 且 `size_bytes <= text_auto_prefetch_bytes`（默认 256KB），Core 自动触发一次 `ensure_content_cached` 完成预取
-  * 否则保持 Lazy Fetch（用户粘贴或显式拉取时才传输正文）
+3. 本机复制变化（系统剪贴板 → Core）：
+- Shell 组 `ClipboardSnapshot` JSON（4.6.2）
+- 根据 UI/设置决定 `share_mode=default|local_only|force`
+- 调 `cb_ingest_local_copy`
 
-5. 用户点击/粘贴历史条目（Lazy Fetch）：
-* 对于图片/文件：组 req → 调 `cb_ensure_content_cached`
-* 等 `CONTENT_CACHED` 事件拿 `LocalContentRef`（4.6.4）→ 写系统剪贴板
+4. 远端元数据到达（对端 `ITEM_META_ADDED`）时的 Shell 行为：
+- **只更新 UI，不自动写系统剪贴板**
+- 如需“收件箱式体验”（可选能力），由 Shell 决定是否对“文本且较小”的条目立即发起拉取：
+  - 条件建议：`kind=text` 且 `size_bytes <= text_auto_prefetch_bytes`
+  - 行为：Shell 调 `cb_ensure_content_cached(item_id)`，等待 `CONTENT_CACHED`
+- 若不启用该体验：保持纯 Lazy Fetch，直到用户选中/粘贴时才拉取
+
+5. 用户在 UI 上“选中某条元数据并准备粘贴/复制到系统剪贴板”（核心触发点）：
+- 触发来源：主页条目点击、历史页条目点击、QuickPaste 小窗条目点击、或快捷键“粘贴上一条/选中条目”等
+- Shell 调用 `cb_ensure_content_cached(item_id, ...) -> transfer_id`
+- Shell 等待事件：
+  - 成功：`CONTENT_CACHED { transfer_id, local_ref: LocalContentRef }`
+  - 失败：`TRANSFER_FAILED { transfer_id, error }`（或等价错误事件）
+- Shell 拿到 `LocalContentRef` 后写入系统剪贴板（规则见 4.6.4 与 §5.4）
+
+6. 写入系统剪贴板成功后（可选）：
+- Shell 可将该 item 标为“最近使用/置顶候选”
+- v1 不要求自动模拟 Ctrl+V（未来能力可在 5.4/5.5 扩展）
 
 
 ---
@@ -1674,7 +1694,7 @@ Core 只需要 2 个根目录：`data_dir`（持久）与 `cache_dir`（可清�
 
 ### 4.9.6 Lazy Fetch：命中逻辑（读路径）
 
-当用户在本机触发“粘贴/展开详情/保存文件”时：
+当 Shell 针对某条 ItemMeta 显式请求正文内容时：
 1. 查 items 得到 `sha256_hex + mime + total_bytes`
 2. 查 content_cache：
 - `present=1` 且 CAS 文件存在：直接读本地 bytes（命中）
@@ -1682,6 +1702,14 @@ Core 只需要 2 个根目录：`data_dir`（持久）与 `cache_dir`（可清�
 3. 回源成功后：
 - 写入 CAS（tmp -> rename）
 - `UPDATE content_cache SET present=1, last_access_ts_ms=now`
+-
+#### Lazy Fetch 的结果交付约束
+
+Lazy Fetch 的执行结果，Core 仅通过事件形式向 Shell 交付 `LocalContentRef`。
+
+* Core 不通过同步返回值直接暴露正文数据；
+* Shell 必须等待对应的 `CONTENT_CACHED`（或等价）事件；
+* Shell 后续所有剪贴板写入、文件导出行为，均以 `LocalContentRef` 为输入。
 
 ---
 
@@ -2006,7 +2034,7 @@ GcReport 建议包含：
 - A 发布 file_list meta（包含 files[]）
 
 **输入**
-- B 对其中一个 file_id 发起 `ensure_content_cached(kind=file, file_id=...)`
+- B 对其中一个 file_id 发起 `ensure_file_cached(item_id, file_id)`
 
 **期望**
 - B 接收 FILE_BEGIN + raw bytes，落盘到受控目录

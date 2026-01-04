@@ -248,4 +248,61 @@
   <data name="Shell_History.Content" xml:space="preserve">
     <value>History</value>
   </data>
+  <data name="Settings_Database" xml:space="preserve">
+    <value>Database</value>
+  </data>
+  <data name="Settings_DeleteCloudDb_SettingsCard.Header" xml:space="preserve">
+    <value>Delete cloud database</value>
+  </data>
+  <data name="Settings_DeleteCloudDb_SettingsCard.Description" xml:space="preserve">
+    <value>Delete the local metadata database (core.db). This will remove history and item metadata on this device.</value>
+  </data>
+  <data name="Settings_DeleteCloudDb_Button.Content" xml:space="preserve">
+    <value>Delete database</value>
+  </data>
+  <data name="Settings_DeleteCache_SettingsCard.Header" xml:space="preserve">
+    <value>Delete cache</value>
+  </data>
+  <data name="Settings_DeleteCache_SettingsCard.Description" xml:space="preserve">
+    <value>Delete cached content blobs and temporary files (CAS).</value>
+  </data>
+  <data name="Settings_DeleteCache_Button.Content" xml:space="preserve">
+    <value>Delete cache</value>
+  </data>
+  <data name="Settings_DeleteCloudDbConfirm_Title" xml:space="preserve">
+    <value>Delete Meta database?</value>
+  </data>
+  <data name="Settings_DeleteCloudDbConfirm_Content" xml:space="preserve">
+    <value>This action cannot be undone. The app will restart the core.</value>
+  </data>
+  <data name="Settings_DeleteCloudDbConfirm_Primary" xml:space="preserve">
+    <value>Delete</value>
+  </data>
+  <data name="Settings_DeleteCloudDbConfirm_Secondary" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="Settings_DeleteCloudDbDone" xml:space="preserve">
+    <value>Database deleted.</value>
+  </data>
+  <data name="Settings_DeleteCloudDbFailed" xml:space="preserve">
+    <value>Failed to delete database.</value>
+  </data>
+  <data name="Settings_DeleteCacheConfirm_Title" xml:space="preserve">
+    <value>Delete cache?</value>
+  </data>
+  <data name="Settings_DeleteCacheConfirm_Content" xml:space="preserve">
+    <value>This action cannot be undone. The app will restart the core.</value>
+  </data>
+  <data name="Settings_DeleteCacheConfirm_Primary" xml:space="preserve">
+    <value>Delete</value>
+  </data>
+  <data name="Settings_DeleteCacheConfirm_Secondary" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="Settings_DeleteCacheDone" xml:space="preserve">
+    <value>Cache deleted.</value>
+  </data>
+  <data name="Settings_DeleteCacheFailed" xml:space="preserve">
+    <value>Failed to delete cache.</value>
+  </data>
 </root>
