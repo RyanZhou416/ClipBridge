@@ -63,15 +63,15 @@ target\release\core_ffi_windows.dll
 
 在**仓库根目录**执行：
 
-```
+`
 cargo ndk -t arm64-v8a build -p core-ffi-android --release
-```
+`
 
 #### 0.1.2.3 构建 x86_64
 
-```
+`
 cargo ndk -t x86_64 build -p core-ffi-android --release
-```
+`
 
 ---
 
@@ -107,6 +107,23 @@ System.loadLibrary("core_ffi_android");
 * Core 事件通过 `on_event(const char* json, void* user_data)` 回调进入 Java 层
 * Java 层需立即拷贝 JSON 字符串（回调期间指针有效）
 
+#### 0.1.2.6 Android Studio运行配置
+
+在Android Studio运行模拟器的时候需要添加ADB环境变量
+
+`
+$adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools"; $curr = [Environment]::GetEnvironmentVariable("Path", "User"); if ($curr -notlike "*$adb*") { [Environment]::SetEnvironmentVariable("Path", $curr + ";" + $adb, "User"); Write-Host "成功！ADB 已添加。" -ForegroundColor Green } else { Write-Host "无需添加：ADB 已存在。" -ForegroundColor Yellow }
+`
+
+然后重启IDE，通过ADB给权限
+
+`
+adb shell appops set com.ryan416.clipbridgeshellandroid READ_CLIPBOARD allow
+`
+
+`
+adb shell appops set com.ryan416.clipbridgeshellandroid SYSTEM_ALERT_WINDOW allow
+`
 ------
 
 # 1) 功能与阶段目标

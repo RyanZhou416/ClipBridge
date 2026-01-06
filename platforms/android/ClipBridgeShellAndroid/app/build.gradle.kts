@@ -4,11 +4,14 @@ plugins {
 }
 
 android {
+	ndkVersion = "26.3.11579264"
     namespace = "com.ryan416.clipbridgeshellandroid"
     compileSdk {
         version = release(36)
     }
-
+	buildFeatures {
+		aidl = true  // 确保这一行是 true
+	}
     defaultConfig {
         applicationId = "com.ryan416.clipbridgeshellandroid"
         minSdk = 26
@@ -32,6 +35,28 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+	defaultConfig {
+		// 你已有的 applicationId/minSdk/targetSdk/versionCode/versionName 保留
+
+		ndk {
+			abiFilters += setOf("arm64-v8a", "x86_64")
+		}
+
+		externalNativeBuild {
+			cmake {
+				// 可选：传一些 CMake 参数
+				// arguments += listOf("-DANDROID_STL=c++_shared")
+				// cppFlags += listOf("-std=c++17")
+			}
+		}
+	}
+
+	externalNativeBuild {
+		cmake {
+			path = file("src/main/cpp/CMakeLists.txt")
+			// version = "3.22.1" // 可选：如果你想锁定版本
+		}
+	}
 }
 
 dependencies {
@@ -39,9 +64,13 @@ dependencies {
     implementation(libs.material)
     implementation(libs.activity)
     implementation(libs.constraintlayout)
+	implementation(libs.jna)
     testImplementation(libs.junit)
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)
+	implementation(libs.api)
+	implementation(libs.provider)
+	implementation(libs.hiddenapibypass)
 }
 val repoRoot = layout.projectDirectory.dir("../../../../")
 

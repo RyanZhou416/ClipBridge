@@ -10,9 +10,12 @@
 		tools:ignore="ForegroundServicesPolicy" />
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
+	<!-- 无障碍服务 -->
+	<uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 	<!-- Android 13+ 通知权限（不加会导致前台通知可能不弹/受限） -->
 	<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
+		android:name=".App"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -22,10 +25,18 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ClipBridgeShellAndroid">
 		<service
-			android:name=".service.ClipBridgeForegroundService"
+			android:name=".service.ForegroundService"
 			android:exported="false"
 			android:foregroundServiceType="dataSync"
 			tools:ignore="ForegroundServicePermission" />
+
+		<provider
+			android:name="rikka.shizuku.ShizukuProvider"
+			android:authorities="${applicationId}.shizuku"
+			android:enabled="true"
+			android:exported="true"
+			android:multiprocess="false"
+			android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
         <activity
             android:name=".MainActivity"
             android:exported="true">

@@ -1,1 +1,3 @@
 /build
+/src/main/jniLibs/arm64-v8a/libcore_ffi_android.so
+/src/main/jniLibs/x86_64/libcore_ffi_android.so

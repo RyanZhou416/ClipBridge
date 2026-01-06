@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">ClipBridgeShellAndroid</string>
+	<string name="accessibility_service_label">ClipBridge Sync Helper</string>
+    <string name="accessibility_desc">Enables background clipboard synchronization for ClipBridge.</string>
 </resources>

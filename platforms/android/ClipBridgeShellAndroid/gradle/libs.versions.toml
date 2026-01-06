@@ -1,5 +1,8 @@
 [versions]
 agp = "8.13.2"
+api = "13.1.5"
+hiddenapibypass = "4.3"
+jna = "5.18.1"
 junit = "4.13.2"
 junitVersion = "1.1.5"
 espressoCore = "3.5.1"
@@ -9,6 +12,9 @@ activity = "1.8.0"
 constraintlayout = "2.1.4"
 
 [libraries]
+api = { module = "dev.rikka.shizuku:api", version.ref = "api" }
+hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version.ref = "hiddenapibypass" }
+jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
@@ -16,6 +22,7 @@ appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "a
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 activity = { group = "androidx.activity", name = "activity", version.ref = "activity" }
 constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
+provider = { module = "dev.rikka.shizuku:provider", version.ref = "api" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
