@@ -2,6 +2,7 @@ using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
 using Microsoft.UI.Xaml.Controls;   
 using Microsoft.UI.Xaml;
+using Microsoft.Extensions.Logging;
 
 namespace ClipBridgeShell_CS.Services;
 
@@ -11,6 +12,7 @@ public class ClipboardWatcher
     private readonly ICoreHostService _coreHostService;
     private readonly IngestPolicy _policy;
     private readonly ILocalSettingsService _settingsService;
+    private readonly ILogger<ClipboardWatcher>? _logger;
 
     private bool _isListening = false;
     private bool _isInitialized = false;
@@ -24,11 +26,13 @@ public class ClipboardWatcher
     public ClipboardWatcher(
         IClipboardService clipboardService,
         ICoreHostService coreHostService,
-        ILocalSettingsService settingsService)
+        ILocalSettingsService settingsService,
+        ILoggerFactory? loggerFactory = null)
     {
         _clipboardService = clipboardService;
         _coreHostService = coreHostService;
         _settingsService = settingsService;
+        _logger = loggerFactory?.CreateLogger<ClipboardWatcher>();
 
         // 策略类是纯逻辑，可以直接在这里new，也可以注入。
         // 为了简单，如果策略不依赖其他复杂服务，直接new。
@@ -49,7 +53,7 @@ public class ClipboardWatcher
 
         _clipboardService.ContentChanged += OnClipboardContentChanged;
         _isListening = true;
-        System.Diagnostics.Debug.WriteLine("[Watcher] Clipboard Monitor Started.");
+        _logger?.LogInformation("Clipboard monitoring started");
     }
 
     private void Stop()
@@ -59,7 +63,7 @@ public class ClipboardWatcher
         _clipboardService.ContentChanged -= OnClipboardContentChanged;
         _debounceCts?.Cancel(); // 取消正在进行的防抖任务
         _isListening = false;
-        System.Diagnostics.Debug.WriteLine("[Watcher] Clipboard Monitor Stopped.");
+        _logger?.LogInformation("Clipboard monitoring stopped");
     }
 
     public void Shutdown()
@@ -111,6 +115,8 @@ public class ClipboardWatcher
 
         try
         {
+            _logger?.LogInformation("Clipboard content changed, processing...");
+
             // A. 获取快照
             var snapshot = await _clipboardService.GetSnapshotAsync();
             if (snapshot == null)
@@ -128,15 +134,15 @@ public class ClipboardWatcher
                 // D. 更新策略状态 (用于连续去重)
                 _policy.OnIngestSuccess(snapshot);
 
-                System.Diagnostics.Debug.WriteLine($"[Watcher] Ingested: {snapshot.MimeType}, FP={snapshot.Fingerprint}");
+                _logger?.LogInformation("Clipboard ingest allowed, type: {Type}", snapshot.MimeType);
             }
             else
             {
-                System.Diagnostics.Debug.WriteLine($"[Watcher] Denied: {decision.Reason}");
+                _logger?.LogWarning("Clipboard ingest denied by policy: {Reason}", decision.Reason);
             }
         } catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[Watcher] Error: {ex.Message}");
+            _logger?.LogError(ex, "Failed to process clipboard change");
         }
     }
 

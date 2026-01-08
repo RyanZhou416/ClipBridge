@@ -6,6 +6,18 @@ using System.Text.Json.Serialization;
 
 namespace ClipBridgeShell_CS.Interop;
 
+/// <summary>
+/// 来源统计（component 和 category 的列表及计数）
+/// </summary>
+public class SourceStats
+{
+    [JsonPropertyName("components")]
+    public Dictionary<string, long> Components { get; set; } = new();
+    
+    [JsonPropertyName("categories")]
+    public Dictionary<string, long> Categories { get; set; } = new();
+}
+
 internal static class CoreInterop
 {
     // 注意：Windows 下实际文件可能是 core_ffi_windows.dll
@@ -132,10 +144,13 @@ internal static class CoreInterop
     internal static extern int cb_logs_write(
         IntPtr h,
         int level,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string component,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string category,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string message,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string message_en,
+        IntPtr message_zh_cn_or_null,
         IntPtr exception_or_null,
         IntPtr props_json_or_null,
+        long ts_utc,
         out long out_id);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
@@ -143,6 +158,15 @@ internal static class CoreInterop
         IntPtr h,
         long after_id, int level_min,
         IntPtr like_or_null, int limit,
+        IntPtr lang_or_null,
+        out IntPtr out_json_array);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int cb_logs_query_before_id(
+        IntPtr h,
+        long before_id, int level_min,
+        IntPtr like_or_null, int limit,
+        IntPtr lang_or_null,
         out IntPtr out_json_array);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
@@ -150,6 +174,7 @@ internal static class CoreInterop
         IntPtr h,
         long start_ms, long end_ms, int level_min,
         IntPtr like_or_null, int limit, int offset,
+        IntPtr lang_or_null,
         out IntPtr out_json_array);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
@@ -158,7 +183,16 @@ internal static class CoreInterop
         long cutoff_ms, out long out_deleted);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int cb_logs_delete_by_ids(
+        IntPtr h,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string ids_json,
+        out long out_deleted);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int cb_logs_stats(IntPtr h, out IntPtr out_json);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int cb_logs_source_stats(IntPtr h, out IntPtr out_json);
 
     // 数据库清空接口
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
@@ -169,6 +203,9 @@ internal static class CoreInterop
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr cb_clear_stats_db(IntPtr h);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr cb_clear_cache(IntPtr h);
 
     // 释放非 string 类型的指针 (如 logs 返回的 json 数组可能需要通用 free)
     // 如果头文件中 cb_free_string 是通用的 free，则使用 cb_free_string 即可。
@@ -210,22 +247,25 @@ internal static class CoreInterop
     // ==========================================================
 
     /// <summary>
-    /// 写入日志
+    /// 写入日志（多语言版本）
     /// </summary>
-    public static long LogsWrite(IntPtr handle, int level, string category, string message, string? exception = null, string? propsJson = null)
+    /// <param name="tsUtc">时间戳（Unix毫秒）。如果为0或负数，使用当前时间；否则使用提供的时间戳（用于暂存日志回写）</param>
+    public static long LogsWrite(IntPtr handle, int level, string component, string category, string messageEn, string? messageZhCn = null, string? exception = null, string? propsJson = null, long tsUtc = 0)
     {
         // 手动处理可空字符串指针
+        IntPtr zhCnPtr = messageZhCn != null ? Marshal.StringToCoTaskMemUTF8(messageZhCn) : IntPtr.Zero;
         IntPtr exPtr = exception != null ? Marshal.StringToCoTaskMemUTF8(exception) : IntPtr.Zero;
         IntPtr propsPtr = propsJson != null ? Marshal.StringToCoTaskMemUTF8(propsJson) : IntPtr.Zero;
 
         try
         {
-            var rc = cb_logs_write(handle, level, category, message, exPtr, propsPtr, out long id);
+            var rc = cb_logs_write(handle, level, component, category, messageEn, zhCnPtr, exPtr, propsPtr, tsUtc, out long id);
             if (rc != 0) throw new Exception($"cb_logs_write failed: {rc}");
             return id;
         }
         finally
         {
+            if (zhCnPtr != IntPtr.Zero) Marshal.FreeCoTaskMem(zhCnPtr);
             if (exPtr != IntPtr.Zero) Marshal.FreeCoTaskMem(exPtr);
             if (propsPtr != IntPtr.Zero) Marshal.FreeCoTaskMem(propsPtr);
         }
@@ -234,13 +274,14 @@ internal static class CoreInterop
     /// <summary>
     /// 查询增量日志 (Tail)
     /// </summary>
-    public static List<ClipBridgeShell_CS.Models.LogRow> LogsQueryAfterId(IntPtr handle, long afterId, int levelMin, string? like, int limit)
+    public static List<ClipBridgeShell_CS.Models.LogRow> LogsQueryAfterId(IntPtr handle, long afterId, int levelMin, string? like, int limit, string? lang = null)
     {
         IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
+        IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
         IntPtr jsonPtr = IntPtr.Zero;
         try
         {
-            var rc = cb_logs_query_after_id(handle, afterId, levelMin, likePtr, limit, out jsonPtr);
+            var rc = cb_logs_query_after_id(handle, afterId, levelMin, likePtr, limit, langPtr, out jsonPtr);
             if (rc != 0) throw new Exception($"cb_logs_query_after_id failed: {rc}");
 
             // 使用我们新加的 Helper 读取并释放
@@ -270,19 +311,49 @@ internal static class CoreInterop
         finally
         {
             if (likePtr != IntPtr.Zero) Marshal.FreeCoTaskMem(likePtr);
+            if (langPtr != IntPtr.Zero) Marshal.FreeCoTaskMem(langPtr);
+        }
+    }
+
+    /// <summary>
+    /// 查询 before_id 之前的日志（用于向上滚动加载更早的日志）
+    /// </summary>
+    public static List<ClipBridgeShell_CS.Models.LogRow> LogsQueryBeforeId(IntPtr handle, long beforeId, int levelMin, string? like, int limit, string? lang = null)
+    {
+        IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
+        IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
+        IntPtr jsonPtr = IntPtr.Zero;
+        try
+        {
+            var rc = cb_logs_query_before_id(handle, beforeId, levelMin, likePtr, limit, langPtr, out jsonPtr);
+            if (rc != 0) throw new Exception($"cb_logs_query_before_id failed: {rc}");
+
+            var json = PtrToUtf8AndFree(jsonPtr);
+            var envelope = JsonSerializer.Deserialize<JsonElement>(json, _jsonOpts);
+            if (envelope.TryGetProperty("data", out var data))
+            {
+                return JsonSerializer.Deserialize<List<ClipBridgeShell_CS.Models.LogRow>>(data.GetRawText(), _jsonOpts) ?? new();
+            }
+            return new();
+        }
+        finally
+        {
+            if (likePtr != IntPtr.Zero) Marshal.FreeCoTaskMem(likePtr);
+            if (langPtr != IntPtr.Zero) Marshal.FreeCoTaskMem(langPtr);
         }
     }
 
     /// <summary>
     /// 查询历史日志 (Page)
     /// </summary>
-    public static List<ClipBridgeShell_CS.Models.LogRow> LogsQueryRange(IntPtr handle, long startMs, long endMs, int levelMin, string? like, int limit, int offset)
+    public static List<ClipBridgeShell_CS.Models.LogRow> LogsQueryRange(IntPtr handle, long startMs, long endMs, int levelMin, string? like, int limit, int offset, string? lang = null)
     {
         IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
+        IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
         IntPtr jsonPtr = IntPtr.Zero;
         try
         {
-            var rc = cb_logs_query_range(handle, startMs, endMs, levelMin, likePtr, limit, offset, out jsonPtr);
+            var rc = cb_logs_query_range(handle, startMs, endMs, levelMin, likePtr, limit, offset, langPtr, out jsonPtr);
             if (rc != 0) throw new Exception($"cb_logs_query_range failed: {rc}");
 
             var json = PtrToUtf8AndFree(jsonPtr);
@@ -296,6 +367,7 @@ internal static class CoreInterop
         finally
         {
             if (likePtr != IntPtr.Zero) Marshal.FreeCoTaskMem(likePtr);
+            if (langPtr != IntPtr.Zero) Marshal.FreeCoTaskMem(langPtr);
         }
     }
 
@@ -306,6 +378,17 @@ internal static class CoreInterop
     {
         var rc = cb_logs_delete_before(handle, cutoffMs, out long deleted);
         if (rc != 0) throw new Exception($"cb_logs_delete_before failed: {rc}");
+        return deleted;
+    }
+
+    /// <summary>
+    /// 按 ID 列表删除日志
+    /// </summary>
+    public static long LogsDeleteByIds(IntPtr handle, long[] ids)
+    {
+        var idsJson = JsonSerializer.Serialize(ids, _jsonOpts);
+        var rc = cb_logs_delete_by_ids(handle, idsJson, out long deleted);
+        if (rc != 0) throw new Exception($"cb_logs_delete_by_ids failed: {rc}");
         return deleted;
     }
 
@@ -325,6 +408,24 @@ internal static class CoreInterop
             return JsonSerializer.Deserialize<ClipBridgeShell_CS.Models.LogStats>(data.GetRawText(), _jsonOpts) ?? new ClipBridgeShell_CS.Models.LogStats();
         }
         return new ClipBridgeShell_CS.Models.LogStats();
+    }
+
+    /// <summary>
+    /// 获取来源统计（component 和 category 的列表及计数）
+    /// </summary>
+    public static SourceStats LogsSourceStats(IntPtr handle)
+    {
+        IntPtr jsonPtr = IntPtr.Zero;
+        var rc = cb_logs_source_stats(handle, out jsonPtr);
+        if (rc != 0) throw new Exception($"cb_logs_source_stats failed: {rc}");
+
+        var json = PtrToUtf8AndFree(jsonPtr);
+        var envelope = JsonSerializer.Deserialize<JsonElement>(json, _jsonOpts);
+        if (envelope.TryGetProperty("data", out var data))
+        {
+            return JsonSerializer.Deserialize<SourceStats>(data.GetRawText(), _jsonOpts) ?? new SourceStats();
+        }
+        return new SourceStats();
     }
 
     /// <summary>
@@ -366,6 +467,20 @@ internal static class CoreInterop
         if (!envelope.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
         {
             throw new Exception("Failed to clear stats database");
+        }
+    }
+
+    /// <summary>
+    /// 清空缓存（CAS blobs、临时文件等）
+    /// </summary>
+    public static void ClearCache(IntPtr handle)
+    {
+        var resultPtr = cb_clear_cache(handle);
+        var result = PtrToStringAndFree(resultPtr);
+        var envelope = JsonSerializer.Deserialize<JsonElement>(result, _jsonOpts);
+        if (!envelope.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
+        {
+            throw new Exception("Failed to clear cache");
         }
     }
 

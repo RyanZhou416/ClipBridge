@@ -12,6 +12,7 @@ use crate::transport::Transport;
 use crate::util::now_ms;
 use crate::api::{PeerConnectionState, PeerStatus};
 use crate::store::Store;
+use crate::logs::LogStore;
 use std::sync::Mutex;
 
 /// 网络层管理器
@@ -20,6 +21,7 @@ pub struct NetManager {
     transport: Arc<Transport>,
     discovery: DiscoveryService,
     store: Arc<Mutex<Store>>,
+    log_store: Arc<Mutex<LogStore>>,
     sessions: Vec<SessionHandle>,
 
     // 正在拨号中的集合 (防止并发拨号)
@@ -68,6 +70,7 @@ impl NetManager {
         event_sink: Arc<dyn crate::api::CoreEventSink>,
         store: Arc<Mutex<Store>>,
         cas: crate::cas::Cas,
+        log_store: Arc<Mutex<LogStore>>,
     ) -> anyhow::Result<mpsc::Sender<NetCmd>> {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
@@ -86,16 +89,38 @@ impl NetManager {
                         Ok(transport) => {
                             let transport = Arc::new(transport);
                             let port = transport.local_port().unwrap_or(0);
+                            let is_ipv4 = transport.is_ipv4();
+
+                            // 记录 Transport 初始化成功
+                            {
+                                let mut log_store = log_store.lock().unwrap();
+                                let _ = log_store.log_info(
+                                    "Network",
+                                    &format!("Transport initialized, local port: {}, IPv4: {}", port, is_ipv4),
+                                    Some(&format!("传输层已初始化，本地端口: {}，IPv4: {}", port, is_ipv4)),
+                                );
+                            }
 
                             // 3. 启动 Discovery
                             let (disc_tx, disc_rx) = mpsc::channel(32);
                             match DiscoveryService::spawn(config.clone(), port, disc_tx) {
                                 Ok(discovery) => {
+                                    // 记录 Discovery 启动成功
+                                    {
+                                        let mut log_store = log_store.lock().unwrap();
+                                        let _ = log_store.log_info(
+                                            "Network",
+                                            &format!("mDNS discovery service started, listening on port: {}", port),
+                                            Some(&format!("mDNS 发现服务已启动，监听端口: {}", port)),
+                                        );
+                                    }
+
                                     let manager = Self {
                                         config,
                                         transport,
                                         discovery,
                                         store,
+                                        log_store,
                                         cas,
                                         sessions: Vec::new(),
                                         pending_dials: HashSet::new(),
@@ -108,10 +133,26 @@ impl NetManager {
                                     // 4. 运行主循环
                                     manager.run().await;
                                 }
-                                Err(e) => eprintln!("[NetManager] Discovery spawn failed: {}", e),
+                                Err(e) => {
+                                    let mut log_store = log_store.lock().unwrap();
+                                    let _ = log_store.log_error(
+                                        "Network",
+                                        &format!("mDNS discovery service failed to start: {}", e),
+                                        Some(&format!("mDNS 发现服务启动失败: {}", e)),
+                                        Some(&e.to_string()),
+                                    );
+                                }
                             }
                         }
-                        Err(e) => eprintln!("[NetManager] Transport init failed: {}", e),
+                        Err(e) => {
+                            let mut log_store = log_store.lock().unwrap();
+                            let _ = log_store.log_error(
+                                "Network",
+                                &format!("Transport initialization failed: {}", e),
+                                Some(&format!("传输层初始化失败: {}", e)),
+                                Some(&e.to_string()),
+                            );
+                        }
                     }
                 });
             })?;
@@ -186,6 +227,15 @@ impl NetManager {
                 // 3. 入站连接
                 conn = self.transport.accept() => {
                     if let Some(conn) = conn {
+                        let addr = conn.remote_address();
+                        let mut log_store = self.log_store.lock().unwrap();
+                        let _ = log_store.log_info(
+                            "Network",
+                            &format!("Incoming connection accepted from: {}, spawning server session", addr),
+                            Some(&format!("已接受入站连接: {}，正在创建服务器会话", addr)),
+                        );
+                        drop(log_store);
+
                         let handle = SessionActor::spawn(
                             SessionRole::Server,
                             conn,
@@ -194,6 +244,7 @@ impl NetManager {
                             self.store.clone(),
                             self.cas.clone(),
                             None,
+                            self.log_store.clone(),
                         );
                         self.sessions.push(handle);
                     }
@@ -292,7 +343,14 @@ impl NetManager {
             entry.next_retry_ts = now + (delay_secs * 1000) as i64;
 
             self.pending_dials.remove(&did);
-            println!("[Net] Device {} disconnected. Fail count: {}. Backoff {}s", did, entry.fail_count, delay_secs);
+            let mut log_store = self.log_store.lock().unwrap();
+            let _ = log_store.log_info(
+                "Network",
+                &format!("Peer in backoff period: device_id={}, retry_after={}, fail_count={}", 
+                        did, entry.next_retry_ts, entry.fail_count),
+                Some(&format!("对等设备处于退避期: 设备ID={}，重试时间={}，失败次数={}", 
+                        did, entry.next_retry_ts, entry.fail_count)),
+            );
         }
 
         // --- C. 检查退避到期 & 执行重连 ---
@@ -352,9 +410,33 @@ impl NetManager {
 
     async fn broadcast_meta(&self, meta: crate::model::ItemMeta) {
 		if self.config.app_config.global_policy == crate::policy::GlobalPolicy::DenyAll {
-			println!("[Policy] Broadcast DENIED by DenyAll policy.");
+			let mut log_store = self.log_store.lock().unwrap();
+			let _ = log_store.log_warn(
+				"Network",
+				&format!("Metadata broadcast denied by DenyAll policy: item_id={}", meta.item_id),
+				Some(&format!("元数据广播被 DenyAll 策略拒绝: 项目ID={}", meta.item_id)),
+			);
 			return;
 		}
+
+        let online_count = self.sessions.iter().filter(|s| s.is_online()).count();
+        if online_count == 0 {
+            let mut log_store = self.log_store.lock().unwrap();
+            let _ = log_store.log_debug(
+                "Network",
+                &format!("No online peers available for metadata broadcast: item_id={}", meta.item_id),
+                Some(&format!("无在线对等设备可用于元数据广播: 项目ID={}", meta.item_id)),
+            );
+            return;
+        }
+
+        let mut log_store = self.log_store.lock().unwrap();
+        let _ = log_store.log_info(
+            "Network",
+            &format!("Broadcasting metadata to {} online peers: item_id={}", online_count, meta.item_id),
+            Some(&format!("正在向 {} 个在线对等设备广播元数据: 项目ID={}", online_count, meta.item_id)),
+        );
+        drop(log_store);
 
         for session in &self.sessions {
             if session.is_online() {
@@ -401,6 +483,7 @@ impl NetManager {
                         self.store.clone(),
                         self.cas.clone(),
                         Some(peer.device_id.clone()),
+                        self.log_store.clone(),
                     );
                     self.sessions.push(handle);
                     success = true;

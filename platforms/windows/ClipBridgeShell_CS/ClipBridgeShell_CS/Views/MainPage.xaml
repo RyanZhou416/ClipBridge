@@ -59,7 +59,7 @@
                             </ItemsRepeater.Layout>
                             <ItemsRepeater.ItemTemplate>
                                 <DataTemplate x:DataType="events:ItemMetaPayload" x:DefaultBindMode="OneWay">
-                                    <Border Style="{StaticResource ItemCardStyle}">
+                                    <Border Style="{StaticResource ItemCardStyle}" MaxWidth="280">
                                         <Grid RowDefinitions="Auto,*,Auto,Auto">
                                             <!-- 预览区域 -->
                                             <TextBlock Grid.Row="0" 

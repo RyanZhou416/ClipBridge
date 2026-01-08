@@ -20,6 +20,12 @@ public sealed class CoreLogDispatcher : IDisposable
     private readonly Task _backgroundTask;
     private const int BatchSize = 50;
     private const int QueueCapacity = 1000;
+    
+    /// <summary>
+    /// 写入完成回调：当一批日志写入完成时触发
+    /// 参数：写入的日志条目列表
+    /// </summary>
+    public event Action<List<LogEntry>>? BatchWritten;
 
     public CoreLogDispatcher(ICoreHostService coreHost)
     {
@@ -111,7 +117,10 @@ public sealed class CoreLogDispatcher : IDisposable
                 // #region agent log
                 System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Processing batch: count={batch.Count}, CoreState={_coreHost.State}");
                 // #endregion
+                var batchCopy = new List<LogEntry>(batch); // 复制一份用于回调
                 await WriteBatchAsync(batch);
+                // 触发写入完成回调
+                BatchWritten?.Invoke(batchCopy);
                 batch.Clear();
             }
             else if (batch.Count > 0)
@@ -134,7 +143,10 @@ public sealed class CoreLogDispatcher : IDisposable
         // 清理：尝试写入剩余的日志
         if (batch.Count > 0 && _coreHost.State == CoreState.Ready)
         {
+            var batchCopy = new List<LogEntry>(batch); // 复制一份用于回调
             await WriteBatchAsync(batch);
+            // 触发写入完成回调
+            BatchWritten?.Invoke(batchCopy);
         }
     }
 
@@ -169,16 +181,29 @@ public sealed class CoreLogDispatcher : IDisposable
             {
                 try
                 {
+                    // #region agent log
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[CoreLogDispatcher] H_B: Preparing log for FFI. " +
+                        $"Component: {entry.Component}, Category: {entry.Category}, Level: {entry.Level}"
+                    );
+                    // #endregion
+                    // 使用多语言消息
+                    var messageEn = entry.GetMessageEn();
+                    var messageZhCn = entry.GetMessageZhCn();
+                    
                     var id = CoreInterop.LogsWrite(
                         handle,
                         entry.Level,
+                        entry.Component,
                         entry.Category,
-                        entry.Message,
+                        messageEn,
+                        messageZhCn,
                         entry.Exception,
-                        entry.PropsJson
+                        entry.PropsJson,
+                        entry.TsUtc // 传递原始时间戳，用于暂存日志回写
                     );
                     // #region agent log
-                    System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Log written to core: entryId={entry.Id}, coreId={id}");
+                    System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Log written to core: entryId={entry.Id}, coreId={id}, ts_utc={entry.TsUtc}, component={entry.Component}, category={entry.Category}");
                     // #endregion
                 }
                 catch (Exception ex)

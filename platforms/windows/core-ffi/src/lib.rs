@@ -512,22 +512,35 @@ pub extern "C" fn cb_get_item_meta(h: *mut cb_handle, item_id_json: *const c_cha
 	}
 }
 
-/// 写入日志
+/// 写入日志（多语言版本）
 #[no_mangle]
 pub extern "C" fn cb_logs_write(
 	h: *mut cb_handle,
 	level: i32,
+	component: *const c_char,
 	category: *const c_char,
-	message: *const c_char,
+	message_en: *const c_char,
+	message_zh_cn: *const c_char,
 	exception: *const c_char,
 	props_json: *const c_char,
+	ts_utc: i64,
 	out_id: *mut i64,
 ) -> i32 {
 	let run = (|| -> anyhow::Result<()> {
 		if h.is_null() { anyhow::bail!("null handle"); }
 		let handle = unsafe { &mut *h };
+		let component_s = cstr_to_str(component)?;
 		let category_s = cstr_to_str(category)?;
-		let message_s = cstr_to_str(message)?;
+		
+		// #region agent log
+		eprintln!("[cb_logs_write] H_A: Received component={}, category={}, level={}, ts_utc={}", component_s, category_s, level, ts_utc);
+		// #endregion
+		let message_en_s = cstr_to_str(message_en)?;
+		let message_zh_cn_s = if message_zh_cn.is_null() {
+			None
+		} else {
+			Some(cstr_to_str(message_zh_cn)?)
+		};
 		let exception_s = if exception.is_null() {
 			None
 		} else {
@@ -539,16 +552,21 @@ pub extern "C" fn cb_logs_write(
 			Some(cstr_to_str(props_json)?)
 		};
 
-		let ts_utc = cb_core::util::now_ms();
-		let component = "Core"; // 从Core写入的日志
+		// 如果 ts_utc <= 0，使用当前时间；否则使用提供的时间戳（用于暂存日志回写）
+		let ts_utc = if ts_utc <= 0 {
+			cb_core::util::now_ms()
+		} else {
+			ts_utc
+		};
 
 		let mut log_store = handle.core.inner.log_store.lock().unwrap();
-		let id = log_store.write(
+		let id = log_store.write_multilang(
 			ts_utc,
 			level,
-			component,
+			component_s,
 			category_s,
-			message_s,
+			message_en_s,
+			message_zh_cn_s.as_deref(),
 			exception_s.as_deref(),
 			props_json_s.as_deref(),
 		)?;
@@ -575,6 +593,7 @@ pub extern "C" fn cb_logs_query_after_id(
 	level_min: i32,
 	like: *const c_char,
 	limit: i32,
+	lang: *const c_char,
 	out_json: *mut *const c_char,
 ) -> i32 {
 	let run = (|| -> anyhow::Result<String> {
@@ -585,9 +604,65 @@ pub extern "C" fn cb_logs_query_after_id(
 		} else {
 			Some(cstr_to_str(like)?)
 		};
+		let lang_s = if lang.is_null() {
+			None
+		} else {
+			Some(cstr_to_str(lang)?)
+		};
 
 		let log_store = handle.core.inner.log_store.lock().unwrap();
-		let entries = log_store.query_after_id(after_id, level_min, like_s.as_deref(), limit)?;
+		let entries = log_store.query_after_id(after_id, level_min, like_s.as_deref(), limit, lang_s.as_deref())?;
+
+		Ok(crate::error::ok_json(entries))
+	})();
+
+	match run {
+		Ok(s) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(s);
+				}
+			}
+			0
+		}
+		Err(_) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(crate::error::err_json("QUERY_FAILED", "Failed to query logs"));
+				}
+			}
+			1
+		}
+	}
+}
+
+/// 查询 before_id 之前的日志（用于向上滚动加载更早的日志）
+#[no_mangle]
+pub extern "C" fn cb_logs_query_before_id(
+	h: *mut cb_handle,
+	before_id: i64,
+	level_min: i32,
+	like: *const c_char,
+	limit: i32,
+	lang: *const c_char,
+	out_json: *mut *const c_char,
+) -> i32 {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let like_s = if like.is_null() {
+			None
+		} else {
+			Some(cstr_to_str(like)?)
+		};
+		let lang_s = if lang.is_null() {
+			None
+		} else {
+			Some(cstr_to_str(lang)?)
+		};
+
+		let log_store = handle.core.inner.log_store.lock().unwrap();
+		let entries = log_store.query_before_id(before_id, level_min, like_s.as_deref(), limit, lang_s.as_deref())?;
 
 		Ok(crate::error::ok_json(entries))
 	})();
@@ -622,6 +697,7 @@ pub extern "C" fn cb_logs_query_range(
 	like: *const c_char,
 	limit: i32,
 	offset: i32,
+	lang: *const c_char,
 	out_json: *mut *const c_char,
 ) -> i32 {
 	let run = (|| -> anyhow::Result<String> {
@@ -632,9 +708,14 @@ pub extern "C" fn cb_logs_query_range(
 		} else {
 			Some(cstr_to_str(like)?)
 		};
+		let lang_s = if lang.is_null() {
+			None
+		} else {
+			Some(cstr_to_str(lang)?)
+		};
 
 		let log_store = handle.core.inner.log_store.lock().unwrap();
-		let entries = log_store.query_range(start_ms, end_ms, level_min, like_s.as_deref(), limit, offset)?;
+		let entries = log_store.query_range(start_ms, end_ms, level_min, like_s.as_deref(), limit, offset, lang_s.as_deref())?;
 
 		Ok(crate::error::ok_json(entries))
 	})();
@@ -715,6 +796,65 @@ pub extern "C" fn cb_logs_delete_before(h: *mut cb_handle, cutoff_ms: i64, out_d
 	}
 }
 
+/// 按 ID 列表删除日志
+#[no_mangle]
+pub extern "C" fn cb_logs_delete_by_ids(h: *mut cb_handle, ids_json: *const c_char, out_deleted: *mut i64) -> i32 {
+	let run = (|| -> anyhow::Result<i64> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let ids_json_str = cstr_to_str(ids_json)?;
+		let ids: Vec<i64> = serde_json::from_str(ids_json_str)?;
+		
+		let mut log_store = handle.core.inner.log_store.lock().unwrap();
+		let deleted = log_store.delete_by_ids(&ids)?;
+		Ok(deleted)
+	})();
+
+	match run {
+		Ok(deleted) => {
+			unsafe {
+				if !out_deleted.is_null() {
+					*out_deleted = deleted;
+				}
+			}
+			0
+		}
+		Err(_) => 1,
+	}
+}
+
+/// 获取来源统计（component 和 category 的列表及计数）
+#[no_mangle]
+pub extern "C" fn cb_logs_source_stats(h: *mut cb_handle, out_json: *mut *const c_char) -> i32 {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let log_store = handle.core.inner.log_store.lock().unwrap();
+		let stats = log_store.get_source_stats()?;
+
+		Ok(crate::error::ok_json(stats))
+	})();
+
+	match run {
+		Ok(s) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(s);
+				}
+			}
+			0
+		}
+		Err(_) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(crate::error::err_json("STATS_FAILED", "Failed to get source stats"));
+				}
+			}
+			1
+		}
+	}
+}
+
 /// 清空核心数据库
 #[no_mangle]
 pub extern "C" fn cb_clear_core_db(h: *mut cb_handle) -> *const c_char {
@@ -757,6 +897,22 @@ pub extern "C" fn cb_clear_stats_db(h: *mut cb_handle) -> *const c_char {
 		let handle = unsafe { &mut *h };
 		let mut stats_store = handle.core.inner.stats_store.lock().unwrap();
 		stats_store.clear_stats_db()?;
+		Ok(crate::error::ok_json(serde_json::json!({ "ok": true })))
+	})();
+
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("CLEAR_FAILED", &format!("{e:#}"))),
+	}
+}
+
+/// 清空缓存（CAS blobs、临时文件等）
+#[no_mangle]
+pub extern "C" fn cb_clear_cache(h: *mut cb_handle) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		handle.core.clear_cache()?;
 		Ok(crate::error::ok_json(serde_json::json!({ "ok": true })))
 	})();
 

@@ -236,4 +236,77 @@ impl Cas {
 
         Ok(sha256)
     }
+
+    /// 清空所有缓存（删除所有 blobs 和临时文件）
+    pub fn clear_all(&self) -> anyhow::Result<()> {
+        // 删除 blobs 目录下的所有文件
+        if self.blobs_dir.exists() {
+            // 遍历所有子目录并删除文件
+            fn remove_dir_contents(dir: &Path) -> anyhow::Result<()> {
+                if !dir.exists() {
+                    return Ok(());
+                }
+                for entry in fs::read_dir(dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_dir() {
+                        // 递归删除子目录
+                        remove_dir_contents(&path)?;
+                        let _ = fs::remove_dir(&path);
+                    } else {
+                        let _ = fs::remove_file(&path);
+                    }
+                }
+                Ok(())
+            }
+            remove_dir_contents(&self.blobs_dir)?;
+        }
+
+        // 删除 tmp 目录下的所有文件
+        if self.tmp_dir.exists() {
+            for entry in fs::read_dir(&self.tmp_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+
+        // 删除 files 目录（materialize_blob 创建的视图文件）
+        let files_dir = self.cache_dir.join("files");
+        if files_dir.exists() {
+            for entry in fs::read_dir(&files_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+
+        // 删除 downloads 目录（materialize_file 创建的文件）
+        let downloads_dir = self.cache_dir.join("downloads");
+        if downloads_dir.exists() {
+            fn remove_dir_recursive(dir: &Path) -> anyhow::Result<()> {
+                if !dir.exists() {
+                    return Ok(());
+                }
+                for entry in fs::read_dir(dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_dir() {
+                        remove_dir_recursive(&path)?;
+                        let _ = fs::remove_dir(&path);
+                    } else {
+                        let _ = fs::remove_file(&path);
+                    }
+                }
+                Ok(())
+            }
+            remove_dir_recursive(&downloads_dir)?;
+        }
+
+        Ok(())
+    }
 }

@@ -65,7 +65,7 @@ impl StatsStore {
         stat_type: &str,
         data_json: &str,
     ) -> anyhow::Result<i64> {
-        let id = self.conn.execute(
+        let _id = self.conn.execute(
             r#"
             INSERT INTO stats (ts_ms, bucket_sec, stat_type, data_json)
             VALUES (?1, ?2, ?3, ?4)

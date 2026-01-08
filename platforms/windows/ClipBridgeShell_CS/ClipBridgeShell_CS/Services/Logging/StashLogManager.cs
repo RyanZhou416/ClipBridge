@@ -153,7 +153,32 @@ public sealed class LogEntry
     public int Level { get; set; }
     public string Component { get; set; } = "";
     public string Category { get; set; } = "";
+    
+    /// <summary>
+    /// 消息（向后兼容，如果 MessageEn 和 MessageZhCn 为空则使用此字段）
+    /// </summary>
     public string Message { get; set; } = "";
+    
+    /// <summary>
+    /// 英文消息
+    /// </summary>
+    public string? MessageEn { get; set; }
+    
+    /// <summary>
+    /// 中文消息
+    /// </summary>
+    public string? MessageZhCn { get; set; }
+    
     public string? Exception { get; set; }
     public string? PropsJson { get; set; }
+    
+    /// <summary>
+    /// 获取英文消息（优先使用 MessageEn，否则使用 Message）
+    /// </summary>
+    public string GetMessageEn() => !string.IsNullOrEmpty(MessageEn) ? MessageEn : Message;
+    
+    /// <summary>
+    /// 获取中文消息
+    /// </summary>
+    public string? GetMessageZhCn() => MessageZhCn;
 }

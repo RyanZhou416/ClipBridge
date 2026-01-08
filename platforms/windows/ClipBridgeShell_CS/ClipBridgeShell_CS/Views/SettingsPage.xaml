@@ -88,6 +88,16 @@
 										  IsOn="{x:Bind ViewModel.IsClipboardCaptureEnabled, Mode=TwoWay}"
 										  l:Uids.Uid="Settings_IsClipboardCaptureEnabled_ToggleSwitch"/>
 						</ctk:SettingsCard>
+						
+						<!-- 核心开关 -->
+						<ctk:SettingsCard Header="核心服务"
+										  Description="开启或关闭核心服务"
+										  HeaderIcon="{ui:FontIcon Glyph=&#xE713;}"
+										  HorizontalAlignment="Stretch">
+							<ToggleSwitch x:Name="CoreToggleSwitch"
+										  AutomationProperties.Name="Core ToggleSwitch"
+										  Toggled="CoreToggleSwitch_Toggled"/>
+						</ctk:SettingsCard>
 
 						<!-- 主页显示的卡片数量 -->
 						<ctk:SettingsCard Header="主页显示的卡片数量"

@@ -74,6 +74,10 @@ public partial class App : Application
         Host = Microsoft.Extensions.Hosting.Host.
         CreateDefaultBuilder().
         UseContentRoot(AppContext.BaseDirectory).
+        ConfigureLogging(logging =>
+        {
+            // 先配置日志系统，确保 ILoggerFactory 可用
+        }).
         ConfigureServices((context, services) =>
         {
             // Default Activation Handler
@@ -102,14 +106,20 @@ public partial class App : Application
             services.AddSingleton<ContentFetchAwaiter>();
             services.AddSingleton<EventPumpService>();
 
-            //CB Core Host Service
-            services.AddSingleton<CoreHostService>();
-            services.AddSingleton<ICoreHostService, CoreHostService>();
-            services.AddSingleton<IClipboardService, ClipboardService>();
-            services.AddSingleton<ClipboardApplyService>();
-
-            // Logging
+            // Logging - 先注册日志系统，避免循环依赖
             services.AddSingleton<Services.Logging.StashLogManager>();
+            
+            // 先创建 CoreHostService（不使用 ILoggerFactory，避免循环依赖）
+            services.AddSingleton<CoreHostService>(sp =>
+            {
+                var eventPump = sp.GetRequiredService<EventPumpService>();
+                var localSettings = sp.GetRequiredService<ILocalSettingsService>();
+                // 暂时不传入 loggerFactory，避免循环依赖
+                return new CoreHostService(eventPump, localSettings, null);
+            });
+            services.AddSingleton<ICoreHostService>(sp => sp.GetRequiredService<CoreHostService>());
+            
+            // 现在注册日志提供者（需要 ICoreHostService）
             services.AddSingleton<Services.Logging.CoreLogDispatcher>(sp =>
             {
                 var coreHost = sp.GetRequiredService<ICoreHostService>();
@@ -122,15 +132,15 @@ public partial class App : Application
                 var stashManager = sp.GetRequiredService<Services.Logging.StashLogManager>();
                 return new Services.Logging.CoreLoggerProvider(coreHost, dispatcher, stashManager);
             });
-            // 注册日志提供者 - 先注册为服务
+            // 注册日志提供者
             services.AddSingleton<Microsoft.Extensions.Logging.ILoggerProvider>(sp =>
             {
                 var provider = sp.GetRequiredService<Services.Logging.CoreLoggerProvider>();
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[App] CoreLoggerProvider registered as ILoggerProvider, CoreState={sp.GetRequiredService<ICoreHostService>().State}");
-                // #endregion
                 return provider;
             });
+
+            services.AddSingleton<IClipboardService, ClipboardService>();
+            services.AddSingleton<ClipboardApplyService>();
 
             // Views and ViewModels
             services.AddTransient<SettingsViewModel>();
@@ -140,7 +150,8 @@ public partial class App : Application
                 var coreHost = sp.GetRequiredService<ICoreHostService>();
                 var stashManager = sp.GetRequiredService<Services.Logging.StashLogManager>();
                 var eventPump = sp.GetRequiredService<EventPumpService>();
-                return new LogsViewModel(coreHost, stashManager, eventPump);
+                var localSettings = sp.GetRequiredService<ILocalSettingsService>();
+                return new LogsViewModel(coreHost, stashManager, eventPump, localSettings);
             });
             services.AddTransient<LogsPage>();
             services.AddTransient<DevicesViewModel>();
@@ -162,7 +173,14 @@ public partial class App : Application
 
             // Configuration
             services.Configure<LocalSettingsOptions>(context.Configuration.GetSection(nameof(LocalSettingsOptions)));
-            services.AddSingleton<ClipboardWatcher>();
+            services.AddSingleton<ClipboardWatcher>(sp =>
+            {
+                var clipboardService = sp.GetRequiredService<IClipboardService>();
+                var coreHostService = sp.GetRequiredService<ICoreHostService>();
+                var localSettings = sp.GetRequiredService<ILocalSettingsService>();
+                var loggerFactory = sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>();
+                return new ClipboardWatcher(clipboardService, coreHostService, localSettings, loggerFactory);
+            });
 
             // History Service
             services.AddTransient<HistoryViewModel>(sp =>
@@ -190,6 +208,10 @@ public partial class App : Application
             // #region agent log
             System.Diagnostics.Debug.WriteLine($"[App] Test log message sent via ILogger");
             // #endregion
+            
+            // 现在日志系统已初始化，可以更新 CoreHostService 和 ClipboardWatcher 的 logger
+            // 注意：由于它们是单例且已经创建，我们需要通过其他方式设置 logger
+            // 或者让它们在需要时通过 ILoggerFactory 获取 logger
         }
         catch (Exception ex)
         {
@@ -203,6 +225,14 @@ public partial class App : Application
 
     private void App_UnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
+        // 记录未处理的异常
+        System.Diagnostics.Debug.WriteLine($"[App] UnhandledException: {e.Exception}");
+        System.Diagnostics.Debug.WriteLine($"[App] Exception Message: {e.Exception.Message}");
+        System.Diagnostics.Debug.WriteLine($"[App] Exception StackTrace: {e.Exception.StackTrace}");
+        if (e.Exception.InnerException != null)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] InnerException: {e.Exception.InnerException}");
+        }
         // TODO: Log and handle exceptions as appropriate.
         // https://docs.microsoft.com/windows/windows-app-sdk/api/winrt/microsoft.ui.xaml.application.unhandledexception.
     }

@@ -47,6 +47,9 @@
 
             <!-- 4) 全局转换器 -->
             <helpers:StringToVisibilityConverter x:Key="StringToVisibilityConverter" />
+            <helpers:InverseBoolConverter x:Key="InverseBoolConverter" />
+            <helpers:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+            <helpers:GridLengthConverter x:Key="GridLengthConverter" />
 
         </ResourceDictionary>
     </Application.Resources>

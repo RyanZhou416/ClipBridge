@@ -253,9 +253,10 @@ public partial class MainViewModel : ObservableRecipient
         var handle = _coreHost.GetHandle();
         if (handle == IntPtr.Zero) return;
 
-        // TODO: 实现缓存清理接口调用
-        // 目前先占位，等待Core提供接口
-        await Task.CompletedTask;
+        await Task.Run(() =>
+        {
+            ClipBridgeShell_CS.Interop.CoreInterop.ClearCache(handle);
+        });
     }
 
     private void OnCoreStateChanged(CoreState state)

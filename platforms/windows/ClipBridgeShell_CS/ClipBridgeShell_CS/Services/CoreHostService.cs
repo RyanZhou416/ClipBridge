@@ -11,6 +11,8 @@ using ClipBridgeShell_CS.Core.Services;
 using ClipBridgeShell_CS.Interop;
 using ClipBridgeShell_CS.Stores;
 using Windows.Storage;
+using Microsoft.Extensions.Logging;
+using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS.Services;
 
@@ -23,6 +25,7 @@ public sealed class CoreHostService : ICoreHostService
     private static bool _isResolverSet = false;
     private readonly EventPumpService _eventPump;
     private readonly ILocalSettingsService _localSettingsService;
+    private readonly ILogger<CoreHostService>? _logger;
     // 定义 JSON 序列化选项
     private readonly JsonSerializerOptions _jsonOpts;
 
@@ -34,10 +37,11 @@ public sealed class CoreHostService : ICoreHostService
         get; private set;
     }
 
-    public CoreHostService(EventPumpService eventPump, ILocalSettingsService localSettingsService)
+    public CoreHostService(EventPumpService eventPump, ILocalSettingsService localSettingsService, ILoggerFactory? loggerFactory = null)
     {
         _eventPump = eventPump;
         _localSettingsService = localSettingsService;
+        _logger = loggerFactory?.CreateLogger<CoreHostService>();
         _jsonOpts = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
@@ -50,6 +54,7 @@ public sealed class CoreHostService : ICoreHostService
     {
         if (State is CoreState.Loading or CoreState.Ready) return;
 
+        _logger?.LogInformation("CoreHostService initializing...");
         LastError = null;
         SetState(CoreState.Loading);
 
@@ -94,12 +99,14 @@ public sealed class CoreHostService : ICoreHostService
 
         if (string.IsNullOrWhiteSpace(dllFullPath) || !File.Exists(dllFullPath))
         {
+            _logger?.LogWarning("Core DLL not found");
             Diagnostics.DllLoadError = "DLL not found in app output directories.";
             Diagnostics.LastInitSummary = "Core degraded: DLL missing.";
             LastError = Diagnostics.DllLoadError;
             SetState(CoreState.Degraded);
             return;
         }
+        _logger?.LogInformation("Core DLL loaded from: {Path}", dllFullPath);
 
         try
         {
@@ -125,6 +132,10 @@ public sealed class CoreHostService : ICoreHostService
             var userData = GCHandle.ToIntPtr(_selfHandle);
 
             // 6. Init
+            // 记录初始化开始时间，用于写入"核心开"日志（使其时间戳早于核心初始化日志）
+            // 注意：核心初始化日志是在 cb_init 调用时立即写入的，所以我们需要使用一个更早的时间戳
+            var initStartTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 50; // 减去50ms，确保早于核心初始化日志
+            
             IntPtr outHandle;
             // [FIX] 必须使用 Task.Run 避免阻塞 UI 线程，虽然 init 应该很快
             await Task.Run(() =>
@@ -148,11 +159,26 @@ public sealed class CoreHostService : ICoreHostService
                 _coreHandle = handle;
             });
 
+            _logger?.LogInformation("Core initialized successfully, handle: {Handle}", _coreHandle);
             Diagnostics.LastInitSummary = "Init OK";
             SetState(CoreState.Ready);
+            
+            // 写入"核心开"日志到核心（使用较早的时间戳，使其出现在核心初始化日志之前）
+            try
+            {
+                var currentLang = GetCurrentLanguage();
+                var messageEn = "-------------Core Started-----------";
+                var messageZhCn = "-------------核心开-----------";
+                CoreInterop.LogsWrite(_coreHandle, 2, "System", "Separator", messageEn, messageZhCn, null, null, initStartTime);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[CoreHostService] Failed to write 'Core Started' log: {ex}");
+            }
         }
         catch (DllNotFoundException ex)
         {
+            _logger?.LogError(ex, "Core initialization failed");
             Diagnostics.DllLoadError = $"DllNotFound: {ex.Message}";
             Diagnostics.LastInitSummary = "Core degraded: DLL load failed.";
             LastError = ex.Message;
@@ -160,6 +186,7 @@ public sealed class CoreHostService : ICoreHostService
         }
         catch (BadImageFormatException ex)
         {
+            _logger?.LogError(ex, "Core initialization failed");
             Diagnostics.DllLoadError = $"BadImageFormat: {ex.Message}";
             Diagnostics.LastInitSummary = "Core degraded: Arch mismatch (x64/x86).";
             LastError = ex.Message;
@@ -175,30 +202,79 @@ public sealed class CoreHostService : ICoreHostService
 
     public async Task ShutdownAsync(CancellationToken ct = default)
     {
-        if (State == CoreState.NotLoaded) return;
+        // #region agent log
+        System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync called: current State={State}");
+        // #endregion
+        
+        if (State == CoreState.NotLoaded)
+        {
+            // #region agent log
+            System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: already NotLoaded, returning");
+            // #endregion
+            return;
+        }
 
+        // #region agent log
+        System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: setting state to ShuttingDown");
+        // #endregion
         SetState(CoreState.ShuttingDown);
 
         if (_coreHandle != IntPtr.Zero)
         {
+            // 写入"核心关"日志到核心（在关闭前）
             try
             {
-                // [FIX] 放到后台线程防止阻塞
-                await Task.Run(() => CoreInterop.cb_shutdown(_coreHandle));
+                var currentLang = GetCurrentLanguage();
+                var messageEn = "-------------Core Stopped-----------";
+                var messageZhCn = "-------------核心关-----------";
+                CoreInterop.LogsWrite(_coreHandle, 2, "System", "Separator", messageEn, messageZhCn);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Shutdown error: {ex}");
+                System.Diagnostics.Debug.WriteLine($"[CoreHostService] Failed to write 'Core Stopped' log: {ex}");
+            }
+            
+            try
+            {
+                // #region agent log
+                System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: calling cb_shutdown");
+                // #endregion
+                // [FIX] 放到后台线程防止阻塞
+                await Task.Run(() => CoreInterop.cb_shutdown(_coreHandle));
+                // #region agent log
+                System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: cb_shutdown completed");
+                // #endregion
+            }
+            catch (Exception ex)
+            {
+                // #region agent log
+                System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: Shutdown error: {ex}");
+                // #endregion
             }
             finally
             {
                 _coreHandle = IntPtr.Zero;
+                // #region agent log
+                System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: _coreHandle cleared");
+                // #endregion
             }
         }
 
-        if (_selfHandle.IsAllocated) _selfHandle.Free();
+        if (_selfHandle.IsAllocated)
+        {
+            _selfHandle.Free();
+            // #region agent log
+            System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: _selfHandle freed");
+            // #endregion
+        }
 
+        // #region agent log
+        System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: setting state to NotLoaded");
+        // #endregion
         SetState(CoreState.NotLoaded);
+        // #region agent log
+        System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: completed, final State={State}");
+        // #endregion
     }
 
     public IntPtr GetHandle()
@@ -208,8 +284,22 @@ public sealed class CoreHostService : ICoreHostService
 
     private void SetState(CoreState s)
     {
+        var oldState = State;
+        if (oldState == s)
+        {
+            // #region agent log
+            System.Diagnostics.Debug.WriteLine($"[CoreHostService] SetState: state unchanged ({s}), skipping event");
+            // #endregion
+            return;
+        }
         State = s;
+        // #region agent log
+        System.Diagnostics.Debug.WriteLine($"[CoreHostService] SetState: changing from {oldState} to {s}");
+        // #endregion
         StateChanged?.Invoke(s);
+        // #region agent log
+        System.Diagnostics.Debug.WriteLine($"[CoreHostService] SetState: StateChanged event invoked, new state={s}");
+        // #endregion
     }
 
     private bool IsEnvelopeOkAndGetHandle(string json, out IntPtr handle, out string errCode, out string errMsg)
@@ -381,6 +471,22 @@ public sealed class CoreHostService : ICoreHostService
         }
 
         return id;
+    }
+
+    /// <summary>
+    /// 获取当前语言设置
+    /// </summary>
+    private string GetCurrentLanguage()
+    {
+        try
+        {
+            var loc = Localizer.Get();
+            return loc.GetCurrentLanguage();
+        }
+        catch
+        {
+            return "en-US";
+        }
     }
 
     public async Task IngestLocalCopyAsync(ClipboardSnapshot snapshot)

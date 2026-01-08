@@ -1,0 +1,66 @@
+<UserControl
+    x:Class="ClipBridgeShell_CS.Views.LogsFilterFlyout"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    MinWidth="400"
+    MaxHeight="600">
+    
+    <ScrollViewer VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="16" Padding="16">
+            
+            <!-- 时间戳过滤 -->
+            <StackPanel x:Name="TimestampFilterPanel" Spacing="8">
+                <TextBlock Text="时间范围" FontWeight="SemiBold" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <CheckBox x:Name="StartTimeUnlimitedCheckBox" Content="开始时间：无限" IsChecked="True" />
+                    <DatePicker x:Name="StartDatePicker" IsEnabled="{x:Bind StartTimeUnlimitedCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                    <TimePicker x:Name="StartTimePicker" IsEnabled="{x:Bind StartTimeUnlimitedCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <CheckBox x:Name="EndTimeNowCheckBox" Content="结束时间：现在" IsChecked="True" />
+                    <DatePicker x:Name="EndDatePicker" IsEnabled="{x:Bind EndTimeNowCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                    <TimePicker x:Name="EndTimePicker" IsEnabled="{x:Bind EndTimeNowCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                </StackPanel>
+            </StackPanel>
+            
+            <!-- 级别过滤 -->
+            <StackPanel x:Name="LevelFilterPanel" Spacing="8">
+                <TextBlock Text="级别" FontWeight="SemiBold" />
+                <StackPanel Spacing="4">
+                    <CheckBox x:Name="LevelTraceCheckBox" Content="Trace" IsChecked="True" />
+                    <CheckBox x:Name="LevelDebugCheckBox" Content="Debug" IsChecked="True" />
+                    <CheckBox x:Name="LevelInfoCheckBox" Content="Info" IsChecked="True" />
+                    <CheckBox x:Name="LevelWarnCheckBox" Content="Warn" IsChecked="True" />
+                    <CheckBox x:Name="LevelErrorCheckBox" Content="Error" IsChecked="True" />
+                    <CheckBox x:Name="LevelCriticalCheckBox" Content="Critical" IsChecked="True" />
+                </StackPanel>
+            </StackPanel>
+            
+            <!-- 组件过滤 -->
+            <StackPanel x:Name="ComponentFilterPanel" Spacing="8">
+                <TextBlock Text="组件" FontWeight="SemiBold" />
+                <ScrollViewer MaxHeight="150" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
+                    <StackPanel x:Name="ComponentCheckBoxList" Spacing="4" />
+                </ScrollViewer>
+            </StackPanel>
+            
+            <!-- 分类过滤 -->
+            <StackPanel x:Name="CategoryFilterPanel" Spacing="8">
+                <TextBlock Text="分类" FontWeight="SemiBold" />
+                <ScrollViewer MaxHeight="150" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
+                    <StackPanel x:Name="CategoryCheckBoxList" Spacing="4" />
+                </ScrollViewer>
+            </StackPanel>
+            
+            <!-- 操作按钮 -->
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                <Button Content="重置" Click="OnResetClick" />
+                <Button Content="应用" Click="OnApplyClick" Style="{ThemeResource AccentButtonStyle}" />
+            </StackPanel>
+            
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

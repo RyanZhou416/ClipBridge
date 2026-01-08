@@ -90,21 +90,109 @@ impl Core {
     * @return 返回初始化完成的 Core 实例
     */
     pub fn init(cfg: CoreConfig, sink: Arc<dyn CoreEventSink>) -> Self {
-        let store = Store::open(&cfg.data_dir).expect("open store");
-        let store_arc = Arc::new(Mutex::new(store));
+        // 初始化日志存储（需要先创建才能记录日志）
         let log_store = LogStore::open(&cfg.data_dir).expect("open log store");
         let log_store_arc = Arc::new(Mutex::new(log_store));
-        let stats_store = StatsStore::open(&cfg.data_dir).expect("open stats store");
+        
+        // 记录初始化开始日志
+        {
+            let mut log_store = log_store_arc.lock().unwrap();
+            let _ = log_store.log_info(
+                "Init",
+                &format!("Core initializing with device_id: {}", cfg.device_id),
+                Some(&format!("核心正在初始化，设备 ID: {}", cfg.device_id)),
+            );
+        }
+
+        // 初始化各个组件
+        let store = match Store::open(&cfg.data_dir) {
+            Ok(s) => {
+                let mut log_store = log_store_arc.lock().unwrap();
+                let _ = log_store.log_info(
+                    "Init",
+                    "Store initialized successfully",
+                    Some("存储初始化成功"),
+                );
+                s
+            }
+            Err(e) => {
+                let mut log_store = log_store_arc.lock().unwrap();
+                let _ = log_store.log_error(
+                    "Init",
+                    &format!("Failed to initialize Store: {}", e),
+                    Some(&format!("存储初始化失败: {}", e)),
+                    Some(&e.to_string()),
+                );
+                panic!("Failed to open store: {}", e);
+            }
+        };
+        let store_arc = Arc::new(Mutex::new(store));
+
+        let stats_store = match StatsStore::open(&cfg.data_dir) {
+            Ok(s) => {
+                let mut log_store = log_store_arc.lock().unwrap();
+                let _ = log_store.log_info(
+                    "Init",
+                    "StatsStore initialized successfully",
+                    Some("统计存储初始化成功"),
+                );
+                s
+            }
+            Err(e) => {
+                let mut log_store = log_store_arc.lock().unwrap();
+                let _ = log_store.log_error(
+                    "Init",
+                    &format!("Failed to initialize StatsStore: {}", e),
+                    Some(&format!("统计存储初始化失败: {}", e)),
+                    Some(&e.to_string()),
+                );
+                panic!("Failed to open stats store: {}", e);
+            }
+        };
         let stats_store_arc = Arc::new(Mutex::new(stats_store));
-        let cas = Cas::new(&cfg.cache_dir).expect("init cas");
+
+        let cas = match Cas::new(&cfg.cache_dir) {
+            Ok(c) => {
+                let mut log_store = log_store_arc.lock().unwrap();
+                let _ = log_store.log_info(
+                    "Init",
+                    "CAS initialized successfully",
+                    Some("CAS 初始化成功"),
+                );
+                c
+            }
+            Err(e) => {
+                let mut log_store = log_store_arc.lock().unwrap();
+                let _ = log_store.log_error(
+                    "Init",
+                    &format!("Failed to initialize CAS: {}", e),
+                    Some(&format!("CAS 初始化失败: {}", e)),
+                    Some(&e.to_string()),
+                );
+                panic!("Failed to init cas: {}", e);
+            }
+        };
 
         // --- M1 集成：启动网络管理器 ---
         // 注意：这里假设 NetManager::spawn 是同步封装（内部 spawn 异步任务）
         // 如果是在 FFI 环境且有 Tokio Runtime，这将正常工作。
-        let net_tx = match NetManager::spawn(cfg.clone(), sink.clone(), store_arc.clone(),cas.clone()) {
-            Ok(tx) => Some(tx),
+        let net_tx = match NetManager::spawn(cfg.clone(), sink.clone(), store_arc.clone(),cas.clone(), log_store_arc.clone()) {
+            Ok(tx) => {
+                let mut log_store = log_store_arc.lock().unwrap();
+                let _ = log_store.log_info(
+                    "Init",
+                    "NetManager started successfully",
+                    Some("网络管理器启动成功"),
+                );
+                Some(tx)
+            }
             Err(e) => {
-                eprintln!("[Core] Failed to start NetManager: {}", e);
+                let mut log_store = log_store_arc.lock().unwrap();
+                let _ = log_store.log_warn(
+                    "Init",
+                    &format!("NetManager failed to start: {} (continuing without network)", e),
+                    Some(&format!("网络管理器启动失败: {}（将在无网络模式下继续）", e)),
+                );
                 None
             }
         };
@@ -135,15 +223,47 @@ impl Core {
     */
     pub fn ingest_local_copy(&self, snapshot: ClipboardSnapshot) -> anyhow::Result<ItemMeta> {
         // Step 1：只做计划，不碰 DB/CAS
-        let plan = self.plan_local_ingest(&snapshot, false)?;
+        let plan = match self.plan_local_ingest(&snapshot, false) {
+            Ok(p) => p,
+            Err(e) => {
+                let mut log_store = self.inner.log_store.lock().unwrap();
+                let _ = log_store.log_error(
+                    "Ingest",
+                    &format!("Ingest planning failed: {}", e),
+                    Some(&format!("内容摄入规划失败: {}", e)),
+                    Some(&e.to_string()),
+                );
+                return Err(e);
+            }
+        };
         // Step 2：真正落库 + CAS + 发事件
-        self.apply_ingest(plan)
+        match self.apply_ingest(plan) {
+            Ok(meta) => Ok(meta),
+            Err(e) => {
+                let mut log_store = self.inner.log_store.lock().unwrap();
+                let _ = log_store.log_error(
+                    "Ingest",
+                    &format!("Ingest failed: {}", e),
+                    Some(&format!("内容摄入失败: {}", e)),
+                    Some(&e.to_string()),
+                );
+                Err(e)
+            }
+        }
     }
 
     pub fn shutdown(&self) {
         self.inner.shutdown();
     }
 
+    /// 清空所有缓存（CAS blobs、临时文件等）
+    pub fn clear_cache(&self) -> anyhow::Result<()> {
+        self.inner.cas.clear_all()?;
+        // 同时清空数据库中的缓存记录
+        let mut store = self.inner.store.lock().unwrap();
+        store.conn.execute("DELETE FROM content_cache", [])?;
+        Ok(())
+    }
 
     /**
      * 规划本地内容的摄入流程。
@@ -162,6 +282,26 @@ impl Core {
     ) -> anyhow::Result<IngestPlan> {
         if self.inner.is_shutdown.load(Ordering::Acquire) {
             anyhow::bail!("core already shutdown");
+        }
+
+        // 获取内容类型和大小
+        let (content_type, size_bytes) = match snapshot {
+            ClipboardSnapshot::Text { text_utf8, .. } => ("Text", text_utf8.len() as i64),
+            ClipboardSnapshot::Image { bytes, .. } => ("Image", bytes.len() as i64),
+            ClipboardSnapshot::FileList { files, .. } => {
+                let total: i64 = files.iter().map(|f| f.size_bytes).sum();
+                ("FileList", total)
+            }
+        };
+
+        // 记录规划日志
+        {
+            let mut log_store = self.inner.log_store.lock().unwrap();
+            let _ = log_store.log_info(
+                "Ingest",
+                &format!("Planning ingest for clipboard content, type: {}, size: {} bytes", content_type, size_bytes),
+                Some(&format!("正在规划剪贴板内容摄入，类型: {}，大小: {} 字节", content_type, size_bytes)),
+            );
         }
 
         let deps = LocalIngestDeps {
@@ -183,6 +323,7 @@ impl Core {
         let now = now_ms();
         let meta_clone = plan.meta.clone();
         let sha = plan.meta.content.sha256.clone();
+        let item_id = plan.meta.item_id.clone();
 
         // Phase A：落库（只在这个 block 里持锁）
         let cache = {
@@ -198,12 +339,35 @@ impl Core {
             if self.inner.cas.blob_exists(&sha) {
                 let mut store = self.inner.store.lock().unwrap();
                 store.mark_cache_present(&sha, now)?;
+                
+                // 记录 CAS 写入成功
+                let mut log_store = self.inner.log_store.lock().unwrap();
+                let _ = log_store.log_info(
+                    "Ingest",
+                    &format!("CAS blob written successfully: {}", sha),
+                    Some(&format!("CAS 对象写入成功: {}", sha)),
+                );
             } else {
+                let mut log_store = self.inner.log_store.lock().unwrap();
+                let _ = log_store.log_error(
+                    "Ingest",
+                    "CAS write failed: blob missing after put_if_absent",
+                    Some("CAS 写入失败: put_if_absent 后对象缺失"),
+                    Some("CAS write failed: blob missing after put_if_absent"),
+                );
                 anyhow::bail!("CAS write failed: blob missing after put_if_absent");
             }
         } else {
             let mut store = self.inner.store.lock().unwrap();
             store.touch_cache(&sha, now)?;
+            
+            // 记录 CAS 去重命中
+            let mut log_store = self.inner.log_store.lock().unwrap();
+            let _ = log_store.log_debug(
+                "Ingest",
+                &format!("CAS blob already exists, skipping write: {}", sha),
+                Some(&format!("CAS 对象已存在，跳过写入: {}", sha)),
+            );
         }
 
         // 事件（不需要 store 锁）
@@ -216,6 +380,16 @@ impl Core {
           }
         });
         self.inner.emit(meta_evt.to_string());
+
+        // 记录摄入成功
+        {
+            let mut log_store = self.inner.log_store.lock().unwrap();
+            let _ = log_store.log_info(
+                "Ingest",
+                &format!("Ingest applied successfully, item_id: {}", item_id),
+                Some(&format!("内容摄入成功，项目 ID: {}", item_id)),
+            );
+        }
 
         // --- M1 集成：广播元数据到网络 ---
         if let Some(net_tx) = &self.inner.net {

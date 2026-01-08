@@ -30,6 +30,121 @@ public sealed partial class SettingsPage : Page
     {
         base.OnNavigatedTo(e);
         await ViewModel.InitializeAsync();
+        
+        // 初始化核心开关状态
+        var coreHost = App.GetService<ICoreHostService>();
+        CoreToggleSwitch.IsOn = coreHost.State == CoreState.Ready;
+        
+        // 订阅状态变化
+        coreHost.StateChanged += OnCoreStateChanged;
+    }
+    
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        base.OnNavigatedFrom(e);
+        // 取消订阅
+        var coreHost = App.GetService<ICoreHostService>();
+        coreHost.StateChanged -= OnCoreStateChanged;
+    }
+    
+    private void OnCoreStateChanged(CoreState state)
+    {
+        // 在UI线程更新开关状态
+        App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
+        {
+            CoreToggleSwitch.IsOn = state == CoreState.Ready;
+        });
+    }
+    
+    private async void CoreToggleSwitch_Toggled(object sender, RoutedEventArgs e)
+    {
+        var toggleSwitch = sender as ToggleSwitch;
+        if (toggleSwitch == null) return;
+        
+        var coreHost = App.GetService<ICoreHostService>();
+        
+        // #region agent log
+        System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: IsOn={toggleSwitch.IsOn}, CoreState={coreHost.State}");
+        // #endregion
+        
+        if (toggleSwitch.IsOn)
+        {
+            // 开启核心
+            if (coreHost.State != CoreState.Ready)
+            {
+                // #region agent log
+                System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: starting core initialization");
+                // #endregion
+                try
+                {
+                    await coreHost.InitializeAsync();
+                    // #region agent log
+                    System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core initialization completed, State={coreHost.State}");
+                    // #endregion
+                }
+                catch (Exception ex)
+                {
+                    // #region agent log
+                    System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core initialization failed: {ex.Message}");
+                    // #endregion
+                    var err = new ContentDialog
+                    {
+                        Title = "错误",
+                        Content = $"启动核心失败: {ex.Message}",
+                        PrimaryButtonText = "OK",
+                        XamlRoot = this.Content.XamlRoot
+                    };
+                    await err.ShowAsync();
+                    // 恢复开关状态
+                    toggleSwitch.IsOn = false;
+                }
+            }
+            else
+            {
+                // #region agent log
+                System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core already Ready, no action needed");
+                // #endregion
+            }
+        }
+        else
+        {
+            // 关闭核心
+            if (coreHost.State != CoreState.NotLoaded)
+            {
+                // #region agent log
+                System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: shutting down core, current State={coreHost.State}");
+                // #endregion
+                try
+                {
+                    await coreHost.ShutdownAsync();
+                    // #region agent log
+                    System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core shutdown completed, State={coreHost.State}");
+                    // #endregion
+                }
+                catch (Exception ex)
+                {
+                    // #region agent log
+                    System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core shutdown failed: {ex.Message}");
+                    // #endregion
+                    var err = new ContentDialog
+                    {
+                        Title = "错误",
+                        Content = $"关闭核心失败: {ex.Message}",
+                        PrimaryButtonText = "OK",
+                        XamlRoot = this.Content.XamlRoot
+                    };
+                    await err.ShowAsync();
+                    // 恢复开关状态
+                    toggleSwitch.IsOn = true;
+                }
+            }
+            else
+            {
+                // #region agent log
+                System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core already NotLoaded, no action needed");
+                // #endregion
+            }
+        }
     }
 
     private void ViewModel_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -225,21 +340,19 @@ public sealed partial class SettingsPage : Page
                 return;
             }
 
-            // 使用核心函数清空缓存（如果核心提供了缓存清理接口）
-            // 注意：目前核心可能没有缓存清理接口，这里先保留占位
-            // 如果核心没有提供，可能需要直接删除目录
-            // 但根据用户要求，应该使用核心函数，所以这里先注释掉直接删除的逻辑
-            
-            // TODO: 如果核心提供了缓存清理接口，使用它
-            // 目前先提示用户
-            var notImplemented = new ContentDialog
+            // 使用核心函数清空缓存
+            await Task.Run(() =>
             {
-                Title = "提示",
-                Content = "缓存清理功能需要核心提供接口支持",
+                ClipBridgeShell_CS.Interop.CoreInterop.ClearCache(handle);
+            });
+
+            var done = new ContentDialog
+            {
+                Title = loc.GetLocalizedString("Settings_DeleteCacheDone"),
                 PrimaryButtonText = "OK",
                 XamlRoot = this.Content.XamlRoot
             };
-            await notImplemented.ShowAsync();
+            await done.ShowAsync();
         }
         catch (Exception ex)
         {

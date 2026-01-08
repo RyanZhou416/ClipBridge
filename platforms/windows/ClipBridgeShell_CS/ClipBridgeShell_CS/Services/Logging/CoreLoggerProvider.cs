@@ -15,6 +15,8 @@ public sealed class CoreLoggerProvider : ILoggerProvider
     private readonly CoreLogDispatcher _dispatcher;
     private readonly StashLogManager _stashManager;
     private readonly Dictionary<string, CoreLogger> _loggers = new();
+    private readonly HashSet<long> _pendingStashedLogIds = new(); // 跟踪待写入的暂存日志ID
+    private readonly object _pendingLock = new(); // 保护 _pendingStashedLogIds 的锁
 
     public CoreLoggerProvider(ICoreHostService coreHost, CoreLogDispatcher dispatcher, StashLogManager stashManager)
     {
@@ -24,6 +26,9 @@ public sealed class CoreLoggerProvider : ILoggerProvider
 
         // 监听核心状态变化
         _coreHost.StateChanged += OnCoreStateChanged;
+        
+        // 监听日志写入完成回调
+        _dispatcher.BatchWritten += OnBatchWritten;
     }
 
     private void OnCoreStateChanged(CoreState state)
@@ -63,6 +68,16 @@ public sealed class CoreLoggerProvider : ILoggerProvider
         }
 
         // 使用 CoreLogDispatcher 批量写入暂存日志（更高效）
+        // 记录所有待写入的暂存日志ID，用于跟踪写入完成状态
+        lock (_pendingLock)
+        {
+            _pendingStashedLogIds.Clear();
+            foreach (var entry in stashedLogs)
+            {
+                _pendingStashedLogIds.Add(entry.Id);
+            }
+        }
+        
         int enqueuedCount = 0;
         foreach (var entry in stashedLogs)
         {
@@ -75,21 +90,20 @@ public sealed class CoreLoggerProvider : ILoggerProvider
                 // #region agent log
                 System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] Failed to enqueue stashed log: id={entry.Id}");
                 // #endregion
+                // 如果入队失败，从待写入列表中移除
+                lock (_pendingLock)
+                {
+                    _pendingStashedLogIds.Remove(entry.Id);
+                }
             }
         }
         
         // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] Enqueued {enqueuedCount}/{stashedLogs.Count} stashed logs to dispatcher");
+        System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] Enqueued {enqueuedCount}/{stashedLogs.Count} stashed logs to dispatcher, pending count={_pendingStashedLogIds.Count}");
         // #endregion
-
-        // 等待一小段时间，让dispatcher处理一些日志
-        await Task.Delay(500);
-
-        // 清空暂存日志（即使部分日志还在队列中，也会被dispatcher处理）
-        _stashManager.Clear();
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] Stashed logs cleared after enqueueing");
-        // #endregion
+        
+        // 注意：不再使用固定延迟，而是通过 OnBatchWritten 回调来检查所有暂存日志是否已写入
+        // 如果所有暂存日志都已写入，OnBatchWritten 会自动清空暂存文件
     }
 
     public ILogger CreateLogger(string categoryName)
@@ -108,11 +122,56 @@ public sealed class CoreLoggerProvider : ILoggerProvider
         return logger;
     }
 
+    /// <summary>
+    /// 当一批日志写入完成时触发
+    /// </summary>
+    private void OnBatchWritten(List<LogEntry> writtenEntries)
+    {
+        lock (_pendingLock)
+        {
+            if (_pendingStashedLogIds.Count == 0)
+            {
+                // 没有待写入的暂存日志，无需处理
+                return;
+            }
+            
+            // 从待写入列表中移除已写入的日志
+            foreach (var entry in writtenEntries)
+            {
+                _pendingStashedLogIds.Remove(entry.Id);
+            }
+            
+            // #region agent log
+            System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] OnBatchWritten: written {writtenEntries.Count} entries, remaining pending={_pendingStashedLogIds.Count}");
+            // #endregion
+            
+            // 如果所有暂存日志都已写入，清空暂存文件
+            if (_pendingStashedLogIds.Count == 0)
+            {
+                // #region agent log
+                System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] All stashed logs written, clearing stash file");
+                // #endregion
+                _stashManager.Clear();
+                // #region agent log
+                System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] Stashed logs cleared after all entries written");
+                // #endregion
+            }
+        }
+    }
+
     public void Dispose()
     {
         _coreHost.StateChanged -= OnCoreStateChanged;
-        _dispatcher?.Dispose();
+        if (_dispatcher != null)
+        {
+            _dispatcher.BatchWritten -= OnBatchWritten;
+            _dispatcher.Dispose();
+        }
         _loggers.Clear();
+        lock (_pendingLock)
+        {
+            _pendingStashedLogIds.Clear();
+        }
     }
 }
 
@@ -173,6 +232,15 @@ internal sealed class CoreLogger : ILogger
         var exceptionStr = exception?.ToString();
         var propsJson = SerializeProperties(state);
 
+        // 获取多语言消息（从翻译器获取中英文版本）
+        var (messageEn, messageZhCn) = LogMessageTranslator.GetTranslated(message);
+
+        // #region agent log
+        System.Diagnostics.Debug.WriteLine(
+            $"[CoreLogger] H_B: Creating log entry. Component: {component}, Category: {category}, Level: {level}"
+        );
+        // #endregion
+
         var entry = new LogEntry
         {
             Id = GetNextId(),
@@ -180,7 +248,9 @@ internal sealed class CoreLogger : ILogger
             Level = level,
             Component = component,
             Category = category,
-            Message = message,
+            Message = message, // 向后兼容
+            MessageEn = messageEn,
+            MessageZhCn = messageZhCn,
             Exception = exceptionStr,
             PropsJson = propsJson
         };

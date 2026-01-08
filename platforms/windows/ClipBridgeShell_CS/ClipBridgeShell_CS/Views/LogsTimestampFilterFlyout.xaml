@@ -1,0 +1,33 @@
+<UserControl
+    x:Class="ClipBridgeShell_CS.Views.LogsTimestampFilterFlyout"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    MinWidth="300">
+    
+    <StackPanel Spacing="12" Padding="16">
+        <TextBlock Text="时间范围过滤" FontWeight="SemiBold" FontSize="14" />
+        
+        <StackPanel Spacing="8">
+            <CheckBox x:Name="StartTimeUnlimitedCheckBox" Content="开始时间：无限" IsChecked="True" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <DatePicker x:Name="StartDatePicker" IsEnabled="{x:Bind StartTimeUnlimitedCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                <TimePicker x:Name="StartTimePicker" IsEnabled="{x:Bind StartTimeUnlimitedCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+            </StackPanel>
+        </StackPanel>
+        
+        <StackPanel Spacing="8">
+            <CheckBox x:Name="EndTimeNowCheckBox" Content="结束时间：现在" IsChecked="True" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <DatePicker x:Name="EndDatePicker" IsEnabled="{x:Bind EndTimeNowCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                <TimePicker x:Name="EndTimePicker" IsEnabled="{x:Bind EndTimeNowCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+            </StackPanel>
+        </StackPanel>
+        
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+            <Button Content="重置" Click="OnResetClick" />
+        </StackPanel>
+    </StackPanel>
+</UserControl>

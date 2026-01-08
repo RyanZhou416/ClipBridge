@@ -13,4 +13,5 @@ public enum CoreState
     Ready,
     Degraded,
     ShuttingDown,
+    NotInitialized,
 }
