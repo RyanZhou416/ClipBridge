@@ -7,6 +7,9 @@ use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 use anyhow::Context;
 use cb_core::api::{Core, CoreEventSink};
+use cb_core::logs::LogStore;
+use cb_core::stats::StatsStore;
+use cb_core::util::now_ms;
 
 use crate::error::{err_json, ok_json};
 
@@ -506,6 +509,448 @@ pub extern "C" fn cb_get_item_meta(h: *mut cb_handle, item_id_json: *const c_cha
 	match run {
 		Ok(s) => crate::ret(s),
 		Err(e) => crate::ret(crate::error::err_json("GET_ITEM_FAILED", &format!("{e:#}"))),
+	}
+}
+
+/// 写入日志
+#[no_mangle]
+pub extern "C" fn cb_logs_write(
+	h: *mut cb_handle,
+	level: i32,
+	category: *const c_char,
+	message: *const c_char,
+	exception: *const c_char,
+	props_json: *const c_char,
+	out_id: *mut i64,
+) -> i32 {
+	let run = (|| -> anyhow::Result<()> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let category_s = cstr_to_str(category)?;
+		let message_s = cstr_to_str(message)?;
+		let exception_s = if exception.is_null() {
+			None
+		} else {
+			Some(cstr_to_str(exception)?)
+		};
+		let props_json_s = if props_json.is_null() {
+			None
+		} else {
+			Some(cstr_to_str(props_json)?)
+		};
+
+		let ts_utc = cb_core::util::now_ms();
+		let component = "Core"; // 从Core写入的日志
+
+		let mut log_store = handle.core.inner.log_store.lock().unwrap();
+		let id = log_store.write(
+			ts_utc,
+			level,
+			component,
+			category_s,
+			message_s,
+			exception_s.as_deref(),
+			props_json_s.as_deref(),
+		)?;
+
+		unsafe {
+			if !out_id.is_null() {
+				*out_id = id;
+			}
+		}
+		Ok(())
+	})();
+
+	match run {
+		Ok(_) => 0,
+		Err(_) => 1,
+	}
+}
+
+/// 查询增量日志 (after_id)
+#[no_mangle]
+pub extern "C" fn cb_logs_query_after_id(
+	h: *mut cb_handle,
+	after_id: i64,
+	level_min: i32,
+	like: *const c_char,
+	limit: i32,
+	out_json: *mut *const c_char,
+) -> i32 {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let like_s = if like.is_null() {
+			None
+		} else {
+			Some(cstr_to_str(like)?)
+		};
+
+		let log_store = handle.core.inner.log_store.lock().unwrap();
+		let entries = log_store.query_after_id(after_id, level_min, like_s.as_deref(), limit)?;
+
+		Ok(crate::error::ok_json(entries))
+	})();
+
+	match run {
+		Ok(s) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(s);
+				}
+			}
+			0
+		}
+		Err(_) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(crate::error::err_json("QUERY_FAILED", "Failed to query logs"));
+				}
+			}
+			1
+		}
+	}
+}
+
+/// 查询时间范围内的日志
+#[no_mangle]
+pub extern "C" fn cb_logs_query_range(
+	h: *mut cb_handle,
+	start_ms: i64,
+	end_ms: i64,
+	level_min: i32,
+	like: *const c_char,
+	limit: i32,
+	offset: i32,
+	out_json: *mut *const c_char,
+) -> i32 {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let like_s = if like.is_null() {
+			None
+		} else {
+			Some(cstr_to_str(like)?)
+		};
+
+		let log_store = handle.core.inner.log_store.lock().unwrap();
+		let entries = log_store.query_range(start_ms, end_ms, level_min, like_s.as_deref(), limit, offset)?;
+
+		Ok(crate::error::ok_json(entries))
+	})();
+
+	match run {
+		Ok(s) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(s);
+				}
+			}
+			0
+		}
+		Err(_) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(crate::error::err_json("QUERY_FAILED", "Failed to query logs"));
+				}
+			}
+			1
+		}
+	}
+}
+
+/// 获取日志统计
+#[no_mangle]
+pub extern "C" fn cb_logs_stats(h: *mut cb_handle, out_json: *mut *const c_char) -> i32 {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let log_store = handle.core.inner.log_store.lock().unwrap();
+		let stats = log_store.stats()?;
+
+		Ok(crate::error::ok_json(stats))
+	})();
+
+	match run {
+		Ok(s) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(s);
+				}
+			}
+			0
+		}
+		Err(_) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(crate::error::err_json("STATS_FAILED", "Failed to get log stats"));
+				}
+			}
+			1
+		}
+	}
+}
+
+/// 删除指定时间之前的日志
+#[no_mangle]
+pub extern "C" fn cb_logs_delete_before(h: *mut cb_handle, cutoff_ms: i64, out_deleted: *mut i64) -> i32 {
+	let run = (|| -> anyhow::Result<i64> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let mut log_store = handle.core.inner.log_store.lock().unwrap();
+		let deleted = log_store.delete_before(cutoff_ms)?;
+		Ok(deleted)
+	})();
+
+	match run {
+		Ok(deleted) => {
+			unsafe {
+				if !out_deleted.is_null() {
+					*out_deleted = deleted;
+				}
+			}
+			0
+		}
+		Err(_) => 1,
+	}
+}
+
+/// 清空核心数据库
+#[no_mangle]
+pub extern "C" fn cb_clear_core_db(h: *mut cb_handle) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let mut store = handle.core.inner.store.lock().unwrap();
+		store.clear_core_db()?;
+		Ok(crate::error::ok_json(serde_json::json!({ "ok": true })))
+	})();
+
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("CLEAR_FAILED", &format!("{e:#}"))),
+	}
+}
+
+/// 清空日志数据库
+#[no_mangle]
+pub extern "C" fn cb_clear_logs_db(h: *mut cb_handle) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let mut log_store = handle.core.inner.log_store.lock().unwrap();
+		log_store.clear_logs_db()?;
+		Ok(crate::error::ok_json(serde_json::json!({ "ok": true })))
+	})();
+
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("CLEAR_FAILED", &format!("{e:#}"))),
+	}
+}
+
+/// 清空统计数据库
+#[no_mangle]
+pub extern "C" fn cb_clear_stats_db(h: *mut cb_handle) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let mut stats_store = handle.core.inner.stats_store.lock().unwrap();
+		stats_store.clear_stats_db()?;
+		Ok(crate::error::ok_json(serde_json::json!({ "ok": true })))
+	})();
+
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("CLEAR_FAILED", &format!("{e:#}"))),
+	}
+}
+
+/// 查询缓存统计
+#[no_mangle]
+pub extern "C" fn cb_query_cache_stats(h: *mut cb_handle, query_json: *const c_char) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let query_str = cstr_to_str(query_json)?;
+		
+		#[derive(serde::Deserialize)]
+		struct StatsQuery {
+			#[serde(default)]
+			start_ts_ms: i64,
+			#[serde(default)]
+			end_ts_ms: i64,
+			#[serde(default = "default_bucket")]
+			bucket_sec: i32,
+		}
+		fn default_bucket() -> i32 { 10 }
+
+		let query: StatsQuery = serde_json::from_str(query_str)?;
+		let start_ts = if query.start_ts_ms == 0 && query.end_ts_ms == 0 {
+			// 默认窗口：最近60分钟
+			cb_core::util::now_ms() - 60 * 60 * 1000
+		} else {
+			query.start_ts_ms
+		};
+		let end_ts = if query.end_ts_ms == 0 {
+			cb_core::util::now_ms()
+		} else {
+			query.end_ts_ms
+		};
+
+		let stats_store = handle.core.inner.stats_store.lock().unwrap();
+		let entries = stats_store.query_cache_stats(start_ts, end_ts, query.bucket_sec)?;
+
+		// 解析data_json并构建series
+		let mut series = Vec::new();
+		for entry in entries {
+			let data: serde_json::Value = serde_json::from_str(&entry.data_json)?;
+			series.push(serde_json::json!({
+				"ts_ms": entry.ts_ms,
+				"cache_bytes": data.get("cache_bytes").and_then(|v| v.as_i64()).unwrap_or(0)
+			}));
+		}
+
+		// 获取当前缓存大小（从store）
+		let store = handle.core.inner.store.lock().unwrap();
+		let current_cache_bytes = store.sum_present_bytes().unwrap_or(0);
+
+		Ok(crate::error::ok_json(serde_json::json!({
+			"window": {
+				"start_ts_ms": start_ts,
+				"end_ts_ms": end_ts,
+				"bucket_sec": query.bucket_sec
+			},
+			"series": series,
+			"current_cache_bytes": current_cache_bytes
+		})))
+	})();
+
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("QUERY_FAILED", &format!("{e:#}"))),
+	}
+}
+
+/// 查询网络统计
+#[no_mangle]
+pub extern "C" fn cb_query_net_stats(h: *mut cb_handle, query_json: *const c_char) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let query_str = cstr_to_str(query_json)?;
+		
+		#[derive(serde::Deserialize)]
+		struct StatsQuery {
+			#[serde(default)]
+			start_ts_ms: i64,
+			#[serde(default)]
+			end_ts_ms: i64,
+			#[serde(default = "default_bucket")]
+			bucket_sec: i32,
+		}
+		fn default_bucket() -> i32 { 10 }
+
+		let query: StatsQuery = serde_json::from_str(query_str)?;
+		let start_ts = if query.start_ts_ms == 0 && query.end_ts_ms == 0 {
+			cb_core::util::now_ms() - 60 * 60 * 1000
+		} else {
+			query.start_ts_ms
+		};
+		let end_ts = if query.end_ts_ms == 0 {
+			cb_core::util::now_ms()
+		} else {
+			query.end_ts_ms
+		};
+
+		let stats_store = handle.core.inner.stats_store.lock().unwrap();
+		let entries = stats_store.query_net_stats(start_ts, end_ts, query.bucket_sec)?;
+
+		let mut series = Vec::new();
+		for entry in entries {
+			let data: serde_json::Value = serde_json::from_str(&entry.data_json)?;
+			series.push(serde_json::json!({
+				"ts_ms": entry.ts_ms,
+				"bytes_sent": data.get("bytes_sent").and_then(|v| v.as_i64()).unwrap_or(0),
+				"bytes_recv": data.get("bytes_recv").and_then(|v| v.as_i64()).unwrap_or(0)
+			}));
+		}
+
+		Ok(crate::error::ok_json(serde_json::json!({
+			"window": {
+				"start_ts_ms": start_ts,
+				"end_ts_ms": end_ts,
+				"bucket_sec": query.bucket_sec
+			},
+			"series": series
+		})))
+	})();
+
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("QUERY_FAILED", &format!("{e:#}"))),
+	}
+}
+
+/// 查询活动统计
+#[no_mangle]
+pub extern "C" fn cb_query_activity_stats(h: *mut cb_handle, query_json: *const c_char) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let query_str = cstr_to_str(query_json)?;
+		
+		#[derive(serde::Deserialize)]
+		struct StatsQuery {
+			#[serde(default)]
+			start_ts_ms: i64,
+			#[serde(default)]
+			end_ts_ms: i64,
+			#[serde(default = "default_bucket")]
+			bucket_sec: i32,
+		}
+		fn default_bucket() -> i32 { 60 }
+
+		let query: StatsQuery = serde_json::from_str(query_str)?;
+		let start_ts = if query.start_ts_ms == 0 && query.end_ts_ms == 0 {
+			// 默认窗口：最近24小时
+			cb_core::util::now_ms() - 24 * 60 * 60 * 1000
+		} else {
+			query.start_ts_ms
+		};
+		let end_ts = if query.end_ts_ms == 0 {
+			cb_core::util::now_ms()
+		} else {
+			query.end_ts_ms
+		};
+
+		let stats_store = handle.core.inner.stats_store.lock().unwrap();
+		let entries = stats_store.query_activity_stats(start_ts, end_ts, query.bucket_sec)?;
+
+		let mut series = Vec::new();
+		for entry in entries {
+			let data: serde_json::Value = serde_json::from_str(&entry.data_json)?;
+			series.push(serde_json::json!({
+				"ts_ms": entry.ts_ms,
+				"text_count": data.get("text_count").and_then(|v| v.as_i64()).unwrap_or(0),
+				"image_count": data.get("image_count").and_then(|v| v.as_i64()).unwrap_or(0),
+				"files_count": data.get("files_count").and_then(|v| v.as_i64()).unwrap_or(0)
+			}));
+		}
+
+		Ok(crate::error::ok_json(serde_json::json!({
+			"window": {
+				"start_ts_ms": start_ts,
+				"end_ts_ms": end_ts,
+				"bucket_sec": query.bucket_sec
+			},
+			"series": series
+		})))
+	})();
+
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("QUERY_FAILED", &format!("{e:#}"))),
 	}
 }
 

@@ -19,4 +19,5 @@ public interface ICoreHostService
     string GetDiagnosticsText();
     Task<HistoryPage> ListHistoryAsync(HistoryQuery query);
     Task IngestLocalCopyAsync(ClipBridgeShell_CS.Core.Models.ClipboardSnapshot snapshot);
+    IntPtr GetHandle(); // 获取核心句柄（用于日志写入等）
 }

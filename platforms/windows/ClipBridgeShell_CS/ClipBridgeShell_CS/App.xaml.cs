@@ -17,6 +17,7 @@ using ClipBridgeShell_CS.Views;
 
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -107,14 +108,54 @@ public partial class App : Application
             services.AddSingleton<IClipboardService, ClipboardService>();
             services.AddSingleton<ClipboardApplyService>();
 
+            // Logging
+            services.AddSingleton<Services.Logging.StashLogManager>();
+            services.AddSingleton<Services.Logging.CoreLogDispatcher>(sp =>
+            {
+                var coreHost = sp.GetRequiredService<ICoreHostService>();
+                return new Services.Logging.CoreLogDispatcher(coreHost);
+            });
+            services.AddSingleton<Services.Logging.CoreLoggerProvider>(sp =>
+            {
+                var coreHost = sp.GetRequiredService<ICoreHostService>();
+                var dispatcher = sp.GetRequiredService<Services.Logging.CoreLogDispatcher>();
+                var stashManager = sp.GetRequiredService<Services.Logging.StashLogManager>();
+                return new Services.Logging.CoreLoggerProvider(coreHost, dispatcher, stashManager);
+            });
+            // 注册日志提供者 - 先注册为服务
+            services.AddSingleton<Microsoft.Extensions.Logging.ILoggerProvider>(sp =>
+            {
+                var provider = sp.GetRequiredService<Services.Logging.CoreLoggerProvider>();
+                // #region agent log
+                System.Diagnostics.Debug.WriteLine($"[App] CoreLoggerProvider registered as ILoggerProvider, CoreState={sp.GetRequiredService<ICoreHostService>().State}");
+                // #endregion
+                return provider;
+            });
+
             // Views and ViewModels
             services.AddTransient<SettingsViewModel>();
             services.AddTransient<SettingsPage>();
-            services.AddTransient<LogsViewModel>();
+            services.AddTransient<LogsViewModel>(sp =>
+            {
+                var coreHost = sp.GetRequiredService<ICoreHostService>();
+                var stashManager = sp.GetRequiredService<Services.Logging.StashLogManager>();
+                var eventPump = sp.GetRequiredService<EventPumpService>();
+                return new LogsViewModel(coreHost, stashManager, eventPump);
+            });
             services.AddTransient<LogsPage>();
             services.AddTransient<DevicesViewModel>();
             services.AddTransient<DevicesPage>();
-            services.AddTransient<MainViewModel>();
+            services.AddTransient<MainViewModel>(sp =>
+            {
+                var historyStore = sp.GetRequiredService<Stores.HistoryStore>();
+                var pump = sp.GetRequiredService<EventPumpService>();
+                var coreHost = sp.GetRequiredService<ICoreHostService>();
+                var peerStore = sp.GetRequiredService<Stores.PeerStore>();
+                var transferStore = sp.GetRequiredService<Stores.TransferStore>();
+                var navigationService = sp.GetRequiredService<INavigationService>();
+                var localSettings = sp.GetRequiredService<ILocalSettingsService>();
+                return new MainViewModel(historyStore, pump, coreHost, peerStore, transferStore, navigationService, localSettings);
+            });
             services.AddTransient<MainPage>();
             services.AddTransient<ShellPage>();
             services.AddTransient<ShellViewModel>();
@@ -124,12 +165,38 @@ public partial class App : Application
             services.AddSingleton<ClipboardWatcher>();
 
             // History Service
-            services.AddTransient<HistoryViewModel>();
+            services.AddTransient<HistoryViewModel>(sp =>
+            {
+                var coreService = sp.GetRequiredService<ICoreHostService>();
+                var clipboardApply = sp.GetRequiredService<ClipboardApplyService>();
+                var historyStore = sp.GetRequiredService<Stores.HistoryStore>();
+                return new HistoryViewModel(coreService, clipboardApply, historyStore);
+            });
             services.AddTransient<HistoryPage>();
         }).
         Build();
 
         App.GetService<IAppNotificationService>().Initialize();
+
+        // 测试日志系统 - 验证日志提供者是否工作
+        // #region agent log
+        System.Diagnostics.Debug.WriteLine($"[App] Testing logger system...");
+        // #endregion
+        try
+        {
+            var loggerFactory = Host.Services.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>();
+            var testLogger = loggerFactory.CreateLogger("App");
+            testLogger.LogInformation("App started - testing log system");
+            // #region agent log
+            System.Diagnostics.Debug.WriteLine($"[App] Test log message sent via ILogger");
+            // #endregion
+        }
+        catch (Exception ex)
+        {
+            // #region agent log
+            System.Diagnostics.Debug.WriteLine($"[App] Failed to get logger: {ex.Message}");
+            // #endregion
+        }
 
         UnhandledException += App_UnhandledException;
     }

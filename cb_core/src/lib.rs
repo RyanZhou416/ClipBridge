@@ -6,8 +6,10 @@ pub mod util;
 pub mod policy;
 
 pub mod runtime;
-mod store;
-mod cas;
+pub mod store;
+pub mod logs;
+pub mod stats;
+pub mod cas;
 pub mod clipboard;
 pub mod testsupport;
 pub mod net;

@@ -23,6 +23,7 @@ public partial class SettingsViewModel : ObservableRecipient
     // 常量定义
     private const string CaptureSettingsKey = "IsClipboardCaptureEnabled";
     private const string LanguageSettingsKey = "PreferredLanguage";
+    private const string RecentItemsCountKey = "MainPage_RecentItemsCount";
 
     public sealed record ComboOption<T>(T Value, string Label);
     private bool _suppressSettingWrites;
@@ -41,6 +42,7 @@ public partial class SettingsViewModel : ObservableRecipient
 
     private bool _isClipboardCaptureEnabled;
     private string _currentLanguage = "en-US";
+    private int _recentItemsCount = 10;
 
     // 命令：重置设置
     public ICommand ResetSettingsCommand
@@ -78,6 +80,17 @@ public partial class SettingsViewModel : ObservableRecipient
         var current = Localizer.Get().GetCurrentLanguage();
         CurrentLanguage = NormalizeLanguageTag(current);
         RefreshComboOptions();
+
+        // 3. 读取RecentItemsCount
+        _suppressSettingWrites = true;
+        try
+        {
+            RecentItemsCount = await _settingsService.ReadSettingAsync<int?>(RecentItemsCountKey) ?? 10;
+        }
+        finally
+        {
+            _suppressSettingWrites = false;
+        }
     }
 
     #region Properties (Data Binding)
@@ -108,6 +121,24 @@ public partial class SettingsViewModel : ObservableRecipient
             if (SetProperty(ref _currentLanguage, value))
             {
                 SwitchLanguage(value);
+            }
+        }
+    }
+
+    // 主页显示的卡片数量
+    public int RecentItemsCount
+    {
+        get => _recentItemsCount;
+        set
+        {
+            // 限制范围：1-50
+            var clampedValue = Math.Clamp(value, 1, 50);
+            if (SetProperty(ref _recentItemsCount, clampedValue))
+            {
+                if (_suppressSettingWrites)
+                    return;
+
+                _ = _settingsService.SaveSettingAsync(RecentItemsCountKey, clampedValue);
             }
         }
     }

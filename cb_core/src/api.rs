@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::clipboard::{make_ingest_plan, ClipboardSnapshot, IngestPlan, LocalIngestDeps};
 pub(crate) use crate::model::ItemMeta;
 use crate::net::{NetCmd, NetManager};
-use crate::{cas::Cas, store::Store, util::now_ms};
+use crate::{cas::Cas, store::Store, logs::LogStore, stats::StatsStore, util::now_ms};
 pub use crate::policy::{AppConfig, GlobalPolicy};
 
 /**
@@ -77,7 +77,7 @@ pub enum PeerConnectionState {
  */
 #[derive(Clone)]
 pub struct Core {
-    pub(crate) inner: Arc<Inner>,
+    pub inner: Arc<Inner>,
 }
 
 impl Core {
@@ -92,6 +92,10 @@ impl Core {
     pub fn init(cfg: CoreConfig, sink: Arc<dyn CoreEventSink>) -> Self {
         let store = Store::open(&cfg.data_dir).expect("open store");
         let store_arc = Arc::new(Mutex::new(store));
+        let log_store = LogStore::open(&cfg.data_dir).expect("open log store");
+        let log_store_arc = Arc::new(Mutex::new(log_store));
+        let stats_store = StatsStore::open(&cfg.data_dir).expect("open stats store");
+        let stats_store_arc = Arc::new(Mutex::new(stats_store));
         let cas = Cas::new(&cfg.cache_dir).expect("init cas");
 
         // --- M1 集成：启动网络管理器 ---
@@ -110,6 +114,8 @@ impl Core {
             sink,
             is_shutdown: AtomicBool::new(false),
             store: store_arc,
+            log_store: log_store_arc,
+            stats_store: stats_store_arc,
             cas,
             net: net_tx,
         };
@@ -491,11 +497,13 @@ pub struct ContentFetchRequest {
 	// pub is_force: bool,
 }
 
-pub(crate) struct Inner {
+pub struct Inner {
     pub core_config: CoreConfig,
     pub sink: Arc<dyn CoreEventSink>,
     pub is_shutdown: AtomicBool,
     pub store: Arc<Mutex<Store>>,
+    pub log_store: Arc<Mutex<LogStore>>,
+    pub stats_store: Arc<Mutex<StatsStore>>,
     pub cas: Cas,
     pub net: Option<mpsc::Sender<NetCmd>>,
 }

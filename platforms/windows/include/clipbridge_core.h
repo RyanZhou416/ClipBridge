@@ -50,6 +50,23 @@ CB_API const char* cb_list_history(cb_handle* h, const char* query_json);
 // 查询单条元数据
 CB_API const char* cb_get_item_meta(cb_handle* h, const char* item_id_json);
 
+// 日志系统
+CB_API int cb_logs_write(cb_handle* h, int level, const char* category, const char* message, const char* exception, const char* props_json, long long* out_id);
+CB_API int cb_logs_query_after_id(cb_handle* h, long long after_id, int level_min, const char* like, int limit, const char** out_json);
+CB_API int cb_logs_query_range(cb_handle* h, long long start_ms, long long end_ms, int level_min, const char* like, int limit, int offset, const char** out_json);
+CB_API int cb_logs_stats(cb_handle* h, const char** out_json);
+CB_API int cb_logs_delete_before(cb_handle* h, long long cutoff_ms, long long* out_deleted);
+
+// 数据库清空
+CB_API const char* cb_clear_core_db(cb_handle* h);
+CB_API const char* cb_clear_logs_db(cb_handle* h);
+CB_API const char* cb_clear_stats_db(cb_handle* h);
+
+// 统计查询
+CB_API const char* cb_query_cache_stats(cb_handle* h, const char* query_json);
+CB_API const char* cb_query_net_stats(cb_handle* h, const char* query_json);
+CB_API const char* cb_query_activity_stats(cb_handle* h, const char* query_json);
+
 #ifdef __cplusplus
 }
 #endif

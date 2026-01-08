@@ -22,9 +22,7 @@ impl Store {
 
         let conn = Connection::open(db_path)?;
         Self::init_pragmas(&conn)?;
-        Self::migrate_v1(&conn)?;
-        Self::migrate_v2(&conn)?;
-        Self::migrate_v3(&conn)?;
+        Self::init_schema(&conn)?;
         Ok(Self { conn })
     }
 
@@ -39,57 +37,27 @@ impl Store {
         Ok(())
     }
 
-    /// 如果数据库模式版本尚未达到 1，则将其迁移到版本 1。
+    /// 初始化数据库模式（统一的初始化函数，合并了所有迁移）
     ///
-    /// 此函数通过 `PRAGMA user_version` 命令检查当前模式版本。
-    /// 如果版本小于 1，它将执行一系列 SQL 命令来创建和准备必要的表和索引，
-    /// 然后将模式版本更新为 1。
+    /// 此函数直接创建完整的数据库结构，不进行版本检查。
+    /// 开发阶段，每次启动都重新创建表结构（使用 CREATE TABLE IF NOT EXISTS）。
     ///
-    /// # 模式变更
-    /// - 创建 `items` 表用于存储项的元数据，并关联以下索引：
-    ///   - `idx_items_created`: 基于 `created_ts_ms` 的索引
-    ///   - `idx_items_sha256`: 基于 `sha256_hex` 的索引
-    ///   - `idx_items_owner_created`: 基于 `owner_device_id` 和 `created_ts_ms` 的复合索引
-    /// - 创建 `history` 表用于追踪项的历史数据，并关联以下索引：
-    ///   - `idx_history_account_sort`: 基于 `account_uid` 和 `sort_ts_ms DESC` 的索引
-    ///   - `idx_history_item`: 基于 `item_id` 的索引
-    /// - 创建 `content_cache` 表用于存储内容缓存信息，并关联以下索引：
-    ///   - `idx_cache_lru`: 基于 `present` 和 `last_access_ts_ms` 的索引
-    ///   - `idx_cache_size`: 基于 `present` 和 `total_bytes` 的索引
-    ///
-    /// 成功应用这些迁移后，数据库的 user version 将被设置为 1。
+    /// # 模式
+    /// - `items`: 存储项的元数据
+    /// - `history`: 追踪项的历史数据
+    /// - `content_cache`: 存储内容缓存信息
+    /// - `trusted_peers`: 记录已信任的设备指纹
     ///
     /// # 参数
-    /// - `conn`: 指向 SQLite 数据库连接的引用 (`&Connection`)，用于执行模式迁移。
+    /// - `conn`: 指向 SQLite 数据库连接的引用
     ///
     /// # 返回值
-    /// - `Ok(())`: 如果迁移成功或模式已处于版本 1。
-    /// - `Err(anyhow::Error)`: 如果在迁移过程中任何数据库操作失败。
-    ///
-    /// # 错误
-    /// 如果任何 SQL 命令执行失败，此函数将返回错误。常见原因包括：
-    /// - 数据库连接或权限问题。
-    /// - 数据库文件损坏。
-    /// - 与现有模式元素冲突，导致无法创建表或索引。
-    ///
-    /// # 示例
-    /// ```rust,ignore
-    /// use rusqlite::{Connection, Result};
-    ///
-    /// fn main() -> Result<()> {
-    ///     let conn = Connection::open_in_memory()?;
-    ///     migrate_v1(&conn)?;
-    ///     Ok(())
-    /// }
-    /// ```
-    fn migrate_v1(conn: &Connection) -> anyhow::Result<()> {
-        let user_version: i64 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
-        if user_version >= 1 {
-            return Ok(());
-        }
-
+    /// - `Ok(())`: 如果初始化成功
+    /// - `Err(anyhow::Error)`: 如果初始化失败
+    fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         conn.execute_batch(
             r#"
+            -- items 表：存储项的元数据
             CREATE TABLE IF NOT EXISTS items (
               item_id TEXT PRIMARY KEY,
               kind TEXT NOT NULL,
@@ -99,12 +67,14 @@ impl Store {
               mime TEXT NOT NULL,
               sha256_hex TEXT NOT NULL,
               preview_json TEXT,
+              files_json TEXT,
               expires_ts_ms INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_ts_ms);
             CREATE INDEX IF NOT EXISTS idx_items_sha256 ON items(sha256_hex);
             CREATE INDEX IF NOT EXISTS idx_items_owner_created ON items(owner_device_id, created_ts_ms);
 
+            -- history 表：追踪项的历史数据
             CREATE TABLE IF NOT EXISTS history (
               history_id INTEGER PRIMARY KEY AUTOINCREMENT,
               account_uid TEXT NOT NULL,
@@ -115,7 +85,9 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_history_account_sort ON history(account_uid, sort_ts_ms DESC);
             CREATE INDEX IF NOT EXISTS idx_history_item ON history(item_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_history_account_item ON history(account_uid, item_id);
 
+            -- content_cache 表：存储内容缓存信息
             CREATE TABLE IF NOT EXISTS content_cache (
               sha256_hex TEXT PRIMARY KEY,
               total_bytes INTEGER NOT NULL,
@@ -126,124 +98,14 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_cache_lru ON content_cache(present, last_access_ts_ms);
             CREATE INDEX IF NOT EXISTS idx_cache_size ON content_cache(present, total_bytes);
 
-            PRAGMA user_version = 1;
-            "#,
-        )?;
-        Ok(())
-    }
-
-
-    /// 将数据库模式迁移到版本 2。
-    ///
-    /// 此函数检查 SQLite 数据库的当前 user version，如果版本小于 2，
-    /// 则执行必要的模式修改。如果模式已经是版本 2 或更高，则不执行任何操作。
-    ///
-    /// # 版本 2 引入的变更
-    /// - 在 `items` 表中添加 `files_json` 列（类型为 `TEXT`）。
-    /// - 在 `history` 表上创建唯一索引 `idx_history_account_item`，
-    ///   以确保不会写入重复条目（相同的 `account_uid` 和 `item_id`）。
-    /// - 将 `user_version` pragma 更新为 2，表示模式已成功迁移。
-    ///
-    /// # 参数
-    /// - `conn`: 指向 SQLite 数据库连接的引用。
-    ///
-    /// # 返回值
-    /// - `Ok(())`: 如果迁移成功，或者当前版本已经是 2 或更高。
-    /// - `Err(anyhow::Error)`: 如果在迁移过程中发生错误。
-    ///
-    /// # 示例
-    /// ```rust,ignore
-    /// use rusqlite::{Connection, Result};
-    ///
-    /// fn main() -> Result<()> {
-    ///     let conn = Connection::open("my_database.db")?;
-    ///     migrate_v2(&conn)?;
-    ///     Ok(())
-    /// }
-    /// ```
-    fn migrate_v2(conn: &Connection) -> anyhow::Result<()> {
-        let user_version: i64 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
-        if user_version >= 2 {
-            return Ok(());
-        }
-
-        conn.execute_batch(
-            r#"
-            ALTER TABLE items ADD COLUMN files_json TEXT;
-
-            -- 防止同一个 item 被重复写入 history（最简单：加 unique index）
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_history_account_item ON history(account_uid, item_id);
-
-            PRAGMA user_version = 2;
-            "#,
-        )?;
-        Ok(())
-    }
-
-    /// 将数据库模式迁移到版本 3。
-    ///
-    /// 此函数检查存储在 SQLite `user_version` pragma 中的当前模式版本，
-    /// 如果尚未达到版本 3，则执行必要的迁移步骤。迁移包括创建一个 `trusted_peers` 表，
-    /// 用于存储受信任的设备指纹，并将 `user_version` 更新为 3。
-    ///
-    /// # 参数
-    /// - `conn`: 指向已建立的 SQLite 数据库连接 (`Connection`) 的引用。
-    ///
-    /// # SQLite 模式变更
-    /// - 创建一个新表 `trusted_peers`，包含以下列：
-    ///   - `account_uid` (TEXT) - 账号的唯一标识符。
-    ///   - `device_id` (TEXT) - 设备的标识符。
-    ///   - `fingerprint_sha256` (TEXT) - 设备证书的 SHA-256 指纹（以十六进制字符串存储）。
-    ///   - `updated_at_ms` (INTEGER) - 最后一次更新的时间戳（毫秒）。
-    ///   - 基于 `(account_uid, device_id)` 的复合主键。
-    /// - 将 `user_version` pragma 更新为 `3`。
-    ///
-    /// # 返回值
-    /// - `Ok(())`: 如果迁移成功，或者版本已经达到或超过 3。
-    /// - `Err(anyhow::Error)`: 如果在迁移过程中发生错误（如 SQL 执行失败）。
-    ///
-    /// # 错误
-    /// 在以下情况下，此函数可能会返回错误：
-    /// - `PRAGMA user_version` 查询失败。
-    /// - 执行批量 SQL 命令失败。
-    ///
-    /// # 示例
-    /// ```rust,ignore
-    /// use rusqlite::{Connection, Result};
-    /// use anyhow::Result as AnyhowResult;
-    ///
-    /// fn main() -> AnyhowResult<()> {
-    ///     let conn = Connection::open_in_memory()?;
-    ///     migrate_v3(&conn)?;
-    ///     Ok(())
-    /// }
-    ///
-    /// fn migrate_v3(conn: &Connection) -> AnyhowResult<()> {
-    ///     // 迁移的具体实现...
-    /// }
-    /// ```
-    ///
-    /// # 备注
-    /// 此函数遵循防御性迁移模式，仅在根据当前模式版本判定有必要时才应用更改。
-    /// 这确保了迁移是幂等的，可以安全地多次运行。
-fn migrate_v3(conn: &Connection) -> anyhow::Result<()> {
-        let user_version: i64 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0))?;
-        if user_version >= 3 {
-            return Ok(());
-        }
-
-        conn.execute_batch(
-            r#"
-            -- TOFU 表：记录已信任的设备指纹
+            -- trusted_peers 表：记录已信任的设备指纹
             CREATE TABLE IF NOT EXISTS trusted_peers (
                 account_uid TEXT NOT NULL,
                 device_id TEXT NOT NULL,
-                fingerprint_sha256 TEXT NOT NULL, -- 证书指纹 (hex)
+                fingerprint_sha256 TEXT NOT NULL,
                 updated_at_ms INTEGER NOT NULL,
                 PRIMARY KEY (account_uid, device_id)
             );
-
-            PRAGMA user_version = 3;
             "#,
         )?;
         Ok(())
@@ -742,5 +604,16 @@ pub fn insert_meta_and_history(
             }
         }
         Ok(None)
+    }
+
+    /// 清空核心数据库的所有表
+    pub fn clear_core_db(&mut self) -> anyhow::Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM history", [])?;
+        tx.execute("DELETE FROM items", [])?;
+        tx.execute("DELETE FROM content_cache", [])?;
+        tx.execute("DELETE FROM trusted_peers", [])?;
+        tx.commit()?;
+        Ok(())
     }
 }

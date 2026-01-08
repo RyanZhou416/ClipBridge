@@ -88,18 +88,44 @@
 										  IsOn="{x:Bind ViewModel.IsClipboardCaptureEnabled, Mode=TwoWay}"
 										  l:Uids.Uid="Settings_IsClipboardCaptureEnabled_ToggleSwitch"/>
 						</ctk:SettingsCard>
+
+						<!-- 主页显示的卡片数量 -->
+						<ctk:SettingsCard Header="主页显示的卡片数量"
+										  Description="设置主页 Recent Items 区域显示的卡片数量（1-50）"
+										  HeaderIcon="{ui:FontIcon Glyph=&#xE8C1;}"
+										  HorizontalAlignment="Stretch">
+							<NumberBox x:Name="RecentItemsCountBox"
+									   Value="{x:Bind ViewModel.RecentItemsCount, Mode=TwoWay}"
+									   Minimum="1"
+									   Maximum="50"
+									   SpinButtonPlacementMode="Inline"
+									   Width="120"
+									   HorizontalAlignment="Left"
+									   KeyDown="RecentItemsCountBox_KeyDown"
+									   LostFocus="RecentItemsCountBox_LostFocus"/>
+						</ctk:SettingsCard>
 					</StackPanel>
 
 					<!-- 数据库 -->
 					<StackPanel Spacing="{StaticResource SettingsItemSpacing}">
 						<TextBlock l:Uids.Uid="Settings_Database" Style="{StaticResource GroupHeaderTextStyle}"/>
-						<!-- 删除云数据库（元数据库 core.db） -->
+						<!-- 清空元数据库（core.db） -->
 						<ctk:SettingsCard l:Uids.Uid="Settings_DeleteCloudDb_SettingsCard"
 								  HeaderIcon="{ui:FontIcon Glyph=&#xE74D;}"
 								  HorizontalAlignment="Stretch">
 							<Button Click="DeleteCloudDb_Click"
 							Width="180"
 							l:Uids.Uid="Settings_DeleteCloudDb_Button"/>
+						</ctk:SettingsCard>
+
+						<!-- 清空统计数据库 -->
+						<ctk:SettingsCard Header="清空统计数据"
+								  Description="清空所有统计数据（缓存使用、网络吞吐、活动统计等）"
+								  HeaderIcon="{ui:FontIcon Glyph=&#xE74D;}"
+								  HorizontalAlignment="Stretch">
+							<Button Click="DeleteStatsDb_Click"
+							Width="180"
+							Content="清空统计数据"/>
 						</ctk:SettingsCard>
 
 						<!-- 删除缓存库（CAS blobs/tmp） -->

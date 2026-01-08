@@ -201,6 +201,11 @@ public sealed class CoreHostService : ICoreHostService
         SetState(CoreState.NotLoaded);
     }
 
+    public IntPtr GetHandle()
+    {
+        return _coreHandle;
+    }
+
     private void SetState(CoreState s)
     {
         State = s;

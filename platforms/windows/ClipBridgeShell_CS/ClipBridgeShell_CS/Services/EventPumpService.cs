@@ -16,6 +16,9 @@ public class EventPumpService
     private readonly Channel<string> _channel;
     private readonly CancellationTokenSource _cts = new();
 
+    // 日志写入事件通知
+    public event EventHandler? LogWritten;
+
     public EventPumpService(HistoryStore historyStore, PeerStore peerStore, TransferStore transferStore, ContentFetchAwaiter awaiter)
     {
         _historyStore = historyStore;
@@ -234,6 +237,15 @@ public class EventPumpService
                         : $"TRANSFER_FAILED: {reason}");
 
                     _awaiter.Fail(transferId!, ex);
+                    break;
+                }
+
+            // --- 日志写入事件
+            case "LOG_WRITTEN":
+            case "LOGS_BATCH_WRITTEN":
+                {
+                    // 通知订阅者日志已写入
+                    LogWritten?.Invoke(this, EventArgs.Empty);
                     break;
                 }
 

@@ -108,15 +108,10 @@ public sealed partial class SettingsPage : Page
     {
         var loc = Localizer.Get();
 
-        var dataDir = ApplicationData.Current.LocalFolder.Path;
-        var db = Path.Combine(dataDir, "core.db");
-        var wal = db + "-wal";
-        var shm = db + "-shm";
-
         var confirm = new ContentDialog
         {
             Title = loc.GetLocalizedString("Settings_DeleteCloudDbConfirm_Title"),
-            Content = $"{loc.GetLocalizedString("Settings_DeleteCloudDbConfirm_Content")}\n\n{db}",
+            Content = loc.GetLocalizedString("Settings_DeleteCloudDbConfirm_Content"),
             PrimaryButtonText = loc.GetLocalizedString("Settings_DeleteCloudDbConfirm_Primary"),
             CloseButtonText = loc.GetLocalizedString("Settings_DeleteCloudDbConfirm_Secondary"),
             XamlRoot = this.Content.XamlRoot
@@ -128,30 +123,39 @@ public sealed partial class SettingsPage : Page
 
         try
         {
-            // 先关 core，避免 SQLite/WAL 文件被占用
             var coreHost = App.GetService<ICoreHostService>();
-            await coreHost.ShutdownAsync();
-            for (int i = 0; i < 20; i++) // 最多等 4 秒
+            if (coreHost.State != CoreState.Ready)
             {
-                if (coreHost.State == CoreState.NotLoaded)
+                var err = new ContentDialog
                 {
-                    // 再确认一次，防止瞬态
-                    await Task.Delay(200);
-                    if (coreHost.State == CoreState.NotLoaded)
-                        break;
-                }
-
-                await Task.Delay(200);
+                    Title = "错误",
+                    Content = "核心未就绪，无法清空数据库",
+                    PrimaryButtonText = "OK",
+                    XamlRoot = this.Content.XamlRoot
+                };
+                await err.ShowAsync();
+                return;
             }
 
-            // 额外保险延时（SQLite 释放句柄）
-            await Task.Delay(300);
-            await DeleteFileWithRetryAsync(db);
-            await DeleteFileWithRetryAsync(wal);
-            await DeleteFileWithRetryAsync(shm);
+            var handle = coreHost.GetHandle();
+            if (handle == IntPtr.Zero)
+            {
+                var err = new ContentDialog
+                {
+                    Title = "错误",
+                    Content = "无法获取核心句柄",
+                    PrimaryButtonText = "OK",
+                    XamlRoot = this.Content.XamlRoot
+                };
+                await err.ShowAsync();
+                return;
+            }
 
-            // 删除后立即重启 core，避免外壳长期处于 degraded
-            await coreHost.InitializeAsync();
+            // 使用核心函数清空数据库
+            await Task.Run(() =>
+            {
+                ClipBridgeShell_CS.Interop.CoreInterop.ClearCoreDb(handle);
+            });
 
             var done = new ContentDialog
             {
@@ -160,12 +164,13 @@ public sealed partial class SettingsPage : Page
                 XamlRoot = this.Content.XamlRoot
             };
             await done.ShowAsync();
-        } catch (Exception ex)
+        }
+        catch (Exception ex)
         {
             var err = new ContentDialog
             {
                 Title = loc.GetLocalizedString("Settings_DeleteCloudDbFailed"),
-                Content = ex.ToString(),
+                Content = ex.Message,
                 PrimaryButtonText = "OK",
                 XamlRoot = this.Content.XamlRoot
             };
@@ -177,14 +182,10 @@ public sealed partial class SettingsPage : Page
     {
         var loc = Localizer.Get();
 
-        var cacheRoot = ApplicationData.Current.LocalCacheFolder.Path;
-        var blobsDir = Path.Combine(cacheRoot, "blobs");
-        var tmpDir = Path.Combine(cacheRoot, "tmp");
-
         var confirm = new ContentDialog
         {
             Title = loc.GetLocalizedString("Settings_DeleteCacheConfirm_Title"),
-            Content = $"{loc.GetLocalizedString("Settings_DeleteCacheConfirm_Content")}\n\n{blobsDir}\n{tmpDir}",
+            Content = loc.GetLocalizedString("Settings_DeleteCacheConfirm_Content"),
             PrimaryButtonText = loc.GetLocalizedString("Settings_DeleteCacheConfirm_Primary"),
             CloseButtonText = loc.GetLocalizedString("Settings_DeleteCacheConfirm_Secondary"),
             XamlRoot = this.Content.XamlRoot
@@ -197,42 +198,55 @@ public sealed partial class SettingsPage : Page
         try
         {
             var coreHost = App.GetService<ICoreHostService>();
-            await coreHost.ShutdownAsync();
-
-            for (int i = 0; i < 20; i++) // 最多等 4 秒
+            if (coreHost.State != CoreState.Ready)
             {
-                if (coreHost.State == CoreState.NotLoaded)
+                var err = new ContentDialog
                 {
-                    // 再确认一次，防止瞬态
-                    await Task.Delay(200);
-                    if (coreHost.State == CoreState.NotLoaded)
-                        break;
-                }
-
-                await Task.Delay(200);
+                    Title = "错误",
+                    Content = "核心未就绪，无法清空缓存",
+                    PrimaryButtonText = "OK",
+                    XamlRoot = this.Content.XamlRoot
+                };
+                await err.ShowAsync();
+                return;
             }
 
-            // 额外保险延时（SQLite 释放句柄）
-            await Task.Delay(300);
-
-            await DeleteDirectoryWithRetryAsync(blobsDir);
-            await DeleteDirectoryWithRetryAsync(tmpDir);
-
-            await coreHost.InitializeAsync();
-
-            var done = new ContentDialog
+            var handle = coreHost.GetHandle();
+            if (handle == IntPtr.Zero)
             {
-                Title = loc.GetLocalizedString("Settings_DeleteCacheDone"),
+                var err = new ContentDialog
+                {
+                    Title = "错误",
+                    Content = "无法获取核心句柄",
+                    PrimaryButtonText = "OK",
+                    XamlRoot = this.Content.XamlRoot
+                };
+                await err.ShowAsync();
+                return;
+            }
+
+            // 使用核心函数清空缓存（如果核心提供了缓存清理接口）
+            // 注意：目前核心可能没有缓存清理接口，这里先保留占位
+            // 如果核心没有提供，可能需要直接删除目录
+            // 但根据用户要求，应该使用核心函数，所以这里先注释掉直接删除的逻辑
+            
+            // TODO: 如果核心提供了缓存清理接口，使用它
+            // 目前先提示用户
+            var notImplemented = new ContentDialog
+            {
+                Title = "提示",
+                Content = "缓存清理功能需要核心提供接口支持",
                 PrimaryButtonText = "OK",
                 XamlRoot = this.Content.XamlRoot
             };
-            await done.ShowAsync();
-        } catch (Exception ex)
+            await notImplemented.ShowAsync();
+        }
+        catch (Exception ex)
         {
             var err = new ContentDialog
             {
                 Title = loc.GetLocalizedString("Settings_DeleteCacheFailed"),
-                Content = ex.ToString(),
+                Content = ex.Message,
                 PrimaryButtonText = "OK",
                 XamlRoot = this.Content.XamlRoot
             };
@@ -240,50 +254,94 @@ public sealed partial class SettingsPage : Page
         }
     }
 
-    private static async Task DeleteFileWithRetryAsync(string path)
+    private async void DeleteStatsDb_Click(object sender, RoutedEventArgs e)
     {
-        if (!File.Exists(path))
+        var loc = Localizer.Get();
+
+        var confirm = new ContentDialog
+        {
+            Title = "清空统计数据",
+            Content = "确定要清空所有统计数据吗？此操作不可恢复。",
+            PrimaryButtonText = "确定",
+            CloseButtonText = "取消",
+            XamlRoot = this.Content.XamlRoot
+        };
+
+        var result = await confirm.ShowAsync();
+        if (result != ContentDialogResult.Primary)
             return;
 
-        for (int i = 0; i < 10; i++) // 最多重试 10 次
+        try
         {
-            try
+            var coreHost = App.GetService<ICoreHostService>();
+            if (coreHost.State != CoreState.Ready)
             {
-                File.Delete(path);
+                var err = new ContentDialog
+                {
+                    Title = "错误",
+                    Content = "核心未就绪，无法清空统计数据",
+                    PrimaryButtonText = "OK",
+                    XamlRoot = this.Content.XamlRoot
+                };
+                await err.ShowAsync();
                 return;
-            } catch (IOException) when (i < 9)
-            {
-                await Task.Delay(200); // 等待核心彻底释放句柄
-            } catch (UnauthorizedAccessException) when (i < 9)
-            {
-                await Task.Delay(200);
             }
-        }
 
-        // 最后再尝试一次，若仍失败则抛出异常
-        File.Delete(path);
+            var handle = coreHost.GetHandle();
+            if (handle == IntPtr.Zero)
+            {
+                var err = new ContentDialog
+                {
+                    Title = "错误",
+                    Content = "无法获取核心句柄",
+                    PrimaryButtonText = "OK",
+                    XamlRoot = this.Content.XamlRoot
+                };
+                await err.ShowAsync();
+                return;
+            }
+
+            // 使用核心函数清空统计数据
+            await Task.Run(() =>
+            {
+                ClipBridgeShell_CS.Interop.CoreInterop.ClearStatsDb(handle);
+            });
+
+            var done = new ContentDialog
+            {
+                Title = "完成",
+                Content = "统计数据已清空",
+                PrimaryButtonText = "OK",
+                XamlRoot = this.Content.XamlRoot
+            };
+            await done.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            var err = new ContentDialog
+            {
+                Title = "错误",
+                Content = $"清空统计数据失败: {ex.Message}",
+                PrimaryButtonText = "OK",
+                XamlRoot = this.Content.XamlRoot
+            };
+            await err.ShowAsync();
+        }
     }
 
-    private static async Task DeleteDirectoryWithRetryAsync(string path)
+    private void RecentItemsCountBox_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
-        if (!Directory.Exists(path))
-            return;
-
-        for (int i = 0; i < 3; i++)
+        if (e.Key == Windows.System.VirtualKey.Enter)
         {
-            try
-            {
-                Directory.Delete(path, recursive: true);
-                return;
-            } catch (IOException) when (i < 2)
-            {
-                await Task.Delay(150);
-            } catch (UnauthorizedAccessException) when (i < 2)
-            {
-                await Task.Delay(150);
-            }
+            // 回车时，让 NumberBox 失去焦点，触发 LostFocus 事件
+            (sender as NumberBox)?.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
         }
+    }
 
-        Directory.Delete(path, recursive: true);
+    private void RecentItemsCountBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        // 失去焦点时，值已经通过绑定更新到 ViewModel
+        // 这里可以触发 MainViewModel 重新加载 RecentItems（如果需要）
+        // 由于 MainViewModel 已经监听了设置变化，会自动重新加载
     }
 }

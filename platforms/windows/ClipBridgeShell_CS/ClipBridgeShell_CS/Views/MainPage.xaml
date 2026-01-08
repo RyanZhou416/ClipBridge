@@ -5,52 +5,232 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:l="using:WinUI3Localizer"
+    xmlns:events="using:ClipBridgeShell_CS.Core.Models.Events"
+    xmlns:helpers="using:ClipBridgeShell_CS.Helpers"
     mc:Ignorable="d">
 
-	<Grid x:Name="ContentArea">
-		<Grid.RowDefinitions>
-				<RowDefinition Height="Auto"/>
-				<RowDefinition Height="*"/>
-			</Grid.RowDefinitions>
+    <Page.Resources>
+        <!-- 转换器 -->
+        <helpers:BooleanToColorConverter x:Key="BooleanToColorConverter"/>
+        <helpers:DeviceNameConverter x:Key="DeviceNameConverter"/>
 
-			<StackPanel Grid.Row="0" Padding="36,24,36,4">
-				<StackPanel MaxWidth="1064">
-					<TextBlock l:Uids.Uid="MainPage_Header.Text" Style="{StaticResource TitleTextBlockStyle}"/>
-				</StackPanel>
-			</StackPanel>
+        <!-- 卡片样式 -->
+        <Style x:Key="ItemCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource LayerFillColorDefaultBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Padding" Value="16"/>
+            <Setter Property="Margin" Value="8,0"/>
+            <Setter Property="MinWidth" Value="280"/>
+            <Setter Property="MaxWidth" Value="320"/>
+        </Style>
 
-		<Grid Grid.Row="1" Padding="36,0,36,0">
-			<Grid.RowDefinitions>
-				<RowDefinition Height="Auto"/>
-				<RowDefinition Height="*"/>
-			</Grid.RowDefinitions>
+        <!-- 图表容器样式 -->
+        <Style x:Key="ChartContainerStyle" TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource LayerFillColorDefaultBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Padding" Value="16"/>
+            <Setter Property="Margin" Value="0,8"/>
+        </Style>
+    </Page.Resources>
 
-			<Button Content="Simulate Core Event" 
-                Command="{x:Bind ViewModel.TestAddEventCommand}" 
-                Margin="0,0,0,12"/>
+    <Grid x:Name="ContentArea">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
 
-			<ListView Grid.Row="1" ItemsSource="{x:Bind ViewModel.HistoryItems, Mode=OneWay}">
-				<ListView.ItemTemplate>
-					<DataTemplate x:DataType="events:ItemMetaPayload" xmlns:events="using:ClipBridgeShell_CS.Core.Models.Events">
-						<Border Background="{ThemeResource LayerFillColorDefaultBrush}" 
-                            BorderThickness="1" 
-                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                            CornerRadius="4" 
-                            Padding="12" Margin="0,4,0,4">
-							<StackPanel>
-								<TextBlock Text="{x:Bind Preview}" FontWeight="Bold"/>
-								<StackPanel Orientation="Horizontal" Spacing="8" Opacity="0.6">
-									<TextBlock Text="{x:Bind ItemId}"/>
-									<TextBlock Text="|"/>
-									<TextBlock Text="{x:Bind Mime}"/>
-									<TextBlock Text="|"/>
-									<TextBlock Text="{x:Bind SourceDeviceId}"/>
-								</StackPanel>
-							</StackPanel>
-						</Border>
-					</DataTemplate>
-				</ListView.ItemTemplate>
-			</ListView>
-		</Grid>
-	</Grid>
+
+
+        <!-- 内容区（三段式布局） -->
+        <ScrollViewer x:Name="ContentScrollViewer" Grid.Row="1" Padding="36,36,36,36" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="ContentStackPanel" Spacing="24" >
+                
+                <!-- 顶部：Recent Items 横向卡片条 -->
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Recent Items" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                    <ScrollViewer HorizontalScrollMode="Auto" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled">
+                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.RecentItems, Mode=OneWay}">
+                            <ItemsRepeater.Layout>
+                                <StackLayout Orientation="Horizontal" Spacing="0"/>
+                            </ItemsRepeater.Layout>
+                            <ItemsRepeater.ItemTemplate>
+                                <DataTemplate x:DataType="events:ItemMetaPayload" x:DefaultBindMode="OneWay">
+                                    <Border Style="{StaticResource ItemCardStyle}">
+                                        <Grid RowDefinitions="Auto,*,Auto,Auto">
+                                            <!-- 预览区域 -->
+                                            <TextBlock Grid.Row="0" 
+                                                       Text="{x:Bind Preview.Text, TargetNullValue='(无预览)'}" 
+                                                       TextWrapping="WrapWholeWords" 
+                                                       MaxLines="3" 
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Margin="0,0,0,8"/>
+                                            
+                                            <!-- 元数据 -->
+                                            <StackPanel Grid.Row="1" Spacing="4" Opacity="0.6">
+                                                <TextBlock Text="{x:Bind Kind}" FontSize="12"/>
+                                                <TextBlock FontSize="12">
+                                                    <Run Text="From: "/>
+                                                    <Run Text="{Binding SourceDeviceId, Converter={StaticResource DeviceNameConverter}}"/>
+                                                </TextBlock>
+                                            </StackPanel>
+
+                                            <!-- 状态徽标 -->
+                                            <Border Grid.Row="2" 
+                                                    Background="#FF0F7B0F"
+                                                    CornerRadius="4"
+                                                    Padding="6,2"
+                                                    Margin="0,8,0,0"
+                                                    HorizontalAlignment="Left">
+                                                <TextBlock Text="Ready" 
+                                                           FontSize="10" 
+                                                           Foreground="White"/>
+                                            </Border>
+
+                                            <!-- 操作按钮 -->
+                                            <StackPanel Grid.Row="3" 
+                                                        Orientation="Horizontal" 
+                                                        Spacing="8" 
+                                                        Margin="0,8,0,0"
+                                                        HorizontalAlignment="Right">
+                                                <Button Content="Lock" FontSize="10" Padding="8,4"/>
+                                                <Button Content="Delete" FontSize="10" Padding="8,4"/>
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsRepeater.ItemTemplate>
+                        </ItemsRepeater>
+                    </ScrollViewer>
+                    <!-- 查看更多历史按钮 -->
+                    <Button Content="查看更多历史..." 
+                            Command="{x:Bind ViewModel.NavigateToHistoryCommand}"
+                            HorizontalAlignment="Right"
+                            Margin="8,8,0,0"/>
+                </StackPanel>
+
+                <!-- 中部：状态与操作区 -->
+                <Grid ColumnDefinitions="*,*,*" ColumnSpacing="16">
+                    <!-- A. Sharing（共享策略摘要） -->
+                    <Border Grid.Column="0" Style="{StaticResource ChartContainerStyle}">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Sharing" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                            <StackPanel Spacing="4">
+                                <TextBlock>
+                                    <Run Text="Outbound: "/>
+                                    <Run Text="{x:Bind ViewModel.OutboundPeerCount}" FontWeight="SemiBold"/>
+                                    <Run Text=" devices"/>
+                                </TextBlock>
+                                <TextBlock>
+                                    <Run Text="Inbound: "/>
+                                    <Run Text="{x:Bind ViewModel.InboundPeerCount}" FontWeight="SemiBold"/>
+                                    <Run Text=" devices"/>
+                                </TextBlock>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- B. Local Resources（本机资源） -->
+                    <Border Grid.Column="1" Style="{StaticResource ChartContainerStyle}">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Local Resources" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                            <StackPanel Spacing="4">
+                                <TextBlock>
+                                    <Run Text="Cache: "/>
+                                    <Run Text="{x:Bind ViewModel.CurrentCacheBytesFormatted}" FontWeight="SemiBold"/>
+                                </TextBlock>
+                                <TextBlock>
+                                    <Run Text="Active Transfers: "/>
+                                    <Run Text="{x:Bind ViewModel.ActiveTransfersCount}" FontWeight="SemiBold"/>
+                                </TextBlock>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- C. Toggles（全局开关） -->
+                    <Border Grid.Column="2" Style="{StaticResource ChartContainerStyle}">
+                        <StackPanel Spacing="12">
+                            <TextBlock Text="Controls" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                            <StackPanel Spacing="12">
+                                <ToggleSwitch Header="Clipboard Capture" 
+                                            IsOn="{x:Bind ViewModel.ClipboardCaptureEnabled, Mode=TwoWay}"/>
+                                <ToggleSwitch Header="Clipboard Sharing" 
+                                            IsOn="{x:Bind ViewModel.ClipboardSharingEnabled, Mode=TwoWay}"/>
+                                <Button Content="Clear Cache" 
+                                        Command="{x:Bind ViewModel.ClearCacheCommand}"
+                                        HorizontalAlignment="Stretch"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <!-- 底部：图表区 -->
+                <StackPanel Spacing="16">
+                    <TextBlock Text="Statistics" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+
+                    <!-- Cache usage over time -->
+                    <Border Style="{StaticResource ChartContainerStyle}">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Cache Usage Over Time" FontWeight="SemiBold"/>
+                            <Canvas x:Name="CacheChartCanvas" Width="600" Height="200" Background="Transparent"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Network throughput -->
+                    <Border Style="{StaticResource ChartContainerStyle}">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Network Throughput" FontWeight="SemiBold"/>
+                            <Canvas x:Name="NetworkChartCanvas" Width="600" Height="200" Background="Transparent"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Activity charts -->
+                    <Border Style="{StaticResource ChartContainerStyle}">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Global Copy Activity (24h)" FontWeight="SemiBold"/>
+                            <Canvas x:Name="ActivityChartCanvas" Width="600" Height="200" Background="Transparent"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 设备连接列表 -->
+                    <Border Style="{StaticResource ChartContainerStyle}">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="Connected Devices" FontWeight="SemiBold"/>
+                            <ListView ItemsSource="{x:Bind ViewModel.Peers, Mode=OneWay}" MaxHeight="300">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate x:DataType="events:PeerMetaPayload">
+                                        <Grid Padding="8" ColumnDefinitions="Auto,*,Auto">
+                                            <Ellipse Grid.Column="0" 
+                                                     Width="12" 
+                                                     Height="12" 
+                                                     Margin="0,0,12,0"
+                                                     VerticalAlignment="Center">
+                                                <Ellipse.Fill>
+                                                    <SolidColorBrush Color="{Binding IsOnline, Converter={StaticResource BooleanToColorConverter}}"/>
+                                                </Ellipse.Fill>
+                                            </Ellipse>
+                                            <StackPanel Grid.Column="1">
+                                                <TextBlock Text="{x:Bind Name}" FontWeight="SemiBold"/>
+                                                <TextBlock Text="{x:Bind DeviceId}" FontSize="12" Opacity="0.6"/>
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="2" 
+                                                       FontSize="12" 
+                                                       Opacity="0.6"
+                                                       HorizontalAlignment="Right">
+                                                <Run Text="{x:Bind IsOnline, Mode=OneWay}"/>
+                                            </TextBlock>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
 </Page>
