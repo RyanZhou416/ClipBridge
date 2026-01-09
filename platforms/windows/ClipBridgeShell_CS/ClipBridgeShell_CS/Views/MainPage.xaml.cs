@@ -1,9 +1,11 @@
 using System;
 using System.Linq;
+using ClipBridgeShell_CS.Core.Models.Events;
 using ClipBridgeShell_CS.Interop;
 using ClipBridgeShell_CS.ViewModels;
 using Microsoft.UI;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
@@ -53,11 +55,148 @@ public sealed partial class MainPage : Page
             CacheChartCanvas.SizeChanged += (s, args) => SafeDrawChart(DrawCacheChart, "Cache");
             NetworkChartCanvas.SizeChanged += (s, args) => SafeDrawChart(DrawNetworkChart, "Network");
             ActivityChartCanvas.SizeChanged += (s, args) => SafeDrawChart(DrawActivityChart, "Activity");
+
+            // 监听RecentItems和选中状态变化
+            ViewModel.RecentItems.CollectionChanged += (s, e) => 
+            {
+                // 当RecentItems变化时，可能需要更新UI
+                // 由于ItemsRepeater会自动更新，这里可以留空或添加其他逻辑
+            };
+            ViewModel.PropertyChanged += (s, e) =>
+            {
+                if (e.PropertyName == nameof(ViewModel.SelectedItemId))
+                {
+                    // 选中状态变化时，更新所有卡片的视觉效果
+                    UpdateCardSelection();
+                }
+            };
         }
         catch (Exception ex)
         {
             ShowError($"加载主页内容失败: {ex.Message}");
         }
+    }
+
+    private void OnCardTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
+    {
+        if (sender is Microsoft.UI.Xaml.Controls.Border border && border.Tag is ItemMetaPayload item)
+        {
+            ViewModel.SelectItemCommand.Execute(item);
+            UpdateCardSelection(border);
+        }
+    }
+
+    private void OnCardLoaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (sender is Microsoft.UI.Xaml.Controls.Border border && border.Tag is ItemMetaPayload item)
+        {
+            UpdateCardSelection(border);
+        }
+    }
+
+    private void OnStateBadgeLoaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (sender is Microsoft.UI.Xaml.Controls.Border badge)
+        {
+            // 向上查找CardBorder来获取item
+            var cardBorder = FindParent<Microsoft.UI.Xaml.Controls.Border>(badge);
+            if (cardBorder?.Tag is ItemMetaPayload item)
+            {
+                var state = ViewModel.GetItemState(item);
+                var stateColor = ViewModel.GetItemStateColor(state);
+                
+                badge.Background = new SolidColorBrush(stateColor);
+                
+                // 查找StateText
+                var stateText = FindVisualChild<Microsoft.UI.Xaml.Controls.TextBlock>(badge);
+                if (stateText != null)
+                {
+                    stateText.Text = state;
+                }
+            }
+        }
+    }
+
+    private static T? FindParent<T>(Microsoft.UI.Xaml.DependencyObject child) where T : Microsoft.UI.Xaml.DependencyObject
+    {
+        var parent = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(child);
+        while (parent != null)
+        {
+            if (parent is T result)
+                return result;
+            parent = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(parent);
+        }
+        return null;
+    }
+
+    private void OnCardPointerEntered(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Microsoft.UI.Xaml.Controls.Border border)
+        {
+            border.Opacity = 0.8;
+        }
+    }
+
+    private void OnCardPointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Microsoft.UI.Xaml.Controls.Border border)
+        {
+            border.Opacity = 1.0;
+        }
+    }
+
+    private void UpdateCardSelection()
+    {
+        // 更新所有卡片的选中状态
+        // 遍历ItemsRepeater的所有子元素
+        if (ContentScrollViewer?.Content is Microsoft.UI.Xaml.Controls.StackPanel stackPanel)
+        {
+            var itemsRepeater = FindVisualChild<Microsoft.UI.Xaml.Controls.ItemsRepeater>(stackPanel);
+            if (itemsRepeater != null)
+            {
+                var children = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(itemsRepeater);
+                for (int i = 0; i < children; i++)
+                {
+                    var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(itemsRepeater, i);
+                    if (child is Microsoft.UI.Xaml.Controls.Border border)
+                    {
+                        UpdateCardSelection(border);
+                    }
+                }
+            }
+        }
+    }
+
+    private void UpdateCardSelection(Microsoft.UI.Xaml.Controls.Border border)
+    {
+        if (border.Tag is ItemMetaPayload item)
+        {
+            var isSelected = ViewModel.IsItemSelected(item.ItemId);
+            if (isSelected)
+            {
+                border.BorderThickness = new Microsoft.UI.Xaml.Thickness(3);
+                border.BorderBrush = new SolidColorBrush(Microsoft.UI.Colors.Blue);
+            }
+            else
+            {
+                border.BorderThickness = new Microsoft.UI.Xaml.Thickness(1);
+                border.BorderBrush = new SolidColorBrush(Microsoft.UI.Colors.Gray);
+            }
+        }
+    }
+
+    private static T? FindVisualChild<T>(Microsoft.UI.Xaml.DependencyObject parent) where T : Microsoft.UI.Xaml.DependencyObject
+    {
+        for (int i = 0; i < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(parent, i);
+            if (child is T result)
+                return result;
+            var childOfChild = FindVisualChild<T>(child);
+            if (childOfChild != null)
+                return childOfChild;
+        }
+        return null;
     }
 
     private void SafeDrawChart(Action drawAction, string chartName)

@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
@@ -20,9 +20,9 @@
     <AppxAutoIncrementPackageRevision>True</AppxAutoIncrementPackageRevision>
     <AppxSymbolPackageEnabled>False</AppxSymbolPackageEnabled>
     <GenerateTestArtifacts>True</GenerateTestArtifacts>
-    <AppxBundle>Always</AppxBundle>
+    <AppxBundle>Auto</AppxBundle>
     <AppInstallerUri>C:\Users\12693\Downloads</AppInstallerUri>
-    <AppxBundlePlatforms>x86|x64</AppxBundlePlatforms>
+    <AppxBundlePlatforms>x64</AppxBundlePlatforms>
     <RustTargetDir>C:\Project\ClipBridge\target\x86_64-pc-windows-msvc\release</RustTargetDir>
   </PropertyGroup>
 
@@ -66,6 +66,15 @@
     </Page>
   </ItemGroup>
 
+  <!-- 将 core_ffi_windows.dll 作为 Content 项包含，确保 MSIX 打包时包含它 -->
+  <!-- 直接指向源文件，MSBuild 会自动处理复制到输出目录和打包 -->
+  <ItemGroup>
+    <Content Include="$(RustTargetDir)\core_ffi_windows.dll" Condition="Exists('$(RustTargetDir)\core_ffi_windows.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>core_ffi_windows.dll</Link>
+    </Content>
+  </ItemGroup>
+
   <ItemGroup Condition="'$(DisableMsixProjectCapabilityAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
     <ProjectCapability Include="Msix" />
   </ItemGroup>
@@ -73,8 +82,10 @@
   <PropertyGroup Condition="'$(DisableHasPackageAndPublishMenuAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
     <HasPackageAndPublishMenu>true</HasPackageAndPublishMenu>
   </PropertyGroup>
-    <Target Name="CopyCoreFfiDll" AfterTargets="Build">
-        <Message Text="Copying core_ffi_windows.dll from Rust target to $(OutDir)" Importance="high" />
-        <Copy SourceFiles="$(RustTargetDir)\core_ffi_windows.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
-    </Target>
+  
+  <!-- 备用：复制 core_ffi_windows.dll 到输出目录（Content 项应该已经处理了） -->
+  <Target Name="CopyCoreFfiDll" AfterTargets="Build">
+    <Message Text="Copying core_ffi_windows.dll from Rust target to $(OutDir)" Importance="high" />
+    <Copy SourceFiles="$(RustTargetDir)\core_ffi_windows.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('$(RustTargetDir)\core_ffi_windows.dll')" />
+  </Target>
 </Project>
