@@ -77,7 +77,7 @@ cargo ndk -t x86_64 build -p core-ffi-android --release
 
 #### 0.1.2.4 产物位置
 
-构建完成后，会生成如下文件：
+构建完成后，会生成如下文件：  
 
 arm64:
 `
