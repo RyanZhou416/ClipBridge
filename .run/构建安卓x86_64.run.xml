@@ -1,0 +1,28 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="构建安卓x86_64" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+    <option name="buildProfileId" value="dev" />
+    <option name="command" value="ndk -t x86_64 build -p core-ffi-android --release" />
+    <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+    <envs>
+      <env name="ANDROID_HOME" value="C:\Users\12693\AppData\Local\Android\Sdk" />
+      <env name="ANDROID_NDK" value="C:\Users\12693\AppData\Local\Android\Sdk\ndk\26.3.11579264" />
+      <env name="ANDROID_NDK_HOME" value="C:\Users\12693\AppData\Local\Android\Sdk\ndk\26.3.11579264" />
+      <env name="ANDROID_NDK_ROOT" value="C:\Users\12693\AppData\Local\Android\Sdk\ndk\26.3.11579264" />
+      <env name="ANDROID_SDK_ROOT" value="C:\Users\12693\AppData\Local\Android\Sdk" />
+      <env name="AWS_LC_SYS_CMAKE_GENERATOR" value="Ninja" />
+      <env name="CMAKE_GENERATOR" value="Ninja" />
+    </envs>
+    <option name="emulateTerminal" value="true" />
+    <option name="channel" value="DEFAULT" />
+    <option name="requiredFeatures" value="true" />
+    <option name="allFeatures" value="false" />
+    <option name="withSudo" value="false" />
+    <option name="buildTarget" value="REMOTE" />
+    <option name="backtrace" value="SHORT" />
+    <option name="isRedirectInput" value="false" />
+    <option name="redirectInputPath" value="" />
+    <method v="2">
+      <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+    </method>
+  </configuration>
+</component>
