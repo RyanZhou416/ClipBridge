@@ -335,4 +335,304 @@
   <data name="Settings_ClearLocalCertFailed" xml:space="preserve">
     <value>清除本地证书失败</value>
   </data>
+  <data name="LogsPage_SearchBox.PlaceholderText" xml:space="preserve">
+    <value>搜索...</value>
+  </data>
+  <data name="LogsPage_AutoScroll.Header" xml:space="preserve">
+    <value>自动滚动</value>
+  </data>
+  <data name="LogsPage_ScrollToBottomButton.Content" xml:space="preserve">
+    <value>滚动到底部</value>
+  </data>
+  <data name="LogsPage_TailButton.Content" xml:space="preserve">
+    <value>跟踪</value>
+  </data>
+  <data name="LogsPage_StopButton.Content" xml:space="preserve">
+    <value>停止</value>
+  </data>
+  <data name="LogsPage_RefreshButton.Content" xml:space="preserve">
+    <value>刷新</value>
+  </data>
+  <data name="LogsPage_TestLogButton.Content" xml:space="preserve">
+    <value>测试日志（切换）</value>
+  </data>
+  <data name="LogsPage_ClearViewButton.Content" xml:space="preserve">
+    <value>清空视图</value>
+  </data>
+  <data name="LogsPage_CopyButton.Content" xml:space="preserve">
+    <value>复制</value>
+  </data>
+  <data name="LogsPage_ExportCsvButton.Content" xml:space="preserve">
+    <value>导出 CSV</value>
+  </data>
+  <data name="LogsPage_DeleteSelectedButton.Content" xml:space="preserve">
+    <value>删除选中</value>
+  </data>
+  <data name="LogsPage_DeleteAllButton.Content" xml:space="preserve">
+    <value>删除全部</value>
+  </data>
+  <data name="LogsPage_StatsButton.Content" xml:space="preserve">
+    <value>统计</value>
+  </data>
+  <data name="LogsPage_ExceptionPrefix" xml:space="preserve">
+    <value> | 异常: </value>
+  </data>
+  <data name="DevicesPage_SharingSummary.Text" xml:space="preserve">
+    <value>共享摘要</value>
+  </data>
+  <data name="DevicesPage_OutboundAllowed.Text" xml:space="preserve">
+    <value>允许出站: </value>
+  </data>
+  <data name="DevicesPage_InboundAllowed.Text" xml:space="preserve">
+    <value>允许入站: </value>
+  </data>
+  <data name="DevicesPage_Devices.Text" xml:space="preserve">
+    <value> 设备</value>
+  </data>
+  <data name="DevicesPage_RefreshButton.Content" xml:space="preserve">
+    <value>刷新</value>
+  </data>
+  <data name="DevicesPage_DevicesTitle.Text" xml:space="preserve">
+    <value>设备</value>
+  </data>
+  <data name="DevicesPage_State.Text" xml:space="preserve">
+    <value>状态: </value>
+  </data>
+  <data name="DevicesPage_LastSeen.Text" xml:space="preserve">
+    <value>最后看到: </value>
+  </data>
+  <data name="DevicesPage_ShareTo.Header" xml:space="preserve">
+    <value>共享到</value>
+  </data>
+  <data name="DevicesPage_AcceptFrom.Header" xml:space="preserve">
+    <value>接受来自</value>
+  </data>
+  <data name="DevicesPage_Menu_ShareTo.Text" xml:space="preserve">
+    <value>共享到此设备</value>
+  </data>
+  <data name="DevicesPage_Menu_AcceptFrom.Text" xml:space="preserve">
+    <value>接受来自此设备</value>
+  </data>
+  <data name="DevicesPage_Menu_CopyInfo.Text" xml:space="preserve">
+    <value>复制设备信息</value>
+  </data>
+  <data name="DevicesPage_Menu_SetAlias.Text" xml:space="preserve">
+    <value>设置本地别名</value>
+  </data>
+  <data name="DevicesPage_Menu_ClearFingerprint.Text" xml:space="preserve">
+    <value>清除设备指纹</value>
+  </data>
+  <data name="MainPage_RecentItems.Text" xml:space="preserve">
+    <value>最近项目</value>
+  </data>
+  <data name="MainPage_ViewMoreHistory.Content" xml:space="preserve">
+    <value>查看更多历史...</value>
+  </data>
+  <data name="MainPage_Sharing.Text" xml:space="preserve">
+    <value>共享</value>
+  </data>
+  <data name="MainPage_Outbound.Text" xml:space="preserve">
+    <value>出站: </value>
+  </data>
+  <data name="MainPage_Inbound.Text" xml:space="preserve">
+    <value>入站: </value>
+  </data>
+  <data name="MainPage_Devices.Text" xml:space="preserve">
+    <value> 设备</value>
+  </data>
+  <data name="MainPage_LocalResources.Text" xml:space="preserve">
+    <value>本地资源</value>
+  </data>
+  <data name="MainPage_Cache.Text" xml:space="preserve">
+    <value>缓存: </value>
+  </data>
+  <data name="MainPage_ActiveTransfers.Text" xml:space="preserve">
+    <value>活动传输: </value>
+  </data>
+  <data name="MainPage_Controls.Text" xml:space="preserve">
+    <value>控制</value>
+  </data>
+  <data name="MainPage_ClipboardCapture.Header" xml:space="preserve">
+    <value>剪贴板捕获</value>
+  </data>
+  <data name="MainPage_ClipboardSharing.Header" xml:space="preserve">
+    <value>剪贴板共享</value>
+  </data>
+  <data name="MainPage_ClearCache.Content" xml:space="preserve">
+    <value>清空缓存</value>
+  </data>
+  <data name="MainPage_Statistics.Text" xml:space="preserve">
+    <value>统计</value>
+  </data>
+  <data name="MainPage_CacheUsage.Text" xml:space="preserve">
+    <value>缓存使用情况（时间）</value>
+  </data>
+  <data name="MainPage_NetworkThroughput.Text" xml:space="preserve">
+    <value>网络吞吐量</value>
+  </data>
+  <data name="MainPage_GlobalCopyActivity.Text" xml:space="preserve">
+    <value>全局复制活动（24小时）</value>
+  </data>
+  <data name="MainPage_ConnectedDevices.Text" xml:space="preserve">
+    <value>已连接设备</value>
+  </data>
+  <data name="MainPage_From.Text" xml:space="preserve">
+    <value>来自: </value>
+  </data>
+  <data name="MainPage_NoPreview.Text" xml:space="preserve">
+    <value>（无预览）</value>
+  </data>
+  <data name="MainPage_LockButton.Content" xml:space="preserve">
+    <value>锁定</value>
+  </data>
+  <data name="MainPage_DeleteButton.Content" xml:space="preserve">
+    <value>删除</value>
+  </data>
+  <data name="HistoryPage_SearchBox.PlaceholderText" xml:space="preserve">
+    <value>搜索历史记录...</value>
+  </data>
+  <data name="HistoryPage_AllTypes.PlaceholderText" xml:space="preserve">
+    <value>所有类型</value>
+  </data>
+  <data name="HistoryPage_AllTypes.Content" xml:space="preserve">
+    <value>所有类型</value>
+  </data>
+  <data name="HistoryPage_TypeText.Content" xml:space="preserve">
+    <value>文本</value>
+  </data>
+  <data name="HistoryPage_TypeImage.Content" xml:space="preserve">
+    <value>图片</value>
+  </data>
+  <data name="HistoryPage_TypeFile.Content" xml:space="preserve">
+    <value>文件</value>
+  </data>
+  <data name="HistoryPage_NoPreview.Text" xml:space="preserve">
+    <value>（无预览）</value>
+  </data>
+  <data name="HistoryPage_CopyButton.Content" xml:space="preserve">
+    <value>复制</value>
+  </data>
+  <data name="ShellPage_CoreUnavailable.Title" xml:space="preserve">
+    <value>核心不可用</value>
+  </data>
+  <data name="ShellPage_ActionsButton.Content" xml:space="preserve">
+    <value>操作</value>
+  </data>
+  <data name="ShellPage_Menu_Retry.Text" xml:space="preserve">
+    <value>重试</value>
+  </data>
+  <data name="ShellPage_Menu_CopyDiagnostics.Text" xml:space="preserve">
+    <value>复制诊断信息</value>
+  </data>
+  <data name="ShellPage_Menu_OpenLogs.Text" xml:space="preserve">
+    <value>打开日志</value>
+  </data>
+  <data name="Settings_CoreService_SettingsCard.Header" xml:space="preserve">
+    <value>核心服务</value>
+  </data>
+  <data name="Settings_CoreService_SettingsCard.Description" xml:space="preserve">
+    <value>开启或关闭核心服务</value>
+  </data>
+  <data name="Settings_RecentItemsCount_SettingsCard.Header" xml:space="preserve">
+    <value>主页显示的卡片数量</value>
+  </data>
+  <data name="Settings_RecentItemsCount_SettingsCard.Description" xml:space="preserve">
+    <value>设置主页 Recent Items 区域显示的卡片数量（1-50）</value>
+  </data>
+  <data name="Settings_DeleteStatsDb_SettingsCard.Header" xml:space="preserve">
+    <value>清空统计数据</value>
+  </data>
+  <data name="Settings_DeleteStatsDb_SettingsCard.Description" xml:space="preserve">
+    <value>清空所有统计数据（缓存使用、网络吞吐、活动统计等）</value>
+  </data>
+  <data name="Settings_DeleteStatsDb_Button.Content" xml:space="preserve">
+    <value>清空统计数据</value>
+  </data>
+  <data name="LogsLevelFilter_Title.Text" xml:space="preserve">
+    <value>级别过滤</value>
+  </data>
+  <data name="LogsLevelFilter_LevelTrace.Content" xml:space="preserve">
+    <value>Trace</value>
+  </data>
+  <data name="LogsLevelFilter_LevelDebug.Content" xml:space="preserve">
+    <value>Debug</value>
+  </data>
+  <data name="LogsLevelFilter_LevelInfo.Content" xml:space="preserve">
+    <value>Info</value>
+  </data>
+  <data name="LogsLevelFilter_LevelWarn.Content" xml:space="preserve">
+    <value>Warn</value>
+  </data>
+  <data name="LogsLevelFilter_LevelError.Content" xml:space="preserve">
+    <value>Error</value>
+  </data>
+  <data name="LogsLevelFilter_LevelCritical.Content" xml:space="preserve">
+    <value>Critical</value>
+  </data>
+  <data name="LogsLevelFilter_ResetButton.Content" xml:space="preserve">
+    <value>重置</value>
+  </data>
+  <data name="LogsCategoryFilter_Title.Text" xml:space="preserve">
+    <value>分类过滤</value>
+  </data>
+  <data name="LogsCategoryFilter_ResetButton.Content" xml:space="preserve">
+    <value>重置</value>
+  </data>
+  <data name="LogsComponentFilter_Title.Text" xml:space="preserve">
+    <value>组件过滤</value>
+  </data>
+  <data name="LogsComponentFilter_ResetButton.Content" xml:space="preserve">
+    <value>重置</value>
+  </data>
+  <data name="LogsFilter_TimeRange.Text" xml:space="preserve">
+    <value>时间范围</value>
+  </data>
+  <data name="LogsFilter_StartTimeUnlimited.Content" xml:space="preserve">
+    <value>开始时间：无限</value>
+  </data>
+  <data name="LogsFilter_EndTimeNow.Content" xml:space="preserve">
+    <value>结束时间：现在</value>
+  </data>
+  <data name="LogsFilter_Level.Text" xml:space="preserve">
+    <value>级别</value>
+  </data>
+  <data name="LogsFilter_Component.Text" xml:space="preserve">
+    <value>组件</value>
+  </data>
+  <data name="LogsFilter_Category.Text" xml:space="preserve">
+    <value>分类</value>
+  </data>
+  <data name="LogsFilter_ResetButton.Content" xml:space="preserve">
+    <value>重置</value>
+  </data>
+  <data name="LogsFilter_ApplyButton.Content" xml:space="preserve">
+    <value>应用</value>
+  </data>
+  <data name="LogsTimestampFilter_Title.Text" xml:space="preserve">
+    <value>时间范围过滤</value>
+  </data>
+  <data name="LogsTimestampFilter_StartTimeUnlimited.Content" xml:space="preserve">
+    <value>开始时间：无限</value>
+  </data>
+  <data name="LogsTimestampFilter_EndTimeNow.Content" xml:space="preserve">
+    <value>结束时间：现在</value>
+  </data>
+  <data name="LogsTimestampFilter_ResetButton.Content" xml:space="preserve">
+    <value>重置</value>
+  </data>
+  <data name="LogsPage_FilterLevelButton.Content" xml:space="preserve">
+    <value>过滤：级别</value>
+  </data>
+  <data name="LogsPage_FilterComponentButton.Content" xml:space="preserve">
+    <value>过滤：组件</value>
+  </data>
+  <data name="LogsPage_FilterCategoryButton.Content" xml:space="preserve">
+    <value>过滤：分类</value>
+  </data>
+  <data name="LogsPage_FilterTimeButton.Content" xml:space="preserve">
+    <value>过滤：时间</value>
+  </data>
+  <data name="LogsPage_ResetFiltersButton.Content" xml:space="preserve">
+    <value>重置过滤</value>
+  </data>
 </root>

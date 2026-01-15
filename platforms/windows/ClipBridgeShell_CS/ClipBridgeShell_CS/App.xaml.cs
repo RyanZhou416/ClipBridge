@@ -123,7 +123,8 @@ public partial class App : Application
             services.AddSingleton<Services.Logging.CoreLogDispatcher>(sp =>
             {
                 var coreHost = sp.GetRequiredService<ICoreHostService>();
-                return new Services.Logging.CoreLogDispatcher(coreHost);
+                var eventPump = sp.GetRequiredService<EventPumpService>();
+                return new Services.Logging.CoreLogDispatcher(coreHost, eventPump);
             });
             services.AddSingleton<Services.Logging.CoreLoggerProvider>(sp =>
             {
@@ -148,10 +149,11 @@ public partial class App : Application
             services.AddTransient<LogsViewModel>(sp =>
             {
                 var coreHost = sp.GetRequiredService<ICoreHostService>();
-                var stashManager = sp.GetRequiredService<Services.Logging.StashLogManager>();
+                var stashManager = sp.GetService<Services.Logging.StashLogManager>();
                 var eventPump = sp.GetRequiredService<EventPumpService>();
                 var localSettings = sp.GetRequiredService<ILocalSettingsService>();
-                return new LogsViewModel(coreHost, stashManager, eventPump, localSettings);
+                var loggerFactory = sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>();
+                return new LogsViewModel(coreHost, stashManager, eventPump, localSettings, loggerFactory);
             });
             services.AddTransient<LogsPage>();
             services.AddTransient<DevicesViewModel>(sp =>
@@ -203,27 +205,15 @@ public partial class App : Application
         App.GetService<IAppNotificationService>().Initialize();
 
         // 测试日志系统 - 验证日志提供者是否工作
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[App] Testing logger system...");
-        // #endregion
         try
         {
             var loggerFactory = Host.Services.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>();
             var testLogger = loggerFactory.CreateLogger("App");
             testLogger.LogInformation("App started - testing log system");
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[App] Test log message sent via ILogger");
-            // #endregion
-            
-            // 现在日志系统已初始化，可以更新 CoreHostService 和 ClipboardWatcher 的 logger
-            // 注意：由于它们是单例且已经创建，我们需要通过其他方式设置 logger
-            // 或者让它们在需要时通过 ILoggerFactory 获取 logger
         }
         catch (Exception ex)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[App] Failed to get logger: {ex.Message}");
-            // #endregion
+            // 日志系统初始化失败，但不影响应用启动
         }
 
         UnhandledException += App_UnhandledException;

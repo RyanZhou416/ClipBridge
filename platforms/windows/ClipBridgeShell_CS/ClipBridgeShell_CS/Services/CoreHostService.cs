@@ -91,7 +91,6 @@ public sealed class CoreHostService : ICoreHostService
         };
 
         var configJson = JsonSerializer.Serialize(config, _jsonOpts);
-        System.Diagnostics.Debug.WriteLine($"[CoreHostService] Init JSON: {configJson}");
 
         // 2. 查找 DLL
         var dllFullPath = FindCoreDll("core_ffi_windows.dll");
@@ -202,21 +201,11 @@ public sealed class CoreHostService : ICoreHostService
 
     public async Task ShutdownAsync(CancellationToken ct = default)
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync called: current State={State}");
-        // #endregion
-        
         if (State == CoreState.NotLoaded)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: already NotLoaded, returning");
-            // #endregion
             return;
         }
 
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: setting state to ShuttingDown");
-        // #endregion
         SetState(CoreState.ShuttingDown);
 
         if (_coreHandle != IntPtr.Zero)
@@ -236,45 +225,25 @@ public sealed class CoreHostService : ICoreHostService
             
             try
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: calling cb_shutdown");
-                // #endregion
                 // [FIX] 放到后台线程防止阻塞
                 await Task.Run(() => CoreInterop.cb_shutdown(_coreHandle));
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: cb_shutdown completed");
-                // #endregion
             }
             catch (Exception ex)
             {
-                // #region agent log
                 System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: Shutdown error: {ex}");
-                // #endregion
             }
             finally
             {
                 _coreHandle = IntPtr.Zero;
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: _coreHandle cleared");
-                // #endregion
             }
         }
 
         if (_selfHandle.IsAllocated)
         {
             _selfHandle.Free();
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: _selfHandle freed");
-            // #endregion
         }
 
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: setting state to NotLoaded");
-        // #endregion
         SetState(CoreState.NotLoaded);
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: completed, final State={State}");
-        // #endregion
     }
 
     public IntPtr GetHandle()
@@ -287,19 +256,10 @@ public sealed class CoreHostService : ICoreHostService
         var oldState = State;
         if (oldState == s)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreHostService] SetState: state unchanged ({s}), skipping event");
-            // #endregion
             return;
         }
         State = s;
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreHostService] SetState: changing from {oldState} to {s}");
-        // #endregion
         StateChanged?.Invoke(s);
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreHostService] SetState: StateChanged event invoked, new state={s}");
-        // #endregion
     }
 
     private bool IsEnvelopeOkAndGetHandle(string json, out IntPtr handle, out string errCode, out string errMsg)
@@ -434,7 +394,6 @@ public sealed class CoreHostService : ICoreHostService
 
     public async Task<HistoryPage> ListHistoryAsync(HistoryQuery query)
     {
-        System.Diagnostics.Debug.WriteLine($"[CoreHostService] State: {State}, Handle: {_coreHandle}");
         if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
         {
             return new HistoryPage();
@@ -526,20 +485,11 @@ public sealed class CoreHostService : ICoreHostService
                 // 序列化
                 var json = JsonSerializer.Serialize(ingestDto, _jsonOpts);
 
-                System.Diagnostics.Debug.WriteLine($"[Ingest] Sending: {json}");
-
                 // 调用 Core
                 var resPtr = CoreInterop.cb_ingest_local_copy(_coreHandle, json);
 
                 // 获取结果
                 var resJson = CoreInterop.PtrToStringAndFree(resPtr);
-                System.Diagnostics.Debug.WriteLine($"[Ingest] Core Response: {resJson}");
-
-                // 成功判断
-                if (resJson.Contains("\"ok\":true"))
-                {
-                    System.Diagnostics.Debug.WriteLine("✅ Ingest Success!");
-                }
             } catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[CoreHostService] Ingest failed: {ex}");
@@ -549,7 +499,6 @@ public sealed class CoreHostService : ICoreHostService
 
     public async Task<string> EnsureContentCachedAsync(string itemId, string? fileId = null)
     {
-        System.Diagnostics.Debug.WriteLine($"[CoreHost] EnsureContentCachedAsync enter item_id={itemId} file_id={fileId ?? "<null>"} state={State}");
 
         return await Task.Run(() =>
         {
@@ -561,12 +510,10 @@ public sealed class CoreHostService : ICoreHostService
             };
             var json = JsonSerializer.Serialize(req, _jsonOpts);
 
-            System.Diagnostics.Debug.WriteLine($"[CoreHost] cb_ensure_content_cached req={json}");
 
             var resPtr = CoreInterop.cb_ensure_content_cached(_coreHandle, json);
             var resJson = CoreInterop.PtrToStringAndFree(resPtr);
 
-            System.Diagnostics.Debug.WriteLine($"[CoreHost] cb_ensure_content_cached resp={resJson}");
 
             using var doc = JsonDocument.Parse(resJson);
             var root = doc.RootElement;

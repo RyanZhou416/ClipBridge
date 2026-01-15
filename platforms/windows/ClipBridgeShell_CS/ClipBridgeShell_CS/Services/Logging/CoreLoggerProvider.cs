@@ -42,28 +42,15 @@ public sealed class CoreLoggerProvider : ILoggerProvider
 
     private async Task RewriteStashedLogsAsync()
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] RewriteStashedLogsAsync called, CoreState={_coreHost.State}");
-        // #endregion
-        
         if (_coreHost.State != CoreState.Ready)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] RewriteStashedLogsAsync skipped: Core not ready");
-            // #endregion
             return;
         }
 
         var stashedLogs = _stashManager.ReadAllLogs();
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] Found {stashedLogs.Count} stashed logs to rewrite");
-        // #endregion
         
         if (stashedLogs.Count == 0)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] No stashed logs to rewrite");
-            // #endregion
             return;
         }
 
@@ -78,18 +65,10 @@ public sealed class CoreLoggerProvider : ILoggerProvider
             }
         }
         
-        int enqueuedCount = 0;
         foreach (var entry in stashedLogs)
         {
-            if (_dispatcher.Enqueue(entry))
+            if (!_dispatcher.Enqueue(entry))
             {
-                enqueuedCount++;
-            }
-            else
-            {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] Failed to enqueue stashed log: id={entry.Id}");
-                // #endregion
                 // 如果入队失败，从待写入列表中移除
                 lock (_pendingLock)
                 {
@@ -98,26 +77,16 @@ public sealed class CoreLoggerProvider : ILoggerProvider
             }
         }
         
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] Enqueued {enqueuedCount}/{stashedLogs.Count} stashed logs to dispatcher, pending count={_pendingStashedLogIds.Count}");
-        // #endregion
-        
         // 注意：不再使用固定延迟，而是通过 OnBatchWritten 回调来检查所有暂存日志是否已写入
         // 如果所有暂存日志都已写入，OnBatchWritten 会自动清空暂存文件
     }
 
     public ILogger CreateLogger(string categoryName)
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] CreateLogger called for category: {categoryName}, CoreState: {_coreHost.State}");
-        // #endregion
         if (!_loggers.TryGetValue(categoryName, out var logger))
         {
             logger = new CoreLogger(categoryName, _coreHost, _dispatcher, _stashManager);
             _loggers[categoryName] = logger;
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] Created new CoreLogger for category: {categoryName}");
-            // #endregion
         }
         return logger;
     }
@@ -141,20 +110,10 @@ public sealed class CoreLoggerProvider : ILoggerProvider
                 _pendingStashedLogIds.Remove(entry.Id);
             }
             
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] OnBatchWritten: written {writtenEntries.Count} entries, remaining pending={_pendingStashedLogIds.Count}");
-            // #endregion
-            
             // 如果所有暂存日志都已写入，清空暂存文件
             if (_pendingStashedLogIds.Count == 0)
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] All stashed logs written, clearing stash file");
-                // #endregion
                 _stashManager.Clear();
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreLoggerProvider] Stashed logs cleared after all entries written");
-                // #endregion
             }
         }
     }
@@ -206,23 +165,14 @@ internal sealed class CoreLogger : ILogger
         Exception? exception,
         Func<TState, Exception?, string> formatter)
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreLogger] Log called: category={_categoryName}, level={logLevel}, CoreState={_coreHost.State}");
-        // #endregion
         if (formatter == null)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreLogger] Log skipped: formatter is null");
-            // #endregion
             return;
         }
 
         var message = formatter(state, exception);
         if (string.IsNullOrEmpty(message) && exception == null)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreLogger] Log skipped: message is empty and no exception");
-            // #endregion
             return;
         }
 
@@ -234,12 +184,6 @@ internal sealed class CoreLogger : ILogger
 
         // 获取多语言消息（从翻译器获取中英文版本）
         var (messageEn, messageZhCn) = LogMessageTranslator.GetTranslated(message);
-
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine(
-            $"[CoreLogger] H_B: Creating log entry. Component: {component}, Category: {category}, Level: {level}"
-        );
-        // #endregion
 
         var entry = new LogEntry
         {
@@ -258,17 +202,11 @@ internal sealed class CoreLogger : ILogger
         // 根据核心状态选择写入路径
         if (_coreHost.State == CoreState.Ready)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreLogger] Enqueueing log to dispatcher: id={entry.Id}, message={message.Substring(0, Math.Min(50, message.Length))}");
-            // #endregion
             // 核心就绪，通过dispatcher写入
             _dispatcher.Enqueue(entry);
         }
         else
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreLogger] Writing to stash: id={entry.Id}, message={message.Substring(0, Math.Min(50, message.Length))}");
-            // #endregion
             // 核心未就绪，写入暂存日志
             _stashManager.WriteLog(entry);
         }

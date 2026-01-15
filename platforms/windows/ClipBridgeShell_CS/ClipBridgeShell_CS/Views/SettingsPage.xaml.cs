@@ -63,30 +63,17 @@ public sealed partial class SettingsPage : Page
         
         var coreHost = App.GetService<ICoreHostService>();
         
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: IsOn={toggleSwitch.IsOn}, CoreState={coreHost.State}");
-        // #endregion
-        
         if (toggleSwitch.IsOn)
         {
             // 开启核心
             if (coreHost.State != CoreState.Ready)
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: starting core initialization");
-                // #endregion
                 try
                 {
                     await coreHost.InitializeAsync();
-                    // #region agent log
-                    System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core initialization completed, State={coreHost.State}");
-                    // #endregion
                 }
                 catch (Exception ex)
                 {
-                    // #region agent log
-                    System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core initialization failed: {ex.Message}");
-                    // #endregion
                     var err = new ContentDialog
                     {
                         Title = "错误",
@@ -99,33 +86,18 @@ public sealed partial class SettingsPage : Page
                     toggleSwitch.IsOn = false;
                 }
             }
-            else
-            {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core already Ready, no action needed");
-                // #endregion
-            }
         }
         else
         {
             // 关闭核心
             if (coreHost.State != CoreState.NotLoaded)
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: shutting down core, current State={coreHost.State}");
-                // #endregion
                 try
                 {
                     await coreHost.ShutdownAsync();
-                    // #region agent log
-                    System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core shutdown completed, State={coreHost.State}");
-                    // #endregion
                 }
                 catch (Exception ex)
                 {
-                    // #region agent log
-                    System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core shutdown failed: {ex.Message}");
-                    // #endregion
                     var err = new ContentDialog
                     {
                         Title = "错误",
@@ -137,12 +109,6 @@ public sealed partial class SettingsPage : Page
                     // 恢复开关状态
                     toggleSwitch.IsOn = true;
                 }
-            }
-            else
-            {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[SettingsPage] CoreToggleSwitch_Toggled: core already NotLoaded, no action needed");
-                // #endregion
             }
         }
     }
@@ -170,7 +136,9 @@ public sealed partial class SettingsPage : Page
 
         // 刷新导航栏设置项文本
         if (App.SettingsNavItem is NavigationViewItem settings)
+        {
             settings.Content = loc.GetLocalizedString("Shell_Settings");
+        }
     }
 
     // 打开本地文件夹

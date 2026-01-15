@@ -118,9 +118,11 @@ public partial class SettingsViewModel : ObservableRecipient
         get => _currentLanguage;
         set
         {
-            if (SetProperty(ref _currentLanguage, value))
+            if (_currentLanguage != value)
             {
+                // 先切换语言，再更新属性（这样 PropertyChanged 触发时语言已经切换完成）
                 SwitchLanguage(value);
+                SetProperty(ref _currentLanguage, value);
             }
         }
     }

@@ -131,6 +131,64 @@ public sealed class LogRow
     public string TimeStr => Time.ToLocalTime().ToString("HH:mm:ss.fff");
     public string TimeStrFull => Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff");
     
+    // 异常显示文本（如果异常为空则返回空字符串，否则返回格式化的异常文本）
+    public string ExceptionDisplay => string.IsNullOrWhiteSpace(Exception) 
+        ? string.Empty 
+        : $" | Exception: {Exception}";
+    
+    // 格式化后的对齐字段（用于等宽字体显示，保留颜色绑定）
+    private const int TimeWidth = 23;
+    private const int LevelWidth = 8;
+    private const int ComponentWidth = 18;
+    private const int CategoryWidth = 20;
+    
+    public string FormattedTime => PadRightForDisplay(TimeStrFull, TimeWidth);
+    public string FormattedLevel => PadRightForDisplay(LevelName, LevelWidth);
+    public string FormattedComponent => PadRightForDisplay(Component ?? "", ComponentWidth);
+    public string FormattedCategory => PadRightForDisplay(CategoryDisplay ?? "", CategoryWidth);
+    
+    /// <summary>
+    /// 计算字符串在等宽字体中的显示宽度（中文字符占2个字符宽度）
+    /// </summary>
+    private static int GetDisplayWidth(string str)
+    {
+        if (string.IsNullOrEmpty(str)) return 0;
+        int width = 0;
+        foreach (char c in str)
+        {
+            // 判断是否为全角字符（中文、日文、韩文等）
+            if (c >= 0x1100 && (c <= 0x115F || c >= 0x2E80 && c <= 0x9FFF || c >= 0xAC00 && c <= 0xD7AF || c >= 0xF900 && c <= 0xFAFF))
+            {
+                width += 2;
+            }
+            else
+            {
+                width += 1;
+            }
+        }
+        return width;
+    }
+    
+    /// <summary>
+    /// 在等宽字体中对齐字符串（考虑中文字符宽度）
+    /// </summary>
+    private static string PadRightForDisplay(string str, int targetWidth)
+    {
+        if (string.IsNullOrEmpty(str))
+        {
+            return new string(' ', targetWidth);
+        }
+        
+        int currentWidth = GetDisplayWidth(str);
+        if (currentWidth >= targetWidth)
+        {
+            return str;
+        }
+        
+        int paddingNeeded = targetWidth - currentWidth;
+        return str + new string(' ', paddingNeeded);
+    }
+    
     // 选择状态（用于选择模式）
     public bool IsSelected { get; set; }
 

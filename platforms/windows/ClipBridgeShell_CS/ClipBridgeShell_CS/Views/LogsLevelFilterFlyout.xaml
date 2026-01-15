@@ -4,23 +4,24 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:l="using:WinUI3Localizer"
     mc:Ignorable="d"
     MinWidth="200">
     
     <StackPanel Spacing="12" Padding="16">
-        <TextBlock Text="级别过滤" FontWeight="SemiBold" FontSize="14" />
+        <TextBlock l:Uids.Uid="LogsLevelFilter_Title" FontWeight="SemiBold" FontSize="14" />
         
         <StackPanel Spacing="4">
-            <CheckBox x:Name="LevelTraceCheckBox" Content="Trace" IsChecked="True" />
-            <CheckBox x:Name="LevelDebugCheckBox" Content="Debug" IsChecked="True" />
-            <CheckBox x:Name="LevelInfoCheckBox" Content="Info" IsChecked="True" />
-            <CheckBox x:Name="LevelWarnCheckBox" Content="Warn" IsChecked="True" />
-            <CheckBox x:Name="LevelErrorCheckBox" Content="Error" IsChecked="True" />
-            <CheckBox x:Name="LevelCriticalCheckBox" Content="Critical" IsChecked="True" />
+            <CheckBox x:Name="LevelTraceCheckBox" l:Uids.Uid="LogsLevelFilter_LevelTrace" IsChecked="True" />
+            <CheckBox x:Name="LevelDebugCheckBox" l:Uids.Uid="LogsLevelFilter_LevelDebug" IsChecked="True" />
+            <CheckBox x:Name="LevelInfoCheckBox" l:Uids.Uid="LogsLevelFilter_LevelInfo" IsChecked="True" />
+            <CheckBox x:Name="LevelWarnCheckBox" l:Uids.Uid="LogsLevelFilter_LevelWarn" IsChecked="True" />
+            <CheckBox x:Name="LevelErrorCheckBox" l:Uids.Uid="LogsLevelFilter_LevelError" IsChecked="True" />
+            <CheckBox x:Name="LevelCriticalCheckBox" l:Uids.Uid="LogsLevelFilter_LevelCritical" IsChecked="True" />
         </StackPanel>
         
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
-            <Button Content="重置" Click="OnResetClick" />
+            <Button l:Uids.Uid="LogsLevelFilter_ResetButton" Click="OnResetClick" />
         </StackPanel>
     </StackPanel>
 </UserControl>

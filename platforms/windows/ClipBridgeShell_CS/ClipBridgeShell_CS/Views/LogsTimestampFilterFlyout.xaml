@@ -4,14 +4,20 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:l="using:WinUI3Localizer"
+    xmlns:helpers="using:ClipBridgeShell_CS.Helpers"
     mc:Ignorable="d"
     MinWidth="300">
     
+    <UserControl.Resources>
+        <helpers:InverseBoolConverter x:Key="InverseBoolConverter" />
+    </UserControl.Resources>
+    
     <StackPanel Spacing="12" Padding="16">
-        <TextBlock Text="时间范围过滤" FontWeight="SemiBold" FontSize="14" />
+        <TextBlock l:Uids.Uid="LogsTimestampFilter_Title" FontWeight="SemiBold" FontSize="14" />
         
         <StackPanel Spacing="8">
-            <CheckBox x:Name="StartTimeUnlimitedCheckBox" Content="开始时间：无限" IsChecked="True" />
+            <CheckBox x:Name="StartTimeUnlimitedCheckBox" l:Uids.Uid="LogsTimestampFilter_StartTimeUnlimited" IsChecked="True" />
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <DatePicker x:Name="StartDatePicker" IsEnabled="{x:Bind StartTimeUnlimitedCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
                 <TimePicker x:Name="StartTimePicker" IsEnabled="{x:Bind StartTimeUnlimitedCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
@@ -19,7 +25,7 @@
         </StackPanel>
         
         <StackPanel Spacing="8">
-            <CheckBox x:Name="EndTimeNowCheckBox" Content="结束时间：现在" IsChecked="True" />
+            <CheckBox x:Name="EndTimeNowCheckBox" l:Uids.Uid="LogsTimestampFilter_EndTimeNow" IsChecked="True" />
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <DatePicker x:Name="EndDatePicker" IsEnabled="{x:Bind EndTimeNowCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
                 <TimePicker x:Name="EndTimePicker" IsEnabled="{x:Bind EndTimeNowCheckBox.IsChecked, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
@@ -27,7 +33,7 @@
         </StackPanel>
         
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
-            <Button Content="重置" Click="OnResetClick" />
+            <Button l:Uids.Uid="LogsTimestampFilter_ResetButton" Click="OnResetClick" />
         </StackPanel>
     </StackPanel>
 </UserControl>

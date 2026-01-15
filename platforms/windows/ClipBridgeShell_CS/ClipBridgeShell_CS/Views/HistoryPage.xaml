@@ -7,6 +7,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:vm="using:ClipBridgeShell_CS.ViewModels"
     xmlns:models="using:ClipBridgeShell_CS.Core.Models.Events"
+    xmlns:l="using:WinUI3Localizer"
     mc:Ignorable="d">
 
 	<Grid RowDefinitions="Auto,*" Padding="24">
@@ -14,18 +15,18 @@
 		<Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto" Margin="0,0,0,16" ColumnSpacing="12">
 
 			<TextBox Grid.Column="0"
-                     PlaceholderText="搜索历史记录..."
+                     l:Uids.Uid="HistoryPage_SearchBox"
                      Text="{x:Bind ViewModel.FilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
 			<ComboBox Grid.Column="1" 
-                      PlaceholderText="所有类型"
+                      l:Uids.Uid="HistoryPage_AllTypes"
                       MinWidth="120"
                       SelectedValue="{x:Bind ViewModel.SelectedKind, Mode=TwoWay}"
                       SelectedValuePath="Tag">
-				<ComboBoxItem Content="所有类型" Tag="{x:Null}" IsSelected="True"/>
-				<ComboBoxItem Content="文本" Tag="text"/>
-				<ComboBoxItem Content="图片" Tag="image"/>
-				<ComboBoxItem Content="文件" Tag="file"/>
+				<ComboBoxItem l:Uids.Uid="HistoryPage_AllTypes" Tag="{x:Null}" IsSelected="True"/>
+				<ComboBoxItem l:Uids.Uid="HistoryPage_TypeText" Tag="text"/>
+				<ComboBoxItem l:Uids.Uid="HistoryPage_TypeImage" Tag="image"/>
+				<ComboBoxItem l:Uids.Uid="HistoryPage_TypeFile" Tag="file"/>
 			</ComboBox>
 
 			<Button Grid.Column="2" Command="{x:Bind ViewModel.RefreshCommand}">
@@ -63,7 +64,7 @@
                           VerticalAlignment="Center"/>
 
 						<StackPanel Grid.Column="1" VerticalAlignment="Center">
-							<TextBlock Text="{x:Bind Preview.Text, TargetNullValue='(无预览)'}"
+							<TextBlock Text="{x:Bind Preview.Text, TargetNullValue='(No preview)'}"
                                Style="{ThemeResource BodyStrongTextBlockStyle}"
                                MaxLines="2"
                                TextTrimming="CharacterEllipsis"/>
@@ -82,7 +83,7 @@
 						</StackPanel>
 
 						<Button Grid.Column="2"
-								Content="复制"
+								l:Uids.Uid="HistoryPage_CopyButton"
 								VerticalAlignment="Center"
 								Margin="8,0,0,0"
 								Click="CopyButton_Click"/>

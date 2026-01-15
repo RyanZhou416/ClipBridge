@@ -19,7 +19,6 @@ public sealed class ContentFetchAwaiter
 
     public Task<LocalContentRef> WaitAsync(string transferId, CancellationToken ct)
     {
-        System.Diagnostics.Debug.WriteLine($"[Awaiter] WaitAsync add transfer_id={transferId}");
         if (_pendingLocal.TryRemove(transferId, out var local))
             return Task.FromResult(local);
         var tcs = new TaskCompletionSource<LocalContentRef>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -43,8 +42,6 @@ public sealed class ContentFetchAwaiter
 
     public void Resolve(string transferId, LocalContentRef localRef)
     {
-        System.Diagnostics.Debug.WriteLine($"[Awaiter] Resolve transfer_id={transferId}");
-
         if (_waiters.TryRemove(transferId, out var w))
         {
             w.TrySetResult(localRef);
@@ -53,14 +50,11 @@ public sealed class ContentFetchAwaiter
         {
             // 如果没有人等待，必须存入 Pending，否则后续的 WaitAsync 会死锁
             _pendingLocal[transferId] = localRef;
-            System.Diagnostics.Debug.WriteLine($"[Awaiter] Saved to pending transfer_id={transferId}");
         }
     }
 
     public void Fail(string transferId, Exception ex)
     {
-        System.Diagnostics.Debug.WriteLine($"[Awaiter] Fail transfer_id={transferId} ex={ex.Message}");
-
         if (_waiters.TryRemove(transferId, out var w))
             w.TrySetException(ex);
     }

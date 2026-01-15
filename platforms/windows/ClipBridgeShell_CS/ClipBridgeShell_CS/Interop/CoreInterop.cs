@@ -166,6 +166,14 @@ internal static class CoreInterop
         out long out_id);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int cb_logs_query_latest(
+        IntPtr h,
+        int level_min,
+        IntPtr like_or_null, int limit,
+        IntPtr lang_or_null,
+        out IntPtr out_json_array);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int cb_logs_query_after_id(
         IntPtr h,
         long after_id, int level_min,
@@ -284,6 +292,34 @@ internal static class CoreInterop
     }
 
     /// <summary>
+    /// 查询最新的日志（从新到旧排序，用于初始加载）
+    /// </summary>
+    public static List<ClipBridgeShell_CS.Models.LogRow> LogsQueryLatest(IntPtr handle, int levelMin, string? like, int limit, string? lang = null)
+    {
+        IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
+        IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
+        IntPtr jsonPtr = IntPtr.Zero;
+        try
+        {
+            var rc = cb_logs_query_latest(handle, levelMin, likePtr, limit, langPtr, out jsonPtr);
+            if (rc != 0) throw new Exception($"cb_logs_query_latest failed: {rc}");
+
+            var json = PtrToUtf8AndFree(jsonPtr);
+            var envelope = JsonSerializer.Deserialize<JsonElement>(json, _jsonOpts);
+            if (envelope.TryGetProperty("data", out var data))
+            {
+                return JsonSerializer.Deserialize<List<ClipBridgeShell_CS.Models.LogRow>>(data.GetRawText(), _jsonOpts) ?? new();
+            }
+            return new();
+        }
+        finally
+        {
+            if (likePtr != IntPtr.Zero) Marshal.FreeCoTaskMem(likePtr);
+            if (langPtr != IntPtr.Zero) Marshal.FreeCoTaskMem(langPtr);
+        }
+    }
+
+    /// <summary>
     /// 查询增量日志 (Tail)
     /// </summary>
     public static List<ClipBridgeShell_CS.Models.LogRow> LogsQueryAfterId(IntPtr handle, long afterId, int levelMin, string? like, int limit, string? lang = null)
@@ -299,25 +335,14 @@ internal static class CoreInterop
             // 使用我们新加的 Helper 读取并释放
             var json = PtrToUtf8AndFree(jsonPtr);
             // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreInterop] LogsQueryAfterId raw JSON: {json.Substring(0, Math.Min(500, json.Length))}");
             // #endregion
             var envelope = JsonSerializer.Deserialize<JsonElement>(json, _jsonOpts);
             if (envelope.TryGetProperty("data", out var data))
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreInterop] LogsQueryAfterId data property found, type: {data.ValueKind}");
                 var dataText = data.GetRawText();
-                System.Diagnostics.Debug.WriteLine($"[CoreInterop] LogsQueryAfterId data content: {dataText.Substring(0, Math.Min(500, dataText.Length))}");
-                // #endregion
                 var result = JsonSerializer.Deserialize<List<ClipBridgeShell_CS.Models.LogRow>>(dataText, _jsonOpts) ?? new();
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreInterop] LogsQueryAfterId deserialized: {result.Count} items");
-                // #endregion
                 return result;
             }
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreInterop] LogsQueryAfterId no data property, returning empty list");
-            // #endregion
             return new();
         }
         finally

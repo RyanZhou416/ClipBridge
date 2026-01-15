@@ -14,11 +14,12 @@ namespace ClipBridgeShell_CS.Services.Logging;
 public sealed class CoreLogDispatcher : IDisposable
 {
     private readonly ICoreHostService _coreHost;
+    private readonly EventPumpService? _eventPump;
     private readonly ConcurrentQueue<LogEntry> _queue = new();
     private readonly SemaphoreSlim _semaphore = new(0);
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _backgroundTask;
-    private const int BatchSize = 50;
+    private const int BatchSize = 5; // 减小批量大小，加快响应速度
     private const int QueueCapacity = 1000;
     
     /// <summary>
@@ -26,10 +27,16 @@ public sealed class CoreLogDispatcher : IDisposable
     /// 参数：写入的日志条目列表
     /// </summary>
     public event Action<List<LogEntry>>? BatchWritten;
+    
+    /// <summary>
+    /// 单条日志写入完成回调：当一条日志写入完成时立即触发（用于实时显示）
+    /// </summary>
+    public event Action<LogEntry>? LogWritten;
 
-    public CoreLogDispatcher(ICoreHostService coreHost)
+    public CoreLogDispatcher(ICoreHostService coreHost, EventPumpService? eventPump = null)
     {
         _coreHost = coreHost;
+        _eventPump = eventPump;
         _backgroundTask = Task.Run(ProcessLogsAsync);
     }
 
@@ -38,34 +45,22 @@ public sealed class CoreLogDispatcher : IDisposable
     /// </summary>
     public bool Enqueue(LogEntry entry)
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Enqueue called: id={entry.Id}, queueCount={_queue.Count}, CoreState={_coreHost.State}");
-        // #endregion
         if (_queue.Count >= QueueCapacity)
         {
             // 仅允许丢弃Trace/Debug级别
             if (entry.Level <= 1) // Trace=0, Debug=1
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Entry dropped: queue full and level is Trace/Debug");
-                // #endregion
                 return false; // 丢弃
             }
             // 对于更高级别的日志，尝试移除一个Trace/Debug级别的日志
             if (!TryRemoveTraceOrDebug())
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Entry dropped: queue full and cannot remove Trace/Debug");
-                // #endregion
                 return false; // 无法移除，丢弃
             }
         }
 
         _queue.Enqueue(entry);
         _semaphore.Release();
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Entry enqueued successfully: id={entry.Id}, newQueueCount={_queue.Count}");
-        // #endregion
         return true;
     }
 
@@ -106,28 +101,27 @@ public sealed class CoreLogDispatcher : IDisposable
             }
 
             // 收集一批日志
+            // 注意：如果队列中有日志但不足 BatchSize，也会立即处理（不等待）
             while (batch.Count < BatchSize && _queue.TryDequeue(out var entry))
             {
                 batch.Add(entry);
+            }
+            
+            // 如果队列为空但批次中有日志，立即处理（不等待达到 BatchSize）
+            // 这样可以加快响应速度，特别是对于少量日志
+            if (batch.Count > 0 && batch.Count < BatchSize && _queue.Count == 0)
+            {
+                // 队列为空，即使批次不足 BatchSize 也立即处理
             }
 
             // 如果核心就绪且有日志，批量写入
             if (batch.Count > 0 && _coreHost.State == CoreState.Ready)
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Processing batch: count={batch.Count}, CoreState={_coreHost.State}");
-                // #endregion
                 var batchCopy = new List<LogEntry>(batch); // 复制一份用于回调
                 await WriteBatchAsync(batch);
                 // 触发写入完成回调
                 BatchWritten?.Invoke(batchCopy);
                 batch.Clear();
-            }
-            else if (batch.Count > 0)
-            {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Batch waiting: count={batch.Count}, CoreState={_coreHost.State}");
-                // #endregion
             }
             else if (batch.Count > 0)
             {
@@ -152,46 +146,28 @@ public sealed class CoreLogDispatcher : IDisposable
 
     private async Task WriteBatchAsync(System.Collections.Generic.List<LogEntry> batch)
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] WriteBatchAsync called: batchCount={batch.Count}, CoreState={_coreHost.State}");
-        // #endregion
         if (_coreHost.State != CoreState.Ready)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] WriteBatchAsync skipped: CoreState is not Ready");
-            // #endregion
             return;
         }
 
         var handle = _coreHost.GetHandle();
         if (handle == IntPtr.Zero)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] WriteBatchAsync skipped: handle is zero");
-            // #endregion
             return;
         }
 
         await Task.Run(() =>
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Writing {batch.Count} entries to core");
-            // #endregion
             foreach (var entry in batch)
             {
                 try
                 {
-                    // #region agent log
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[CoreLogDispatcher] H_B: Preparing log for FFI. " +
-                        $"Component: {entry.Component}, Category: {entry.Category}, Level: {entry.Level}"
-                    );
-                    // #endregion
                     // 使用多语言消息
                     var messageEn = entry.GetMessageEn();
                     var messageZhCn = entry.GetMessageZhCn();
                     
-                    var id = CoreInterop.LogsWrite(
+                    CoreInterop.LogsWrite(
                         handle,
                         entry.Level,
                         entry.Component,
@@ -202,15 +178,25 @@ public sealed class CoreLogDispatcher : IDisposable
                         entry.PropsJson,
                         entry.TsUtc // 传递原始时间戳，用于暂存日志回写
                     );
-                    // #region agent log
-                    System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Log written to core: entryId={entry.Id}, coreId={id}, ts_utc={entry.TsUtc}, component={entry.Component}, category={entry.Category}");
-                    // #endregion
                 }
                 catch (Exception ex)
                 {
                     // 写入失败，记录但不阻塞
                     System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Failed to write log: {ex.Message}");
                 }
+            }
+            
+            // 批量写入完成后，统一发送一次 LOG_WRITTEN 事件
+            // 这样避免每条日志都触发事件，导致多个 TickOnce 并发执行
+            if (_eventPump != null && batch.Count > 0)
+            {
+                var eventJson = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    type = "LOG_WRITTEN",
+                    ts_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    payload = new { batch_count = batch.Count }
+                });
+                _eventPump.Enqueue(eventJson);
             }
         });
     }

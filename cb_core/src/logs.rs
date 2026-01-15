@@ -585,6 +585,82 @@ impl LogStore {
         })
     }
 
+    /// 查询最新的日志（从新到旧排序，用于初始加载）
+    pub fn query_latest(
+        &self,
+        level_min: i32,
+        like: Option<&str>,
+        limit: i32,
+        lang: Option<&str>,
+    ) -> anyhow::Result<Vec<LogEntry>> {
+        if let Some(like_str) = like {
+            let like_pattern = format!("%{}%", like_str);
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT id, ts_utc, level, component, category, message, exception, props_json
+                FROM logs
+                WHERE level >= ?1 AND (message LIKE ?2 OR category LIKE ?2 OR exception LIKE ?2)
+                ORDER BY ts_utc DESC, id DESC
+                LIMIT ?3
+                "#,
+            )?;
+            let rows = stmt.query_map(
+                params![level_min, like_pattern, limit],
+                |r| {
+                    let mut entry = LogEntry {
+                        id: r.get(0)?,
+                        ts_utc: r.get(1)?,
+                        level: r.get(2)?,
+                        component: r.get(3)?,
+                        category: r.get(4)?,
+                        message: r.get(5)?,
+                        exception: r.get(6)?,
+                        props_json: r.get(7)?,
+                    };
+                    entry.message = entry.get_message_for_lang(lang);
+                    Ok(entry)
+                },
+            )?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        } else {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT id, ts_utc, level, component, category, message, exception, props_json
+                FROM logs
+                WHERE level >= ?1
+                ORDER BY ts_utc DESC, id DESC
+                LIMIT ?2
+                "#,
+            )?;
+            let rows = stmt.query_map(
+                params![level_min, limit],
+                |r| {
+                    let mut entry = LogEntry {
+                        id: r.get(0)?,
+                        ts_utc: r.get(1)?,
+                        level: r.get(2)?,
+                        component: r.get(3)?,
+                        category: r.get(4)?,
+                        message: r.get(5)?,
+                        exception: r.get(6)?,
+                        props_json: r.get(7)?,
+                    };
+                    entry.message = entry.get_message_for_lang(lang);
+                    Ok(entry)
+                },
+            )?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        }
+    }
+
     /// 清空日志数据库
     pub fn clear_logs_db(&mut self) -> anyhow::Result<()> {
         self.conn.execute("DELETE FROM logs", [])?;

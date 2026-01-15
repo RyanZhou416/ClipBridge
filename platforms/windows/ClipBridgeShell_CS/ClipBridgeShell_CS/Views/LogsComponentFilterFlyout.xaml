@@ -4,19 +4,20 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:l="using:WinUI3Localizer"
     mc:Ignorable="d"
     MinWidth="250"
     MaxHeight="400">
     
     <StackPanel Spacing="12" Padding="16">
-        <TextBlock Text="组件过滤" FontWeight="SemiBold" FontSize="14" />
+        <TextBlock l:Uids.Uid="LogsComponentFilter_Title" FontWeight="SemiBold" FontSize="14" />
         
         <ScrollViewer MaxHeight="250" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
             <StackPanel x:Name="ComponentCheckBoxList" Spacing="4" />
         </ScrollViewer>
         
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
-            <Button Content="重置" Click="OnResetClick" />
+            <Button l:Uids.Uid="LogsComponentFilter_ResetButton" Click="OnResetClick" />
         </StackPanel>
     </StackPanel>
 </UserControl>

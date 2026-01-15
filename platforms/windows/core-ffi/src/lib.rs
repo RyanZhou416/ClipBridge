@@ -629,6 +629,56 @@ pub extern "C" fn cb_logs_query_after_id(
 	}
 }
 
+/// 查询最新的日志（从新到旧排序，用于初始加载）
+#[no_mangle]
+pub extern "C" fn cb_logs_query_latest(
+	h: *mut cb_handle,
+	level_min: i32,
+	like: *const c_char,
+	limit: i32,
+	lang: *const c_char,
+	out_json: *mut *const c_char,
+) -> i32 {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let handle = unsafe { &mut *h };
+		let like_s = if like.is_null() {
+			None
+		} else {
+			Some(cstr_to_str(like)?)
+		};
+		let lang_s = if lang.is_null() {
+			None
+		} else {
+			Some(cstr_to_str(lang)?)
+		};
+
+		let log_store = handle.core.inner.log_store.lock().unwrap();
+		let entries = log_store.query_latest(level_min, like_s.as_deref(), limit, lang_s.as_deref())?;
+
+		Ok(crate::error::ok_json(entries))
+	})();
+
+	match run {
+		Ok(s) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(s);
+				}
+			}
+			0
+		}
+		Err(_) => {
+			unsafe {
+				if !out_json.is_null() {
+					*out_json = crate::ret(crate::error::err_json("QUERY_FAILED", "Failed to query logs"));
+				}
+			}
+			1
+		}
+	}
+}
+
 /// 查询 before_id 之前的日志（用于向上滚动加载更早的日志）
 #[no_mangle]
 pub extern "C" fn cb_logs_query_before_id(

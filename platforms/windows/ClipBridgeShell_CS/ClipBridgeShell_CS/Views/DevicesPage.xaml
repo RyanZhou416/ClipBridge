@@ -6,6 +6,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:events="using:ClipBridgeShell_CS.Core.Models.Events"
     xmlns:helpers="using:ClipBridgeShell_CS.Helpers"
+    xmlns:l="using:WinUI3Localizer"
     mc:Ignorable="d">
 
     <Page.Resources>
@@ -33,24 +34,24 @@
         <!-- 顶部摘要区域 -->
         <Border Grid.Row="0" Style="{StaticResource ItemCardStyle}" Margin="36,36,36,0">
             <StackPanel Spacing="12">
-                <TextBlock Text="Sharing Summary" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                <TextBlock l:Uids.Uid="DevicesPage_SharingSummary" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
                 <Grid ColumnDefinitions="*,*" ColumnSpacing="24">
                     <StackPanel Grid.Column="0" Spacing="4">
                         <TextBlock>
-                            <Run Text="Outbound allowed: "/>
+                            <Run l:Uids.Uid="DevicesPage_OutboundAllowed"/>
                             <Run Text="{x:Bind ViewModel.OutboundAllowedCount}" FontWeight="SemiBold"/>
-                            <Run Text=" devices"/>
+                            <Run l:Uids.Uid="DevicesPage_Devices"/>
                         </TextBlock>
                     </StackPanel>
                     <StackPanel Grid.Column="1" Spacing="4">
                         <TextBlock>
-                            <Run Text="Inbound allowed: "/>
+                            <Run l:Uids.Uid="DevicesPage_InboundAllowed"/>
                             <Run Text="{x:Bind ViewModel.InboundAllowedCount}" FontWeight="SemiBold"/>
-                            <Run Text=" devices"/>
+                            <Run l:Uids.Uid="DevicesPage_Devices"/>
                         </TextBlock>
                     </StackPanel>
                 </Grid>
-                <Button Content="Refresh" 
+                <Button l:Uids.Uid="DevicesPage_RefreshButton" 
                         Command="{x:Bind ViewModel.RefreshDevicesCommand}"
                         HorizontalAlignment="Right"
                         Margin="0,8,0,0"/>
@@ -60,7 +61,7 @@
         <!-- 设备列表区域 -->
         <ScrollViewer Grid.Row="1" Padding="36,24,36,36" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
             <StackPanel Spacing="12">
-                <TextBlock Text="Devices" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                <TextBlock l:Uids.Uid="DevicesPage_DevicesTitle" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
                 
                 <ListView ItemsSource="{x:Bind ViewModel.Devices, Mode=OneWay}" SelectionMode="Single">
                     <ListView.ItemTemplate>
@@ -84,25 +85,25 @@
                                         <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
                                         <TextBlock Text="{Binding DeviceId}" FontSize="12" Opacity="0.6"/>
                                         <TextBlock FontSize="12" Opacity="0.6">
-                                            <Run Text="State: "/>
+                                            <Run l:Uids.Uid="DevicesPage_State"/>
                                             <Run Text="{Binding ConnectionState}"/>
                                         </TextBlock>
                                         <TextBlock FontSize="12" Opacity="0.6">
-                                            <Run Text="Last seen: "/>
+                                            <Run l:Uids.Uid="DevicesPage_LastSeen"/>
                                             <Run Text="{Binding LastSeen, Converter={StaticResource TimestampConverter}}"/>
                                         </TextBlock>
                                     </StackPanel>
 
                                     <!-- Outbound 开关 -->
                                     <ToggleSwitch Grid.Column="2" 
-                                                  Header="Share To"
+                                                  l:Uids.Uid="DevicesPage_ShareTo"
                                                   IsOn="{Binding ShareToPeer, Mode=TwoWay}"
                                                   Toggled="OnShareToToggled"
                                                   Tag="{x:Bind}"/>
 
                                     <!-- Inbound 开关 -->
                                     <ToggleSwitch Grid.Column="3" 
-                                                  Header="Accept From"
+                                                  l:Uids.Uid="DevicesPage_AcceptFrom"
                                                   IsOn="{Binding AcceptFromPeer, Mode=TwoWay}"
                                                   Toggled="OnAcceptFromToggled"
                                                   Tag="{x:Bind}"/>
@@ -115,23 +116,23 @@
                                             Tag="{x:Bind}">
                                         <Button.Flyout>
                                             <MenuFlyout>
-                                                <ToggleMenuFlyoutItem Text="Share to this device" 
+                                                <ToggleMenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_ShareTo" 
                                                                       IsChecked="{Binding ShareToPeer, Mode=TwoWay}"
                                                                       Click="OnShareToMenuClick"
                                                                       Tag="{x:Bind}"/>
-                                                <ToggleMenuFlyoutItem Text="Accept from this device" 
+                                                <ToggleMenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_AcceptFrom" 
                                                                       IsChecked="{Binding AcceptFromPeer, Mode=TwoWay}"
                                                                       Click="OnAcceptFromMenuClick"
                                                                       Tag="{x:Bind}"/>
                                                 <MenuFlyoutSeparator/>
-                                                <MenuFlyoutItem Text="Copy device info" 
+                                                <MenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_CopyInfo" 
                                                                Click="OnCopyDeviceInfoClick"
                                                                Tag="{x:Bind}"/>
-                                                <MenuFlyoutItem Text="Set local alias" 
+                                                <MenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_SetAlias" 
                                                                Click="OnSetAliasClick"
                                                                Tag="{x:Bind}"/>
                                                 <MenuFlyoutSeparator/>
-                                                <MenuFlyoutItem Text="Clear device fingerprint" 
+                                                <MenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_ClearFingerprint" 
                                                                Click="OnClearFingerprintClick"
                                                                Tag="{x:Bind}"/>
                                             </MenuFlyout>

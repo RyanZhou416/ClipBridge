@@ -54,9 +54,6 @@ public class EventPumpService
                 {
                     try
                     {
-                        var shortJson = json.Length > 200 ? json[..200] + "..." : json;
-                        System.Diagnostics.Debug.WriteLine($"[EventPump] recv {shortJson}");
-
                         ParseAndDispatch(json);
                     }
                     catch (Exception ex)

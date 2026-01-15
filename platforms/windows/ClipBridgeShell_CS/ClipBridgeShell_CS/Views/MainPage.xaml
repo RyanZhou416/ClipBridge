@@ -52,7 +52,7 @@
                 
                 <!-- 顶部：Recent Items 横向卡片条 -->
                 <StackPanel Spacing="12">
-                    <TextBlock Text="Recent Items" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                    <TextBlock l:Uids.Uid="MainPage_RecentItems" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
                     <ScrollViewer HorizontalScrollMode="Auto" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled">
                         <ItemsRepeater ItemsSource="{x:Bind ViewModel.RecentItems, Mode=OneWay}">
                             <ItemsRepeater.Layout>
@@ -71,7 +71,7 @@
                                         <Grid RowDefinitions="Auto,*,Auto,Auto">
                                             <!-- 预览区域 -->
                                             <TextBlock Grid.Row="0" 
-                                                       Text="{x:Bind Preview.Text, TargetNullValue='(无预览)'}" 
+                                                       Text="{x:Bind Preview.Text, TargetNullValue='(No preview)'}" 
                                                        TextWrapping="WrapWholeWords" 
                                                        MaxLines="3" 
                                                        TextTrimming="CharacterEllipsis"
@@ -81,7 +81,7 @@
                                             <StackPanel Grid.Row="1" Spacing="4" Opacity="0.6">
                                                 <TextBlock Text="{x:Bind Kind}" FontSize="12"/>
                                                 <TextBlock FontSize="12">
-                                                    <Run Text="From: "/>
+                                                    <Run l:Uids.Uid="MainPage_From"/>
                                                     <Run Text="{Binding SourceDeviceId, Converter={StaticResource DeviceNameConverter}}"/>
                                                 </TextBlock>
                                             </StackPanel>
@@ -105,8 +105,8 @@
                                                         Spacing="8" 
                                                         Margin="0,8,0,0"
                                                         HorizontalAlignment="Right">
-                                                <Button Content="Lock" FontSize="10" Padding="8,4"/>
-                                                <Button Content="Delete" FontSize="10" Padding="8,4"/>
+                                                <Button l:Uids.Uid="MainPage_LockButton" FontSize="10" Padding="8,4"/>
+                                                <Button l:Uids.Uid="MainPage_DeleteButton" FontSize="10" Padding="8,4"/>
                                             </StackPanel>
                                         </Grid>
                                     </Border>
@@ -115,7 +115,7 @@
                         </ItemsRepeater>
                     </ScrollViewer>
                     <!-- 查看更多历史按钮 -->
-                    <Button Content="查看更多历史..." 
+                    <Button l:Uids.Uid="MainPage_ViewMoreHistory" 
                             Command="{x:Bind ViewModel.NavigateToHistoryCommand}"
                             HorizontalAlignment="Right"
                             Margin="8,8,0,0"/>
@@ -126,17 +126,17 @@
                     <!-- A. Sharing（共享策略摘要） -->
                     <Border Grid.Column="0" Style="{StaticResource ChartContainerStyle}">
                         <StackPanel Spacing="8">
-                            <TextBlock Text="Sharing" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                            <TextBlock l:Uids.Uid="MainPage_Sharing" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
                             <StackPanel Spacing="4">
                                 <TextBlock>
-                                    <Run Text="Outbound: "/>
+                                    <Run l:Uids.Uid="MainPage_Outbound"/>
                                     <Run Text="{x:Bind ViewModel.OutboundPeerCount}" FontWeight="SemiBold"/>
-                                    <Run Text=" devices"/>
+                                    <Run l:Uids.Uid="MainPage_Devices"/>
                                 </TextBlock>
                                 <TextBlock>
-                                    <Run Text="Inbound: "/>
+                                    <Run l:Uids.Uid="MainPage_Inbound"/>
                                     <Run Text="{x:Bind ViewModel.InboundPeerCount}" FontWeight="SemiBold"/>
-                                    <Run Text=" devices"/>
+                                    <Run l:Uids.Uid="MainPage_Devices"/>
                                 </TextBlock>
                             </StackPanel>
                         </StackPanel>
@@ -145,14 +145,14 @@
                     <!-- B. Local Resources（本机资源） -->
                     <Border Grid.Column="1" Style="{StaticResource ChartContainerStyle}">
                         <StackPanel Spacing="8">
-                            <TextBlock Text="Local Resources" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                            <TextBlock l:Uids.Uid="MainPage_LocalResources" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
                             <StackPanel Spacing="4">
                                 <TextBlock>
-                                    <Run Text="Cache: "/>
+                                    <Run l:Uids.Uid="MainPage_Cache"/>
                                     <Run Text="{x:Bind ViewModel.CurrentCacheBytesFormatted}" FontWeight="SemiBold"/>
                                 </TextBlock>
                                 <TextBlock>
-                                    <Run Text="Active Transfers: "/>
+                                    <Run l:Uids.Uid="MainPage_ActiveTransfers"/>
                                     <Run Text="{x:Bind ViewModel.ActiveTransfersCount}" FontWeight="SemiBold"/>
                                 </TextBlock>
                             </StackPanel>
@@ -162,13 +162,13 @@
                     <!-- C. Toggles（全局开关） -->
                     <Border Grid.Column="2" Style="{StaticResource ChartContainerStyle}">
                         <StackPanel Spacing="12">
-                            <TextBlock Text="Controls" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                            <TextBlock l:Uids.Uid="MainPage_Controls" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
                             <StackPanel Spacing="12">
-                                <ToggleSwitch Header="Clipboard Capture" 
+                                <ToggleSwitch l:Uids.Uid="MainPage_ClipboardCapture" 
                                             IsOn="{x:Bind ViewModel.ClipboardCaptureEnabled, Mode=TwoWay}"/>
-                                <ToggleSwitch Header="Clipboard Sharing" 
+                                <ToggleSwitch l:Uids.Uid="MainPage_ClipboardSharing" 
                                             IsOn="{x:Bind ViewModel.ClipboardSharingEnabled, Mode=TwoWay}"/>
-                                <Button Content="Clear Cache" 
+                                <Button l:Uids.Uid="MainPage_ClearCache" 
                                         Command="{x:Bind ViewModel.ClearCacheCommand}"
                                         HorizontalAlignment="Stretch"/>
                             </StackPanel>
@@ -178,12 +178,12 @@
 
                 <!-- 底部：图表区 -->
                 <StackPanel Spacing="16">
-                    <TextBlock Text="Statistics" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                    <TextBlock l:Uids.Uid="MainPage_Statistics" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
 
                     <!-- Cache usage over time -->
                     <Border Style="{StaticResource ChartContainerStyle}">
                         <StackPanel Spacing="8">
-                            <TextBlock Text="Cache Usage Over Time" FontWeight="SemiBold"/>
+                            <TextBlock l:Uids.Uid="MainPage_CacheUsage" FontWeight="SemiBold"/>
                             <Canvas x:Name="CacheChartCanvas" Width="600" Height="200" Background="Transparent"/>
                         </StackPanel>
                     </Border>
@@ -191,7 +191,7 @@
                     <!-- Network throughput -->
                     <Border Style="{StaticResource ChartContainerStyle}">
                         <StackPanel Spacing="8">
-                            <TextBlock Text="Network Throughput" FontWeight="SemiBold"/>
+                            <TextBlock l:Uids.Uid="MainPage_NetworkThroughput" FontWeight="SemiBold"/>
                             <Canvas x:Name="NetworkChartCanvas" Width="600" Height="200" Background="Transparent"/>
                         </StackPanel>
                     </Border>
@@ -199,7 +199,7 @@
                     <!-- Activity charts -->
                     <Border Style="{StaticResource ChartContainerStyle}">
                         <StackPanel Spacing="8">
-                            <TextBlock Text="Global Copy Activity (24h)" FontWeight="SemiBold"/>
+                            <TextBlock l:Uids.Uid="MainPage_GlobalCopyActivity" FontWeight="SemiBold"/>
                             <Canvas x:Name="ActivityChartCanvas" Width="600" Height="200" Background="Transparent"/>
                         </StackPanel>
                     </Border>
@@ -207,7 +207,7 @@
                     <!-- 设备连接列表 -->
                     <Border Style="{StaticResource ChartContainerStyle}">
                         <StackPanel Spacing="8">
-                            <TextBlock Text="Connected Devices" FontWeight="SemiBold"/>
+                            <TextBlock l:Uids.Uid="MainPage_ConnectedDevices" FontWeight="SemiBold"/>
                             <ListView ItemsSource="{x:Bind ViewModel.Peers, Mode=OneWay}" MaxHeight="300">
                                 <ListView.ItemTemplate>
                                     <DataTemplate x:DataType="events:PeerMetaPayload">

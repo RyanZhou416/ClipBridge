@@ -6,282 +6,119 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:models="using:ClipBridgeShell_CS.Models"
     xmlns:helpers="using:ClipBridgeShell_CS.Helpers"
+    xmlns:l="using:WinUI3Localizer"
+    xmlns:views="using:ClipBridgeShell_CS.Views"
     x:Name="PageRoot"
     mc:Ignorable="d">
 
 	<Page.Resources>
 		<helpers:LogLevelToColorConverter x:Key="LogLevelToColorConverter"/>
+		<helpers:StringToVisibilityConverter x:Key="StringToVisibilityConverter"/>
+		
+		<!-- 日志项模板 -->
+		<DataTemplate x:Key="LogItemTemplate" x:DataType="models:LogRow">
+			<Border x:Name="LogItemContainer"
+                    Padding="8,2"
+                    Margin="0,0,0,0"
+                    HorizontalAlignment="Stretch">
+				<TextBlock FontFamily="Consolas"
+                           FontSize="13"
+                           IsTextSelectionEnabled="True"
+                           TextWrapping="Wrap"
+                           TextTrimming="None"
+                           Foreground="{ThemeResource SystemControlForegroundBaseHighBrush}">
+					<Run Text="{x:Bind FormattedTime, Mode=OneWay}" />
+					<Run Text=" " />
+					<Run Text="{x:Bind FormattedLevel, Mode=OneWay}" 
+                         Foreground="{x:Bind Level, Mode=OneWay, Converter={StaticResource LogLevelToColorConverter}}" />
+					<Run Text=" " />
+					<Run Text="{x:Bind FormattedComponent, Mode=OneWay}" />
+					<Run Text=" " />
+					<Run Text="{x:Bind FormattedCategory, Mode=OneWay}" 
+                         Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+					<Run Text=" " />
+					<Run Text="{x:Bind DisplayMessage, Mode=OneWay}" 
+                         Foreground="{x:Bind Level, Mode=OneWay, Converter={StaticResource LogLevelToColorConverter}}" />
+					<Run Text="{x:Bind ExceptionDisplay, Mode=OneWay}" 
+                         Foreground="Red" />
+				</TextBlock>
+			</Border>
+		</DataTemplate>
 	</Page.Resources>
 
-	<Grid RowDefinitions="Auto,*,Auto" Padding="12">
-
+	<Grid RowDefinitions="Auto,Auto,*" Padding="12,12,12,12">
 		<!-- 工具条 -->
-		<StackPanel Orientation="Horizontal" Spacing="8">
-			<TextBox Width="240" PlaceholderText="搜索..." Text="{x:Bind VM.FilterText, Mode=TwoWay}" />
+		<StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="0,0,0,12">
+			<TextBox l:Uids.Uid="LogsPage_SearchBox" Width="240" Text="{x:Bind VM.FilterText, Mode=TwoWay}" />
 
-			<ToggleSwitch Header="Auto Scroll" IsOn="{x:Bind VM.AutoScroll, Mode=TwoWay}" />
+			<ToggleSwitch l:Uids.Uid="LogsPage_AutoScroll" IsOn="{x:Bind VM.AutoScroll, Mode=TwoWay}" />
 
-			<Button Content="Scroll to Bottom" Click="OnScrollToBottomClick" />
+			<Button l:Uids.Uid="LogsPage_ScrollToBottomButton" Click="OnScrollToBottomClick" />
 
-			<Button Content="Tail" Command="{x:Bind VM.StartTailCmd}" />
-			<Button Content="Stop" Command="{x:Bind VM.StopTailCmd}" />
-			<Button Content="Clear View" Command="{x:Bind VM.ClearViewCmd}" />
-			<Button Content="Copy" Click="OnCopyClick" />
-			<Button Content="Export CSV" Command="{x:Bind VM.ExportCsvCmd}" />
+			<Button l:Uids.Uid="LogsPage_TailButton" Command="{x:Bind VM.StartTailCmd}" />
+			<Button l:Uids.Uid="LogsPage_RefreshButton" Command="{x:Bind VM.RefreshLogsCmd}" />
+			<Button l:Uids.Uid="LogsPage_TestLogButton" Command="{x:Bind VM.AddTestLogCmd}" />
+			<Button l:Uids.Uid="LogsPage_ClearViewButton" Command="{x:Bind VM.ClearViewCmd}" />
+			<Button l:Uids.Uid="LogsPage_CopyButton" Click="OnCopyClick" />
+			<Button l:Uids.Uid="LogsPage_ExportCsvButton" Command="{x:Bind VM.ExportCsvCmd}" />
 
-			<Button Content="Delete Selected" Command="{x:Bind VM.DeleteSelectedCmd}" />
-			<Button Content="Delete All" Command="{x:Bind VM.DeleteAllCmd}" />
-			<Button Content="Stats" Command="{x:Bind VM.RefreshStatsCmd}" />
+			<Button l:Uids.Uid="LogsPage_DeleteAllButton" Command="{x:Bind VM.DeleteAllCmd}" />
 		</StackPanel>
 
-		<!-- 表格布局：固定表头 + 可滚动内容 -->
-		<Grid Grid.Row="1" RowDefinitions="Auto,*">
-			<!-- 固定表头 -->
-			<Grid x:Name="HeaderGrid" 
-                  Grid.Row="0" 
-                  Padding="8,6"
-                  BorderThickness="0,0,0,1"
-                  BorderBrush="{ThemeResource SystemControlForegroundBaseLowBrush}">
-				<Grid.ColumnDefinitions>
-					<ColumnDefinition x:Name="Col0" Width="{x:Bind VM.Col0Width, Mode=OneWay, Converter={StaticResource GridLengthConverter}}"/>
-					<!-- 选择框 -->
-					<ColumnDefinition x:Name="Col1" Width="{x:Bind VM.Col1Width, Mode=OneWay, Converter={StaticResource GridLengthConverter}}"/>
-					<!-- 时间戳 -->
-					<ColumnDefinition x:Name="Col2" Width="{x:Bind VM.Col2Width, Mode=OneWay, Converter={StaticResource GridLengthConverter}}"/>
-					<!-- 级别 -->
-					<ColumnDefinition x:Name="Col3" Width="{x:Bind VM.Col3Width, Mode=OneWay, Converter={StaticResource GridLengthConverter}}"/>
-					<!-- 组件 -->
-					<ColumnDefinition x:Name="Col4" Width="{x:Bind VM.Col4Width, Mode=OneWay, Converter={StaticResource GridLengthConverter}}"/>
-					<!-- 分类 -->
-					<ColumnDefinition x:Name="Col5" Width="*"/>
-					<!-- 消息 -->
-					<ColumnDefinition x:Name="Col6" Width="{x:Bind VM.Col6Width, Mode=OneWay, Converter={StaticResource GridLengthConverter}}"/>
-					<!-- 异常 -->
-				</Grid.ColumnDefinitions>
+		<!-- 过滤工具条 -->
+		<StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" Margin="0,0,0,12">
+			<Button x:Name="FilterTimeButton" l:Uids.Uid="LogsPage_FilterTimeButton">
+				<Button.Flyout>
+					<Flyout>
+						<views:LogsTimestampFilterFlyout x:Name="TimestampFilterFlyout" />
+					</Flyout>
+				</Button.Flyout>
+			</Button>
 
-				<!-- 全选复选框 -->
-				<CheckBox Grid.Column="0" 
-                          x:Name="SelectAllCheckBox"
-                          Checked="OnSelectAllChecked"
-                          Unchecked="OnSelectAllUnchecked"
-                          Visibility="{x:Bind VM.IsSelectionMode, Mode=OneWay}"
-                          Margin="4,0" />
+			<Button x:Name="FilterLevelButton" l:Uids.Uid="LogsPage_FilterLevelButton">
+				<Button.Flyout>
+					<Flyout>
+						<views:LogsLevelFilterFlyout x:Name="LevelFilterFlyout" />
+					</Flyout>
+				</Button.Flyout>
+			</Button>
 
-				<!-- 时间戳表头 -->
-				<Grid Grid.Column="1">
-					<Button Content="时间戳" 
-                            HorizontalAlignment="Stretch"
-                            HorizontalContentAlignment="Left"
-                            Click="OnTimestampHeaderClick"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Padding="4,0" />
-					<Border Width="4" 
-                            HorizontalAlignment="Right"
-                            Background="Transparent"
-                            PointerEntered="OnCol1ResizeEnter"
-                            PointerExited="OnCol1ResizeExit"
-                            PointerPressed="OnCol1ResizeStart"
-                            PointerMoved="OnCol1ResizeMove"
-                            PointerReleased="OnCol1ResizeEnd" />
-				</Grid>
+			<Button x:Name="FilterComponentButton" l:Uids.Uid="LogsPage_FilterComponentButton">
+				<Button.Flyout>
+					<Flyout>
+						<views:LogsComponentFilterFlyout x:Name="ComponentFilterFlyout" />
+					</Flyout>
+				</Button.Flyout>
+			</Button>
 
-				<!-- 级别表头 -->
-				<Grid Grid.Column="2">
-					<Button Content="级别" 
-                            HorizontalAlignment="Stretch"
-                            HorizontalContentAlignment="Left"
-                            Click="OnLevelHeaderClick"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Padding="4,0" />
-					<Border Width="4" 
-                            HorizontalAlignment="Right"
-                            Background="Transparent"
-                            PointerEntered="OnCol2ResizeEnter"
-                            PointerExited="OnCol2ResizeExit"
-                            PointerPressed="OnCol2ResizeStart"
-                            PointerMoved="OnCol2ResizeMove"
-                            PointerReleased="OnCol2ResizeEnd" />
-				</Grid>
+			<Button x:Name="FilterCategoryButton" l:Uids.Uid="LogsPage_FilterCategoryButton">
+				<Button.Flyout>
+					<Flyout>
+						<views:LogsCategoryFilterFlyout x:Name="CategoryFilterFlyout" />
+					</Flyout>
+				</Button.Flyout>
+			</Button>
 
-				<!-- 组件表头 -->
-				<Grid Grid.Column="3">
-					<Button Content="组件" 
-                            HorizontalAlignment="Stretch"
-                            HorizontalContentAlignment="Left"
-                            Click="OnComponentHeaderClick"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Padding="4,0" />
-					<Border Width="4" 
-                            HorizontalAlignment="Right"
-                            Background="Transparent"
-                            PointerEntered="OnCol3ResizeEnter"
-                            PointerExited="OnCol3ResizeExit"
-                            PointerPressed="OnCol3ResizeStart"
-                            PointerMoved="OnCol3ResizeMove"
-                            PointerReleased="OnCol3ResizeEnd" />
-				</Grid>
+			<Button x:Name="ResetFiltersButton" l:Uids.Uid="LogsPage_ResetFiltersButton" Click="OnResetFiltersClick" />
+		</StackPanel>
 
-				<!-- 分类表头 -->
-				<Grid Grid.Column="4">
-					<Button Content="分类" 
-                            HorizontalAlignment="Stretch"
-                            HorizontalContentAlignment="Left"
-                            Click="OnCategoryHeaderClick"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Padding="4,0" />
-					<Border Width="4" 
-                            HorizontalAlignment="Right"
-                            Background="Transparent"
-                            PointerEntered="OnCol4ResizeEnter"
-                            PointerExited="OnCol4ResizeExit"
-                            PointerPressed="OnCol4ResizeStart"
-                            PointerMoved="OnCol4ResizeMove"
-                            PointerReleased="OnCol4ResizeEnd" />
-				</Grid>
-
-				<!-- 消息表头 -->
-				<Grid Grid.Column="5">
-					<Button Content="消息" 
-                            HorizontalAlignment="Stretch"
-                            HorizontalContentAlignment="Left"
-                            Click="OnMessageHeaderClick"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Padding="4,0" />
-					<Border Width="4" 
-                            HorizontalAlignment="Right"
-                            Background="Transparent"
-                            PointerEntered="OnCol5ResizeEnter"
-                            PointerExited="OnCol5ResizeExit"
-                            PointerPressed="OnCol5ResizeStart"
-                            PointerMoved="OnCol5ResizeMove"
-                            PointerReleased="OnCol5ResizeEnd" />
-				</Grid>
-
-				<!-- 异常表头 -->
-				<Grid Grid.Column="6">
-					<Button Content="异常" 
-                            HorizontalAlignment="Stretch"
-                            HorizontalContentAlignment="Left"
-                            Click="OnExceptionHeaderClick"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Padding="4,0" />
-				</Grid>
-			</Grid>
-
-			<!-- 可滚动内容区域 -->
-			<ScrollViewer Grid.Row="1" 
-                          x:Name="ContentScrollViewer"
-                          ViewChanged="OnScrollViewChanged"
-                          VerticalScrollMode="Auto"
-                          VerticalScrollBarVisibility="Auto">
-				<ItemsRepeater x:Name="List"
-                               ItemsSource="{x:Bind VM.Items, Mode=OneWay}">
-					<ItemsRepeater.ItemTemplate>
-						<DataTemplate x:DataType="models:LogRow">
-							<Grid Padding="8,6"
-                                  MinHeight="28"
-                                  x:Name="ItemGrid">
-								<Grid.ColumnDefinitions>
-									<ColumnDefinition Width="{Binding DataContext.Col0Width, ElementName=PageRoot, Converter={StaticResource GridLengthConverter}}"/>
-									<!-- 选择框 -->
-									<ColumnDefinition Width="{Binding DataContext.Col1Width, ElementName=PageRoot, Converter={StaticResource GridLengthConverter}}"/>
-									<!-- 时间戳 -->
-									<ColumnDefinition Width="{Binding DataContext.Col2Width, ElementName=PageRoot, Converter={StaticResource GridLengthConverter}}"/>
-									<!-- 级别 -->
-									<ColumnDefinition Width="{Binding DataContext.Col3Width, ElementName=PageRoot, Converter={StaticResource GridLengthConverter}}"/>
-									<!-- 组件 -->
-									<ColumnDefinition Width="{Binding DataContext.Col4Width, ElementName=PageRoot, Converter={StaticResource GridLengthConverter}}"/>
-									<!-- 分类 -->
-									<ColumnDefinition Width="*"/>
-									<!-- 消息 -->
-									<ColumnDefinition Width="{Binding DataContext.Col6Width, ElementName=PageRoot, Converter={StaticResource GridLengthConverter}}"/>
-									<!-- 异常 -->
-								</Grid.ColumnDefinitions>
-
-								<!-- 选择复选框 -->
-								<CheckBox Grid.Column="0" 
-                                          IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
-                                          Checked="OnItemChecked"
-                                          Unchecked="OnItemUnchecked"
-                                          Visibility="{Binding DataContext.IsSelectionMode, ElementName=PageRoot, Converter={StaticResource BoolToVisibilityConverter}}"
-                                          Margin="4,0"
-                                          VerticalAlignment="Center" />
-
-								<!-- 时间戳 -->
-								<TextBlock Grid.Column="1"
-                                           Text="{x:Bind TimeStrFull, Mode=OneWay}"
-                                           FontFamily="Consolas"
-                                           FontSize="13"
-                                           IsTextSelectionEnabled="True"
-                                           Padding="4,0"
-                                           VerticalAlignment="Center" />
-
-								<!-- 级别 -->
-								<TextBlock Grid.Column="2"
-                                           Text="{x:Bind LevelName, Mode=OneWay}"
-                                           Foreground="{x:Bind Level, Mode=OneWay, Converter={StaticResource LogLevelToColorConverter}}"
-                                           FontFamily="Consolas"
-                                           FontSize="13"
-                                           FontWeight="SemiBold"
-                                           IsTextSelectionEnabled="True"
-                                           Padding="4,0"
-                                           VerticalAlignment="Center" />
-
-								<!-- 组件 -->
-								<TextBlock Grid.Column="3"
-                                           Text="{x:Bind Component, Mode=OneWay}"
-                                           FontFamily="Consolas"
-                                           FontSize="13"
-                                           IsTextSelectionEnabled="True"
-                                           Padding="4,0"
-                                           VerticalAlignment="Center" />
-
-								<!-- 分类 -->
-								<TextBlock Grid.Column="4"
-                                           Text="{x:Bind CategoryDisplay, Mode=OneWay}"
-                                           FontFamily="Consolas"
-                                           FontSize="13"
-                                           IsTextSelectionEnabled="True"
-                                           Opacity="0.75"
-                                           TextTrimming="CharacterEllipsis"
-                                           Padding="4,0"
-                                           VerticalAlignment="Center" />
-
-								<!-- 消息 -->
-								<TextBlock Grid.Column="5"
-                                           Text="{x:Bind DisplayMessage, Mode=OneWay}"
-                                           Foreground="{x:Bind Level, Mode=OneWay, Converter={StaticResource LogLevelToColorConverter}}"
-                                           FontFamily="Consolas"
-                                           FontSize="13"
-                                           IsTextSelectionEnabled="True"
-                                           TextWrapping="WrapWholeWords"
-                                           Padding="4,0"
-                                           VerticalAlignment="Center" />
-
-								<!-- 异常 -->
-								<TextBlock Grid.Column="6"
-                                           Text="{x:Bind Exception, Mode=OneWay}"
-                                           FontFamily="Consolas"
-                                           FontSize="13"
-                                           IsTextSelectionEnabled="True"
-                                           TextWrapping="WrapWholeWords"
-                                           Foreground="Red"
-                                           Padding="4,0"
-                                           VerticalAlignment="Center"
-                                           Visibility="{x:Bind Exception,
-                                                        Converter={StaticResource StringToVisibilityConverter}}" />
-							</Grid>
-						</DataTemplate>
-					</ItemsRepeater.ItemTemplate>
-				</ItemsRepeater>
-			</ScrollViewer>
-		</Grid>
+		<!-- 文本流显示区域（类似 Logcat/记事本） -->
+		<ScrollViewer Grid.Row="2" 
+                      x:Name="LogsScrollViewer"
+                      VerticalScrollMode="Auto"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollMode="Disabled"
+                      HorizontalScrollBarVisibility="Disabled"
+                      ZoomMode="Disabled"
+                      Padding="0">
+			<ItemsRepeater x:Name="LogsItemsRepeater"
+                           ItemsSource="{x:Bind VM.Items, Mode=OneWay}"
+                           ItemTemplate="{StaticResource LogItemTemplate}">
+				<ItemsRepeater.Layout>
+					<StackLayout Orientation="Vertical" Spacing="0"/>
+				</ItemsRepeater.Layout>
+			</ItemsRepeater>
+		</ScrollViewer>
 
 	</Grid>
 </Page>

@@ -29,19 +29,19 @@
          IsClosable="True"
 		 Height="Auto"
          Severity="Error"
-         Title="Core unavailable"
+         l:Uids.Uid="ShellPage_CoreUnavailable"
          Message="{x:Bind ViewModel.CoreDegradedMessage, Mode=OneWay}">
 
 			<InfoBar.ActionButton>
-				<DropDownButton Content="Actions">
+				<DropDownButton l:Uids.Uid="ShellPage_ActionsButton">
 					<DropDownButton.Flyout>
 						<MenuFlyout>
-							<MenuFlyoutItem Text="Retry"
+							<MenuFlyoutItem l:Uids.Uid="ShellPage_Menu_Retry"
                                     Command="{x:Bind ViewModel.RetryCoreInitCommand}" />
 							<MenuFlyoutSeparator />
-							<MenuFlyoutItem Text="Copy diagnostics"
+							<MenuFlyoutItem l:Uids.Uid="ShellPage_Menu_CopyDiagnostics"
                                     Command="{x:Bind ViewModel.CopyDiagnosticsCommand}" />
-							<MenuFlyoutItem Text="Open Logs"
+							<MenuFlyoutItem l:Uids.Uid="ShellPage_Menu_OpenLogs"
                                     Command="{x:Bind ViewModel.OpenLogsCommand}" />
 						</MenuFlyout>
 					</DropDownButton.Flyout>

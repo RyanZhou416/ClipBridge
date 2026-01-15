@@ -90,8 +90,7 @@
 						</ctk:SettingsCard>
 						
 						<!-- 核心开关 -->
-						<ctk:SettingsCard Header="核心服务"
-										  Description="开启或关闭核心服务"
+						<ctk:SettingsCard l:Uids.Uid="Settings_CoreService_SettingsCard"
 										  HeaderIcon="{ui:FontIcon Glyph=&#xE713;}"
 										  HorizontalAlignment="Stretch">
 							<ToggleSwitch x:Name="CoreToggleSwitch"
@@ -100,8 +99,7 @@
 						</ctk:SettingsCard>
 
 						<!-- 主页显示的卡片数量 -->
-						<ctk:SettingsCard Header="主页显示的卡片数量"
-										  Description="设置主页 Recent Items 区域显示的卡片数量（1-50）"
+						<ctk:SettingsCard l:Uids.Uid="Settings_RecentItemsCount_SettingsCard"
 										  HeaderIcon="{ui:FontIcon Glyph=&#xE8C1;}"
 										  HorizontalAlignment="Stretch">
 							<NumberBox x:Name="RecentItemsCountBox"
@@ -129,13 +127,12 @@
 						</ctk:SettingsCard>
 
 						<!-- 清空统计数据库 -->
-						<ctk:SettingsCard Header="清空统计数据"
-								  Description="清空所有统计数据（缓存使用、网络吞吐、活动统计等）"
+						<ctk:SettingsCard l:Uids.Uid="Settings_DeleteStatsDb_SettingsCard"
 								  HeaderIcon="{ui:FontIcon Glyph=&#xE74D;}"
 								  HorizontalAlignment="Stretch">
 							<Button Click="DeleteStatsDb_Click"
 							Width="180"
-							Content="清空统计数据"/>
+							l:Uids.Uid="Settings_DeleteStatsDb_Button"/>
 						</ctk:SettingsCard>
 
 						<!-- 删除缓存库（CAS blobs/tmp） -->

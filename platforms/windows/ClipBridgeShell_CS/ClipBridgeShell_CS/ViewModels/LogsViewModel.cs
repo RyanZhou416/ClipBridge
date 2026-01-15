@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,6 +18,10 @@ using CommunityToolkit.Mvvm.Input;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using WinUI3Localizer;
+using Microsoft.Extensions.Logging;
+using ClipBridgeShell_CS.Helpers;
+using Windows.Storage.Pickers;
+using WinRT.Interop;
 
 namespace ClipBridgeShell_CS.ViewModels;
 
@@ -25,12 +30,71 @@ public sealed class LogsViewModel : ObservableObject
     private static int _instanceCounter = 0;
     private readonly int _instanceId;
 
-    // 可绑定到 ListView / ItemsRepeater
+    // 可绑定到 ListView / ItemsRepeater（保留用于兼容）
     public ObservableCollection<LogRow> Items { get; } = new();
+    
+    // 格式化文本（用于文本流显示，类似 Logcat）
+    private readonly System.Text.StringBuilder _formattedText = new();
+    private string _formattedTextContent = "";
+    public string FormattedTextContent
+    {
+        get => _formattedTextContent;
+        private set => SetProperty(ref _formattedTextContent, value);
+    }
+    
+    // 列宽定义（用于格式化对齐）
+    private const int TimeWidth = 23;      // yyyy-MM-dd HH:mm:ss.fff
+    private const int LevelWidth = 8;      // Critical
+    private const int ComponentWidth = 18; // 组件名（增加宽度以容纳更长的组件名如 LogsViewModel）
+    private const int CategoryWidth = 20;  // 分类名
+    
+    /// <summary>
+    /// 计算字符串在等宽字体中的显示宽度（中文字符占2个字符宽度）
+    /// </summary>
+    private static int GetDisplayWidth(string str)
+    {
+        if (string.IsNullOrEmpty(str)) return 0;
+        int width = 0;
+        foreach (char c in str)
+        {
+            // 判断是否为全角字符（中文、日文、韩文等）
+            if (c >= 0x1100 && (c <= 0x115F || c >= 0x2E80 && c <= 0x9FFF || c >= 0xAC00 && c <= 0xD7AF || c >= 0xF900 && c <= 0xFAFF))
+            {
+                width += 2;
+            }
+            else
+            {
+                width += 1;
+            }
+        }
+        return width;
+    }
+    
+    /// <summary>
+    /// 在等宽字体中对齐字符串（考虑中文字符宽度）
+    /// </summary>
+    private static string PadRightForDisplay(string str, int targetWidth)
+    {
+        if (string.IsNullOrEmpty(str))
+        {
+            return new string(' ', targetWidth);
+        }
+        
+        int currentWidth = GetDisplayWidth(str);
+        if (currentWidth >= targetWidth)
+        {
+            return str;
+        }
+        
+        int paddingNeeded = targetWidth - currentWidth;
+        return str + new string(' ', paddingNeeded);
+    }
+    
     private readonly ICoreHostService _coreHost;
     private readonly StashLogManager? _stashManager;
     private readonly Services.EventPumpService? _eventPump;
     private readonly ILocalSettingsService? _localSettings;
+    private readonly Microsoft.Extensions.Logging.ILogger<LogsViewModel>? _logger;
     private string _currentLanguage = "en-US";
     private bool CanUseCore() => _coreHost.State == CoreState.Ready;
     
@@ -148,28 +212,58 @@ public sealed class LogsViewModel : ObservableObject
     // 所有原始日志（未过滤）
     private ObservableCollection<LogRow> _allItems = new();
     
-    // 应用过滤条件
+    // 格式化单条日志为固定宽度文本行
+    private string FormatLogLine(LogRow item)
+    {
+        var timeStr = PadRightForDisplay(item.TimeStrFull, TimeWidth);
+        var levelStr = PadRightForDisplay(item.LevelName, LevelWidth);
+        var componentStr = PadRightForDisplay(item.Component ?? "", ComponentWidth);
+        var categoryStr = PadRightForDisplay(item.CategoryDisplay ?? "", CategoryWidth);
+        var messageStr = item.DisplayMessage ?? "";
+        var exceptionStr = !string.IsNullOrEmpty(item.Exception) ? $"{"LogsPage_ExceptionPrefix".GetLocalized()}{item.Exception}" : "";
+        
+        return $"{timeStr} {levelStr} {componentStr} {categoryStr} {messageStr}{exceptionStr}";
+    }
+    
+    // 应用过滤条件（全量重建，用于初始加载或过滤条件变化时）
     private void ApplyFilters()
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] ApplyFilters called: _allItems.Count={_allItems.Count}, FilterLevels.Count={_filterLevels.Count}, FilterComponents.Count={_filterComponents.Count}, FilterCategories.Count={_filterCategories.Count}");
-        var separatorCount = _allItems.Count(item => item.Id < 0 && item.Category == "Separator");
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] ApplyFilters: separator count in _allItems={separatorCount}");
-        // #endregion
         var filtered = _allItems.Where(item => MatchesFilter(item)).ToList();
-        // #region agent log
-        var separatorCountInFiltered = filtered.Count(item => item.Id < 0 && item.Category == "Separator");
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] ApplyFilters: filtered.Count={filtered.Count}, separator count in filtered={separatorCountInFiltered}, before clear Items.Count={Items.Count}");
-        // #endregion
         Items.Clear();
+        _formattedText.Clear();
+        
         foreach (var item in filtered)
         {
             Items.Add(item);
+            _formattedText.AppendLine(FormatLogLine(item));
         }
-        // #region agent log
-        var separatorCountInItems = Items.Count(item => item.Id < 0 && item.Category == "Separator");
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] ApplyFilters: after add Items.Count={Items.Count}, separator count in Items={separatorCountInItems}");
-        // #endregion
+        
+        FormattedTextContent = _formattedText.ToString();
+    }
+    
+    // 增量应用过滤条件（只添加新项，用于新日志追加时）
+    // 新日志已经按时间顺序排序，直接追加到底部即可
+    private void ApplyFiltersIncremental(IEnumerable<LogRow> newItems)
+    {
+        // 使用 HashSet 快速检查已存在的 ID，避免重复添加
+        var existingIds = new HashSet<long>(Items.Select(item => item.Id));
+        
+        foreach (var item in newItems)
+        {
+            // 检查是否匹配过滤条件且未添加过
+            if (MatchesFilter(item) && !existingIds.Contains(item.Id))
+            {
+                // 新日志按时间顺序追加到底部（最新的在底部）
+                Items.Add(item);
+                existingIds.Add(item.Id); // 更新已存在的 ID 集合
+                
+                // 追加到格式化文本
+                _formattedText.AppendLine(FormatLogLine(item));
+            }
+        }
+        
+        // 更新格式化文本内容（触发 UI 更新）
+        FormattedTextContent = _formattedText.ToString();
     }
     
     // 检查日志项是否匹配过滤条件
@@ -178,52 +272,34 @@ public sealed class LogsViewModel : ObservableObject
         // 分隔符始终显示，不受过滤条件影响
         if (item.Id < 0 && item.Category == "Separator")
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] MatchesFilter: separator item {item.Id} always passes filter");
-            // #endregion
             return true;
         }
         
         // 时间范围过滤
         if (_filterStartTime.HasValue && item.Time < _filterStartTime.Value)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] MatchesFilter: item {item.Id} filtered by startTime");
-            // #endregion
             return false;
         }
         if (_filterEndTime.HasValue && item.Time > _filterEndTime.Value)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] MatchesFilter: item {item.Id} filtered by endTime");
-            // #endregion
             return false;
         }
         
         // 级别过滤
         if (!_filterLevels.Contains(item.Level))
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] MatchesFilter: item {item.Id} filtered by level {item.Level}, FilterLevels={string.Join(",", _filterLevels)}");
-            // #endregion
             return false;
         }
         
         // 组件过滤
         if (_filterComponents.Count > 0 && !_filterComponents.Contains(item.Component))
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] MatchesFilter: item {item.Id} filtered by component {item.Component}, FilterComponents={string.Join(",", _filterComponents)}");
-            // #endregion
             return false;
         }
         
         // 分类过滤
         if (_filterCategories.Count > 0 && !_filterCategories.Contains(item.Category))
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] MatchesFilter: item {item.Id} filtered by category {item.Category}, FilterCategories={string.Join(",", _filterCategories)}");
-            // #endregion
             return false;
         }
         
@@ -237,17 +313,32 @@ public sealed class LogsViewModel : ObservableObject
     }
     
     // 滚动状态管理
-    private bool _isScrolledToBottom = true; // 默认滚动到底部
+    private bool _isScrolledToBottom = true; // 默认滚动到底部（显示最新日志）
     public bool IsScrolledToBottom
     {
         get => _isScrolledToBottom;
         set => SetProperty(ref _isScrolledToBottom, value);
     }
     
-    private long _lastId = 0; // tail 用（最新日志的 ID）
-    private long _firstId = 0; // 当前已加载的最早日志的 ID（用于按需加载）
-    private DispatcherTimer? _timer;
-    private int _emptyQueryCount = 0; // 连续空查询次数，用于退避策略
+    private long _lastId = 0; // tail 用（最新日志的 ID，用于查询新日志）
+    private long _firstId = 0; // 当前已加载的最早日志的 ID（用于向上滚动加载更早的日志）
+    
+    // 线程安全地读取 _lastId
+    private long GetLastId() => System.Threading.Interlocked.Read(ref _lastId);
+    
+    // 线程安全地更新 _lastId（只在更大时更新）
+    private void UpdateLastId(long newId)
+    {
+        long currentId;
+        do
+        {
+            currentId = System.Threading.Interlocked.Read(ref _lastId);
+            if (newId <= currentId) return; // 不需要更新
+        } while (System.Threading.Interlocked.CompareExchange(ref _lastId, newId, currentId) != currentId);
+    }
+    private DispatcherTimer? _testLogTimer; // 测试日志定时器，每秒打印一条日志
+    private readonly object _tickLock = new(); // 防止 TickOnce 并发执行
+    private bool _isTickRunning = false; // 标记 TickOnce 是否正在执行
     private CoreState _previousCoreState = CoreState.NotInitialized; // 跟踪上一个核心状态，用于插入分隔符
     private long _separatorIdCounter = -1; // 分隔符ID计数器（使用负数，避免与真实日志ID冲突）
     private HashSet<long> _processedInitLogIds = new(); // 跟踪已处理过的"Core initializing"日志ID，避免重复插入分隔符
@@ -400,18 +491,18 @@ public sealed class LogsViewModel : ObservableObject
     public IRelayCommand SelectAllCmd { get; }
     public IRelayCommand DeselectAllCmd { get; }
     public IRelayCommand RefreshSourceStatsCmd { get; }
+    public IRelayCommand RefreshLogsCmd { get; } // 强制刷新日志
+    public IRelayCommand AddTestLogCmd { get; } // 添加测试日志（用于验证动画效果）
 
-    public LogsViewModel(ICoreHostService coreHost, StashLogManager? stashManager = null, Services.EventPumpService? eventPump = null, ILocalSettingsService? localSettings = null)
+    public LogsViewModel(ICoreHostService coreHost, StashLogManager? stashManager = null, Services.EventPumpService? eventPump = null, ILocalSettingsService? localSettings = null, Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null)
     {
         _instanceId = Interlocked.Increment(ref _instanceCounter);
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel#{_instanceId}] Constructor: creating new instance");
-        // #endregion
         
         _coreHost = coreHost;
         _stashManager = stashManager;
         _eventPump = eventPump;
         _localSettings = localSettings;
+        _logger = loggerFactory?.CreateLogger<LogsViewModel>();
 
         // 初始化语言设置（同步初始化，确保在查询日志前完成）
         // 注意：这里不能使用 await，因为构造函数不能是 async
@@ -421,16 +512,10 @@ public sealed class LogsViewModel : ObservableObject
             var loc = WinUI3Localizer.Localizer.Get();
             var locLang = loc.GetCurrentLanguage();
             CurrentLanguage = NormalizeLanguageTag(locLang);
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Constructor: initial CurrentLanguage={CurrentLanguage} from WinUI3Localizer");
-            // #endregion
         }
         catch
         {
             CurrentLanguage = "en-US";
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Constructor: failed to get language, defaulting to en-US");
-            // #endregion
         }
         
         // 异步部分：从设置中读取保存的语言（如果有）
@@ -447,7 +532,16 @@ public sealed class LogsViewModel : ObservableObject
 
         // Stop 和 Clear 不需要 Core，随时可用
         StopTailCmd = new RelayCommand(StopTail);
-        ClearViewCmd = new RelayCommand(() => { _allItems.Clear(); Items.Clear(); _lastId = 0; _firstId = 0; _processedInitLogIds.Clear(); });
+        ClearViewCmd = new RelayCommand(() => 
+        { 
+            _allItems.Clear(); 
+            Items.Clear(); 
+            _formattedText.Clear();
+            FormattedTextContent = "";
+            System.Threading.Interlocked.Exchange(ref _lastId, 0); 
+            _firstId = 0; 
+            _processedInitLogIds.Clear(); 
+        });
 
         RefreshStatsCmd = new RelayCommand(async () => await RefreshStatsAsync(), CanUseCore);
         QueryPageCmd = new RelayCommand(async () => await QueryPageAsync(), CanUseCore);
@@ -489,27 +583,64 @@ public sealed class LogsViewModel : ObservableObject
             SelectedLogIds.Clear();
         }, () => SelectedLogIds.Count > 0);
         RefreshSourceStatsCmd = new RelayCommand(async () => await RefreshSourceStatsAsync(), CanUseCore);
+        
+        // 强制刷新日志命令（用于调试）
+        RefreshLogsCmd = new RelayCommand(() =>
+        {
+            // 强制触发一次查询
+            _ = Task.Run(() => TickOnce());
+        }, CanUseCore);
+        
+        // 添加测试日志命令（用于验证动画效果）
+        // 注意：使用 ILogger 而不是直接调用 CoreInterop.LogsWrite，这样会经过完整的日志系统
+        AddTestLogCmd = new RelayCommand(() =>
+        {
+            if (!CanUseCore()) return;
+            
+            try
+            {
+                // 如果定时器已经在运行，停止它；否则启动它
+                if (_testLogTimer != null && _testLogTimer.IsEnabled)
+                {
+                    _testLogTimer.Stop();
+                    _testLogTimer = null;
+                }
+                else
+                {
+                    // 启动测试日志定时器，每秒打印一条日志
+                    _testLogTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+                    _testLogTimer.Tick += (s, e) =>
+                    {
+                        if (!CanUseCore())
+                        {
+                            _testLogTimer?.Stop();
+                            _testLogTimer = null;
+                            return;
+                        }
+                        
+                        var testMessage = $"测试日志 - {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff}";
+                        // 使用 ILogger 写入日志，这样会经过完整的日志系统（CoreLogger -> CoreLogDispatcher -> 事件）
+                        _logger?.LogInformation(testMessage);
+                    };
+                    _testLogTimer.Start();
+                }
+            }
+            catch (Exception ex)
+            {
+                // 测试日志命令错误，静默处理
+            }
+        }, CanUseCore);
 
         // 2. 订阅状态变化，以便自动刷新按钮状态
         _coreHost.StateChanged += OnCoreStateChanged;
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Constructor: subscribed to StateChanged event");
-        // #endregion
 
         // 初始化上一个核心状态
         var initialState = _coreHost.State;
         _previousCoreState = initialState;
-        
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Constructor: initial CoreState={initialState}, _previousCoreState={_previousCoreState}");
-        // #endregion
 
         // 3. 如果核心未就绪，加载暂存日志
         if (!CanUseCore() && _stashManager != null)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel#{_instanceId}] Constructor: Core not ready, loading stashed logs");
-            // #endregion
             LoadStashedLogs();
             
             // 如果核心状态是 NotLoaded 或 ShuttingDown，且数据库中有核心初始化的日志（说明之前核心是 Ready 的），
@@ -520,25 +651,14 @@ public sealed class LogsViewModel : ObservableObject
         // 4. 如果核心就绪，先加载暂存日志（如果有），然后启动tail
         else if (CanUseCore())
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Constructor: Core ready, checking for stashed logs before starting tail");
-            // #endregion
-            
             // 即使核心就绪，也先加载暂存日志（如果有）
             // 这样可以显示在核心启动之前产生的日志
             // 注意：暂存日志可能已经被回写到核心，但为了确保显示，我们仍然从暂存中加载
             // 如果暂存日志已经被回写，它们会在核心查询结果中出现，但通过ID去重可以避免重复显示
             if (_stashManager != null && _stashManager.HasStashedLogs())
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Constructor: Core ready but stashed logs exist, loading them first");
-                // #endregion
                 LoadStashedLogs();
             }
-            
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Constructor: Core ready, starting tail and refresh");
-            // #endregion
             
             // 不在这里插入分隔符，让TickOnce在检测到"Core initializing"日志时插入
             // 这样可以避免重复插入
@@ -546,30 +666,15 @@ public sealed class LogsViewModel : ObservableObject
             _ = StartTailAsync();
             _ = RefreshStatsAsync();
         }
-        else
-        {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Constructor: Core not ready and no stash manager");
-            // #endregion
-        }
     }
 
     private void LoadStashedLogs()
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] LoadStashedLogs called: stashManager={_stashManager != null}");
-        // #endregion
         if (_stashManager == null)
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] LoadStashedLogs skipped: stashManager is null");
-            // #endregion
             return;
         }
         var stashedLogs = _stashManager.ReadAllLogs();
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] LoadStashedLogs: found {stashedLogs.Count} stashed logs");
-        // #endregion
         foreach (var entry in stashedLogs)
         {
             // 根据当前语言选择消息
@@ -587,17 +692,10 @@ public sealed class LogsViewModel : ObservableObject
                 displayMessage = entry.GetMessageEn();
             }
             
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] LoadStashedLogs: loading entry id={entry.Id}, ts_utc={entry.TsUtc}, CurrentLanguage={CurrentLanguage}, MessageEn={entry.GetMessageEn()?.Substring(0, Math.Min(50, entry.GetMessageEn()?.Length ?? 0))}, MessageZhCn={entry.GetMessageZhCn()?.Substring(0, Math.Min(50, entry.GetMessageZhCn()?.Length ?? 0))}, displayMessage={displayMessage.Substring(0, Math.Min(50, displayMessage.Length))}");
-            // #endregion
-            
             // 检查是否已存在（避免重复，如果暂存日志已经被回写到核心）
             bool alreadyExists = _allItems.Any(item => item.Id == entry.Id || (item.Time_Unix == entry.TsUtc && item.Component == entry.Component && item.Category == entry.Category && item.Message == displayMessage));
             if (alreadyExists)
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[LogsViewModel] LoadStashedLogs: skipping duplicate entry id={entry.Id}");
-                // #endregion
                 continue;
             }
             
@@ -614,7 +712,7 @@ public sealed class LogsViewModel : ObservableObject
             });
         }
         
-        // 按时间戳和ID排序，确保暂存日志在正确的位置
+        // 按时间戳和ID从旧到新排序（ASC），确保最新日志在底部
         var sortedItems = _allItems.OrderBy(item => item.Time_Unix).ThenBy(item => item.Id).ToList();
         _allItems.Clear();
         foreach (var item in sortedItems)
@@ -624,10 +722,8 @@ public sealed class LogsViewModel : ObservableObject
         ApplyFilters();
         if (stashedLogs.Count > 0)
         {
-            _lastId = stashedLogs.Max(e => e.Id);
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] LoadStashedLogs: loaded {stashedLogs.Count} logs, lastId={_lastId}, itemsCount={Items.Count}");
-            // #endregion
+            var maxId = stashedLogs.Max(e => e.Id);
+            System.Threading.Interlocked.Exchange(ref _lastId, maxId);
         }
     }
 
@@ -643,66 +739,139 @@ public sealed class LogsViewModel : ObservableObject
     // -------------------- Tail 回调 + 后备轮询 --------------------
     private async Task StartTailAsync()
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] StartTailAsync called: CanUseCore={CanUseCore()}, CoreState={_coreHost.State}");
-        // #endregion
         StopTail();
         if (!CanUseCore())
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] StartTailAsync skipped: Core not ready");
-            // #endregion
             return; // 双重保险
         }
 
-        // 立即查询一次
-        _ = Task.Run(() => TickOnce());
+        // 初始加载：查询最新的日志（从新到旧）
+        _ = Task.Run(() => LoadLatestLogs());
 
-        // 启动后备轮询定时器（降低频率到10秒，作为事件丢失的后备）
-        _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) }; // 后备间隔10秒
-        _timer.Tick += (_, __) => TickOnce();
-        _timer.Start();
-        _emptyQueryCount = 0; // 重置空查询计数
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Tail started: callback-based with 10s fallback polling, lastId={_lastId}");
-        // #endregion
+        // 不再使用轮询定时器，完全依赖事件驱动
+        // 事件通过 EventPumpService.LogWritten 触发 OnLogWritten -> TickOnce
+        
         await Task.CompletedTask;
     }
 
     /// <summary>
-    /// 当核心发送日志写入事件时触发
+    /// 加载最新的日志（从新到旧排序，用于初始加载）
+    /// </summary>
+    private void LoadLatestLogs()
+    {
+        if (!CanUseCore())
+        {
+            return;
+        }
+
+        try
+        {
+            var handle = _coreHost.GetHandle();
+            if (handle == IntPtr.Zero)
+            {
+                return;
+            }
+
+            // 查询最新的500条日志（从新到旧）
+            var batch = CoreInterop.LogsQueryLatest(handle, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, 500, CurrentLanguage);
+            
+            if (batch.Count == 0)
+            {
+                return;
+            }
+
+            // 在UI线程更新集合
+            App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+            {
+                _allItems.Clear();
+                Items.Clear();
+                _formattedText.Clear();
+                
+                // batch是从新到旧排序（DESC），但显示时需要从旧到新（最新的在底部）
+                // 所以需要反转顺序
+                var reversedBatch = batch.ToList();
+                reversedBatch.Reverse();
+                
+                foreach (var row in reversedBatch)
+                {
+                    _allItems.Add(row);
+                }
+                
+                // 设置ID范围
+                if (batch.Count > 0)
+                {
+                    System.Threading.Interlocked.Exchange(ref _lastId, batch[0].Id); // 最新的ID（batch的第一个）
+                    _firstId = batch[batch.Count - 1].Id; // 最旧的ID（batch的最后一个）
+                }
+                
+                // 应用过滤（会更新格式化文本）
+                ApplyFilters();
+                
+                // 加载完成后，请求滚动到底部
+                ScrollToBottomRequested?.Invoke(this, EventArgs.Empty);
+            });
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] LoadLatestLogs error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 当核心发送日志写入事件时触发（事件驱动，不轮询）
     /// </summary>
     private void OnLogWritten(object? sender, EventArgs e)
     {
+        // 事件驱动：当有新日志写入时，立即查询并更新UI
+        lock (_tickLock)
+        {
+            if (_isTickRunning)
+            {
+                return;
+            }
+            _isTickRunning = true;
+        }
+        
         // 在后台线程执行查询，避免阻塞事件处理
-        _ = Task.Run(() => TickOnce());
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                TickOnce();
+            }
+            finally
+            {
+                lock (_tickLock)
+                {
+                    _isTickRunning = false;
+                }
+            }
+        });
     }
 
     private void StopTail()
     {
-        if (_timer is not null) { _timer.Stop(); _timer = null; }
+        if (_testLogTimer is not null) { _testLogTimer.Stop(); _testLogTimer = null; }
     }
 
     private void RestartTailNow()
     {
-        if (_timer is null) return;
-        _lastId = 0; 
+        System.Threading.Interlocked.Exchange(ref _lastId, 0); 
         _allItems.Clear(); 
         Items.Clear();
+        _formattedText.Clear();
+        FormattedTextContent = "";
         _processedInitLogIds.Clear(); // 清空已处理的日志ID，以便重新检测分隔符
     }
 
     private void TickOnce()
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] TickOnce called: lastId={_lastId}, CanUseCore={CanUseCore()}");
-        // #endregion
+        // 使用线程安全的方式读取 _lastId
+        var currentLastId = GetLastId();
+        
         // 如果运行中 Core 突然挂了，停止 Timer
         if (!CanUseCore())
         {
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel#{_instanceId}] TickOnce stopped: Core not ready");
-            // #endregion
             StopTail();
             return;
         }
@@ -712,70 +881,33 @@ public sealed class LogsViewModel : ObservableObject
             var handle = _coreHost.GetHandle();
             if (handle == IntPtr.Zero)
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[LogsViewModel] TickOnce skipped: handle is zero");
-                // #endregion
                 return;
             }
 
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Querying logs: afterId={_lastId}, levelMin={LevelMin}, filter={FilterText}, lang={CurrentLanguage}");
-            // #endregion
-            var batch = CoreInterop.LogsQueryAfterId(handle, _lastId, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, 500, CurrentLanguage);
-            // #region agent log
-            if (batch.Count > 0)
-            {
-                var firstMsg = batch[0].Message;
-                var firstId = batch[0].Id;
-                var firstTs = batch[0].Time_Unix;
-                System.Diagnostics.Debug.WriteLine($"[LogsViewModel] First log message sample (first 100 chars): {firstMsg.Substring(0, Math.Min(100, firstMsg.Length))}, isJson={firstMsg.TrimStart().StartsWith("{")}, id={firstId}, ts_utc={firstTs}");
-                if (batch.Count > 1)
-                {
-                    var lastId = batch[batch.Count - 1].Id;
-                    var lastTs = batch[batch.Count - 1].Time_Unix;
-                    System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Last log in batch: id={lastId}, ts_utc={lastTs}");
-                }
-            }
-            // #endregion
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Query returned: batchCount={batch.Count}, currentItemsCount={Items.Count}");
-            // #endregion
+            var batch = CoreInterop.LogsQueryAfterId(handle, currentLastId, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, 500, CurrentLanguage);
+            
             if (batch.Count == 0)
             {
-                // 后备轮询：空查询时不调整间隔（保持10秒）
-                // 因为主要依赖事件回调，轮询只是后备
+                // 没有新日志，直接返回（事件驱动，不需要轮询）
                 return;
             }
-            
-            // 有新日志，重置空查询计数
-            _emptyQueryCount = 0;
             
             // 在UI线程更新集合
             App.MainWindow.DispatcherQueue.TryEnqueue(() =>
             {
-                // #region agent log
-                var separatorCountBefore = _allItems.Count(item => item.Id < 0 && item.Category == "Separator");
-                System.Diagnostics.Debug.WriteLine($"[LogsViewModel#{_instanceId}] TickOnce: before adding batch, _allItems.Count={_allItems.Count}, separatorCount={separatorCountBefore}");
-                // #endregion
-                
+                // 新日志按ID从大到小排序（最新的在前），插入到列表顶部
+                var newLogs = new List<LogRow>();
                 foreach (var row in batch)
                 {
                     // 检查是否已存在（避免重复添加，特别是暂存日志可能已经被回写到核心）
                     bool alreadyExists = _allItems.Any(item => item.Id == row.Id);
                     if (alreadyExists)
                     {
-                        // #region agent log
-                        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] TickOnce: skipping duplicate log id={row.Id}");
-                        // #endregion
                         // 更新_lastId，但不添加重复项
-                        if (row.Id > _lastId)
-                        {
-                            _lastId = row.Id;
-                        }
+                        UpdateLastId(row.Id);
                         continue;
                     }
                     
-                    // #region agent log
                     // 在添加日志前检查是否匹配初始化日志条件
                     bool isInitLog = row.Component == "Core" && 
                                      row.Category == "Init" && 
@@ -785,32 +917,35 @@ public sealed class LogsViewModel : ObservableObject
                                       row.Message.Contains("核心初始化", StringComparison.OrdinalIgnoreCase) ||
                                       (row.Message.Contains("初始化", StringComparison.OrdinalIgnoreCase) && row.Message.Contains("设备 ID", StringComparison.OrdinalIgnoreCase)));
                     bool alreadyProcessed = _processedInitLogIds.Contains(row.Id);
-                    if (isInitLog)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] TickOnce: checking init log: id={row.Id}, Component={row.Component}, Category={row.Category}, Message='{row.Message.Substring(0, Math.Min(80, row.Message.Length))}...', isInitLog={isInitLog}, alreadyProcessed={alreadyProcessed}");
-                    }
-                    // #endregion
                     
-                    _allItems.Add(row);
-                    _lastId = row.Id;
+                    newLogs.Add(row);
                     
                     // 标记已处理的初始化日志（分隔符现在从数据库读取，不需要在这里插入）
                     if (isInitLog && !alreadyProcessed)
                     {
-                        // #region agent log
-                        System.Diagnostics.Debug.WriteLine($"[LogsViewModel#{_instanceId}] TickOnce: detected 'Core initializing' log with id={row.Id}, message='{row.Message.Substring(0, Math.Min(50, row.Message.Length))}...'");
-                        // #endregion
                         _processedInitLogIds.Add(row.Id);
                     }
                 }
                 
-                // #region agent log
-                var separatorCountAfter = _allItems.Count(item => item.Id < 0 && item.Category == "Separator");
-                System.Diagnostics.Debug.WriteLine($"[LogsViewModel#{_instanceId}] TickOnce: after adding batch, _allItems.Count={_allItems.Count}, separatorCount={separatorCountAfter}");
-                // #endregion
-                
-                // 应用过滤
-                ApplyFilters();
+                // 将新日志追加到底部（最新的在底部）
+                if (newLogs.Count > 0)
+                {
+                    // 按ID从小到大排序（旧的在前，新的在后），追加到底部
+                    newLogs.Sort((a, b) => a.Id.CompareTo(b.Id));
+                    var maxIdInBatch = newLogs[newLogs.Count - 1].Id; // 批次中的最大ID
+                    
+                    // 先添加到 _allItems
+                    foreach (var row in newLogs)
+                    {
+                        _allItems.Add(row); // 追加到底部
+                    }
+                    
+                    // 确保 _lastId 更新为批次中的最大ID（这是关键！）
+                    UpdateLastId(maxIdInBatch);
+                    
+                    // 使用增量过滤，只添加匹配过滤条件的新项（避免全屏闪动）
+                    ApplyFiltersIncremental(newLogs);
+                }
                 // 如果这是第一次加载，设置 firstId
                 if (_firstId == 0 && _allItems.Count > 0)
                 {
@@ -821,11 +956,8 @@ public sealed class LogsViewModel : ObservableObject
                         _firstId = firstNonSeparator.Id;
                     }
                 }
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[LogsViewModel] Added {batch.Count} items, newLastId={_lastId}, newItemsCount={Items.Count}, _allItemsCount={_allItems.Count}");
-                // #endregion
-                // 只有在滚动到底部时才自动滚动
-                if (AutoScroll && IsScrolledToBottom)
+                // 新日志追加到底部，如果开启了自动滚动，滚动到底部
+                if (AutoScroll)
                 {
                     TailRequested?.Invoke(this, EventArgs.Empty);
                 }
@@ -834,9 +966,6 @@ public sealed class LogsViewModel : ObservableObject
         catch (Exception ex)
         {
             // 如果出错（例如 DLL 调用失败），停止 Tail
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] TickOnce error: {ex.Message}, stopping tail");
-            // #endregion
             StopTail();
             System.Diagnostics.Debug.WriteLine($"Tail error: {ex.Message}");
         }
@@ -847,7 +976,7 @@ public sealed class LogsViewModel : ObservableObject
     public event EventHandler<LoadOlderLogsEventArgs>? LoadOlderLogsRequested; // 请求加载更早的日志
     
     /// <summary>
-    /// 加载更早的日志（向上滚动时按需加载）
+    /// 加载更早的日志（滚动到顶部时按需加载）
     /// </summary>
     public async Task LoadOlderLogsAsync()
     {
@@ -863,26 +992,39 @@ public sealed class LogsViewModel : ObservableObject
             
             if (batch.Count == 0) return; // 没有更早的日志了
             
-            // 在 UI 线程插入到列表开头
+            // 在 UI 线程插入到列表顶部（更早的日志在顶部）
             App.MainWindow.DispatcherQueue.TryEnqueue(() =>
             {
                 // 记录当前第一个元素的 ID，用于保持滚动位置
                 long? oldFirstId = Items.Count > 0 ? Items[0].Id : null;
                 
-                // 将新日志插入到列表开头（按时间升序，所以是倒序插入）
-                for (int i = batch.Count - 1; i >= 0; i--)
+                // 将更早的日志插入到 _allItems 顶部（batch已经是按时间升序排列的，从旧到新）
+                var newItems = new List<LogRow>();
+                foreach (var row in batch)
                 {
-                    Items.Insert(0, batch[i]);
+                    // 检查是否已存在
+                    if (!_allItems.Any(item => item.Id == row.Id))
+                    {
+                        _allItems.Insert(0, row); // 插入到顶部（更早的日志）
+                        newItems.Add(row);
+                    }
                 }
                 
-                _firstId = batch[0].Id; // 更新最早日志 ID
+                // 更新最早日志 ID
+                if (batch.Count > 0)
+                {
+                    _firstId = batch[0].Id; // batch是升序，第一个是最旧的
+                }
+                
+                // 重新构建格式化文本（因为顺序改变了，需要全量重建）
+                ApplyFilters();
                 
                 // 通知页面需要保持滚动位置
                 LoadOlderLogsRequested?.Invoke(this, new LoadOlderLogsEventArgs 
                 { 
                     OldFirstId = oldFirstId,
                     NewFirstId = _firstId,
-                    AddedCount = batch.Count
+                    AddedCount = newItems.Count
                 });
             });
         }
@@ -895,7 +1037,7 @@ public sealed class LogsViewModel : ObservableObject
     }
     
     /// <summary>
-    /// 滚动到底部并启用吸附
+    /// 滚动到底部并启用吸附（显示最新日志）
     /// </summary>
     public void ScrollToBottom()
     {
@@ -950,29 +1092,66 @@ public sealed class LogsViewModel : ObservableObject
         await Task.CompletedTask;
     }
 
-    // -------------------- 导出 CSV（简单版） --------------------
+    // -------------------- 导出 CSV（改进版：使用文件选择器） --------------------
     private async Task ExportCsvAsync()
     {
-        // 简化：导出当前 Items
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine("id,time,level,category,message,exception");
-        foreach (var r in Items)
+        try
         {
-            var line = string.Join(",", new[]
+            // 获取主窗口
+            var mainWindow = App.MainWindow;
+            if (mainWindow == null)
             {
-                r.Id.ToString(),
-                r.Time.ToString("yyyy-MM-dd HH:mm:ss.fff"),
-                r.LevelName,
-                CsvEscape(r.Category),
-                CsvEscape(r.Message),
-                CsvEscape(r.Exception ?? "")
-            });
-            sb.AppendLine(line);
-        }
+                _logger?.LogWarning("MainWindow is null, cannot show file picker");
+                return;
+            }
 
-        var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), $"logs_{DateTime.Now:yyyyMMdd_HHmmss}.csv");
-        await File.WriteAllTextAsync(path, sb.ToString());
-        // 你也可以在 UI 做个 toast 提示
+            // 创建文件保存选择器
+            var savePicker = new FileSavePicker();
+            
+            // 使用 InitializeWithWindow 初始化
+            var windowHandle = WindowNative.GetWindowHandle(mainWindow);
+            InitializeWithWindow.Initialize(savePicker, windowHandle);
+            
+            savePicker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
+            savePicker.SuggestedFileName = $"logs_{DateTime.Now:yyyyMMdd_HHmmss}";
+            savePicker.FileTypeChoices.Add("CSV Files", new List<string>() { ".csv" });
+            savePicker.FileTypeChoices.Add("All Files", new List<string>() { "." });
+
+            // 显示文件保存对话框
+            var file = await savePicker.PickSaveFileAsync();
+            if (file == null)
+            {
+                // 用户取消了选择
+                return;
+            }
+
+            // 构建 CSV 内容
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("id,time,level,category,message,exception");
+            foreach (var r in Items)
+            {
+                var line = string.Join(",", new[]
+                {
+                    r.Id.ToString(),
+                    r.Time.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+                    r.LevelName,
+                    CsvEscape(r.Category),
+                    CsvEscape(r.Message),
+                    CsvEscape(r.Exception ?? "")
+                });
+                sb.AppendLine(line);
+            }
+
+            // 写入文件（使用 UTF-8 编码，带 BOM 以便 Excel 正确识别）
+            var utf8WithBom = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true);
+            await File.WriteAllTextAsync(file.Path, sb.ToString(), utf8WithBom);
+            
+            _logger?.LogInformation($"Logs exported to: {file.Path}");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to export logs to CSV");
+        }
     }
 
     private static string CsvEscape(string s)
@@ -1032,7 +1211,7 @@ public sealed class LogsViewModel : ObservableObject
             {
                 Items.Clear();
                 SelectedLogIds.Clear();
-                _lastId = 0;
+                System.Threading.Interlocked.Exchange(ref _lastId, 0);
                 _firstId = 0;
                 _ = RefreshStatsAsync();
             });
@@ -1067,19 +1246,12 @@ public sealed class LogsViewModel : ObservableObject
     // [新增] 状态变更处理
     private void OnCoreStateChanged(CoreState state)
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel#{_instanceId}] OnCoreStateChanged: called with state={state}, _previousCoreState={_previousCoreState}");
-        // #endregion
-        
         // 确保在 UI 线程刷新命令状态
         App.MainWindow.DispatcherQueue.TryEnqueue(() =>
         {
             // 更新状态（分隔符现在从数据库读取，不需要在这里插入）
             if (_previousCoreState != state)
             {
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[LogsViewModel#{_instanceId}] OnCoreStateChanged: state changed from {_previousCoreState} to {state}");
-                // #endregion
                 _previousCoreState = state;
             }
 
@@ -1089,6 +1261,8 @@ public sealed class LogsViewModel : ObservableObject
             DeleteBeforeCmd.NotifyCanExecuteChanged();
             DeleteAllCmd.NotifyCanExecuteChanged();
             RefreshSourceStatsCmd.NotifyCanExecuteChanged();
+            RefreshLogsCmd.NotifyCanExecuteChanged();
+            AddTestLogCmd.NotifyCanExecuteChanged();
 
             if (state == CoreState.Ready)
             {
@@ -1114,32 +1288,18 @@ public sealed class LogsViewModel : ObservableObject
     /// </summary>
     private async Task InitializeLanguageAsync()
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] InitializeLanguageAsync called, current CurrentLanguage={CurrentLanguage}");
-        // #endregion
-        
         if (_localSettings != null)
         {
             var savedLang = await _localSettings.ReadSettingAsync<string>("PreferredLanguage");
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[LogsViewModel] InitializeLanguageAsync: savedLang={savedLang}");
-            // #endregion
             if (!string.IsNullOrEmpty(savedLang))
             {
                 var newLang = NormalizeLanguageTag(savedLang);
                 if (newLang != CurrentLanguage)
                 {
                     CurrentLanguage = newLang;
-                    // #region agent log
-                    System.Diagnostics.Debug.WriteLine($"[LogsViewModel] InitializeLanguageAsync: updated CurrentLanguage={CurrentLanguage} from savedLang");
-                    // #endregion
                 }
             }
         }
-        
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[LogsViewModel] InitializeLanguageAsync: final CurrentLanguage={CurrentLanguage}");
-        // #endregion
     }
 
     /// <summary>

@@ -67,6 +67,7 @@ CB_API const char* cb_get_item_meta(cb_handle* h, const char* item_id_json);
 
 // 日志系统
 CB_API int cb_logs_write(cb_handle* h, int level, const char* component, const char* category, const char* message_en, const char* message_zh_cn, const char* exception, const char* props_json, long long ts_utc, long long* out_id);
+CB_API int cb_logs_query_latest(cb_handle* h, int level_min, const char* like, int limit, const char* lang, const char** out_json);
 CB_API int cb_logs_query_after_id(cb_handle* h, long long after_id, int level_min, const char* like, int limit, const char* lang, const char** out_json);
 CB_API int cb_logs_query_before_id(cb_handle* h, long long before_id, int level_min, const char* like, int limit, const char* lang, const char** out_json);
 CB_API int cb_logs_query_range(cb_handle* h, long long start_ms, long long end_ms, int level_min, const char* like, int limit, int offset, const char* lang, const char** out_json);

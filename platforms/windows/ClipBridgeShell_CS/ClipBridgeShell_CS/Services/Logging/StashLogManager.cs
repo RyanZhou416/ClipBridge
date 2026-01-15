@@ -29,16 +29,10 @@ public sealed class StashLogManager
     /// </summary>
     public void WriteLog(LogEntry entry)
     {
-        // #region agent log
-        System.Diagnostics.Debug.WriteLine($"[StashLogManager] WriteLog called: id={entry.Id}, message={entry.Message.Substring(0, Math.Min(50, entry.Message.Length))}");
-        // #endregion
         lock (_lock)
         {
             // 添加到内存列表（用于立即显示）
             _inMemoryLogs.Add(entry);
-            // #region agent log
-            System.Diagnostics.Debug.WriteLine($"[StashLogManager] Added to memory: inMemoryCount={_inMemoryLogs.Count}");
-            // #endregion
 
             // 写入文件（JSON Lines格式）
             try
@@ -46,9 +40,6 @@ public sealed class StashLogManager
                 // 使用默认命名策略（PascalCase），与LogEntry属性名匹配
                 var json = JsonSerializer.Serialize(entry);
                 File.AppendAllText(_stashFilePath, json + Environment.NewLine);
-                // #region agent log
-                System.Diagnostics.Debug.WriteLine($"[StashLogManager] Written to file: path={_stashFilePath}");
-                // #endregion
             }
             catch (Exception ex)
             {
