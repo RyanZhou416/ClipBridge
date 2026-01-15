@@ -95,7 +95,7 @@ async fn setup(name: &str, tag: &str) -> TestContext {
     let log_store = Arc::new(Mutex::new(LogStore::open(&config.data_dir).expect("Failed to init LogStore")));
     let sink = Arc::new(TestSink::new());
     // 端口传 0 让系统自动分配，避免端口冲突
-    let transport = Arc::new(Transport::new(0).unwrap());
+    let transport = Arc::new(Transport::new(0, &config.data_dir, &config.device_id, &config.account_uid).unwrap());
 
     TestContext { config, sink, transport, store, cas, log_store}
 }

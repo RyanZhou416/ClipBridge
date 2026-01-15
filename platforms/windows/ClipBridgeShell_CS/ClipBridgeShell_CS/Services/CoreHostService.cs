@@ -582,5 +582,188 @@ public sealed class CoreHostService : ICoreHostService
         });
     }
 
+    /// <summary>
+    /// 查询设备列表（从核心）
+    /// </summary>
+    public List<Core.Models.Events.PeerMetaPayload> ListPeers()
+    {
+        if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
+        {
+            return new List<Core.Models.Events.PeerMetaPayload>();
+        }
+
+        try
+        {
+            var ptr = CoreInterop.cb_list_peers(_coreHandle);
+            var json = CoreInterop.PtrToStringAndFree(ptr);
+
+            if (string.IsNullOrEmpty(json))
+                return new List<Core.Models.Events.PeerMetaPayload>();
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
+                return new List<Core.Models.Events.PeerMetaPayload>();
+
+            if (!root.TryGetProperty("data", out var dataEl))
+                return new List<Core.Models.Events.PeerMetaPayload>();
+
+            var peers = new List<Core.Models.Events.PeerMetaPayload>();
+            if (dataEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var peerEl in dataEl.EnumerateArray())
+                {
+                    var peer = new Core.Models.Events.PeerMetaPayload
+                    {
+                        DeviceId = peerEl.TryGetProperty("device_id", out var did) ? did.GetString() ?? string.Empty : string.Empty,
+                        Name = peerEl.TryGetProperty("device_name", out var name) ? name.GetString() : "Unknown",
+                        IsOnline = peerEl.TryGetProperty("state", out var stateEl) 
+                            ? stateEl.GetString() == "Online" 
+                            : false,
+                        LastSeen = peerEl.TryGetProperty("last_seen_ts_ms", out var lastSeen) 
+                            ? lastSeen.GetInt64() 
+                            : 0,
+                        ShareToPeer = peerEl.TryGetProperty("share_to_peer", out var shareTo) 
+                            ? shareTo.GetBoolean() 
+                            : true,
+                        AcceptFromPeer = peerEl.TryGetProperty("accept_from_peer", out var acceptFrom) 
+                            ? acceptFrom.GetBoolean() 
+                            : true,
+                    };
+
+                    // 转换连接状态
+                    if (peerEl.TryGetProperty("state", out var state))
+                    {
+                        var stateStr = state.GetString() ?? "Offline";
+                        peer.ConnectionState = stateStr;
+                        peer.IsOnline = stateStr == "Online";
+                    }
+
+                    peers.Add(peer);
+                }
+            }
+
+            return peers;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"ListPeers failed: {ex}");
+            return new List<Core.Models.Events.PeerMetaPayload>();
+        }
+    }
+
+    /// <summary>
+    /// 设置单个设备策略
+    /// </summary>
+    public void SetPeerPolicy(string peerId, bool? shareTo, bool? acceptFrom)
+    {
+        if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("Core is not ready");
+        }
+
+        try
+        {
+            var policy = new
+            {
+                peer_id = peerId,
+                share_to_peer = shareTo,
+                accept_from_peer = acceptFrom
+            };
+
+            var json = JsonSerializer.Serialize(policy, _jsonOpts);
+
+            var ptr = CoreInterop.cb_set_peer_policy(_coreHandle, json);
+            var result = CoreInterop.PtrToStringAndFree(ptr);
+
+            using var doc = JsonDocument.Parse(result);
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
+            {
+                var errMsg = "Unknown error";
+                if (root.TryGetProperty("error", out var errEl))
+                {
+                    if (errEl.TryGetProperty("message", out var msgEl))
+                        errMsg = msgEl.GetString() ?? errMsg;
+                }
+                throw new Exception($"SetPeerPolicy failed: {errMsg}");
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"SetPeerPolicy failed: {ex}");
+            throw;
+        }
+    }
+
+    public void ClearPeerFingerprint(string peerId)
+    {
+        try
+        {
+            if (_coreHandle == IntPtr.Zero)
+                throw new InvalidOperationException("Core not initialized");
+
+            var request = new
+            {
+                peer_id = peerId
+            };
+
+            var json = JsonSerializer.Serialize(request, _jsonOpts);
+            var ptr = CoreInterop.cb_clear_peer_fingerprint(_coreHandle, json);
+            var result = CoreInterop.PtrToStringAndFree(ptr);
+
+            using var doc = JsonDocument.Parse(result);
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
+            {
+                var errMsg = "Unknown error";
+                if (root.TryGetProperty("error", out var errEl))
+                {
+                    if (errEl.TryGetProperty("message", out var msgEl))
+                        errMsg = msgEl.GetString() ?? errMsg;
+                }
+                throw new Exception($"ClearPeerFingerprint failed: {errMsg}");
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"ClearPeerFingerprint failed: {ex}");
+            throw;
+        }
+    }
+
+    public void ClearLocalCert()
+    {
+        try
+        {
+            if (_coreHandle == IntPtr.Zero)
+                throw new InvalidOperationException("Core not initialized");
+
+            var ptr = CoreInterop.cb_clear_local_cert(_coreHandle);
+            var result = CoreInterop.PtrToStringAndFree(ptr);
+
+            using var doc = JsonDocument.Parse(result);
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
+            {
+                var errMsg = "Unknown error";
+                if (root.TryGetProperty("error", out var errEl))
+                {
+                    if (errEl.TryGetProperty("message", out var msgEl))
+                        errMsg = msgEl.GetString() ?? errMsg;
+                }
+                throw new Exception($"ClearLocalCert failed: {errMsg}");
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"ClearLocalCert failed: {ex}");
+            throw;
+        }
+    }
 
 }

@@ -100,6 +100,18 @@ internal static class CoreInterop
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr cb_get_status(IntPtr h);
 
+    // CB_API const char* cb_set_peer_policy(cb_handle* h, const char* policy_json);
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr cb_set_peer_policy(IntPtr h, [MarshalAs(UnmanagedType.LPUTF8Str)] string policy_json);
+
+    // CB_API const char* cb_clear_peer_fingerprint(cb_handle* h, const char* peer_id_json);
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr cb_clear_peer_fingerprint(IntPtr h, [MarshalAs(UnmanagedType.LPUTF8Str)] string peer_id_json);
+
+    // CB_API const char* cb_clear_local_cert(cb_handle* h);
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr cb_clear_local_cert(IntPtr h);
+
     // ==========================================================
     // 4. 传输与内容 (Transfer & Content)
     // ==========================================================

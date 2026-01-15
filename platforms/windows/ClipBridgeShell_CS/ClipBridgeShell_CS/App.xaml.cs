@@ -154,7 +154,13 @@ public partial class App : Application
                 return new LogsViewModel(coreHost, stashManager, eventPump, localSettings);
             });
             services.AddTransient<LogsPage>();
-            services.AddTransient<DevicesViewModel>();
+            services.AddTransient<DevicesViewModel>(sp =>
+            {
+                var coreHost = sp.GetRequiredService<ICoreHostService>();
+                var localSettings = sp.GetRequiredService<ILocalSettingsService>();
+                var eventPump = sp.GetRequiredService<EventPumpService>();
+                return new DevicesViewModel(coreHost, localSettings, eventPump);
+            });
             services.AddTransient<DevicesPage>();
             services.AddTransient<MainViewModel>(sp =>
             {

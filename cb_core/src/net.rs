@@ -85,7 +85,7 @@ impl NetManager {
 
                 rt.block_on(async move {
                     // 2. 在 Runtime 内部进行初始化 (Transport 需要绑定 Socket)
-                    match Transport::new(0) {
+                    match Transport::new(0, &config.data_dir, &config.device_id, &config.account_uid) {
                         Ok(transport) => {
                             let transport = Arc::new(transport);
                             let port = transport.local_port().unwrap_or(0);
@@ -261,12 +261,30 @@ impl NetManager {
     /// 收集当前会话状态
     fn get_peers_info(&self) -> Vec<PeerStatus> {
         let mut peers = Vec::new();
+        let now = now_ms();
+        let account_uid = &self.config.account_uid;
+
+        // 获取 store 锁用于查询策略（只读查询）
+        let store = self.store.lock().unwrap();
 
         // 1. 先把 Session 里的加进去
         for s in &self.sessions {
+            let device_id = s.device_id();
+            let state = s.public_state();
+            
+            // 查询策略（如果不存在则使用默认值）
+            let (share_to, accept_from) = match store.get_peer_rule(account_uid, &device_id) {
+                Ok(Some(rule)) => (rule.share_to_peer, rule.accept_from_peer),
+                _ => (true, true), // 默认都允许
+            };
+
             peers.push(PeerStatus {
-                device_id: s.device_id(),
-                state: s.public_state(),
+                device_id,
+                device_name: None, // TODO: 从 HELLO 消息或事件中获取设备名称
+                state,
+                last_seen_ts_ms: now, // TODO: 从 session 或 known_peers 中获取真实时间
+                share_to_peer: share_to,
+                accept_from_peer: accept_from,
             });
         }
 
@@ -277,8 +295,6 @@ impl NetManager {
             }
 
             // 优先级：Backoff > Connecting > Discovered
-            let now = now_ms();
-
             let state = if let Some(bo) = self.backoff_map.get(did) {
                 if now < bo.next_retry_ts {
                     PeerConnectionState::Backoff
@@ -294,9 +310,19 @@ impl NetManager {
                 PeerConnectionState::Discovered
             };
 
+            // 查询策略（如果不存在则使用默认值）
+            let (share_to, accept_from) = match store.get_peer_rule(account_uid, did) {
+                Ok(Some(rule)) => (rule.share_to_peer, rule.accept_from_peer),
+                _ => (true, true), // 默认都允许
+            };
+
             peers.push(PeerStatus {
                 device_id: did.clone(),
+                device_name: None, // TODO: 从 discovery 或事件中获取设备名称
                 state,
+                last_seen_ts_ms: now, // TODO: 从 known_peers 中获取真实时间
+                share_to_peer: share_to,
+                accept_from_peer: accept_from,
             });
         }
 

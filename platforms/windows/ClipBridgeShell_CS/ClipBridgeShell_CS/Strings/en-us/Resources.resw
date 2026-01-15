@@ -305,4 +305,34 @@
   <data name="Settings_DeleteCacheFailed" xml:space="preserve">
     <value>Failed to delete cache.</value>
   </data>
+  <data name="Settings_ClearLocalCert_SettingsCard.Header" xml:space="preserve">
+    <value>Clear Local Certificate</value>
+  </data>
+  <data name="Settings_ClearLocalCert_SettingsCard.Description" xml:space="preserve">
+    <value>Clear local TLS certificate and private key. This will require all connected devices to re-pair.</value>
+  </data>
+  <data name="Settings_ClearLocalCert_Button.Content" xml:space="preserve">
+    <value>Clear Local Certificate</value>
+  </data>
+  <data name="Settings_ClearLocalCertConfirm_Title" xml:space="preserve">
+    <value>Clear Local Certificate?</value>
+  </data>
+  <data name="Settings_ClearLocalCertConfirm_Content" xml:space="preserve">
+    <value>This will delete the local TLS certificate and private key. All connected devices will need to re-pair. This action cannot be undone.</value>
+  </data>
+  <data name="Settings_ClearLocalCertConfirm_Primary" xml:space="preserve">
+    <value>Clear</value>
+  </data>
+  <data name="Settings_ClearLocalCertConfirm_Secondary" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="Settings_ClearLocalCertDone" xml:space="preserve">
+    <value>Local Certificate Cleared</value>
+  </data>
+  <data name="Settings_ClearLocalCertDone_Content" xml:space="preserve">
+    <value>Local certificate and private key have been successfully cleared. A new certificate will be generated after the application restarts, and all devices will need to re-pair.</value>
+  </data>
+  <data name="Settings_ClearLocalCertFailed" xml:space="preserve">
+    <value>Failed to clear local certificate</value>
+  </data>
 </root>

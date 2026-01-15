@@ -19,6 +19,9 @@ public class EventPumpService
     // 日志写入事件通知
     public event EventHandler? LogWritten;
 
+    // 事件接收通知（供 ViewModel 订阅）
+    public event Action<string>? EventReceived;
+
     public EventPumpService(HistoryStore historyStore, PeerStore peerStore, TransferStore transferStore, ContentFetchAwaiter awaiter)
     {
         _historyStore = historyStore;
@@ -69,6 +72,9 @@ public class EventPumpService
 
     private void ParseAndDispatch(string json)
     {
+        // 触发 EventReceived 事件（供 ViewModel 订阅）
+        EventReceived?.Invoke(json);
+
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 

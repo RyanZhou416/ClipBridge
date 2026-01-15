@@ -306,6 +306,85 @@ pub extern "C" fn cb_get_status(h: *mut cb_handle) -> *const c_char {
     }
 }
 
+/// 设置单个设备的共享策略
+///
+/// 入参格式：{"peer_id": "device_uuid", "share_to_peer": true, "accept_from_peer": false}
+/// 返回格式：{"ok": true}
+#[no_mangle]
+pub extern "C" fn cb_set_peer_policy(h: *mut cb_handle, policy_json: *const c_char) -> *const c_char {
+    let run = (|| -> anyhow::Result<String> {
+        if h.is_null() { anyhow::bail!("null handle"); }
+        let hh = unsafe { &mut *h };
+        let policy_str = crate::cstr_to_str(policy_json)?;
+
+        #[derive(serde::Deserialize)]
+        struct PolicyRequest {
+            peer_id: String,
+            #[serde(default)]
+            share_to_peer: Option<bool>,
+            #[serde(default)]
+            accept_from_peer: Option<bool>,
+        }
+
+        let req: PolicyRequest = serde_json::from_str(policy_str)?;
+        hh.core.set_peer_policy(&req.peer_id, req.share_to_peer, req.accept_from_peer)?;
+
+        Ok(ok_json(serde_json::json!({ "ok": true })))
+    })();
+
+    match run {
+        Ok(s) => ret(s),
+        Err(e) => ret(err_json("SET_PEER_POLICY_FAILED", &format!("{e:#}"))),
+    }
+}
+
+/// 清除设备指纹（用于重新配对，解决 TLS_PIN_MISMATCH 问题）
+///
+/// 入参格式：{"peer_id": "device_uuid"}
+/// 返回格式：{"ok": true}
+#[no_mangle]
+pub extern "C" fn cb_clear_peer_fingerprint(h: *mut cb_handle, peer_id_json: *const c_char) -> *const c_char {
+    let run = (|| -> anyhow::Result<String> {
+        if h.is_null() { anyhow::bail!("null handle"); }
+        let hh = unsafe { &mut *h };
+        let json_str = crate::cstr_to_str(peer_id_json)?;
+
+        #[derive(serde::Deserialize)]
+        struct ClearFingerprintRequest {
+            peer_id: String,
+        }
+
+        let req: ClearFingerprintRequest = serde_json::from_str(json_str)?;
+        hh.core.clear_peer_fingerprint(&req.peer_id)?;
+
+        Ok(ok_json(serde_json::json!({ "ok": true })))
+    })();
+
+    match run {
+        Ok(s) => ret(s),
+        Err(e) => ret(err_json("CLEAR_PEER_FINGERPRINT_FAILED", &format!("{e:#}"))),
+    }
+}
+
+/// 清除本地证书（用于重新生成证书，需要重新配对所有设备）
+///
+/// 无需参数
+/// 返回格式：{"ok": true}
+#[no_mangle]
+pub extern "C" fn cb_clear_local_cert(h: *mut cb_handle) -> *const c_char {
+    let run = (|| -> anyhow::Result<String> {
+        if h.is_null() { anyhow::bail!("null handle"); }
+        let hh = unsafe { &mut *h };
+        hh.core.clear_local_cert()?;
+        Ok(ok_json(serde_json::json!({ "ok": true })))
+    })();
+
+    match run {
+        Ok(s) => ret(s),
+        Err(e) => ret(err_json("CLEAR_LOCAL_CERT_FAILED", &format!("{e:#}"))),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct EnsureContentDto {
 	item_id: String,

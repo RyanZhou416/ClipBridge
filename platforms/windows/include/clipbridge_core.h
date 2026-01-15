@@ -36,6 +36,21 @@ CB_API const char* cb_list_peers(cb_handle* h);
 // 返回 {"ok":true, "data":{"status":"Running", ...}}
 CB_API const char* cb_get_status(cb_handle* h);
 
+// 设置单个设备的共享策略
+// policy_json: {"peer_id": "device_uuid", "share_to_peer": true, "accept_from_peer": false}
+// 返回 {"ok": true}
+CB_API const char* cb_set_peer_policy(cb_handle* h, const char* policy_json);
+
+// 清除设备指纹（用于重新配对，解决 TLS_PIN_MISMATCH 问题）
+// peer_id_json: {"peer_id": "device_uuid"}
+// 返回 {"ok": true}
+CB_API const char* cb_clear_peer_fingerprint(cb_handle* h, const char* peer_id_json);
+
+// 清除本地证书（用于重新生成证书，需要重新配对所有设备）
+// 无需参数
+// 返回 {"ok": true}
+CB_API const char* cb_clear_local_cert(cb_handle* h);
+
 // M3: 确保内容缓存 (Lazy Fetch)
 // req_json: { "item_id": "...", "file_id": "opt", "prefer_peer": "opt" }
 CB_API const char* cb_ensure_content_cached(cb_handle* h, const char* req_json);

@@ -1,9 +1,10 @@
 // cb_core/src/transport.rs
 
-mod cert;
+pub mod cert;
 
 use std::fmt::Debug;
 use std::net::{SocketAddr, Ipv4Addr}; // Ipv6Addr 在 v1 暂不强制
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -83,10 +84,22 @@ pub struct Transport {
 }
 
 impl Transport {
-    pub fn new(listen_port: u16) -> Result<Self> {
-        // 1. 生成证书
-        let (cert_chain, priv_key) = cert::generate_self_signed_cert("clipbridge")
-            .context("failed to generate self-signed cert")?;
+    /// 创建 Transport 实例
+    ///
+    /// # 参数
+    /// - `listen_port`: 监听端口（0 表示自动分配）
+    /// - `data_dir`: 数据目录，用于持久化证书和私钥
+    /// - `device_id`: 设备 ID，用于密钥派生
+    /// - `account_uid`: 账号 UID，用于密钥派生
+    pub fn new(
+        listen_port: u16,
+        data_dir: impl AsRef<Path>,
+        device_id: &str,
+        account_uid: &str,
+    ) -> Result<Self> {
+        // 1. 获取或创建证书（优先加载已保存的，不存在则生成并保存）
+        let (cert_chain, priv_key) = cert::get_or_create_cert(data_dir, device_id, account_uid, "clipbridge")
+            .context("failed to get or create cert")?;
 
         let local_cert_der = cert_chain[0].as_ref().to_vec();
 

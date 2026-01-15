@@ -1,40 +1,148 @@
-﻿<Page
+<Page
     x:Class="ClipBridgeShell_CS.Views.DevicesPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    xmlns:controls="using:CommunityToolkit.WinUI.UI.Controls"
+    xmlns:events="using:ClipBridgeShell_CS.Core.Models.Events"
+    xmlns:helpers="using:ClipBridgeShell_CS.Helpers"
     mc:Ignorable="d">
 
+    <Page.Resources>
+        <!-- 转换器 -->
+        <helpers:BooleanToColorConverter x:Key="BooleanToColorConverter"/>
+        <helpers:TimestampConverter x:Key="TimestampConverter"/>
+
+        <!-- 卡片样式 -->
+        <Style x:Key="ItemCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource LayerFillColorDefaultBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Padding" Value="16"/>
+            <Setter Property="Margin" Value="0,8"/>
+        </Style>
+    </Page.Resources>
+
     <Grid x:Name="ContentArea">
-        <controls:DataGrid
-            AutoGenerateColumns="False"
-            GridLinesVisibility="Horizontal"
-            ItemsSource="{x:Bind ViewModel.Source, Mode=OneWay}">
-            <controls:DataGrid.Resources>
-                <SolidColorBrush x:Key="DataGridColumnHeaderBackgroundColor" Color="Transparent" />
-            </controls:DataGrid.Resources>
-            <controls:DataGrid.Columns>
-                <!-- TODO: Replace column definitions to match real data. Consider adding Header values to Resources.resw. -->
-                <controls:DataGridTextColumn Binding="{Binding OrderID}" Header="OrderID" />
-                <controls:DataGridTextColumn Binding="{Binding OrderDate}" Header="OrderDate" />
-                <controls:DataGridTextColumn Binding="{Binding Company}" Header="Company" />
-                <controls:DataGridTextColumn Binding="{Binding ShipTo}" Header="ShipTo" />
-                <controls:DataGridTextColumn Binding="{Binding OrderTotal}" Header="OrderTotal" />
-                <controls:DataGridTextColumn Binding="{Binding Status}" Header="Status" />
-                <controls:DataGridTemplateColumn Header="Symbol">
-                    <controls:DataGridTemplateColumn.CellTemplate>
-                        <DataTemplate>
-                            <FontIcon
-                                HorizontalAlignment="Left"
-                                FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                Glyph="{Binding Symbol}"
-                                AutomationProperties.Name="{Binding SymbolName}" />
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- 顶部摘要区域 -->
+        <Border Grid.Row="0" Style="{StaticResource ItemCardStyle}" Margin="36,36,36,0">
+            <StackPanel Spacing="12">
+                <TextBlock Text="Sharing Summary" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                <Grid ColumnDefinitions="*,*" ColumnSpacing="24">
+                    <StackPanel Grid.Column="0" Spacing="4">
+                        <TextBlock>
+                            <Run Text="Outbound allowed: "/>
+                            <Run Text="{x:Bind ViewModel.OutboundAllowedCount}" FontWeight="SemiBold"/>
+                            <Run Text=" devices"/>
+                        </TextBlock>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Spacing="4">
+                        <TextBlock>
+                            <Run Text="Inbound allowed: "/>
+                            <Run Text="{x:Bind ViewModel.InboundAllowedCount}" FontWeight="SemiBold"/>
+                            <Run Text=" devices"/>
+                        </TextBlock>
+                    </StackPanel>
+                </Grid>
+                <Button Content="Refresh" 
+                        Command="{x:Bind ViewModel.RefreshDevicesCommand}"
+                        HorizontalAlignment="Right"
+                        Margin="0,8,0,0"/>
+            </StackPanel>
+        </Border>
+
+        <!-- 设备列表区域 -->
+        <ScrollViewer Grid.Row="1" Padding="36,24,36,36" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="12">
+                <TextBlock Text="Devices" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                
+                <ListView ItemsSource="{x:Bind ViewModel.Devices, Mode=OneWay}" SelectionMode="Single">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="events:PeerMetaPayload">
+                            <Border Style="{StaticResource ItemCardStyle}" 
+                                    Tapped="OnDeviceTapped"
+                                    Tag="{x:Bind}">
+                                <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto" ColumnSpacing="12">
+                                    <!-- 状态指示器 -->
+                                    <Ellipse Grid.Column="0" 
+                                             Width="12" 
+                                             Height="12" 
+                                             VerticalAlignment="Center">
+                                        <Ellipse.Fill>
+                                            <SolidColorBrush Color="{Binding IsOnline, Converter={StaticResource BooleanToColorConverter}}"/>
+                                        </Ellipse.Fill>
+                                    </Ellipse>
+
+                                    <!-- 设备信息 -->
+                                    <StackPanel Grid.Column="1" Spacing="4">
+                                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding DeviceId}" FontSize="12" Opacity="0.6"/>
+                                        <TextBlock FontSize="12" Opacity="0.6">
+                                            <Run Text="State: "/>
+                                            <Run Text="{Binding ConnectionState}"/>
+                                        </TextBlock>
+                                        <TextBlock FontSize="12" Opacity="0.6">
+                                            <Run Text="Last seen: "/>
+                                            <Run Text="{Binding LastSeen, Converter={StaticResource TimestampConverter}}"/>
+                                        </TextBlock>
+                                    </StackPanel>
+
+                                    <!-- Outbound 开关 -->
+                                    <ToggleSwitch Grid.Column="2" 
+                                                  Header="Share To"
+                                                  IsOn="{Binding ShareToPeer, Mode=TwoWay}"
+                                                  Toggled="OnShareToToggled"
+                                                  Tag="{x:Bind}"/>
+
+                                    <!-- Inbound 开关 -->
+                                    <ToggleSwitch Grid.Column="3" 
+                                                  Header="Accept From"
+                                                  IsOn="{Binding AcceptFromPeer, Mode=TwoWay}"
+                                                  Toggled="OnAcceptFromToggled"
+                                                  Tag="{x:Bind}"/>
+
+                                    <!-- 右键菜单按钮 -->
+                                    <Button Grid.Column="4" 
+                                            Content="⋯"
+                                            FontSize="16"
+                                            Click="OnDeviceMenuClick"
+                                            Tag="{x:Bind}">
+                                        <Button.Flyout>
+                                            <MenuFlyout>
+                                                <ToggleMenuFlyoutItem Text="Share to this device" 
+                                                                      IsChecked="{Binding ShareToPeer, Mode=TwoWay}"
+                                                                      Click="OnShareToMenuClick"
+                                                                      Tag="{x:Bind}"/>
+                                                <ToggleMenuFlyoutItem Text="Accept from this device" 
+                                                                      IsChecked="{Binding AcceptFromPeer, Mode=TwoWay}"
+                                                                      Click="OnAcceptFromMenuClick"
+                                                                      Tag="{x:Bind}"/>
+                                                <MenuFlyoutSeparator/>
+                                                <MenuFlyoutItem Text="Copy device info" 
+                                                               Click="OnCopyDeviceInfoClick"
+                                                               Tag="{x:Bind}"/>
+                                                <MenuFlyoutItem Text="Set local alias" 
+                                                               Click="OnSetAliasClick"
+                                                               Tag="{x:Bind}"/>
+                                                <MenuFlyoutSeparator/>
+                                                <MenuFlyoutItem Text="Clear device fingerprint" 
+                                                               Click="OnClearFingerprintClick"
+                                                               Tag="{x:Bind}"/>
+                                            </MenuFlyout>
+                                        </Button.Flyout>
+                                    </Button>
+                                </Grid>
+                            </Border>
                         </DataTemplate>
-                    </controls:DataGridTemplateColumn.CellTemplate>
-                </controls:DataGridTemplateColumn>
-            </controls:DataGrid.Columns>
-        </controls:DataGrid>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </StackPanel>
+        </ScrollViewer>
     </Grid>
 </Page>

@@ -442,6 +442,67 @@ public sealed partial class SettingsPage : Page
         }
     }
 
+    private async void ClearLocalCert_Click(object sender, RoutedEventArgs e)
+    {
+        var loc = Localizer.Get();
+
+        var confirm = new ContentDialog
+        {
+            Title = loc.GetLocalizedString("Settings_ClearLocalCertConfirm_Title"),
+            Content = loc.GetLocalizedString("Settings_ClearLocalCertConfirm_Content"),
+            PrimaryButtonText = loc.GetLocalizedString("Settings_ClearLocalCertConfirm_Primary"),
+            CloseButtonText = loc.GetLocalizedString("Settings_ClearLocalCertConfirm_Secondary"),
+            XamlRoot = this.Content.XamlRoot
+        };
+
+        var result = await confirm.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+            return;
+
+        try
+        {
+            var coreHost = App.GetService<ICoreHostService>();
+            if (coreHost.State != CoreState.Ready)
+            {
+                var err = new ContentDialog
+                {
+                    Title = "错误",
+                    Content = "核心未就绪，无法清除本地证书",
+                    PrimaryButtonText = "OK",
+                    XamlRoot = this.Content.XamlRoot
+                };
+                await err.ShowAsync();
+                return;
+            }
+
+            // 调用清除本地证书
+            await Task.Run(() =>
+            {
+                coreHost.ClearLocalCert();
+            });
+
+            var done = new ContentDialog
+            {
+                Title = loc.GetLocalizedString("Settings_ClearLocalCertDone"),
+                Content = loc.GetLocalizedString("Settings_ClearLocalCertDone_Content"),
+                PrimaryButtonText = "OK",
+                XamlRoot = this.Content.XamlRoot
+            };
+            await done.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            var err = new ContentDialog
+            {
+                Title = loc.GetLocalizedString("Settings_ClearLocalCertFailed"),
+                Content = ex.Message,
+                PrimaryButtonText = "OK",
+                XamlRoot = this.Content.XamlRoot
+            };
+            await err.ShowAsync();
+        }
+    }
+
     private void RecentItemsCountBox_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
         if (e.Key == Windows.System.VirtualKey.Enter)

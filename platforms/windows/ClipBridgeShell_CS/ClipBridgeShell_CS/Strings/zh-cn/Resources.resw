@@ -305,4 +305,34 @@
   <data name="Settings_DeleteCacheFailed" xml:space="preserve">
     <value>删除缓存失败。</value>
   </data>
+  <data name="Settings_ClearLocalCert_SettingsCard.Header" xml:space="preserve">
+    <value>清除本地证书</value>
+  </data>
+  <data name="Settings_ClearLocalCert_SettingsCard.Description" xml:space="preserve">
+    <value>清除本地 TLS 证书和私钥。这将导致所有已连接的设备需要重新配对。</value>
+  </data>
+  <data name="Settings_ClearLocalCert_Button.Content" xml:space="preserve">
+    <value>清除本地证书</value>
+  </data>
+  <data name="Settings_ClearLocalCertConfirm_Title" xml:space="preserve">
+    <value>清除本地证书？</value>
+  </data>
+  <data name="Settings_ClearLocalCertConfirm_Content" xml:space="preserve">
+    <value>此操作将删除本地 TLS 证书和私钥。所有已连接的设备将需要重新配对。此操作无法撤销。</value>
+  </data>
+  <data name="Settings_ClearLocalCertConfirm_Primary" xml:space="preserve">
+    <value>清除</value>
+  </data>
+  <data name="Settings_ClearLocalCertConfirm_Secondary" xml:space="preserve">
+    <value>取消</value>
+  </data>
+  <data name="Settings_ClearLocalCertDone" xml:space="preserve">
+    <value>本地证书已清除</value>
+  </data>
+  <data name="Settings_ClearLocalCertDone_Content" xml:space="preserve">
+    <value>本地证书和私钥已成功清除。应用程序重启后将生成新的证书，所有设备需要重新配对。</value>
+  </data>
+  <data name="Settings_ClearLocalCertFailed" xml:space="preserve">
+    <value>清除本地证书失败</value>
+  </data>
 </root>

@@ -12,7 +12,14 @@ pub struct CacheRow {
     pub present: bool,
 }
 
-
+/// PeerRule 结构体：设备共享策略规则
+pub struct PeerRule {
+    pub account_uid: String,
+    pub device_id: String,
+    pub share_to_peer: bool,
+    pub accept_from_peer: bool,
+    pub updated_at_ms: i64,
+}
 
 impl Store {
     pub fn open(data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -106,6 +113,16 @@ impl Store {
                 updated_at_ms INTEGER NOT NULL,
                 PRIMARY KEY (account_uid, device_id)
             );
+
+            -- peer_rules 表：存储设备共享策略
+            CREATE TABLE IF NOT EXISTS peer_rules (
+                account_uid TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                share_to_peer INTEGER NOT NULL DEFAULT 1,
+                accept_from_peer INTEGER NOT NULL DEFAULT 1,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (account_uid, device_id)
+            );
             "#,
         )?;
         Ok(())
@@ -166,7 +183,7 @@ impl Store {
     ///         total_bytes: 1024,
     ///         mime: "application/pdf".to_string(),
     ///     },
-    ///     preview: Some(Preview { thumbnail_url: "http://example.com/thumbnail.png".to_string() }),
+    ///     preview: Some(Preview { thumbnail_url: "https://example.com/thumbnail.png".to_string() }),
     ///     files: vec![File { name: "example.pdf".to_string(), size: 1024 }],
     /// };
     ///
@@ -217,7 +234,7 @@ pub fn insert_meta_and_history(
         )?;
 
         // history：sort_ts_ms 固定用 created_ts_ms
-        // 如果同 (account_uid,item_id) 已经存在，unique index 会挡住；这里用 OR IGNORE 保证幂等
+        // 如果同 (account_uid, item_id) 已经存在，unique index 会挡住；这里用 OR IGNORE 保证幂等
         tx.execute(
             r#"INSERT OR IGNORE INTO history(account_uid, item_id, sort_ts_ms, source_device_id)
                VALUES (?1, ?2, ?3, ?4)"#,
@@ -498,6 +515,100 @@ pub fn insert_meta_and_history(
         Ok(())
     }
 
+    /// 删除设备指纹（用于重新配对）
+    pub fn delete_peer_fingerprint(&mut self, account_uid: &str, device_id: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "DELETE FROM trusted_peers WHERE account_uid=?1 AND device_id=?2",
+            params![account_uid, device_id]
+        )?;
+        Ok(())
+    }
+
+    /// 获取或创建默认的 PeerRule（如果不存在则创建默认值）
+    pub fn get_or_create_peer_rule(&mut self, account_uid: &str, device_id: &str, now_ms: i64) -> anyhow::Result<PeerRule> {
+        // 先尝试查询
+        let existing: Option<(bool, bool, i64)> = self.conn.query_row(
+            "SELECT share_to_peer, accept_from_peer, updated_at_ms FROM peer_rules WHERE account_uid=?1 AND device_id=?2",
+            params![account_uid, device_id],
+            |r| Ok((r.get::<_, i32>(0)? != 0, r.get::<_, i32>(1)? != 0, r.get(2)?)),
+        ).optional()?;
+
+        if let Some((share_to, accept_from, updated_at)) = existing {
+            Ok(PeerRule {
+                account_uid: account_uid.to_string(),
+                device_id: device_id.to_string(),
+                share_to_peer: share_to,
+                accept_from_peer: accept_from,
+                updated_at_ms: updated_at,
+            })
+        } else {
+            // 创建默认规则（默认都允许）
+            let rule = PeerRule {
+                account_uid: account_uid.to_string(),
+                device_id: device_id.to_string(),
+                share_to_peer: true,
+                accept_from_peer: true,
+                updated_at_ms: now_ms,
+            };
+            self.upsert_peer_rule(&rule)?;
+            Ok(rule)
+        }
+    }
+
+    /// 更新或插入 PeerRule
+    pub fn upsert_peer_rule(&mut self, rule: &PeerRule) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO peer_rules (account_uid, device_id, share_to_peer, accept_from_peer, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                rule.account_uid,
+                rule.device_id,
+                if rule.share_to_peer { 1 } else { 0 },
+                if rule.accept_from_peer { 1 } else { 0 },
+                rule.updated_at_ms
+            ]
+        )?;
+        Ok(())
+    }
+
+    /// 获取 PeerRule（如果不存在返回 None）
+    pub fn get_peer_rule(&self, account_uid: &str, device_id: &str) -> anyhow::Result<Option<PeerRule>> {
+        let res: Option<(bool, bool, i64)> = self.conn.query_row(
+            "SELECT share_to_peer, accept_from_peer, updated_at_ms FROM peer_rules WHERE account_uid=?1 AND device_id=?2",
+            params![account_uid, device_id],
+            |r| Ok((r.get::<_, i32>(0)? != 0, r.get::<_, i32>(1)? != 0, r.get(2)?)),
+        ).optional()?;
+
+        Ok(res.map(|(share_to, accept_from, updated_at)| PeerRule {
+            account_uid: account_uid.to_string(),
+            device_id: device_id.to_string(),
+            share_to_peer: share_to,
+            accept_from_peer: accept_from,
+            updated_at_ms: updated_at,
+        }))
+    }
+
+    /// 列出所有 PeerRule（用于调试或迁移）
+    pub fn list_peer_rules(&self, account_uid: &str) -> anyhow::Result<Vec<PeerRule>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT device_id, share_to_peer, accept_from_peer, updated_at_ms FROM peer_rules WHERE account_uid=?1"
+        )?;
+        let rows = stmt.query_map([account_uid], |r| {
+            Ok(PeerRule {
+                account_uid: account_uid.to_string(),
+                device_id: r.get(0)?,
+                share_to_peer: r.get::<_, i32>(1)? != 0,
+                accept_from_peer: r.get::<_, i32>(2)? != 0,
+                updated_at_ms: r.get(3)?,
+            })
+        })?;
+
+        let mut rules = Vec::new();
+        for row in rows {
+            rules.push(row?);
+        }
+        Ok(rules)
+    }
+
     // [新增] M2: 处理远端广播来的元数据
     // 返回 true 表示这是新数据（需要触发事件），false 表示已存在（忽略）
     pub fn insert_remote_item(
@@ -613,6 +724,7 @@ pub fn insert_meta_and_history(
         tx.execute("DELETE FROM items", [])?;
         tx.execute("DELETE FROM content_cache", [])?;
         tx.execute("DELETE FROM trusted_peers", [])?;
+        tx.execute("DELETE FROM peer_rules", [])?;
         tx.commit()?;
         Ok(())
     }

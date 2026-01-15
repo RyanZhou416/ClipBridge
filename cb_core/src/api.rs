@@ -52,7 +52,12 @@ pub trait CoreEventSink: Send + Sync + 'static {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PeerStatus {
     pub device_id: String,
-    pub state: PeerConnectionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,      // 设备名称（从 HELLO 或 discovery 获取）
+    pub state: PeerConnectionState,       // 连接状态
+    pub last_seen_ts_ms: i64,            // 最后见到时间
+    pub share_to_peer: bool,             // Outbound allow（策略状态）
+    pub accept_from_peer: bool,          // Inbound allow（策略状态）
 }
 
 /// 详细的连接状态枚举
@@ -514,6 +519,90 @@ impl Core {
             "net_enabled": self.inner.net.is_some(),
 			"config": self.inner.core_config.app_config
         }))
+    }
+
+    /**
+     * 设置单个设备的共享策略。
+     *
+     * @param peer_id 对端设备 ID
+     * @param share_to 是否允许向该设备发送（None 表示不修改）
+     * @param accept_from 是否允许接收该设备的数据（None 表示不修改）
+     */
+    /// 清除设备指纹（用于重新配对，解决 TLS_PIN_MISMATCH 问题）
+    pub fn clear_peer_fingerprint(&self, peer_id: &str) -> anyhow::Result<()> {
+        if self.inner.is_shutdown.load(Ordering::Acquire) {
+            anyhow::bail!("core already shutdown");
+        }
+
+        let account_uid = &self.inner.core_config.account_uid;
+        let mut store = self.inner.store.lock().unwrap();
+        store.delete_peer_fingerprint(account_uid, peer_id)?;
+
+        // 发送事件通知外壳
+        self.inner.emit_json(serde_json::json!({
+            "type": "peer_fingerprint_cleared",
+            "ts_ms": now_ms(),
+            "payload": {
+                "device_id": peer_id
+            }
+        }));
+
+        Ok(())
+    }
+
+    /// 清除本地证书（用于重新生成证书，需要重新配对所有设备）
+    pub fn clear_local_cert(&self) -> anyhow::Result<()> {
+        if self.inner.is_shutdown.load(Ordering::Acquire) {
+            anyhow::bail!("core already shutdown");
+        }
+
+        let data_dir = &self.inner.core_config.data_dir;
+        crate::transport::cert::clear_local_cert(data_dir)?;
+
+        // 发送事件通知外壳
+        self.inner.emit_json(serde_json::json!({
+            "type": "local_cert_cleared",
+            "ts_ms": now_ms(),
+            "payload": {}
+        }));
+
+        Ok(())
+    }
+
+    pub fn set_peer_policy(&self, peer_id: &str, share_to: Option<bool>, accept_from: Option<bool>) -> anyhow::Result<()> {
+        if self.inner.is_shutdown.load(Ordering::Acquire) {
+            anyhow::bail!("core already shutdown");
+        }
+
+        let now = now_ms();
+        let account_uid = &self.inner.core_config.account_uid;
+
+        // 获取或创建规则
+        let mut store = self.inner.store.lock().unwrap();
+        let mut rule = store.get_or_create_peer_rule(account_uid, peer_id, now)?;
+
+        // 更新策略（如果提供了新值）
+        if let Some(st) = share_to {
+            rule.share_to_peer = st;
+        }
+        if let Some(af) = accept_from {
+            rule.accept_from_peer = af;
+        }
+        rule.updated_at_ms = now;
+
+        // 保存到数据库
+        store.upsert_peer_rule(&rule)?;
+
+        // 触发 peer_changed 事件通知外壳
+        let event = serde_json::json!({
+            "type": "peer_changed",
+            "device_id": peer_id,
+            "share_to_peer": rule.share_to_peer,
+            "accept_from_peer": rule.accept_from_peer,
+        });
+        self.inner.emit(event.to_string());
+
+        Ok(())
     }
 
 	pub fn ensure_content_cached(&self, item_id: &str, file_id: Option<&str>) -> anyhow::Result<String> {

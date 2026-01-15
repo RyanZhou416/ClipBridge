@@ -146,6 +146,15 @@
 							Width="180"
 							l:Uids.Uid="Settings_DeleteCache_Button"/>
 						</ctk:SettingsCard>
+
+						<!-- 清除本地证书 -->
+						<ctk:SettingsCard l:Uids.Uid="Settings_ClearLocalCert_SettingsCard"
+								  HeaderIcon="{ui:FontIcon Glyph=&#xE8C1;}"
+								  HorizontalAlignment="Stretch">
+							<Button Click="ClearLocalCert_Click"
+							Width="180"
+							l:Uids.Uid="Settings_ClearLocalCert_Button"/>
+						</ctk:SettingsCard>
 					</StackPanel>
 
 					<!-- Debugging -->

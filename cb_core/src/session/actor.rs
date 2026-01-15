@@ -305,9 +305,9 @@ impl SessionActor {
                                         let mut log_store = actor.log_store.lock().unwrap();
                                         let _ = log_store.log_info(
                                             "Session",
-                                            &format!("Metadata sent to peer: device_id={}, item_id={}, msg_id={}", 
+                                            &format!("Metadata sent to peer: device_id={}, item_id={}, msg_id={}",
                                                     device_id, item_id, msg_id),
-                                            Some(&format!("元数据已发送至对等设备: 设备ID={}，项目ID={}，消息ID={}", 
+                                            Some(&format!("元数据已发送至对等设备: 设备ID={}，项目ID={}，消息ID={}",
                                                     device_id, item_id, msg_id)),
                                         );
                                     }
@@ -401,15 +401,15 @@ impl SessionActor {
         self.state = new_state.clone();
         let mut s = self.state_ref.lock().unwrap();
         *s = new_state.clone();
-        
+
         // 记录状态转换
         if let Some(device_id) = &self.remote_device_id {
             let mut log_store = self.log_store.lock().unwrap();
             let _ = log_store.log_info(
                 "Session",
-                &format!("Session state changed: device_id={}, old_state={:?}, new_state={:?}", 
+                &format!("Session state changed: device_id={}, old_state={:?}, new_state={:?}",
                         device_id, old_state, new_state),
-                Some(&format!("会话状态已变化: 设备ID={}，旧状态={:?}，新状态={:?}", 
+                Some(&format!("会话状态已变化: 设备ID={}，旧状态={:?}，新状态={:?}",
                         device_id, old_state, new_state)),
             );
         }
@@ -490,9 +490,9 @@ impl SessionActor {
                     let mut log_store = self.log_store.lock().unwrap();
                     let _ = log_store.log_info(
                         "Session",
-                        &format!("Hello message sent: device_id={}, account_tag={}", 
+                        &format!("Hello message sent: device_id={}, account_tag={}",
                                 self.config.device_id, self.config.account_tag),
-                        Some(&format!("Hello 消息已发送: 设备ID={}，账号标签={}", 
+                        Some(&format!("Hello 消息已发送: 设备ID={}，账号标签={}",
                                 self.config.device_id, self.config.account_tag)),
                     );
                 }
@@ -521,9 +521,9 @@ impl SessionActor {
                         let mut log_store = self.log_store.lock().unwrap();
                         let _ = log_store.log_info(
                             "Session",
-                            &format!("Hello message received: remote_device_id={}, remote_account_tag={}", 
+                            &format!("Hello message received: remote_device_id={}, remote_account_tag={}",
                                     device_id, account_tag),
-                            Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号标签={}", 
+                            Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号标签={}",
                                     device_id, account_tag)),
                         );
                     }
@@ -532,9 +532,9 @@ impl SessionActor {
                             let mut log_store = self.log_store.lock().unwrap();
                             let _ = log_store.log_error(
                                 "Session",
-                                &format!("Account verification failed (tag mismatch): remote_device_id={}, remote_tag={}, local_tag={}", 
+                                &format!("Account verification failed (tag mismatch): remote_device_id={}, remote_tag={}, local_tag={}",
                                         device_id, account_tag, self.config.account_tag),
-                                Some(&format!("账号验证失败（标签不匹配）: 远程设备ID={}，远程标签={}，本地标签={}", 
+                                Some(&format!("账号验证失败（标签不匹配）: 远程设备ID={}，远程标签={}，本地标签={}",
                                         device_id, account_tag, self.config.account_tag)),
                                 Some("AUTH_ACCOUNT_TAG_MISMATCH"),
                             );
@@ -572,9 +572,9 @@ impl SessionActor {
                         let mut log_store = self.log_store.lock().unwrap();
                         let _ = log_store.log_info(
                             "Session",
-                            &format!("Hello message received: remote_device_id={}, remote_account_tag={}", 
+                            &format!("Hello message received: remote_device_id={}, remote_account_tag={}",
                                     server_device_id, "N/A"),
-                            Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号标签=N/A", 
+                            Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号标签=N/A",
                                     server_device_id)),
                         );
                     }
@@ -623,9 +623,9 @@ impl SessionActor {
                     let mut log_store = self.log_store.lock().unwrap();
                     let _ = log_store.log_info(
                         "Session",
-                        &format!("Metadata received from peer: device_id={}, item_id={}, msg_id={:?}", 
+                        &format!("Metadata received from peer: device_id={}, item_id={}, msg_id={:?}",
                                 did, item.item_id, msg_id),
-                        Some(&format!("从对等设备接收元数据: 设备ID={}，项目ID={}，消息ID={:?}", 
+                        Some(&format!("从对等设备接收元数据: 设备ID={}，项目ID={}，消息ID={:?}",
                                 did, item.item_id, msg_id)),
                     );
                 }
@@ -707,9 +707,9 @@ impl SessionActor {
 			let mut log_store = self.log_store.lock().unwrap();
 			let _ = log_store.log_info(
 				"Session",
-				&format!("Transfer request received: transfer_id={}, item_id={}, file_id={:?}", 
+				&format!("Transfer request received: transfer_id={}, item_id={}, file_id={:?}",
 						req_id, item_id, file_id),
-				Some(&format!("传输请求已接收: 传输ID={}，项目ID={}，文件ID={:?}", 
+				Some(&format!("传输请求已接收: 传输ID={}，项目ID={}，文件ID={:?}",
 						req_id, item_id, file_id)),
 			);
 		}
@@ -879,9 +879,9 @@ impl SessionActor {
 						let mut log_store = self.log_store.lock().unwrap();
 						let _ = log_store.log_debug(
 							"Session",
-							&format!("Data chunk received: transfer_id={}, size={} bytes, total_received={}", 
+							&format!("Data chunk received: transfer_id={}, size={} bytes, total_received={}",
 									transfer_id, chunk_size, *received_bytes),
-							Some(&format!("数据块已接收: 传输ID={}，大小={} 字节，已接收总计={}", 
+							Some(&format!("数据块已接收: 传输ID={}，大小={} 字节，已接收总计={}",
 									transfer_id, chunk_size, *received_bytes)),
 						);
 					}
@@ -932,9 +932,9 @@ impl SessionActor {
 							let mut log_store = self.log_store.lock().unwrap();
 							let _ = log_store.log_info(
 								"Session",
-								&format!("Transfer completed successfully: transfer_id={}, total_bytes={}, sha256={}", 
+								&format!("Transfer completed successfully: transfer_id={}, total_bytes={}, sha256={}",
 										transfer_id, total_bytes, expected_sha256),
-								Some(&format!("传输成功完成: 传输ID={}，总字节数={}，SHA256={}", 
+								Some(&format!("传输成功完成: 传输ID={}，总字节数={}，SHA256={}",
 										transfer_id, total_bytes, expected_sha256)),
 							);
 						}
@@ -1186,9 +1186,9 @@ impl SessionActor {
             let mut log_store = self.log_store.lock().unwrap();
             let _ = log_store.log_info(
                 "Session",
-                &format!("Transfer request initiated: transfer_id={}, item_id={}, file_id={:?}", 
+                &format!("Transfer request initiated: transfer_id={}, item_id={}, file_id={:?}",
                         transfer_id, item_id, file_id),
-                Some(&format!("传输请求已发起: 传输ID={}，项目ID={}，文件ID={:?}", 
+                Some(&format!("传输请求已发起: 传输ID={}，项目ID={}，文件ID={:?}",
                         transfer_id, item_id, file_id)),
             );
         }
@@ -1353,9 +1353,9 @@ impl SessionActor {
                 let mut log_store = self.log_store.lock().unwrap();
                 let _ = log_store.log_warn(
                     "Session",
-                    &format!("Heartbeat timeout, session may be dead: device_id={}, last_active={}", 
+                    &format!("Heartbeat timeout, session may be dead: device_id={}, last_active={}",
                             did, self.last_active_at),
-                    Some(&format!("心跳超时，会话可能已死亡: 设备ID={}，最后活跃={}", 
+                    Some(&format!("心跳超时，会话可能已死亡: 设备ID={}，最后活跃={}",
                             did, self.last_active_at)),
                 );
             }
