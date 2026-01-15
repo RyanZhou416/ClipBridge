@@ -1,5 +1,4 @@
 use super::common::*;
-use super::super::*;
 
 #[test]
 fn gc_evicts_lru_when_over_cap() {

@@ -1,5 +1,4 @@
 use super::common::*;
-use super::super::*;
 
 #[test]
 fn ingest_same_image_dedup_cache() {

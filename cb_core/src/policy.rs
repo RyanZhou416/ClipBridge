@@ -136,7 +136,6 @@ mod tests {
     use crate::model::ItemKind;
 
     #[test]
-    #[test]
     fn text_auto_prefetch_under_threshold() {
         let lim = SizeLimits::default();
         let out = decide(ItemKind::Text, lim.text_auto_prefetch_bytes, false, &lim);

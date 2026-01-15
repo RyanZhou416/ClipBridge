@@ -1,5 +1,4 @@
 use super::common::*;
-use super::super::*;
 
 #[test]
 fn list_history_orders_newest_first() {

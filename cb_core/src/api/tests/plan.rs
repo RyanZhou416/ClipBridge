@@ -1,5 +1,4 @@
 use super::common::*;
-use super::super::*;
 
 #[test]
 fn plan_requires_confirm_over_soft() {

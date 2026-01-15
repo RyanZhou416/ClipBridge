@@ -177,8 +177,6 @@ impl DiscoveryService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use mdns_sd::ServiceInfo;
 
     #[test]
     fn test_discovery_parsing_match() {

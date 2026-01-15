@@ -14,7 +14,7 @@ async fn test_m2_meta_sync_and_db_persistence() {
 	let (core_a, _rx_a, _dir_a) = create_test_core("m2_a", &shared_uid, |_| {});
 
 	// [修复点] 禁用自动预取，确保 B 处于 Lazy Fetch 状态，否则小文本会自动下载导致 Step 5 断言失败
-	let (core_b, mut rx_b, dir_b) = create_test_core("m2_b", &shared_uid, |c| {
+	let (_core_b, mut rx_b, dir_b) = create_test_core("m2_b", &shared_uid, |c| {
 		c.app_config.size_limits.text_auto_prefetch_bytes = 0;
 	});
 
@@ -119,7 +119,7 @@ async fn test_m2_robustness_network_replay() {
 	let shared_uid = format!("m2_robustness_replay_{}", uuid::Uuid::new_v4());
 	// 1. 启动环境
 	let (core_a, _rx_a, _dir_a) = create_test_core("m2_rob_a", &shared_uid, |_| {});
-	let (core_b, mut rx_b, dir_b) = create_test_core("m2_rob_b", &shared_uid, |_| {});
+	let (_core_b, mut rx_b, dir_b) = create_test_core("m2_rob_b", &shared_uid, |_| {});
 
 	// 2. 建立连接
 	let connected = wait_for(Duration::from_secs(5), || async {

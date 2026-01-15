@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 use crate::cas::Cas;
+use crate::logs::LogStore;
 // --- 1. 测试辅助工具 ---
 
 // 一个简单的 Sink，把收到的事件存进内存列表，方便断言
@@ -65,6 +66,7 @@ struct TestContext {
     transport: Arc<Transport>, // 保持引用防止 drop
     store: Arc<Mutex<Store>>,
     cas: Cas,
+    log_store: Arc<Mutex<LogStore>>,
 }
 
 async fn setup(name: &str, tag: &str) -> TestContext {
@@ -90,11 +92,12 @@ async fn setup(name: &str, tag: &str) -> TestContext {
     let _ = Store::open(&config.data_dir).unwrap();
     let store = Arc::new(Mutex::new(Store::open(&config.data_dir).unwrap()));
     let cas = Cas::new(&config.cache_dir).expect("Failed to init CAS");
+    let log_store = Arc::new(Mutex::new(LogStore::open(&config.data_dir).expect("Failed to init LogStore")));
     let sink = Arc::new(TestSink::new());
     // 端口传 0 让系统自动分配，避免端口冲突
     let transport = Arc::new(Transport::new(0).unwrap());
 
-    TestContext { config, sink, transport, store, cas}
+    TestContext { config, sink, transport, store, cas, log_store}
 }
 
 // 建立两个 Transport 之间的真实连接
@@ -134,7 +137,8 @@ async fn test_handshake_success() {
         srv_ctx.sink.clone(),
         srv_ctx.store.clone(),
         srv_ctx.cas.clone(),
-        None
+        None,
+        srv_ctx.log_store.clone()
     );
 
     // Client 端知道自己要连 srv_ok
@@ -145,7 +149,8 @@ async fn test_handshake_success() {
         cli_ctx.sink.clone(),
         srv_ctx.store.clone(),
         srv_ctx.cas.clone(),
-        Some("srv_ok".to_string())
+        Some("srv_ok".to_string()),
+        cli_ctx.log_store.clone()
     );
 
     // 断言：双方都应该收到 PEER_ONLINE
@@ -184,7 +189,8 @@ async fn test_auth_fail_tag_mismatch() {
         srv_ctx.sink.clone(),
         srv_ctx.store.clone(),
         srv_ctx.cas.clone(),
-        None
+        None,
+        srv_ctx.log_store.clone()
     );
 
     let _cli_handle = SessionActor::spawn(
@@ -194,7 +200,8 @@ async fn test_auth_fail_tag_mismatch() {
         cli_ctx.sink.clone(),
         srv_ctx.store.clone(),
         srv_ctx.cas.clone(),
-        Some("srv_diff".to_string())
+        Some("srv_diff".to_string()),
+        cli_ctx.log_store.clone()
     );
 
     // 等待一会
@@ -228,7 +235,8 @@ async fn test_tofu_reject_changed_fingerprint() {
         srv_ctx.sink.clone(),
         srv_ctx.store.clone(),
         srv_ctx.cas.clone(),
-        None
+        None,
+        srv_ctx.log_store.clone()
     );
 
     let _cli_handle = SessionActor::spawn(
@@ -238,7 +246,8 @@ async fn test_tofu_reject_changed_fingerprint() {
         cli_ctx.sink.clone(),
         srv_ctx.store.clone(),
         srv_ctx.cas.clone(),
-        Some("srv_hack".to_string())
+        Some("srv_hack".to_string()),
+        cli_ctx.log_store.clone()
     );
 
     // Client 会完成握手（因为 Tag 是对的），但在最后一步 AuthOk 处理时，

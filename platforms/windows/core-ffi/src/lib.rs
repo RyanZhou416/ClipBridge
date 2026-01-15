@@ -7,9 +7,6 @@ use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 use anyhow::Context;
 use cb_core::api::{Core, CoreEventSink};
-use cb_core::logs::LogStore;
-use cb_core::stats::StatsStore;
-use cb_core::util::now_ms;
 
 use crate::error::{err_json, ok_json};
 
@@ -154,89 +151,6 @@ pub extern "C" fn cb_init(cfg_json: *const c_char, on_event: OnEventFn, user_dat
         Ok(s) => ret(s),
         Err(e) => ret(err_json("INIT_FAILED", &format!("{e:#}"))),
     }
-}
-
-/// 将原始指针转换为 `cb_handle` 类型的可变引用，并验证其有效性。
-///
-/// # 参数
-///
-/// * `handle_ptr` - 以 `usize` 表示的原始指针，预期指向 `cb_handle` 实例。
-///
-/// # 返回值
-///
-/// * 成功时，返回包装在 `anyhow::Result` 中的 `cb_handle` 可变引用。
-/// * 失败时，如果指针为空或无效，则返回带有 "null handle" 消息的 `anyhow::Error`。
-///
-/// # 安全性
-///
-/// 此函数使用 `unsafe` 代码来解引用提供的原始指针。调用者必须确保：
-/// - `handle_ptr` 是一个有效的、非空的指针。
-/// - 指针引用的内存在返回引用的生命周期内保持有效。
-/// - 指针引用的内存是排他性的，且未在其他不安全上下文中被访问。
-///
-/// 不当使用此函数可能导致未定义行为，包括段错误（segmentation faults）。
-///
-/// # 错误
-///
-/// 在以下情况下返回错误：
-/// - 如果 `handle_ptr` 为 0 或空。
-/// - 如果指针转换导致空引用。
-///
-/// # 示例
-/// ```rust
-/// let some_ptr: usize = ...; // 指向有效 `cb_handle` 的指针
-/// match get_handle(some_ptr) {
-///     Ok(handle) => {
-///         // 安全访问 `cb_handle`
-///     }
-///     Err(err) => {
-///         eprintln!("错误: {}", err);
-///     }
-/// }
-/// ```
-///
-/// 此函数假定调用者传递的是对应于 `cb_handle` 对象的有效指针。
-fn get_handle(handle_ptr: usize) -> anyhow::Result<&'static mut cb_handle> {
-    if handle_ptr == 0 { anyhow::bail!("null handle"); }
-    let p = handle_ptr as *mut cb_handle;
-    if p.is_null() { anyhow::bail!("null handle"); }
-    Ok(unsafe { &mut *p })
-}
-
-/// 从 JSON 字符串中解析 'handle' 字段并将其作为 `usize` 返回。
-///
-/// 预期 JSON 的结构如下：
-/// ```json
-/// {
-///   "data": {
-///     "handle": 123
-///   }
-/// }
-/// ```
-///
-/// # 参数
-/// - `json`: 包含 JSON 数据字符串切片。
-///
-/// # 返回值
-/// - 成功时，返回包含解析出的 "handle" 字段 `usize` 值的 `Result`；
-///   如果解析失败，则返回 `anyhow::Error` 类型的错误。
-///
-/// # 错误
-/// - 如果输入的 JSON 字符串格式错误或不符合预期结构，则返回错误。
-/// - 如果 "handle" 字段不存在或无法解析为 `usize`，则返回错误。
-///
-/// # 示例
-/// ```
-/// let json_data = r#"{ "data": { "handle": 42 } }"#;
-/// let handle = parse_handle_from_json(json_data)?;
-/// assert_eq!(handle, 42);
-/// ```
-fn parse_handle_from_json(json: &str) -> anyhow::Result<usize> {
-    #[derive(serde::Deserialize)]
-    struct H { handle: usize }
-    let v: serde_json::Value = serde_json::from_str(json)?;
-    let h: H = serde_json::from_value(v["data"].clone())?;
-    Ok(h.handle)
 }
 
 /// # `cb_shutdown` 函数

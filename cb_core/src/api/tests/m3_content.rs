@@ -128,7 +128,7 @@ async fn test_m3_1_text_fetch_success() {
 async fn test_m3_2_image_fetch_success() {
 	let shared_uid = format!("m3_img_{}", uuid::Uuid::new_v4());
 	let (core_a, _rx_a, _dir_a) = create_test_core("m3_img_a", &shared_uid, |_| {});
-	let (core_b, mut rx_b, dir_b) = create_test_core("m3_img_b", &shared_uid, |_| {});
+	let (core_b, mut rx_b, _dir_b) = create_test_core("m3_img_b", &shared_uid, |_| {});
 
 	wait_for(Duration::from_secs(5), || async {
 		let peers = list_peers_async(&core_a).await;
@@ -195,7 +195,7 @@ async fn test_m3_2_image_fetch_success() {
 async fn test_m3_3_file_fetch_success() {
 	let shared_uid = format!("m3_file_{}", uuid::Uuid::new_v4());
 	let (core_a, _rx_a, _dir_a) = create_test_core("m3_file_a", &shared_uid, |_| {});
-	let (core_b, mut rx_b, dir_b) = create_test_core("m3_file_b", &shared_uid, |_| {});
+	let (core_b, mut rx_b, _dir_b) = create_test_core("m3_file_b", &shared_uid, |_| {});
 
 	wait_for(Duration::from_secs(15), || async {
 		let peers = list_peers_async(&core_a).await;

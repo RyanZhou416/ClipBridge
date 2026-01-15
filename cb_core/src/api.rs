@@ -260,7 +260,7 @@ impl Core {
     pub fn clear_cache(&self) -> anyhow::Result<()> {
         self.inner.cas.clear_all()?;
         // 同时清空数据库中的缓存记录
-        let mut store = self.inner.store.lock().unwrap();
+        let store = self.inner.store.lock().unwrap();
         store.conn.execute("DELETE FROM content_cache", [])?;
         Ok(())
     }

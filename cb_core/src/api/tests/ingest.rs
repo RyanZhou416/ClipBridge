@@ -1,6 +1,5 @@
 use crate::model::ItemKind;
 use super::common::*;
-use super::super::*;
 
 #[test]
 fn ingest_text_smoke() {

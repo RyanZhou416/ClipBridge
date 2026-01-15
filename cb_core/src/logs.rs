@@ -3,12 +3,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// 多语言消息结构
+/// 设计为可扩展：可以轻松添加新语言字段
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct MultilingualMessage {
+    /// 英文消息（必需，作为回退语言）
     #[serde(rename = "en")]
     en: String,
+    /// 简体中文消息（可选）
     #[serde(rename = "zh-CN")]
     zh_cn: Option<String>,
+    // 未来可以添加更多语言：
+    // #[serde(rename = "ja")]
+    // ja: Option<String>,  // 日语
+    // #[serde(rename = "fr")]
+    // fr: Option<String>,  // 法语
+    // 等等...
 }
 
 /// 日志条目
@@ -160,14 +169,12 @@ impl LogStore {
         exception: Option<&str>,
         props_json: Option<&str>,
     ) -> anyhow::Result<i64> {
-        // 构建多语言 JSON
-        let mut msg_obj = serde_json::json!({
-            "en": message_en
-        });
-        if let Some(zh_cn) = message_zh_cn {
-            msg_obj["zh-CN"] = serde_json::Value::String(zh_cn.to_string());
-        }
-        let message_json = serde_json::to_string(&msg_obj)?;
+        // 使用结构体构建多语言消息（类型安全，易于扩展）
+        let msg = MultilingualMessage {
+            en: message_en.to_string(),
+            zh_cn: message_zh_cn.map(|s| s.to_string()),
+        };
+        let message_json = serde_json::to_string(&msg)?;
 
         let _id = self.conn.execute(
             r#"
