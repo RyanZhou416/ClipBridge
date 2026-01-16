@@ -8,121 +8,220 @@
     xmlns:l="using:WinUI3Localizer"
     xmlns:events="using:ClipBridgeShell_CS.Core.Models.Events"
     xmlns:helpers="using:ClipBridgeShell_CS.Helpers"
+    xmlns:controls="using:ClipBridgeShell_CS.Controls"
     mc:Ignorable="d">
 
     <Page.Resources>
-        <!-- 转换器 -->
-        <helpers:BooleanToColorConverter x:Key="BooleanToColorConverter"/>
-        <helpers:DeviceNameConverter x:Key="DeviceNameConverter"/>
+        <ResourceDictionary>
+            <!-- 主题字典：渐变遮罩（必须在最前面） -->
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Light">
+                    <LinearGradientBrush x:Key="BackgroundGradient" StartPoint="0.5,0" EndPoint="0.5,1">
+                        <GradientStop Offset="0.0" Color="#CED8E4" />
+                        <GradientStop Offset="1.0" Color="#D5DBE3" />
+                    </LinearGradientBrush>
+                    <SolidColorBrush x:Key="HeaderForegroundBrush" Color="Black" />
+                    <x:Double x:Key="HeaderImageOpacity">0.9</x:Double>
+                    <LinearGradientBrush x:Key="OverlayRadialGradient" StartPoint="0.5,0" EndPoint="0.5,1">
+                        <GradientStop Offset="0" Color="#FFFFFFFF" />
+                        <GradientStop Offset="0.75" Color="#FFFFFFFF" />
+                        <GradientStop Offset="0.85" Color="#00FFFFFF" />
+                        <GradientStop Offset="1" Color="#00FFFFFF" />
+                    </LinearGradientBrush>
+                    <SolidColorBrush x:Key="CardHoverOverlayBrush" Color="Black" Opacity="0.1"/>
+                    <SolidColorBrush x:Key="CardSelectedBorderBrush" Color="Gray"/>
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="BackgroundGradient" Color="#020B20" />
+                    <SolidColorBrush x:Key="HeaderForegroundBrush" Color="White" />
+                    <x:Double x:Key="HeaderImageOpacity">0.8</x:Double>
+                    <LinearGradientBrush x:Key="OverlayRadialGradient" StartPoint="0.5,0" EndPoint="0.5,1">
+                        <GradientStop Offset="0" Color="#FF000000" />
+                        <GradientStop Offset="0.75" Color="#FF000000" />
+                        <GradientStop Offset="0.85" Color="#00000000" />
+                        <GradientStop Offset="1" Color="#00000000" />
+                    </LinearGradientBrush>
+                    <SolidColorBrush x:Key="CardHoverOverlayBrush" Color="White" Opacity="0.1"/>
+                    <SolidColorBrush x:Key="CardSelectedBorderBrush" Color="White"/>
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
 
-        <!-- 卡片样式 -->
-        <Style x:Key="ItemCardStyle" TargetType="Border">
-            <Setter Property="Background" Value="{ThemeResource LayerFillColorDefaultBrush}"/>
-            <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
-            <Setter Property="CornerRadius" Value="8"/>
-            <Setter Property="Padding" Value="16"/>
-            <Setter Property="Margin" Value="8,0"/>
-            <Setter Property="MinWidth" Value="280"/>
-            <Setter Property="MaxWidth" Value="320"/>
-        </Style>
+            <!-- 转换器 -->
+            <helpers:BooleanToColorConverter x:Key="BooleanToColorConverter"/>
+            <helpers:DeviceNameConverter x:Key="DeviceNameConverter"/>
+            <helpers:ItemKindConverter x:Key="ItemKindConverter"/>
 
-        <!-- 图表容器样式 -->
-        <Style x:Key="ChartContainerStyle" TargetType="Border">
-            <Setter Property="Background" Value="{ThemeResource LayerFillColorDefaultBrush}"/>
-            <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
-            <Setter Property="CornerRadius" Value="8"/>
-            <Setter Property="Padding" Value="16"/>
-            <Setter Property="Margin" Value="0,8"/>
-        </Style>
+            <!-- 卡片样式 - WinUI-Gallery 风格（Acrylic 背景，带边框） -->
+            <Style x:Key="ItemCardStyle" TargetType="Border">
+                <Setter Property="Background" Value="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
+                <Setter Property="CornerRadius" Value="8"/>
+                <Setter Property="Padding" Value="0"/>
+				<Setter Property="Width" Value="232"/>
+                <Setter Property="Height" Value="172"/>
+                <Setter Property="Margin" Value="0,0,0,0"/>
+            </Style>
+
+            <!-- 图表容器样式 - 使用 Acrylic 背景，与卡片一致 -->
+            <Style x:Key="ChartContainerStyle" TargetType="Border">
+                <Setter Property="Background" Value="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
+                <Setter Property="CornerRadius" Value="8"/>
+                <Setter Property="Padding" Value="16"/>
+                <Setter Property="Margin" Value="0"/>
+            </Style>
+        </ResourceDictionary>
     </Page.Resources>
 
     <Grid x:Name="ContentArea">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-        </Grid.RowDefinitions>
-
-
-
-        <!-- 内容区（三段式布局） -->
-        <ScrollViewer x:Name="ContentScrollViewer" Grid.Row="1" Padding="36,36,36,36" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
-            <StackPanel x:Name="ContentStackPanel" Spacing="24" >
+        <!-- 内容区（包含背景、卡片和下方内容） -->
+        <ScrollViewer x:Name="ContentScrollViewer" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="ContentStackPanel" Spacing="24">
                 
-                <!-- 顶部：Recent Items 横向卡片条 -->
-                <StackPanel Spacing="12">
-                    <TextBlock l:Uids.Uid="MainPage_RecentItems" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
-                    <ScrollViewer HorizontalScrollMode="Auto" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled">
-                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.RecentItems, Mode=OneWay}">
-                            <ItemsRepeater.Layout>
-                                <StackLayout Orientation="Horizontal" Spacing="0"/>
-                            </ItemsRepeater.Layout>
-                            <ItemsRepeater.ItemTemplate>
+                <!-- 背景头部区域（只包含背景图片和标题） -->
+                <Grid Height="600" Margin="0,0,0,0">
+                    <controls:OpacityMaskView
+                        Height="600"
+                        VerticalAlignment="Stretch">
+                        <controls:OpacityMaskView.OpacityMask>
+                            <Rectangle Fill="{ThemeResource OverlayRadialGradient}" />
+                        </controls:OpacityMaskView.OpacityMask>
+                        <Grid
+                            x:Name="ImageGrid"
+                            Margin="0,-100,0,0"
+                            Background="{ThemeResource BackgroundGradient}">
+                            <Image
+                                x:Name="HeroImage"
+                                Source="ms-appx:///Assets/background.jpg"
+                                Opacity="{ThemeResource HeaderImageOpacity}"
+                                Stretch="UniformToFill" />
+                        </Grid>
+                    </controls:OpacityMaskView>
+                    
+                    <!-- 标题层 -->
+					<Grid Margin="0,48,0,0" VerticalAlignment="Top">
+                        <TextBlock x:Name="TitleTextBlock"
+                                   l:Uids.Uid="AppName.Text" 
+                                   Style="{ThemeResource TitleLargeTextBlockStyle}" 
+                                   FontWeight="SemiBold"
+                                   Padding="36,0,0,0"/>
+                    </Grid>
+                </Grid>
+                
+                <!-- 卡片容器区域（使用视差滚动效果） -->
+                <Grid x:Name="ParallaxContentContainer" Margin="0,-298,0,0">
+                    <Grid.RenderTransform>
+                        <TranslateTransform x:Name="ParallaxTransform"/>
+                    </Grid.RenderTransform>
+                    <StackPanel Spacing="12">
+                        <!-- 横向滚动卡片容器 -->
+                        <controls:HorizontalScrollContainer x:Name="RecentlyVisitedContainer" Margin="0,50,0,0">
+                            <controls:HorizontalScrollContainer.Source>
+                                <ItemsRepeater ItemsSource="{x:Bind ViewModel.RecentItems, Mode=OneWay}">
+                                    <ItemsRepeater.Layout>
+                                        <StackLayout Orientation="Horizontal" Spacing="12"/>
+                                    </ItemsRepeater.Layout>
+                                    <ItemsRepeater.ItemTemplate>
                                 <DataTemplate x:DataType="events:ItemMetaPayload" x:DefaultBindMode="OneWay">
+                                    <!-- 卡片 Border：内容和背景，边框在内部 -->
                                     <Border x:Name="CardBorder" 
                                             Style="{StaticResource ItemCardStyle}" 
-                                            MaxWidth="280"
                                             Tag="{x:Bind}"
                                             Tapped="OnCardTapped"
                                             PointerEntered="OnCardPointerEntered"
                                             PointerExited="OnCardPointerExited"
                                             Loaded="OnCardLoaded">
-                                        <Grid RowDefinitions="Auto,*,Auto,Auto">
-                                            <!-- 预览区域 -->
-                                            <TextBlock Grid.Row="0" 
-                                                       Text="{x:Bind Preview.Text, TargetNullValue='(No preview)'}" 
-                                                       TextWrapping="WrapWholeWords" 
-                                                       MaxLines="3" 
-                                                       TextTrimming="CharacterEllipsis"
-                                                       Margin="0,0,0,8"/>
+                                        <Grid Margin="0,0,0,0" Padding="0,0,0,0">
+                                            <!-- 悬停时的叠加层 - 覆盖整个 Border（包括边框），带圆角 -->
+                                            <!-- 使用负 Margin 来覆盖边框（边框厚度为 1px，所以 Margin 为 -1） -->
+                                            <Rectangle x:Name="HoverOverlay"
+                                                       Fill="{ThemeResource CardHoverOverlayBrush}"
+                                                       Opacity="0"
+                                                       IsHitTestVisible="False"
+                                                       RadiusX="8"
+                                                       RadiusY="8"
+                                                       Margin="-1"
+                                                       HorizontalAlignment="Stretch"
+                                                       VerticalAlignment="Stretch">
+                                                <Rectangle.OpacityTransition>
+                                                    <ScalarTransition Duration="0:0:0.200"/>
+                                                </Rectangle.OpacityTransition>
+                                            </Rectangle>
+                                            <Grid x:Name="ContentGrid" RowDefinitions="Auto,Auto,Auto" Margin="0,0,0,0" Padding="12,12,12,12">
+                                                <!-- 预览区域 -->
+                                                <TextBlock Grid.Row="0" 
+                                                           Text="{x:Bind Preview.Text, TargetNullValue='(No preview)'}" 
+                                                           Style="{ThemeResource BodyStrongTextBlockStyle}"
+                                                           TextWrapping="WrapWholeWords" 
+                                                           MaxLines="3" 
+                                                           MinHeight="60"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Margin="0,0,0,0"/>
                                             
-                                            <!-- 元数据 -->
-                                            <StackPanel Grid.Row="1" Spacing="4" Opacity="0.6">
-                                                <TextBlock Text="{x:Bind Kind}" FontSize="12"/>
-                                                <TextBlock FontSize="12">
-                                                    <Run l:Uids.Uid="MainPage_From"/>
-                                                    <Run Text="{Binding SourceDeviceId, Converter={StaticResource DeviceNameConverter}}"/>
-                                                </TextBlock>
-                                            </StackPanel>
+                                                <!-- 元数据 -->
+                                                <StackPanel Grid.Row="1" Spacing="4" Margin="0,4,0,4">
+                                                    <TextBlock Text="{x:Bind Kind, Converter={StaticResource ItemKindConverter}}" 
+                                                               Style="{ThemeResource CaptionTextBlockStyle}"
+                                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                                    <TextBlock x:Name="DeviceNameText"
+                                                               Style="{ThemeResource CaptionTextBlockStyle}"
+                                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                                                        <Run l:Uids.Uid="MainPage_From"/>
+                                                        <Run x:Name="DeviceNameRun"/>
+                                                    </TextBlock>
+                                                </StackPanel>
 
-                                            <!-- 状态徽标 -->
-                                            <Border Grid.Row="2" 
-                                                    x:Name="StateBadge"
-                                                    CornerRadius="4"
-                                                    Padding="6,2"
-                                                    Margin="0,8,0,0"
-                                                    HorizontalAlignment="Left"
-                                                    Loaded="OnStateBadgeLoaded">
-                                                <TextBlock x:Name="StateText" 
-                                                           FontSize="10" 
-                                                           Foreground="White"/>
-                                            </Border>
+                                                <!-- 状态徽标和操作按钮（同一行） -->
+                                                <Grid Grid.Row="2" Margin="0,12,0,0">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    
+                                                    <!-- 状态徽标 -->
+                                                    <Border Grid.Column="0"
+                                                            x:Name="StateBadge"
+                                                            CornerRadius="4"
+                                                            HorizontalAlignment="Left"
+                                                            Loaded="OnStateBadgeLoaded">
+                                                        <TextBlock x:Name="StateText" 
+                                                                   FontSize="10" 
+                                                                   Foreground="White"
+																   Padding="8,4"/>
+                                                    </Border>
 
-                                            <!-- 操作按钮 -->
-                                            <StackPanel Grid.Row="3" 
-                                                        Orientation="Horizontal" 
-                                                        Spacing="8" 
-                                                        Margin="0,8,0,0"
-                                                        HorizontalAlignment="Right">
-                                                <Button l:Uids.Uid="MainPage_LockButton" FontSize="10" Padding="8,4"/>
-                                                <Button l:Uids.Uid="MainPage_DeleteButton" FontSize="10" Padding="8,4"/>
-                                            </StackPanel>
+                                                    <!-- 操作按钮 -->
+                                                    <StackPanel Grid.Column="2" 
+                                                                Orientation="Horizontal" 
+                                                                Spacing="8" 
+                                                                HorizontalAlignment="Right">
+                                                        <Button l:Uids.Uid="MainPage_LockButton" FontSize="10" Padding="8,4"/>
+                                                        <Button l:Uids.Uid="MainPage_DeleteButton" FontSize="10" Padding="8,4"/>
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Grid>
                                         </Grid>
                                     </Border>
-                                </DataTemplate>
-                            </ItemsRepeater.ItemTemplate>
-                        </ItemsRepeater>
-                    </ScrollViewer>
-                    <!-- 查看更多历史按钮 -->
-                    <Button l:Uids.Uid="MainPage_ViewMoreHistory" 
-                            Command="{x:Bind ViewModel.NavigateToHistoryCommand}"
-                            HorizontalAlignment="Right"
-                            Margin="8,8,0,0"/>
-                </StackPanel>
-
-                <!-- 中部：状态与操作区 -->
-                <Grid ColumnDefinitions="*,*,*" ColumnSpacing="16">
+                                        </DataTemplate>
+                                    </ItemsRepeater.ItemTemplate>
+                                </ItemsRepeater>
+                            </controls:HorizontalScrollContainer.Source>
+                        </controls:HorizontalScrollContainer>
+                        
+                        <!-- 查看更多历史按钮 -->
+                        <Button l:Uids.Uid="MainPage_ViewMoreHistory" 
+                                Command="{x:Bind ViewModel.NavigateToHistoryCommand}"
+                                HorizontalAlignment="Right"
+                                Width="Auto"
+                                Margin="0,12,36,0"
+                                Padding="8,8,8,8"
+                                Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"/>
+                        
+                        <!-- 中部：状态与操作区 -->
+                        <Grid ColumnDefinitions="*,*,*" ColumnSpacing="16" Margin="0" Padding="36,0,36,0">
                     <!-- A. Sharing（共享策略摘要） -->
                     <Border Grid.Column="0" Style="{StaticResource ChartContainerStyle}">
                         <StackPanel Spacing="8">
@@ -175,69 +274,71 @@
                         </StackPanel>
                     </Border>
                 </Grid>
+                        
+                        <!-- 底部：图表区 -->
+                        <StackPanel Spacing="16" Padding="36,0,36,36">
+                            <TextBlock l:Uids.Uid="MainPage_Statistics" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
 
-                <!-- 底部：图表区 -->
-                <StackPanel Spacing="16">
-                    <TextBlock l:Uids.Uid="MainPage_Statistics" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
+                            <!-- Cache usage over time -->
+                            <Border Style="{StaticResource ChartContainerStyle}">
+                                <StackPanel Spacing="8">
+                                    <TextBlock l:Uids.Uid="MainPage_CacheUsage" FontWeight="SemiBold"/>
+                                    <Canvas x:Name="CacheChartCanvas" Width="600" Height="200" Background="Transparent"/>
+                                </StackPanel>
+                            </Border>
 
-                    <!-- Cache usage over time -->
-                    <Border Style="{StaticResource ChartContainerStyle}">
-                        <StackPanel Spacing="8">
-                            <TextBlock l:Uids.Uid="MainPage_CacheUsage" FontWeight="SemiBold"/>
-                            <Canvas x:Name="CacheChartCanvas" Width="600" Height="200" Background="Transparent"/>
+                            <!-- Network throughput -->
+                            <Border Style="{StaticResource ChartContainerStyle}">
+                                <StackPanel Spacing="8">
+                                    <TextBlock l:Uids.Uid="MainPage_NetworkThroughput" FontWeight="SemiBold"/>
+                                    <Canvas x:Name="NetworkChartCanvas" Width="600" Height="200" Background="Transparent"/>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Activity charts -->
+                            <Border Style="{StaticResource ChartContainerStyle}">
+                                <StackPanel Spacing="8">
+                                    <TextBlock l:Uids.Uid="MainPage_GlobalCopyActivity" FontWeight="SemiBold"/>
+                                    <Canvas x:Name="ActivityChartCanvas" Width="600" Height="200" Background="Transparent"/>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- 设备连接列表 -->
+                            <Border Style="{StaticResource ChartContainerStyle}">
+                                <StackPanel Spacing="8">
+                                    <TextBlock l:Uids.Uid="MainPage_ConnectedDevices" FontWeight="SemiBold"/>
+                                    <ListView ItemsSource="{x:Bind ViewModel.Peers, Mode=OneWay}" MaxHeight="300">
+                                        <ListView.ItemTemplate>
+                                            <DataTemplate x:DataType="events:PeerMetaPayload">
+                                                <Grid Padding="8" ColumnDefinitions="Auto,*,Auto">
+                                                    <Ellipse Grid.Column="0" 
+                                                             Width="12" 
+                                                             Height="12" 
+                                                             Margin="0,0,12,0"
+                                                             VerticalAlignment="Center">
+                                                        <Ellipse.Fill>
+                                                            <SolidColorBrush Color="{Binding IsOnline, Converter={StaticResource BooleanToColorConverter}}"/>
+                                                        </Ellipse.Fill>
+                                                    </Ellipse>
+                                                    <StackPanel Grid.Column="1">
+                                                        <TextBlock Text="{x:Bind Name}" FontWeight="SemiBold"/>
+                                                        <TextBlock Text="{x:Bind DeviceId}" FontSize="12" Opacity="0.6"/>
+                                                    </StackPanel>
+                                                    <TextBlock Grid.Column="2" 
+                                                               FontSize="12" 
+                                                               Opacity="0.6"
+                                                               HorizontalAlignment="Right">
+                                                        <Run Text="{x:Bind IsOnline, Mode=OneWay}"/>
+                                                    </TextBlock>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListView.ItemTemplate>
+                                    </ListView>
+                                </StackPanel>
+                            </Border>
                         </StackPanel>
-                    </Border>
-
-                    <!-- Network throughput -->
-                    <Border Style="{StaticResource ChartContainerStyle}">
-                        <StackPanel Spacing="8">
-                            <TextBlock l:Uids.Uid="MainPage_NetworkThroughput" FontWeight="SemiBold"/>
-                            <Canvas x:Name="NetworkChartCanvas" Width="600" Height="200" Background="Transparent"/>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Activity charts -->
-                    <Border Style="{StaticResource ChartContainerStyle}">
-                        <StackPanel Spacing="8">
-                            <TextBlock l:Uids.Uid="MainPage_GlobalCopyActivity" FontWeight="SemiBold"/>
-                            <Canvas x:Name="ActivityChartCanvas" Width="600" Height="200" Background="Transparent"/>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- 设备连接列表 -->
-                    <Border Style="{StaticResource ChartContainerStyle}">
-                        <StackPanel Spacing="8">
-                            <TextBlock l:Uids.Uid="MainPage_ConnectedDevices" FontWeight="SemiBold"/>
-                            <ListView ItemsSource="{x:Bind ViewModel.Peers, Mode=OneWay}" MaxHeight="300">
-                                <ListView.ItemTemplate>
-                                    <DataTemplate x:DataType="events:PeerMetaPayload">
-                                        <Grid Padding="8" ColumnDefinitions="Auto,*,Auto">
-                                            <Ellipse Grid.Column="0" 
-                                                     Width="12" 
-                                                     Height="12" 
-                                                     Margin="0,0,12,0"
-                                                     VerticalAlignment="Center">
-                                                <Ellipse.Fill>
-                                                    <SolidColorBrush Color="{Binding IsOnline, Converter={StaticResource BooleanToColorConverter}}"/>
-                                                </Ellipse.Fill>
-                                            </Ellipse>
-                                            <StackPanel Grid.Column="1">
-                                                <TextBlock Text="{x:Bind Name}" FontWeight="SemiBold"/>
-                                                <TextBlock Text="{x:Bind DeviceId}" FontSize="12" Opacity="0.6"/>
-                                            </StackPanel>
-                                            <TextBlock Grid.Column="2" 
-                                                       FontSize="12" 
-                                                       Opacity="0.6"
-                                                       HorizontalAlignment="Right">
-                                                <Run Text="{x:Bind IsOnline, Mode=OneWay}"/>
-                                            </TextBlock>
-                                        </Grid>
-                                    </DataTemplate>
-                                </ListView.ItemTemplate>
-                            </ListView>
-                        </StackPanel>
-                    </Border>
-                </StackPanel>
+                    </StackPanel>
+                </Grid>
 
             </StackPanel>
         </ScrollViewer>

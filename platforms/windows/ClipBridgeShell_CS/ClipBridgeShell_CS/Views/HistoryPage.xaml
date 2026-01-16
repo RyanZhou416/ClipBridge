@@ -8,7 +8,12 @@
     xmlns:vm="using:ClipBridgeShell_CS.ViewModels"
     xmlns:models="using:ClipBridgeShell_CS.Core.Models.Events"
     xmlns:l="using:WinUI3Localizer"
+    xmlns:helpers="using:ClipBridgeShell_CS.Helpers"
     mc:Ignorable="d">
+
+	<Page.Resources>
+		<helpers:ItemKindConverter x:Key="ItemKindConverter"/>
+	</Page.Resources>
 
 	<Grid RowDefinitions="Auto,*" Padding="24">
 
@@ -70,7 +75,7 @@
                                TextTrimming="CharacterEllipsis"/>
 
 							<StackPanel Orientation="Horizontal" Spacing="8">
-								<TextBlock Text="{x:Bind Kind}"
+								<TextBlock Text="{x:Bind Kind, Converter={StaticResource ItemKindConverter}}"
                                    Style="{ThemeResource CaptionTextBlockStyle}"
                                    Opacity="0.6"/>
 								<TextBlock Text="•"

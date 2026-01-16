@@ -635,4 +635,16 @@
   <data name="LogsPage_ResetFiltersButton.Content" xml:space="preserve">
     <value>Reset Filters</value>
   </data>
+  <data name="ItemKind_TypeLabel" xml:space="preserve">
+    <value>Type: </value>
+  </data>
+  <data name="ItemKind_Text" xml:space="preserve">
+    <value>Text</value>
+  </data>
+  <data name="ItemKind_Image" xml:space="preserve">
+    <value>Image</value>
+  </data>
+  <data name="ItemKind_FileList" xml:space="preserve">
+    <value>File</value>
+  </data>
 </root>

@@ -23,6 +23,10 @@ public class ItemMetaPayload
     [JsonPropertyName("source_device_id")]
     public string SourceDeviceId { get; set; } = string.Empty;
 
+    // [Core] source_device_name
+    [JsonPropertyName("source_device_name")]
+    public string? SourceDeviceName { get; set; }
+
     // [Core] preview
     [JsonPropertyName("preview")]
     public ItemPreviewPayload? Preview { get; set; }

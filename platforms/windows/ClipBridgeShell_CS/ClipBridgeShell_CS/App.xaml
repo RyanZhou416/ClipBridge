@@ -16,6 +16,8 @@
                 <ResourceDictionary Source="ms-appx:///Styles/FontSizes.xaml" />
                 <ResourceDictionary Source="ms-appx:///Styles/Thickness.xaml" />
                 <ResourceDictionary Source="ms-appx:///Styles/TextBlock.xaml" />
+                <!-- OpacityMaskView 样式 -->
+                <ResourceDictionary Source="ms-appx:///Controls/OpacityMaskView.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
             <!-- 全局开启：让每个 NavigationView 都使用“标题栏自动上内边距” -->

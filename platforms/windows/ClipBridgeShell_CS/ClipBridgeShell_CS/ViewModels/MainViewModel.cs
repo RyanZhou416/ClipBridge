@@ -70,6 +70,14 @@ public partial class MainViewModel : ObservableRecipient
     }
 
     /// <summary>
+    /// 获取本机设备ID
+    /// </summary>
+    public string? GetLocalDeviceId()
+    {
+        return _localDeviceId;
+    }
+
+    /// <summary>
     /// 根据 device_id 获取设备名称
     /// </summary>
     public string GetDeviceName(string deviceId)

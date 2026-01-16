@@ -477,7 +477,7 @@
     <value>已连接设备</value>
   </data>
   <data name="MainPage_From.Text" xml:space="preserve">
-    <value>来自: </value>
+    <value>来源: </value>
   </data>
   <data name="MainPage_NoPreview.Text" xml:space="preserve">
     <value>（无预览）</value>
@@ -634,5 +634,17 @@
   </data>
   <data name="LogsPage_ResetFiltersButton.Content" xml:space="preserve">
     <value>重置过滤</value>
+  </data>
+  <data name="ItemKind_TypeLabel" xml:space="preserve">
+    <value>类型：</value>
+  </data>
+  <data name="ItemKind_Text" xml:space="preserve">
+    <value>文字</value>
+  </data>
+  <data name="ItemKind_Image" xml:space="preserve">
+    <value>图片</value>
+  </data>
+  <data name="ItemKind_FileList" xml:space="preserve">
+    <value>文件</value>
   </data>
 </root>
