@@ -69,6 +69,22 @@ public partial class App : Application
     }
     public App()
     {
+        // 确保使用硬件加速（WinUI 3 默认启用，但某些情况下可能回退到软件渲染）
+        // 检查并设置环境变量，强制使用硬件加速
+        try
+        {
+            // 移除可能强制软件渲染的环境变量
+            var disableHwAccel = Environment.GetEnvironmentVariable("WINUI_DISABLE_HW_ACCEL");
+            if (disableHwAccel == "1")
+            {
+                Environment.SetEnvironmentVariable("WINUI_DISABLE_HW_ACCEL", "0");
+            }
+        }
+        catch
+        {
+            // 忽略环境变量设置失败
+        }
+        
         InitializeComponent();
 
         Host = Microsoft.Extensions.Hosting.Host.
@@ -248,12 +264,42 @@ public partial class App : Application
 
 #if DEBUG
         PrintCoreDllInfo();
+        // 检测渲染模式（仅在 Debug 模式下）
+        CheckHardwareAcceleration();
 #endif
         _ = App.GetService<CoreHostService>().InitializeAsync();
 
         // 启动剪贴板监听
         App.GetService<ClipboardWatcher>().Initialize();
 
+    }
+
+    /// <summary>
+    /// 检测硬件加速状态（仅在 Debug 模式下）
+    /// </summary>
+    private void CheckHardwareAcceleration()
+    {
+        try
+        {
+            // 检查环境变量
+            var disableHwAccel = Environment.GetEnvironmentVariable("WINUI_DISABLE_HW_ACCEL");
+            var dxgiDisableHwAccel = Environment.GetEnvironmentVariable("DXGI_DISABLE_HW_ACCEL");
+            
+            var message = "硬件加速检测:\n";
+            message += $"WINUI_DISABLE_HW_ACCEL: {disableHwAccel ?? "未设置"}\n";
+            message += $"DXGI_DISABLE_HW_ACCEL: {dxgiDisableHwAccel ?? "未设置"}\n";
+            message += "\n提示: 如果使用 'Microsoft Basic Render Driver'，请检查:\n";
+            message += "1. Windows 设置 → 系统 → 显示 → 图形设置\n";
+            message += "2. 添加应用并设置为 '高性能'\n";
+            message += "3. 确保显卡驱动是最新版本\n";
+            message += "4. 使用 Release 模式运行（Debug 模式可能使用软件渲染）";
+            
+            System.Diagnostics.Debug.WriteLine(message);
+        }
+        catch
+        {
+            // 忽略检测失败
+        }
     }
 
     private async Task InitializeLocalizer()

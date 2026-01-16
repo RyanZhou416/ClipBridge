@@ -24,6 +24,7 @@ public partial class SettingsViewModel : ObservableRecipient
     private const string CaptureSettingsKey = "IsClipboardCaptureEnabled";
     private const string LanguageSettingsKey = "PreferredLanguage";
     private const string RecentItemsCountKey = "MainPage_RecentItemsCount";
+    private const string BackgroundImagePathKey = "MainPage_BackgroundImagePath";
 
     public sealed record ComboOption<T>(T Value, string Label);
     private bool _suppressSettingWrites;
@@ -43,6 +44,7 @@ public partial class SettingsViewModel : ObservableRecipient
     private bool _isClipboardCaptureEnabled;
     private string _currentLanguage = "en-US";
     private int _recentItemsCount = 10;
+    private string? _backgroundImagePath;
 
     // 命令：重置设置
     public ICommand ResetSettingsCommand
@@ -86,6 +88,17 @@ public partial class SettingsViewModel : ObservableRecipient
         try
         {
             RecentItemsCount = await _settingsService.ReadSettingAsync<int?>(RecentItemsCountKey) ?? 10;
+        }
+        finally
+        {
+            _suppressSettingWrites = false;
+        }
+
+        // 4. 读取背景图片路径
+        _suppressSettingWrites = true;
+        try
+        {
+            BackgroundImagePath = await _settingsService.ReadSettingAsync<string?>(BackgroundImagePathKey);
         }
         finally
         {
@@ -141,6 +154,22 @@ public partial class SettingsViewModel : ObservableRecipient
                     return;
 
                 _ = _settingsService.SaveSettingAsync(RecentItemsCountKey, clampedValue);
+            }
+        }
+    }
+
+    // 背景图片路径（null 表示使用默认图片）
+    public string? BackgroundImagePath
+    {
+        get => _backgroundImagePath;
+        set
+        {
+            if (SetProperty(ref _backgroundImagePath, value))
+            {
+                if (_suppressSettingWrites)
+                    return;
+
+                _ = _settingsService.SaveSettingAsync(BackgroundImagePathKey, value);
             }
         }
     }

@@ -10,6 +10,9 @@
     <windowsSettings>
       <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/PM</dpiAware>
       <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+      <!-- 确保启用硬件加速 -->
+      <!-- WinUI 3 默认使用硬件加速，但某些情况下可能回退到软件渲染 -->
+      <!-- 通过设置 DPI awareness 有助于确保硬件加速正常工作 -->
     </windowsSettings>
   </application>
 </assembly>

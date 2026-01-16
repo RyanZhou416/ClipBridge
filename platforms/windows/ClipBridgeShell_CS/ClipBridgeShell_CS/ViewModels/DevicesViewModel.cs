@@ -93,40 +93,46 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
 
     private async Task RefreshDevicesAsync()
     {
-        await Task.Run(() =>
+        try
         {
-            try
-            {
-                var peers = _coreHost.ListPeers();
+            // 在后台线程获取设备列表
+            var peers = await Task.Run(() => _coreHost.ListPeers());
 
-                // 加载本地别名
+            // 异步加载所有本地别名（并行执行，避免阻塞）
+            var aliasTasks = peers.Select(async peer =>
+            {
+                var aliasKey = $"DeviceAlias_{peer.DeviceId}";
+                peer.LocalAlias = await _localSettings.ReadSettingAsync<string>(aliasKey);
+            }).ToArray();
+            
+            await Task.WhenAll(aliasTasks);
+
+            // 更新 UI 线程上的集合
+            App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
+            {
+                Devices.Clear();
+
                 foreach (var peer in peers)
                 {
-                    var aliasKey = $"DeviceAlias_{peer.DeviceId}";
-                    var alias = Task.Run(async () => await _localSettings.ReadSettingAsync<string>(aliasKey)).Result;
-                    peer.LocalAlias = alias;
+                    Devices.Add(peer);
                 }
 
-                // 更新 UI 线程上的集合
-                App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
+                // 更新统计（优化：只计算一次）
+                var outboundCount = 0;
+                var inboundCount = 0;
+                foreach (var peer in peers)
                 {
-                    Devices.Clear();
-
-                    foreach (var peer in peers)
-                    {
-                        Devices.Add(peer);
-                    }
-
-                    // 更新统计
-                    OutboundAllowedCount = Devices.Count(p => p.ShareToPeer);
-                    InboundAllowedCount = Devices.Count(p => p.AcceptFromPeer);
-                });
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"RefreshDevicesAsync failed: {ex}");
-            }
-        });
+                    if (peer.ShareToPeer) outboundCount++;
+                    if (peer.AcceptFromPeer) inboundCount++;
+                }
+                OutboundAllowedCount = outboundCount;
+                InboundAllowedCount = inboundCount;
+            });
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"RefreshDevicesAsync failed: {ex}");
+        }
     }
 
     [RelayCommand]

@@ -5,6 +5,8 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using Windows.Storage;
+using Windows.Storage.Pickers;
+using Windows.Graphics.Imaging;
 using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS.Views;
@@ -485,5 +487,170 @@ public sealed partial class SettingsPage : Page
         // 失去焦点时，值已经通过绑定更新到 ViewModel
         // 这里可以触发 MainViewModel 重新加载 RecentItems（如果需要）
         // 由于 MainViewModel 已经监听了设置变化，会自动重新加载
+    }
+
+    // 选择背景图片
+    private async void SelectBackgroundImage_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var loc = Localizer.Get();
+            
+            // 创建文件选择器
+            var picker = new FileOpenPicker();
+            var windowHandle = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle);
+            
+            picker.ViewMode = PickerViewMode.Thumbnail;
+            picker.SuggestedStartLocation = PickerLocationId.PicturesLibrary;
+            picker.FileTypeFilter.Add(".jpg");
+            picker.FileTypeFilter.Add(".jpeg");
+            picker.FileTypeFilter.Add(".png");
+            picker.FileTypeFilter.Add(".bmp");
+            
+            var file = await picker.PickSingleFileAsync();
+            if (file == null)
+                return;
+
+            // 验证图片尺寸（最小 1920x600，推荐 2560x800 或更高）
+            var minWidth = 1920;
+            var minHeight = 600;
+            var recommendedWidth = 2560;
+            var recommendedHeight = 800;
+
+            int width, height;
+            using (var stream = await file.OpenAsync(FileAccessMode.Read))
+            {
+                var decoder = await BitmapDecoder.CreateAsync(stream);
+                width = (int)decoder.PixelWidth;
+                height = (int)decoder.PixelHeight;
+
+                if (width < minWidth || height < minHeight)
+                {
+                    var error = new ContentDialog
+                    {
+                        Title = loc.GetLocalizedString("Settings_BackgroundImage_InvalidSize_Title"),
+                        Content = string.Format(loc.GetLocalizedString("Settings_BackgroundImage_InvalidSize_Content"), 
+                            width, height, minWidth, minHeight, recommendedWidth, recommendedHeight),
+                        PrimaryButtonText = "OK",
+                        XamlRoot = this.Content.XamlRoot
+                    };
+                    await error.ShowAsync();
+                    return;
+                }
+
+                // 如果尺寸小于推荐尺寸，给出警告但允许继续
+                if (width < recommendedWidth || height < recommendedHeight)
+                {
+                    var warning = new ContentDialog
+                    {
+                        Title = loc.GetLocalizedString("Settings_BackgroundImage_LowResolution_Title"),
+                        Content = string.Format(loc.GetLocalizedString("Settings_BackgroundImage_LowResolution_Content"),
+                            width, height, recommendedWidth, recommendedHeight),
+                        PrimaryButtonText = loc.GetLocalizedString("Settings_BackgroundImage_Continue"),
+                        CloseButtonText = loc.GetLocalizedString("Settings_BackgroundImage_Cancel"),
+                        XamlRoot = this.Content.XamlRoot
+                    };
+                    var result = await warning.ShowAsync();
+                    if (result != ContentDialogResult.Primary)
+                        return;
+                }
+            }
+
+            // 复制文件到本地存储
+            var localFolder = ApplicationData.Current.LocalFolder;
+            var imagesFolder = await localFolder.CreateFolderAsync("BackgroundImages", CreationCollisionOption.OpenIfExists);
+            
+            // 删除旧的背景图片（如果存在）
+            if (!string.IsNullOrEmpty(ViewModel.BackgroundImagePath))
+            {
+                try
+                {
+                    var oldFile = await StorageFile.GetFileFromPathAsync(ViewModel.BackgroundImagePath);
+                    if (oldFile != null && oldFile.Path.StartsWith(imagesFolder.Path))
+                    {
+                        await oldFile.DeleteAsync();
+                    }
+                }
+                catch
+                {
+                    // 忽略删除失败
+                }
+            }
+
+            // 复制新文件
+            var newFile = await file.CopyAsync(imagesFolder, $"background_{DateTime.Now.Ticks}.{file.FileType.TrimStart('.')}", NameCollisionOption.ReplaceExisting);
+            
+            // 保存路径到设置
+            ViewModel.BackgroundImagePath = newFile.Path;
+
+            var success = new ContentDialog
+            {
+                Title = loc.GetLocalizedString("Settings_BackgroundImage_Success_Title"),
+                Content = string.Format(loc.GetLocalizedString("Settings_BackgroundImage_Success_Content"), width, height),
+                PrimaryButtonText = "OK",
+                XamlRoot = this.Content.XamlRoot
+            };
+            await success.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            var loc = Localizer.Get();
+            var error = new ContentDialog
+            {
+                Title = loc.GetLocalizedString("Settings_BackgroundImage_Error_Title"),
+                Content = $"{loc.GetLocalizedString("Settings_BackgroundImage_Error_Content")}: {ex.Message}",
+                PrimaryButtonText = "OK",
+                XamlRoot = this.Content.XamlRoot
+            };
+            await error.ShowAsync();
+        }
+    }
+
+    // 重置背景图片为默认
+    private async void ResetBackgroundImage_Click(object sender, RoutedEventArgs e)
+    {
+        var loc = Localizer.Get();
+        
+        var confirm = new ContentDialog
+        {
+            Title = loc.GetLocalizedString("Settings_BackgroundImage_ResetConfirm_Title"),
+            Content = loc.GetLocalizedString("Settings_BackgroundImage_ResetConfirm_Content"),
+            PrimaryButtonText = loc.GetLocalizedString("Settings_BackgroundImage_ResetConfirm_Primary"),
+            CloseButtonText = loc.GetLocalizedString("Settings_BackgroundImage_ResetConfirm_Secondary"),
+            XamlRoot = this.Content.XamlRoot
+        };
+
+        var result = await confirm.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+            return;
+
+        // 删除自定义背景图片文件（如果存在）
+        if (!string.IsNullOrEmpty(ViewModel.BackgroundImagePath))
+        {
+            try
+            {
+                var file = await StorageFile.GetFileFromPathAsync(ViewModel.BackgroundImagePath);
+                if (file != null)
+                {
+                    await file.DeleteAsync();
+                }
+            }
+            catch
+            {
+                // 忽略删除失败
+            }
+        }
+
+        // 清除设置
+        ViewModel.BackgroundImagePath = null;
+
+        var done = new ContentDialog
+        {
+            Title = loc.GetLocalizedString("Settings_BackgroundImage_ResetDone"),
+            PrimaryButtonText = "OK",
+            XamlRoot = this.Content.XamlRoot
+        };
+        await done.ShowAsync();
     }
 }

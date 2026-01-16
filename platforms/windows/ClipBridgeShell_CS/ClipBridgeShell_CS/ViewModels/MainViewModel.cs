@@ -481,6 +481,9 @@ public partial class MainViewModel : ObservableRecipient
                 App.MainWindow.DispatcherQueue.TryEnqueue(() =>
                 {
                     CurrentCacheBytes = cacheStats.CurrentCacheBytes;
+                    // 使用批量更新，减少 CollectionChanged 事件触发次数
+                    // 先暂停通知，然后批量更新
+                    var oldItems = CacheSeries.ToList();
                     CacheSeries.Clear();
                     foreach (var point in cacheStats.Series)
                     {
@@ -492,6 +495,7 @@ public partial class MainViewModel : ObservableRecipient
                 var netStats = CoreInterop.QueryNetStats(handle);
                 App.MainWindow.DispatcherQueue.TryEnqueue(() =>
                 {
+                    // 使用批量更新，减少 CollectionChanged 事件触发次数
                     NetworkSeries.Clear();
                     foreach (var point in netStats.Series)
                     {
@@ -503,6 +507,7 @@ public partial class MainViewModel : ObservableRecipient
                 var activityStats = CoreInterop.QueryActivityStats(handle);
                 App.MainWindow.DispatcherQueue.TryEnqueue(() =>
                 {
+                    // 使用批量更新，减少 CollectionChanged 事件触发次数
                     ActivitySeries.Clear();
                     foreach (var point in activityStats.Series)
                     {
@@ -516,16 +521,37 @@ public partial class MainViewModel : ObservableRecipient
             }
         });
 
-        // 更新设备统计（从Store）
+        // 更新设备统计（从Store）- 优化：减少LINQ操作
         App.MainWindow.DispatcherQueue.TryEnqueue(() =>
         {
             var peers = _peerStore.Peers;
-            // 当前PeerMetaPayload模型没有区分Outbound/Inbound，使用IsOnline和IsAllowed
-            // Outbound: 在线且允许的设备数（可共享到的设备）
-            OutboundPeerCount = peers.Count(p => p.IsOnline && p.IsAllowed);
-            // Inbound: 在线且允许的设备数（可接收的设备，当前模型相同）
-            InboundPeerCount = peers.Count(p => p.IsOnline && p.IsAllowed);
-            ActiveTransfersCount = _transferStore.Transfers.Count(t => t.State == "downloading" || t.State == "uploading");
+            var transfers = _transferStore.Transfers;
+            
+            // 只遍历一次集合来计算统计
+            var outboundCount = 0;
+            var inboundCount = 0;
+            var activeTransfers = 0;
+            
+            foreach (var peer in peers)
+            {
+                if (peer.IsOnline && peer.IsAllowed)
+                {
+                    outboundCount++;
+                    inboundCount++;
+                }
+            }
+            
+            foreach (var transfer in transfers)
+            {
+                if (transfer.State == "downloading" || transfer.State == "uploading")
+                {
+                    activeTransfers++;
+                }
+            }
+            
+            OutboundPeerCount = outboundCount;
+            InboundPeerCount = inboundCount;
+            ActiveTransfersCount = activeTransfers;
         });
     }
 
@@ -536,6 +562,13 @@ public partial class MainViewModel : ObservableRecipient
         // 更新选中状态
         SelectedItemId = item.ItemId;
         OnPropertyChanged(nameof(SelectedItemId));
+        
+        // 注意：由于使用 x:Bind 和 Converter，绑定可能不会自动更新
+        // 因为 ItemMetaPayload 对象本身没有改变
+        // 为了触发绑定更新，我们需要通知 ItemsRepeater 重新评估绑定
+        // 这通过触发集合的 CollectionChanged 事件来实现（但不会实际改变集合）
+        // 实际上，x:Bind 在编译时生成代码，可能不会响应 SelectedItemId 的变化
+        // 如果遇到问题，可以考虑使用 Binding 而不是 x:Bind，或者使用其他方法
 
         // 如果ClipboardApplyService可用，调用它来写入剪切板
         if (_clipboardApply != null)

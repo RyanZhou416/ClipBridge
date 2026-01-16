@@ -9,6 +9,7 @@
     xmlns:events="using:ClipBridgeShell_CS.Core.Models.Events"
     xmlns:helpers="using:ClipBridgeShell_CS.Helpers"
     xmlns:controls="using:ClipBridgeShell_CS.Controls"
+    xmlns:canvas="using:Microsoft.Graphics.Canvas.UI.Xaml"
     mc:Ignorable="d">
 
     <Page.Resources>
@@ -46,10 +47,23 @@
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
 
+            <!-- 自定义标题样式，确保 Foreground 不受主题影响 -->
+            <!-- TextBlock 不支持 Template，直接设置属性，Foreground 由代码动态设置 -->
+            <Style x:Key="CustomTitleTextBlockStyle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="28"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                <Setter Property="TextWrapping" Value="NoWrap"/>
+                <!-- 不设置 Foreground，完全由代码控制，避免主题影响 -->
+            </Style>
+
             <!-- 转换器 -->
             <helpers:BooleanToColorConverter x:Key="BooleanToColorConverter"/>
             <helpers:DeviceNameConverter x:Key="DeviceNameConverter"/>
             <helpers:ItemKindConverter x:Key="ItemKindConverter"/>
+            <helpers:CardSelectionBorderThicknessConverter x:Key="CardSelectionBorderThicknessConverter"/>
+            <helpers:CardSelectionBorderBrushConverter x:Key="CardSelectionBorderBrushConverter"/>
+            <helpers:CardSelectionPaddingConverter x:Key="CardSelectionPaddingConverter"/>
 
             <!-- 卡片样式 - WinUI-Gallery 风格（Acrylic 背景，带边框） -->
             <Style x:Key="ItemCardStyle" TargetType="Border">
@@ -81,32 +95,47 @@
             <StackPanel x:Name="ContentStackPanel" Spacing="24">
                 
                 <!-- 背景头部区域（只包含背景图片和标题） -->
-                <Grid Height="600" Margin="0,0,0,0">
+                <!-- 优化：使用缓存模式提升静态内容渲染性能 -->
+                <Grid Height="600" Margin="0,0,0,0" CacheMode="BitmapCache">
                     <controls:OpacityMaskView
                         Height="600"
-                        VerticalAlignment="Stretch">
+                        VerticalAlignment="Stretch"
+                        CacheMode="BitmapCache">
                         <controls:OpacityMaskView.OpacityMask>
                             <Rectangle Fill="{ThemeResource OverlayRadialGradient}" />
                         </controls:OpacityMaskView.OpacityMask>
                         <Grid
                             x:Name="ImageGrid"
                             Margin="0,-100,0,0"
-                            Background="{ThemeResource BackgroundGradient}">
+                            Background="{ThemeResource BackgroundGradient}"
+                            HorizontalAlignment="Stretch"
+                            VerticalAlignment="Stretch">
                             <Image
                                 x:Name="HeroImage"
                                 Source="ms-appx:///Assets/background.jpg"
                                 Opacity="{ThemeResource HeaderImageOpacity}"
-                                Stretch="UniformToFill" />
+                                Stretch="UniformToFill"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                CacheMode="BitmapCache"/>
                         </Grid>
                     </controls:OpacityMaskView>
                     
-                    <!-- 标题层 -->
-					<Grid Margin="0,48,0,0" VerticalAlignment="Top">
+                    <!-- 标题层 - 使用 Win2D Canvas 绘制，完全不受主题影响 -->
+					<Grid Margin="0,48,0,0" VerticalAlignment="Top" Height="60" Padding="36,0,0,0">
+                        <!-- 使用 Win2D Canvas 绘制文本，完全控制颜色 -->
+                        <canvas:CanvasControl x:Name="TitleCanvas" 
+                                                Draw="OnTitleCanvasDraw"
+                                                HorizontalAlignment="Left"
+                                                VerticalAlignment="Top"
+                                                Width="400"
+                                                Height="60"
+                                                IsHitTestVisible="False"/>
+                        <!-- 隐藏的 TextBlock 用于获取本地化文本和测量大小 -->
                         <TextBlock x:Name="TitleTextBlock"
                                    l:Uids.Uid="AppName.Text" 
-                                   Style="{ThemeResource TitleLargeTextBlockStyle}" 
-                                   FontWeight="SemiBold"
-                                   Padding="36,0,0,0"/>
+                                   Opacity="0"
+                                   Visibility="Collapsed"/>
                     </Grid>
                 </Grid>
                 
@@ -129,6 +158,8 @@
                                     <Border x:Name="CardBorder" 
                                             Style="{StaticResource ItemCardStyle}" 
                                             Tag="{x:Bind}"
+                                            BorderThickness="{x:Bind Converter={StaticResource CardSelectionBorderThicknessConverter}}"
+                                            BorderBrush="{x:Bind Converter={StaticResource CardSelectionBorderBrushConverter}}"
                                             Tapped="OnCardTapped"
                                             PointerEntered="OnCardPointerEntered"
                                             PointerExited="OnCardPointerExited"
@@ -149,7 +180,7 @@
                                                     <ScalarTransition Duration="0:0:0.200"/>
                                                 </Rectangle.OpacityTransition>
                                             </Rectangle>
-                                            <Grid x:Name="ContentGrid" RowDefinitions="Auto,Auto,Auto" Margin="0,0,0,0" Padding="12,12,12,12">
+                                            <Grid x:Name="ContentGrid" RowDefinitions="Auto,Auto,Auto" Margin="0,0,0,0" Padding="{x:Bind Converter={StaticResource CardSelectionPaddingConverter}}">
                                                 <!-- 预览区域 -->
                                                 <TextBlock Grid.Row="0" 
                                                            Text="{x:Bind Preview.Text, TargetNullValue='(No preview)'}" 
@@ -212,13 +243,19 @@
                         </controls:HorizontalScrollContainer>
                         
                         <!-- 查看更多历史按钮 -->
-                        <Button l:Uids.Uid="MainPage_ViewMoreHistory" 
-                                Command="{x:Bind ViewModel.NavigateToHistoryCommand}"
-                                HorizontalAlignment="Right"
+                        <Border HorizontalAlignment="Right"
                                 Width="Auto"
                                 Margin="0,12,36,0"
-                                Padding="8,8,8,8"
-                                Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"/>
+                                CornerRadius="4"
+                                Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+                                BorderThickness="1"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+                            <Button l:Uids.Uid="MainPage_ViewMoreHistory" 
+                                    Command="{x:Bind ViewModel.NavigateToHistoryCommand}"
+                                    Padding="8,8,8,8"
+                                    Background="Transparent"
+                                    BorderThickness="0"/>
+                        </Border>
                         
                         <!-- 中部：状态与操作区 -->
                         <Grid ColumnDefinitions="*,*,*" ColumnSpacing="16" Margin="0" Padding="36,0,36,0">
@@ -267,9 +304,17 @@
                                             IsOn="{x:Bind ViewModel.ClipboardCaptureEnabled, Mode=TwoWay}"/>
                                 <ToggleSwitch l:Uids.Uid="MainPage_ClipboardSharing" 
                                             IsOn="{x:Bind ViewModel.ClipboardSharingEnabled, Mode=TwoWay}"/>
-                                <Button l:Uids.Uid="MainPage_ClearCache" 
-                                        Command="{x:Bind ViewModel.ClearCacheCommand}"
-                                        HorizontalAlignment="Stretch"/>
+                                <Border CornerRadius="4"
+                                        Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+                                        BorderThickness="1"
+                                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                        HorizontalAlignment="Stretch">
+                                    <Button l:Uids.Uid="MainPage_ClearCache" 
+                                            Command="{x:Bind ViewModel.ClearCacheCommand}"
+                                            HorizontalAlignment="Stretch"
+                                            Background="Transparent"
+                                            BorderThickness="0"/>
+                                </Border>
                             </StackPanel>
                         </StackPanel>
                     </Border>
@@ -280,10 +325,11 @@
                             <TextBlock l:Uids.Uid="MainPage_Statistics" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
 
                             <!-- Cache usage over time -->
+                            <!-- 优化：使用缓存模式，减少图表重绘时的布局计算 -->
                             <Border Style="{StaticResource ChartContainerStyle}">
                                 <StackPanel Spacing="8">
                                     <TextBlock l:Uids.Uid="MainPage_CacheUsage" FontWeight="SemiBold"/>
-                                    <Canvas x:Name="CacheChartCanvas" Width="600" Height="200" Background="Transparent"/>
+                                    <Canvas x:Name="CacheChartCanvas" Width="600" Height="200" Background="Transparent" CacheMode="BitmapCache"/>
                                 </StackPanel>
                             </Border>
 
@@ -291,7 +337,7 @@
                             <Border Style="{StaticResource ChartContainerStyle}">
                                 <StackPanel Spacing="8">
                                     <TextBlock l:Uids.Uid="MainPage_NetworkThroughput" FontWeight="SemiBold"/>
-                                    <Canvas x:Name="NetworkChartCanvas" Width="600" Height="200" Background="Transparent"/>
+                                    <Canvas x:Name="NetworkChartCanvas" Width="600" Height="200" Background="Transparent" CacheMode="BitmapCache"/>
                                 </StackPanel>
                             </Border>
 
@@ -299,7 +345,7 @@
                             <Border Style="{StaticResource ChartContainerStyle}">
                                 <StackPanel Spacing="8">
                                     <TextBlock l:Uids.Uid="MainPage_GlobalCopyActivity" FontWeight="SemiBold"/>
-                                    <Canvas x:Name="ActivityChartCanvas" Width="600" Height="200" Background="Transparent"/>
+                                    <Canvas x:Name="ActivityChartCanvas" Width="600" Height="200" Background="Transparent" CacheMode="BitmapCache"/>
                                 </StackPanel>
                             </Border>
 

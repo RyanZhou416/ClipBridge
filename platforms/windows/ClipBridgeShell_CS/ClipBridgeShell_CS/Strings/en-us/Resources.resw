@@ -647,4 +647,61 @@
   <data name="ItemKind_FileList" xml:space="preserve">
     <value>File</value>
   </data>
+  <data name="Settings_BackgroundImage_SettingsCard.Header" xml:space="preserve">
+    <value>Background Image</value>
+  </data>
+  <data name="Settings_BackgroundImage_SettingsCard.Description" xml:space="preserve">
+    <value>Minimum size: 1920x600 pixels. Recommended: 2560x800 or higher for best quality.</value>
+  </data>
+  <data name="Settings_BackgroundImage_SelectButton.Content" xml:space="preserve">
+    <value>Select Image</value>
+  </data>
+  <data name="Settings_BackgroundImage_ResetButton.Content" xml:space="preserve">
+    <value>Reset to Default</value>
+  </data>
+  <data name="Settings_BackgroundImage_InvalidSize_Title.Text" xml:space="preserve">
+    <value>Image Size Too Small</value>
+  </data>
+  <data name="Settings_BackgroundImage_InvalidSize_Content.Text" xml:space="preserve">
+    <value>The selected image ({0}x{1}) is smaller than the minimum required size ({2}x{3}). Please select an image with at least {2}x{3} pixels. Recommended size: {4}x{5} or higher.</value>
+  </data>
+  <data name="Settings_BackgroundImage_LowResolution_Title.Text" xml:space="preserve">
+    <value>Low Resolution Warning</value>
+  </data>
+  <data name="Settings_BackgroundImage_LowResolution_Content.Text" xml:space="preserve">
+    <value>The selected image ({0}x{1}) is smaller than the recommended size ({2}x{3}). The image may appear blurry when stretched. Continue anyway?</value>
+  </data>
+  <data name="Settings_BackgroundImage_Continue.Text" xml:space="preserve">
+    <value>Continue</value>
+  </data>
+  <data name="Settings_BackgroundImage_Cancel.Text" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="Settings_BackgroundImage_Success_Title.Text" xml:space="preserve">
+    <value>Image Set Successfully</value>
+  </data>
+  <data name="Settings_BackgroundImage_Success_Content.Text" xml:space="preserve">
+    <value>Background image has been set. Size: {0}x{1} pixels.</value>
+  </data>
+  <data name="Settings_BackgroundImage_Error_Title.Text" xml:space="preserve">
+    <value>Error</value>
+  </data>
+  <data name="Settings_BackgroundImage_Error_Content.Text" xml:space="preserve">
+    <value>Failed to set background image</value>
+  </data>
+  <data name="Settings_BackgroundImage_ResetConfirm_Title.Text" xml:space="preserve">
+    <value>Reset Background Image</value>
+  </data>
+  <data name="Settings_BackgroundImage_ResetConfirm_Content.Text" xml:space="preserve">
+    <value>Are you sure you want to reset the background image to the default? The current custom image will be removed.</value>
+  </data>
+  <data name="Settings_BackgroundImage_ResetConfirm_Primary.Text" xml:space="preserve">
+    <value>Reset</value>
+  </data>
+  <data name="Settings_BackgroundImage_ResetConfirm_Secondary.Text" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="Settings_BackgroundImage_ResetDone.Text" xml:space="preserve">
+    <value>Background image has been reset to default.</value>
+  </data>
 </root>
