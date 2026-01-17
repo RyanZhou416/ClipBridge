@@ -22,6 +22,8 @@ using Microsoft.Graphics.Canvas.UI.Xaml;
 using System.Numerics;
 using Windows.UI.Text;
 using CommunityToolkit.WinUI;
+using Microsoft.UI.Composition;
+using Microsoft.UI.Xaml.Hosting;
 
 namespace ClipBridgeShell_CS.Views;
 
@@ -38,6 +40,9 @@ public sealed partial class MainPage : Page
     private CanvasTextLayout? _titleTextLayout;
     private Color _titleTextColor = Colors.White; // 默认白色，确保在深色背景上可见
     private string _titleText = string.Empty;
+    
+    // 卡片选中状态管理（性能优化：只更新变化的卡片，而不是遍历所有卡片）
+    private Microsoft.UI.Xaml.Controls.Border? _selectedBorder;
 
     public MainPage()
     {
@@ -102,8 +107,15 @@ public sealed partial class MainPage : Page
                 // 当RecentItems变化时，可能需要更新UI
                 // 由于ItemsRepeater会自动更新，这里可以留空或添加其他逻辑
             };
-            // 注意：已移除 PropertyChanged 中对 UpdateCardSelection() 的调用
-            // 现在使用数据绑定自动更新卡片选中状态
+            
+            // 监听选中状态变化，更新所有卡片的选中效果
+            ViewModel.PropertyChanged += (s, e) =>
+            {
+                if (e.PropertyName == nameof(ViewModel.SelectedItemId))
+                {
+                    UpdateAllCardsSelection();
+                }
+            };
             
             // 设置视差滚动效果（使用 RenderTransform，不影响布局）
             if (ContentScrollViewer != null && ParallaxContentContainer != null)
@@ -611,8 +623,18 @@ public sealed partial class MainPage : Page
     {
         if (sender is Microsoft.UI.Xaml.Controls.Border cardBorder && cardBorder.Tag is ItemMetaPayload item)
         {
+            // 先更新 ViewModel 的选中状态
             ViewModel.SelectItemCommand.Execute(item);
-            // 注意：不再需要手动调用 UpdateCardSelection，数据绑定会自动更新
+            
+            // 取消之前选中卡片的选中状态（强制取消，不依赖 ViewModel 状态）
+            if (_selectedBorder != null && _selectedBorder != cardBorder)
+            {
+                UpdateCardSelection(_selectedBorder, forceUnselected: true);
+            }
+            
+            // 保存新的选中卡片引用并更新样式
+            _selectedBorder = cardBorder;
+            UpdateCardSelection(cardBorder);
         }
     }
 
@@ -620,7 +642,14 @@ public sealed partial class MainPage : Page
     {
         if (sender is Microsoft.UI.Xaml.Controls.Border cardBorder && cardBorder.Tag is ItemMetaPayload item)
         {
-            // 注意：不再需要调用 UpdateCardSelection，数据绑定会自动更新
+            // 初始化卡片的选中状态
+            UpdateCardSelection(cardBorder);
+            
+            // 如果这个卡片是当前选中的，保存引用
+            if (ViewModel.IsItemSelected(item.ItemId))
+            {
+                _selectedBorder = cardBorder;
+            }
             
             // 设置设备名称
             var deviceNameTextBlock = FindVisualChildByName<Microsoft.UI.Xaml.Controls.TextBlock>(cardBorder, "DeviceNameText");
@@ -746,14 +775,77 @@ public sealed partial class MainPage : Page
         }
     }
 
-    // 注意：UpdateCardSelection() 无参数方法已移除
-    // 现在使用数据绑定自动更新卡片选中状态，性能从 O(n) 优化到 O(1)
-    // 保留此方法作为后备（如果绑定失败时使用）
-    private void UpdateCardSelection(Microsoft.UI.Xaml.Controls.Border border)
+    /// <summary>
+    /// 更新卡片选中状态（性能优化版本）
+    /// 只更新之前选中的卡片和当前选中的卡片，而不是遍历所有卡片
+    /// 注意：如果通过代码直接修改 SelectedItemId（而不是点击），仍需要查找对应的卡片
+    /// </summary>
+    private void UpdateAllCardsSelection()
+    {
+        if (ViewModel?.RecentItems == null) return;
+        
+        // 1. 取消之前选中卡片的选中状态
+        if (_selectedBorder != null)
+        {
+            // 检查之前的卡片是否仍然存在且仍然被选中
+            if (_selectedBorder.Tag is ItemMetaPayload oldItem && 
+                ViewModel.IsItemSelected(oldItem.ItemId))
+            {
+                // 如果之前的卡片仍然是选中的，说明 SelectedItemId 没有改变，不需要更新
+                return;
+            }
+            
+            // 取消之前的选中状态
+            UpdateCardSelection(_selectedBorder);
+            _selectedBorder = null;
+        }
+        
+        // 2. 找到并选中新的卡片（仅在通过代码修改 SelectedItemId 时才会执行到这里）
+        if (!string.IsNullOrEmpty(ViewModel.SelectedItemId) && RecentItemsRepeater != null)
+        {
+            // 在 ItemsSource 中查找对应的项
+            for (int i = 0; i < ViewModel.RecentItems.Count; i++)
+            {
+                var item = ViewModel.RecentItems[i];
+                if (item.ItemId == ViewModel.SelectedItemId)
+                {
+                    // 获取对应的 UI 元素
+                    var element = RecentItemsRepeater.TryGetElement(i);
+                    if (element != null)
+                    {
+                        // 查找 Border（卡片）
+                        Microsoft.UI.Xaml.Controls.Border? border = null;
+                        if (element is Microsoft.UI.Xaml.Controls.Border b && b.Name == "CardBorder")
+                        {
+                            border = b;
+                        }
+                        else
+                        {
+                            border = FindVisualChildByName<Microsoft.UI.Xaml.Controls.Border>(element, "CardBorder");
+                        }
+                        
+                        if (border != null)
+                        {
+                            _selectedBorder = border;
+                            UpdateCardSelection(border);
+                            break; // 找到后立即退出
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 更新单个卡片的选中状态（带动画）
+    /// </summary>
+    /// <param name="border">要更新的卡片 Border</param>
+    /// <param name="forceUnselected">强制设置为未选中状态（用于在切换选中时取消之前的选中）</param>
+    private void UpdateCardSelection(Microsoft.UI.Xaml.Controls.Border border, bool forceUnselected = false)
     {
         if (border.Tag is ItemMetaPayload item)
         {
-            var isSelected = ViewModel.IsItemSelected(item.ItemId);
+            var isSelected = forceUnselected ? false : ViewModel.IsItemSelected(item.ItemId);
             
             // 查找内容 Grid，用于调整 Padding
             var contentGrid = FindVisualChildByName<Microsoft.UI.Xaml.Controls.Grid>(border, "ContentGrid");
@@ -763,8 +855,7 @@ public sealed partial class MainPage : Page
                 // 选中时：边框加粗（从 1px 变为 2px），颜色改为选中颜色
                 border.BorderThickness = new Microsoft.UI.Xaml.Thickness(2);
                 
-                // 从 Page.Resources 获取边框颜色（资源在 Page.Resources 的 ThemeDictionaries 中）
-                // 需要根据当前主题从 ThemeDictionaries 中获取
+                // 从 Page.Resources 获取边框颜色
                 var themeDictionaries = this.Resources.ThemeDictionaries;
                 var currentTheme = this.ActualTheme == Microsoft.UI.Xaml.ElementTheme.Light ? "Light" : "Dark";
                 if (themeDictionaries != null && themeDictionaries.TryGetValue(currentTheme, out var themeDict) && themeDict is Microsoft.UI.Xaml.ResourceDictionary themeResourceDict)
@@ -775,7 +866,7 @@ public sealed partial class MainPage : Page
                     }
                 }
                 
-                // 减少 Padding 来补偿边框占用的额外空间（边框从 1px 变为 2px，所以 Padding 减少 1px）
+                // 减少 Padding 来补偿边框占用的额外空间
                 if (contentGrid != null)
                 {
                     contentGrid.Padding = new Microsoft.UI.Xaml.Thickness(11, 11, 11, 11);

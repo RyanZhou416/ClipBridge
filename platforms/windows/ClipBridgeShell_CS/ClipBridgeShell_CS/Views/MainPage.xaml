@@ -148,7 +148,7 @@
                         <!-- 横向滚动卡片容器 -->
                         <controls:HorizontalScrollContainer x:Name="RecentlyVisitedContainer" Margin="0,50,0,0">
                             <controls:HorizontalScrollContainer.Source>
-                                <ItemsRepeater ItemsSource="{x:Bind ViewModel.RecentItems, Mode=OneWay}">
+                                <ItemsRepeater x:Name="RecentItemsRepeater" ItemsSource="{x:Bind ViewModel.RecentItems, Mode=OneWay}">
                                     <ItemsRepeater.Layout>
                                         <StackLayout Orientation="Horizontal" Spacing="12"/>
                                     </ItemsRepeater.Layout>
