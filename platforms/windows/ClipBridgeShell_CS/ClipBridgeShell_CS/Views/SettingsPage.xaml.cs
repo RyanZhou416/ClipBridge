@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Navigation;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.Graphics.Imaging;
+using Windows.System;
 using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS.Views;
@@ -652,5 +653,17 @@ public sealed partial class SettingsPage : Page
             XamlRoot = this.Content.XamlRoot
         };
         await done.ShowAsync();
+    }
+
+    private async void LicenseLink_Click(object sender, RoutedEventArgs e)
+    {
+        var uri = new Uri("https://github.com/RyanZhou416/ClipBridge/blob/main/LICENSE");
+        await Launcher.LaunchUriAsync(uri);
+    }
+
+    private async void GitHubLink_Click(object sender, RoutedEventArgs e)
+    {
+        var uri = new Uri("https://github.com/RyanZhou416/ClipBridge");
+        await Launcher.LaunchUriAsync(uri);
     }
 }

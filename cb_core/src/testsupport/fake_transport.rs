@@ -8,11 +8,11 @@ use serde_json::json;
 use crate::testsupport::core::TestCore;
 use crate::util::now_ms;
 
-/// inproc “假网络”
+/// inproc "假网络"
 ///
 /// 目标：只为 M1 测试提供闭环：
-/// - account_tag 相同：双方立刻收到 PEER_ONLINE；disconnect 后双方收到 PEER_OFFLINE
-/// - account_tag 不同：A 侧立刻收到 CORE_ERROR(AUTH_ACCOUNT_TAG_MISMATCH, affects_session=true)
+/// - account_uid 相同：双方立刻收到 PEER_ONLINE；disconnect 后双方收到 PEER_OFFLINE
+/// - account_uid 不同：A 侧立刻收到 CORE_ERROR(AUTH_ACCOUNT_UID_MISMATCH, affects_session=true)
 pub struct FakeTransport;
 
 impl FakeTransport {
@@ -27,16 +27,16 @@ impl FakeTransport {
         let a_name = a.core.inner.core_config.device_name.clone();
         let b_name = b.core.inner.core_config.device_name.clone();
 
-        let a_tag = a.core.inner.core_config.account_tag.clone();
-        let b_tag = b.core.inner.core_config.account_tag.clone();
+        let a_tag = a.core.inner.core_config.account_uid.clone();
+        let b_tag = b.core.inner.core_config.account_uid.clone();
 
-        // account_tag 不一致：按文档要求发 AUTH_ACCOUNT_TAG_MISMATCH（只对 A 侧）
+        // account_uid 不一致：按文档要求发 AUTH_ACCOUNT_UID_MISMATCH（只对 A 侧）
         if a_tag != b_tag {
             a.core.inner.emit_json(json!({
                 "type": "CORE_ERROR",
                 "ts_ms": now_ms(),
                 "payload": {
-                    "code": "AUTH_ACCOUNT_TAG_MISMATCH",
+                    "code": "AUTH_ACCOUNT_UID_MISMATCH",
                     "affects_session": true
                 }
             }));
@@ -50,7 +50,7 @@ impl FakeTransport {
             };
         }
 
-        // account_tag 一致：双方上线
+        // account_uid 一致：双方上线
         a.core.inner.emit_json(json!({
             "type": "PEER_ONLINE",
             "ts_ms": now_ms(),

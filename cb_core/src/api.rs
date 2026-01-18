@@ -19,8 +19,8 @@ pub use crate::policy::{AppConfig, GlobalPolicy};
 pub struct CoreConfig {
     pub device_id: String,     // 本机 device_id（先由壳传入）
     pub device_name: String,   // 设备显示名
-    pub account_uid: String,   // 本机当前账号域（history 分区键）
-    pub account_tag: String,   // 账号
+    pub account_uid: String,   // 本机当前账号域（history 分区键，账号明文）
+    pub account_password: String,   // 账号密码（用于OPAQUE握手验证）
     pub data_dir: String,      // 持久：core.db
     pub cache_dir: String,     // 可清空：CAS blobs/tmp
 	pub app_config: AppConfig,
@@ -515,7 +515,7 @@ impl Core {
         Ok(serde_json::json!({
             "status": if is_shutdown { "Shutdown" } else { "Running" },
             "device_id": self.inner.core_config.device_id,
-            "account_tag": self.inner.core_config.account_tag,
+            "account_uid": self.inner.core_config.account_uid,
             "net_enabled": self.inner.net.is_some(),
 			"config": self.inner.core_config.app_config
         }))

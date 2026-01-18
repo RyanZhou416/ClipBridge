@@ -45,8 +45,8 @@ where F: FnOnce(&mut CoreConfig)
 	let mut config = CoreConfig {
 		device_id: device_id.to_string(),
 		device_name: format!("Test Device {}", device_id),
-		account_tag: uid.to_string(),
 		account_uid: uid.to_string(),
+		account_password: "test_password".to_string(),
 		data_dir: data_path.clone(),
 		cache_dir: data_path,
 		..Default::default()

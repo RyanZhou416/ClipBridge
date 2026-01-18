@@ -18,10 +18,10 @@ fn get_tls_dir(data_dir: impl AsRef<Path>) -> PathBuf {
 fn derive_encryption_key(device_id: &str, account_uid: &str) -> Result<[u8; 32]> {
     use argon2::{Argon2, Algorithm, Version, Params};
     
-    let salt = b"ClipBridge:cert_key:v1"; // 固定 salt，与 account_tag 算法保持一致
+    let salt = b"ClipBridge:cert_key:v1"; // 固定 salt
     let mut output = [0u8; 32];
     
-    // 参数：m=65536 KiB (64 MiB), t=3, p=1（与 account_tag 一致）
+    // 参数：m=65536 KiB (64 MiB), t=3, p=1
     let params = Params::new(65536, 3, 1, Some(32))
         .map_err(|e| anyhow::anyhow!("failed to create Argon2 params: {:?}", e))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -187,7 +187,8 @@ pub fn generate_self_signed_cert(
     let subject_alt_names = vec![common_name.to_string()];
 
     let CertifiedKey { cert, signing_key } =
-        generate_simple_self_signed(subject_alt_names)?;
+        generate_simple_self_signed(subject_alt_names)
+            .context("rcgen::generate_simple_self_signed failed")?;
 
     let cert_chain = vec![CertificateDer::from(cert.der().to_vec())];
     let key_der = PrivatePkcs8KeyDer::from(signing_key.serialize_der());
@@ -204,18 +205,24 @@ pub fn get_or_create_cert(
     common_name: &str,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     // 尝试加载已保存的证书
-    match load_cert_and_key(&data_dir, device_id, account_uid)? {
-        Some((cert_chain, priv_key)) => {
+    match load_cert_and_key(&data_dir, device_id, account_uid) {
+        Ok(Some((cert_chain, priv_key))) => {
             // 成功加载，直接返回
             return Ok((cert_chain, priv_key));
         }
-        None => {
+        Ok(None) => {
             // 不存在，生成新证书
+        }
+        Err(_e) => {
+            // 加载失败（可能是 account_uid 改变导致解密失败），删除旧证书并重新生成
+            // 清除旧的证书文件
+            let _ = clear_local_cert(&data_dir);
         }
     }
 
     // 生成新证书
-    let (cert_chain, priv_key) = generate_self_signed_cert(common_name)?;
+    let (cert_chain, priv_key) = generate_self_signed_cert(common_name)
+        .context("generate_self_signed_cert failed")?;
 
     // 保存到磁盘
     if let Err(e) = save_cert_and_key(&data_dir, device_id, account_uid, &cert_chain, &priv_key) {

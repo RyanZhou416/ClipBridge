@@ -34,7 +34,7 @@ pub enum CtrlMsg {
         msg_id: Option<String>,
         protocol_version: u32,
         device_id: String,
-        account_tag: String,
+        account_uid: String,
         capabilities: Vec<String>,
         client_nonce: Option<String>,
     },

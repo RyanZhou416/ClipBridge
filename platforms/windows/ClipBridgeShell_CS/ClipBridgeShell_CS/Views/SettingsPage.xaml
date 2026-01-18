@@ -162,7 +162,7 @@
 
 						<!-- 清除本地证书 -->
 						<ctk:SettingsCard l:Uids.Uid="Settings_ClearLocalCert_SettingsCard"
-								  HeaderIcon="{ui:FontIcon Glyph=&#xE8C1;}"
+								  HeaderIcon="{ui:FontIcon Glyph=&#xE74D;}"
 								  HorizontalAlignment="Stretch">
 							<Button Click="ClearLocalCert_Click"
 							Width="180"
@@ -192,7 +192,8 @@
                         <TextBlock l:Uids.Uid="Settings_About" Style="{StaticResource GroupHeaderTextStyle}"/>
                         <TextBlock l:Uids.Uid="AppName"/>
                         <TextBlock l:Uids.Uid="Settings_AboutDescription"/>
-                        <HyperlinkButton l:Uids.Uid="SettingsPage_PrivacyTermsLink" Margin="{StaticResource SettingsPageHyperlinkButtonMargin}" />
+                        <HyperlinkButton x:Name="LicenseLink" l:Uids.Uid="SettingsPage_LicenseLink" Click="LicenseLink_Click"/>
+                        <HyperlinkButton x:Name="GitHubLink" l:Uids.Uid="SettingsPage_GitHubLink" Click="GitHubLink_Click"/>
                     </StackPanel>
                 </StackPanel>
             </Border>

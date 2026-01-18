@@ -33,16 +33,16 @@ pub struct DiscoveryService {
 
 
 /// 纯函数：尝试从 mDNS ServiceInfo 中解析出 PeerCandidate
-/// 如果 account_tag 不匹配或缺少必要字段，返回 None
-fn parse_peer_candidate(info: &Box<ResolvedService>, local_account_tag: &str, local_device_id: &str) -> Option<PeerCandidate> {
+/// 如果 account_uid 不匹配或缺少必要字段，返回 None
+fn parse_peer_candidate(info: &Box<ResolvedService>, local_account_uid: &str, local_device_id: &str) -> Option<PeerCandidate> {
     // 排除自己
     if info.get_fullname().contains(local_device_id) {
         return None;
     }
 
-    // 检查 account_tag
+    // 检查 account_uid
     let peer_acct = info.get_property_val_str("acct").unwrap_or("");
-    if peer_acct != local_account_tag {
+    if peer_acct != local_account_uid {
         return None;
     }
 
@@ -108,7 +108,7 @@ impl DiscoveryService {
 
 
         let properties = [
-            ("acct", cfg.account_tag.as_str()),
+            ("acct", cfg.account_uid.as_str()),
             ("did", cfg.device_id.as_str()),
             ("proto", "1"),
             ("cap", "txt,img,file"),
@@ -129,7 +129,7 @@ impl DiscoveryService {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
         let receiver = mdns.browse(SERVICE_TYPE)?;
         let local_device_id = cfg.device_id.clone();
-        let local_account_tag = cfg.account_tag.clone();
+        let local_account_uid = cfg.account_uid.clone();
 
         task::spawn(async move {
             // println!("[Discovery] Started browsing: {}", SERVICE_TYPE);
@@ -144,7 +144,7 @@ impl DiscoveryService {
                     event = async { receiver.recv_async().await } => {
                         match event {
                             Ok(ServiceEvent::ServiceResolved(info)) => {
-                                if let Some(candidate) = parse_peer_candidate(&info, &local_account_tag, &local_device_id) {
+                                if let Some(candidate) = parse_peer_candidate(&info, &local_account_uid, &local_device_id) {
                                      if event_tx.send(DiscoveryEvent::CandidateFound(candidate)).await.is_err() {
                                          break;
                                      }

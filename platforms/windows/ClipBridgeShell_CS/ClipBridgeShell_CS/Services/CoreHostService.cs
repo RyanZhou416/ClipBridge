@@ -25,9 +25,12 @@ public sealed class CoreHostService : ICoreHostService
     private static bool _isResolverSet = false;
     private readonly EventPumpService _eventPump;
     private readonly ILocalSettingsService _localSettingsService;
+    private readonly IAccountService? _accountService;
     private readonly ILogger<CoreHostService>? _logger;
     // 定义 JSON 序列化选项
     private readonly JsonSerializerOptions _jsonOpts;
+    // 保存当前账号 UID，用于检测账号切换
+    private string? _currentAccountUid;
 
     public CoreState State { get; private set; } = CoreState.NotLoaded;
     public CoreDiagnostics Diagnostics { get; } = new();
@@ -37,10 +40,11 @@ public sealed class CoreHostService : ICoreHostService
         get; private set;
     }
 
-    public CoreHostService(EventPumpService eventPump, ILocalSettingsService localSettingsService, ILoggerFactory? loggerFactory = null)
+    public CoreHostService(EventPumpService eventPump, ILocalSettingsService localSettingsService, ILoggerFactory? loggerFactory = null, IAccountService? accountService = null)
     {
         _eventPump = eventPump;
         _localSettingsService = localSettingsService;
+        _accountService = accountService;
         _logger = loggerFactory?.CreateLogger<CoreHostService>();
         _jsonOpts = new JsonSerializerOptions
         {
@@ -58,6 +62,19 @@ public sealed class CoreHostService : ICoreHostService
         LastError = null;
         SetState(CoreState.Loading);
 
+        // 检查是否有账号信息
+        if (_accountService != null)
+        {
+            var hasAccount = await _accountService.HasAccountAsync();
+            if (!hasAccount)
+            {
+                _logger?.LogInformation("No account found, waiting for account login");
+                LastError = "需要登录账号";
+                SetState(CoreState.NotLoaded);
+                return;
+            }
+        }
+
         var deviceId = await GetOrCreateDeviceIdAsync();
         
         // 1. 路径构建
@@ -70,12 +87,29 @@ public sealed class CoreHostService : ICoreHostService
         var localFolder = ApplicationData.Current.LocalFolder.Path;
         var cacheFolder = ApplicationData.Current.LocalCacheFolder.Path;
 
+        // 从AccountService获取账号信息
+        string accountUid = "default_user";
+        string accountPassword = "";
+        
+        if (_accountService != null)
+        {
+            var account = await _accountService.LoadAccountAsync();
+            if (account.HasValue)
+            {
+                accountUid = account.Value.username;
+                accountPassword = account.Value.password;
+            }
+        }
+
+        // 更新当前账号 UID（用于后续检测账号切换）
+        _currentAccountUid = accountUid;
+
         var config = new
         {
             device_id = deviceId, // 手动写成 snake_case 属性名，或者依赖 Policy
             device_name = System.Environment.MachineName,
-            account_uid = "default_user", // 示例
-            account_tag = "default_tag",
+            account_uid = accountUid,
+            account_password = accountPassword,
             data_dir = localFolder,
             cache_dir = cacheFolder,
 
@@ -196,6 +230,77 @@ public sealed class CoreHostService : ICoreHostService
             Diagnostics.LastInitSummary = $"Init failed: {ex.GetType().Name}: {ex.Message}";
             LastError = ex.Message;
             SetState(CoreState.Degraded);
+        }
+    }
+
+    /// <summary>
+    /// 在账号登录后初始化核心
+    /// </summary>
+    public async Task InitializeWithAccountAsync(CancellationToken ct = default)
+    {
+        // 获取新的账号信息
+        string? newAccountUid = null;
+        if (_accountService != null)
+        {
+            var account = await _accountService.LoadAccountAsync();
+            if (account.HasValue)
+            {
+                newAccountUid = account.Value.username;
+            }
+        }
+
+        // 检测账号是否改变
+        bool accountChanged = _currentAccountUid != null && newAccountUid != null && _currentAccountUid != newAccountUid;
+
+        // 如果已经初始化，先关闭
+        if (State == CoreState.Ready || State == CoreState.Loading)
+        {
+            await ShutdownAsync(ct);
+        }
+
+        // 如果账号改变了，清理证书文件（在初始化前）
+        if (accountChanged)
+        {
+            _logger?.LogInformation("Account changed from {OldUid} to {NewUid}, clearing certificate", _currentAccountUid, newAccountUid);
+            await ClearCertificateFilesAsync();
+        }
+
+        // 重新初始化
+        await InitializeAsync(ct);
+
+        // 更新当前账号 UID
+        _currentAccountUid = newAccountUid;
+    }
+
+    /// <summary>
+    /// 直接清理证书文件（不依赖核心实例）
+    /// </summary>
+    private async Task ClearCertificateFilesAsync()
+    {
+        try
+        {
+            var localFolder = ApplicationData.Current.LocalFolder.Path;
+            var tlsDir = System.IO.Path.Combine(localFolder, "tls");
+            
+            if (System.IO.Directory.Exists(tlsDir))
+            {
+                await Task.Run(() =>
+                {
+                    try
+                    {
+                        System.IO.Directory.Delete(tlsDir, true);
+                        _logger?.LogInformation("Certificate directory cleared: {Path}", tlsDir);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, "Failed to clear certificate directory: {Path}", tlsDir);
+                    }
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to clear certificate files");
         }
     }
 

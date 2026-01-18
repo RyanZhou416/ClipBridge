@@ -33,13 +33,13 @@ impl TestCore {
         device_id: &str,
         device_name: &str,
         account_uid: &str,
-        account_tag: &str,
+        account_password: &str,
     ) -> Self {
         let cfg = CoreConfig {
             device_id: device_id.to_string(),
             device_name: device_name.to_string(),
             account_uid: account_uid.to_string(),
-            account_tag: account_tag.to_string(),
+            account_password: account_password.to_string(),
             data_dir: String::new(),
             cache_dir: String::new(),
 			app_config: AppConfig {

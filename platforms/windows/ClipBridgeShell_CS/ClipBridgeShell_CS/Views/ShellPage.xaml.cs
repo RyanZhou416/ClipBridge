@@ -1,6 +1,9 @@
 using ClipBridgeShell_CS.Contracts.Services;
+using ClipBridgeShell_CS.Core.Contracts.Services;
+using ClipBridgeShell_CS.Core.Models;
 using ClipBridgeShell_CS.Helpers;
 using ClipBridgeShell_CS.ViewModels;
+using ClipBridgeShell_CS.Views;
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -98,5 +101,83 @@ public sealed partial class ShellPage : Page
         }
     }
 
+    private async void OnAvatarTapped(object sender, TappedRoutedEventArgs e)
+    {
+        var accountService = App.GetService<IAccountService>();
+        var hasAccount = await accountService.HasAccountAsync();
+
+        if (!hasAccount)
+        {
+            // 显示登录窗口
+            var loginDialog = new LoginDialog(accountService);
+            loginDialog.XamlRoot = this.XamlRoot;
+            await loginDialog.ShowAsync();
+        }
+        else
+        {
+            // 显示账号信息和更换账号选项
+            var account = await accountService.LoadAccountAsync();
+            if (account.HasValue)
+            {
+                var deviceName = System.Environment.MachineName;
+                
+                // 创建内容面板
+                var contentPanel = new StackPanel
+                {
+                    Spacing = 12
+                };
+                
+                var loc = Localizer.Get();
+                
+                // 账号信息
+                var accountInfo = new TextBlock
+                {
+                    Text = string.Format(loc.GetLocalizedString("AccountInfo_Account"), account.Value.username),
+                    FontSize = 14,
+                    Margin = new Thickness(0, 0, 0, 8)
+                };
+                contentPanel.Children.Add(accountInfo);
+                
+                // 设备信息
+                var deviceInfo = new TextBlock
+                {
+                    Text = string.Format(loc.GetLocalizedString("AccountInfo_Device"), deviceName),
+                    FontSize = 14
+                };
+                contentPanel.Children.Add(deviceInfo);
+                
+                var dialog = new ContentDialog
+                {
+                    Title = loc.GetLocalizedString("AccountInfo_Title"),
+                    Content = contentPanel,
+                    PrimaryButtonText = loc.GetLocalizedString("AccountInfo_SwitchAccount"),
+                    CloseButtonText = loc.GetLocalizedString("AccountInfo_Close"),
+                    XamlRoot = this.XamlRoot
+                };
+                
+                var result = await dialog.ShowAsync();
+                
+                // 如果点击了"更换账号"
+                if (result == ContentDialogResult.Primary)
+                {
+                    // 清除当前账号
+                    await accountService.ClearAccountAsync();
+                    
+                    // 关闭核心（如果正在运行）
+                    var coreHost = App.GetService<ICoreHostService>();
+                    if (coreHost.State == CoreState.Ready || 
+                        coreHost.State == CoreState.Loading)
+                    {
+                        await coreHost.ShutdownAsync();
+                    }
+                    
+                    // 显示登录对话框
+                    var loginDialog = new LoginDialog(accountService);
+                    loginDialog.XamlRoot = this.XamlRoot;
+                    await loginDialog.ShowAsync();
+                }
+            }
+        }
+    }
 
 }

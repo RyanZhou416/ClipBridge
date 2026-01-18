@@ -154,13 +154,19 @@
     <value>About this application</value>
   </data>
   <data name="Settings_AboutDescription.Text" xml:space="preserve">
-    <value>TODO: Replace with your app description.</value>
+    <value>Cross-device clipboard sync tool supporting real-time sharing of text, images, and files.</value>
   </data>
-  <data name="SettingsPage_PrivacyTermsLink.Content" xml:space="preserve">
-    <value>Privacy Statement</value>
+  <data name="SettingsPage_LicenseLink.Content" xml:space="preserve">
+    <value>Open Source License</value>
   </data>
-  <data name="SettingsPage_PrivacyTermsLink.NavigateUri" xml:space="preserve">
-    <value>https://YourPrivacyUrlGoesHere/</value>
+  <data name="SettingsPage_LicenseLink.NavigateUri" xml:space="preserve">
+    <value>https://github.com/RyanZhou416/ClipBridge/blob/main/LICENSE</value>
+  </data>
+  <data name="SettingsPage_GitHubLink.Content" xml:space="preserve">
+    <value>GitHub Repository</value>
+  </data>
+  <data name="SettingsPage_GitHubLink.NavigateUri" xml:space="preserve">
+    <value>https://github.com/RyanZhou416/ClipBridge</value>
   </data>
   <data name="AppNotificationSamplePayload" xml:space="preserve">
     <value>&lt;toast launch="action=ToastClick"&gt;
@@ -248,7 +254,7 @@
   <data name="Shell_History.Content" xml:space="preserve">
     <value>History</value>
   </data>
-  <data name="Settings_Database" xml:space="preserve">
+  <data name="Settings_Database.Text" xml:space="preserve">
     <value>Database</value>
   </data>
   <data name="Settings_DeleteCloudDb_SettingsCard.Header" xml:space="preserve">
@@ -703,5 +709,56 @@
   </data>
   <data name="Settings_BackgroundImage_ResetDone.Text" xml:space="preserve">
     <value>Background image has been reset to default.</value>
+  </data>
+  <data name="LoginDialog_Title" xml:space="preserve">
+    <value>Login</value>
+  </data>
+  <data name="LoginDialog.Title" xml:space="preserve">
+    <value>Login</value>
+  </data>
+  <data name="LoginDialog.PrimaryButtonText" xml:space="preserve">
+    <value>Login</value>
+  </data>
+  <data name="LoginDialog.CloseButtonText" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="LoginDialog_UsernameTextBox.Header" xml:space="preserve">
+    <value>Username</value>
+  </data>
+  <data name="LoginDialog_UsernameTextBox.PlaceholderText" xml:space="preserve">
+    <value>Enter username</value>
+  </data>
+  <data name="LoginDialog_PasswordBox.Header" xml:space="preserve">
+    <value>Password</value>
+  </data>
+  <data name="LoginDialog_PasswordBox.PlaceholderText" xml:space="preserve">
+    <value>Enter password</value>
+  </data>
+  <data name="LoginDialog_LoginButton" xml:space="preserve">
+    <value>Login</value>
+  </data>
+  <data name="LoginDialog_CancelButton" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="LoginDialog_ErrorEmpty" xml:space="preserve">
+    <value>Username and password cannot be empty</value>
+  </data>
+  <data name="LoginDialog_ErrorFailed" xml:space="preserve">
+    <value>Login failed: {0}</value>
+  </data>
+  <data name="AccountInfo_Title" xml:space="preserve">
+    <value>Account Information</value>
+  </data>
+  <data name="AccountInfo_Account" xml:space="preserve">
+    <value>Account: {0}</value>
+  </data>
+  <data name="AccountInfo_Device" xml:space="preserve">
+    <value>Device: {0}</value>
+  </data>
+  <data name="AccountInfo_SwitchAccount" xml:space="preserve">
+    <value>Switch Account</value>
+  </data>
+  <data name="AccountInfo_Close" xml:space="preserve">
+    <value>Close</value>
   </data>
 </root>

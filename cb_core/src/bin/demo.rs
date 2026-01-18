@@ -70,12 +70,12 @@ fn get_temp_dirs(suffix: &str) -> (String, String) {
 async fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        println!("用法: cargo run --bin demo <DeviceID> <AccountTag>");
+        println!("用法: cargo run --bin demo <DeviceID> <AccountPassword>");
         return;
     }
 
     let device_id = args[1].clone();
-    let account_tag = args[2].clone();
+    let account_password = args[2].clone();
     let device_name = format!("{}_Console", device_id);
 
     // 状态追踪
@@ -90,7 +90,7 @@ async fn main() {
         device_id: device_id.clone(),
         device_name,
         account_uid: "demo_uid".to_string(),
-        account_tag,
+        account_password,
         data_dir,
         cache_dir,
         app_config: Default::default(),

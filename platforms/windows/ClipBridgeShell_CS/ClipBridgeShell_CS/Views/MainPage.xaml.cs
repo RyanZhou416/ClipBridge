@@ -5,6 +5,11 @@ using ClipBridgeShell_CS.Core.Models.Events;
 using ClipBridgeShell_CS.Interop;
 using ClipBridgeShell_CS.ViewModels;
 using ClipBridgeShell_CS.Helpers;
+using ClipBridgeShell_CS.Contracts.Services;
+using ClipBridgeShell_CS.Core.Contracts.Services;
+using ClipBridgeShell_CS.Core.Models;
+using ClipBridgeShell_CS.Views;
+using WinUI3Localizer;
 using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml.Controls;
@@ -243,10 +248,19 @@ public sealed partial class MainPage : Page
                 
                 // 计算标题区域在图片中的位置（标题在图片的上方，大约在 48-100 像素的位置）
                 // 采样标题区域的颜色（左上角 36, 48 到 200, 100 的区域）
-                var width = (uint)Math.Min(200, decoder.PixelWidth);
-                var height = (uint)Math.Min(100, decoder.PixelHeight);
+                // 确保边界不超出图片范围
                 var x = (uint)Math.Min(36, decoder.PixelWidth);
                 var y = (uint)Math.Min(48, decoder.PixelHeight);
+                var maxWidth = decoder.PixelWidth > x ? decoder.PixelWidth - x : 1;
+                var maxHeight = decoder.PixelHeight > y ? decoder.PixelHeight - y : 1;
+                var width = (uint)Math.Min(200, maxWidth);
+                var height = (uint)Math.Min(100, maxHeight);
+                
+                // 如果图片太小，跳过颜色检测
+                if (width == 0 || height == 0 || decoder.PixelWidth == 0 || decoder.PixelHeight == 0)
+                {
+                    return;
+                }
                 
                 // 读取像素数据
                 var transform = new BitmapTransform
@@ -481,8 +495,8 @@ public sealed partial class MainPage : Page
             // 创建文本格式
             var textFormat = new CanvasTextFormat
             {
-                FontSize = 36, // 增大字体
-                FontWeight = new Windows.UI.Text.FontWeight { Weight = 300 }, // Light = 300，更细
+                FontSize = 36,
+                FontWeight = new Windows.UI.Text.FontWeight { Weight = 400 }, // Regular，稍微细一点
                 WordWrapping = CanvasWordWrapping.NoWrap,
                 FontFamily = "Segoe UI"
             };
@@ -496,7 +510,7 @@ public sealed partial class MainPage : Page
                 float.MaxValue
             );
 
-            // 更新 Canvas 大小（增加高度以容纳更大的字体）
+            // 更新 Canvas 大小
             TitleCanvas.Width = Math.Max((float)_titleTextLayout.LayoutBounds.Width + 20, 200);
             TitleCanvas.Height = Math.Max((float)_titleTextLayout.LayoutBounds.Height + 10, 60);
 
@@ -523,8 +537,8 @@ public sealed partial class MainPage : Page
                 {
                     var textFormat = new CanvasTextFormat
                     {
-                        FontSize = 36, // 增大字体
-                        FontWeight = new Windows.UI.Text.FontWeight { Weight = 300 }, // Light = 300，更细
+                FontSize = 36,
+                FontWeight = new Windows.UI.Text.FontWeight { Weight = 400 }, // Regular，稍微细一点
                         WordWrapping = CanvasWordWrapping.NoWrap,
                         FontFamily = "Segoe UI"
                     };
@@ -558,8 +572,8 @@ public sealed partial class MainPage : Page
                 {
                     var textFormat = new CanvasTextFormat
                     {
-                        FontSize = 36, // 增大字体
-                        FontWeight = new Windows.UI.Text.FontWeight { Weight = 300 }, // Light = 300，更细
+                FontSize = 36,
+                FontWeight = new Windows.UI.Text.FontWeight { Weight = 400 }, // Regular，稍微细一点
                         WordWrapping = CanvasWordWrapping.NoWrap,
                         FontFamily = "Segoe UI"
                     };
@@ -1267,6 +1281,85 @@ public sealed partial class MainPage : Page
         } catch (Exception ex)
         {
             throw;
+        }
+    }
+
+    private async void OnAvatarTapped(object sender, TappedRoutedEventArgs e)
+    {
+        var accountService = App.GetService<IAccountService>();
+        var hasAccount = await accountService.HasAccountAsync();
+
+        if (!hasAccount)
+        {
+            // 显示登录窗口
+            var loginDialog = new LoginDialog(accountService);
+            loginDialog.XamlRoot = this.XamlRoot;
+            await loginDialog.ShowAsync();
+        }
+        else
+        {
+            // 显示账号信息和更换账号选项
+            var account = await accountService.LoadAccountAsync();
+            if (account.HasValue)
+            {
+                var deviceName = System.Environment.MachineName;
+                
+                // 创建内容面板
+                var contentPanel = new StackPanel
+                {
+                    Spacing = 12
+                };
+                
+                var loc = Localizer.Get();
+                
+                // 账号信息
+                var accountInfo = new TextBlock
+                {
+                    Text = string.Format(loc.GetLocalizedString("AccountInfo_Account"), account.Value.username),
+                    FontSize = 14,
+                    Margin = new Thickness(0, 0, 0, 8)
+                };
+                contentPanel.Children.Add(accountInfo);
+                
+                // 设备信息
+                var deviceInfo = new TextBlock
+                {
+                    Text = string.Format(loc.GetLocalizedString("AccountInfo_Device"), deviceName),
+                    FontSize = 14
+                };
+                contentPanel.Children.Add(deviceInfo);
+                
+                var dialog = new ContentDialog
+                {
+                    Title = loc.GetLocalizedString("AccountInfo_Title"),
+                    Content = contentPanel,
+                    PrimaryButtonText = loc.GetLocalizedString("AccountInfo_SwitchAccount"),
+                    CloseButtonText = loc.GetLocalizedString("AccountInfo_Close"),
+                    XamlRoot = this.XamlRoot
+                };
+                
+                var result = await dialog.ShowAsync();
+                
+                // 如果点击了"更换账号"
+                if (result == ContentDialogResult.Primary)
+                {
+                    // 清除当前账号
+                    await accountService.ClearAccountAsync();
+                    
+                    // 关闭核心（如果正在运行）
+                    var coreHost = App.GetService<ICoreHostService>();
+                    if (coreHost.State == CoreState.Ready || 
+                        coreHost.State == CoreState.Loading)
+                    {
+                        await coreHost.ShutdownAsync();
+                    }
+                    
+                    // 显示登录对话框
+                    var loginDialog = new LoginDialog(accountService);
+                    loginDialog.XamlRoot = this.XamlRoot;
+                    await loginDialog.ShowAsync();
+                }
+            }
         }
     }
 }

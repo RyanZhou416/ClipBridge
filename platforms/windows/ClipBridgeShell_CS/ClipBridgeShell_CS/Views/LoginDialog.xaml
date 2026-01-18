@@ -1,0 +1,25 @@
+<ContentDialog
+    x:Class="ClipBridgeShell_CS.Views.LoginDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:l="using:WinUI3Localizer"
+    l:Uids.Uid="LoginDialog"
+    DefaultButton="Primary"
+    PrimaryButtonClick="OnPrimaryButtonClick">
+    <StackPanel Spacing="16" Margin="0,8,0,0">
+        <TextBox
+            x:Name="UsernameTextBox"
+            l:Uids.Uid="LoginDialog_UsernameTextBox"
+            TextChanged="OnInputChanged"/>
+        <PasswordBox
+            x:Name="PasswordBox"
+            l:Uids.Uid="LoginDialog_PasswordBox"
+            PasswordChanged="OnInputChanged"/>
+        <TextBlock
+            x:Name="ErrorTextBlock"
+            Foreground="Red"
+            TextWrapping="Wrap"
+            Visibility="Collapsed"
+            Margin="0,0,0,8"/>
+    </StackPanel>
+</ContentDialog>

@@ -78,7 +78,7 @@ fn mk_cfg_json() -> (CString, PathBuf) {
           "device_id":"dev-1",
           "device_name":"dev1",
           "account_uid":"acct-1",
-          "account_tag":"acctTag",
+          "account_password":"test_password",
           "data_dir":"{}",
           "cache_dir":"{}",
           "app_config": {{

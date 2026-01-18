@@ -106,6 +106,7 @@ public partial class App : Application
             services.AddSingleton<IAppNotificationService, AppNotificationService>();
             services.AddSingleton<ILocalSettingsService, LocalSettingsService>();
             services.AddSingleton<IThemeSelectorService, ThemeSelectorService>();
+            services.AddSingleton<IAccountService, AccountService>();
             services.AddTransient<INavigationViewService, NavigationViewService>();
 
             services.AddSingleton<IActivationService, ActivationService>();
@@ -130,8 +131,9 @@ public partial class App : Application
             {
                 var eventPump = sp.GetRequiredService<EventPumpService>();
                 var localSettings = sp.GetRequiredService<ILocalSettingsService>();
+                var accountService = sp.GetRequiredService<IAccountService>();
                 // 暂时不传入 loggerFactory，避免循环依赖
-                return new CoreHostService(eventPump, localSettings, null);
+                return new CoreHostService(eventPump, localSettings, null, accountService);
             });
             services.AddSingleton<ICoreHostService>(sp => sp.GetRequiredService<CoreHostService>());
             
@@ -267,9 +269,16 @@ public partial class App : Application
         // 检测渲染模式（仅在 Debug 模式下）
         CheckHardwareAcceleration();
 #endif
-        _ = App.GetService<CoreHostService>().InitializeAsync();
+        
+        // 检查账号状态，如果有账号才初始化核心
+        var accountService = App.GetService<IAccountService>();
+        var hasAccount = await accountService.HasAccountAsync();
+        if (hasAccount)
+        {
+            _ = App.GetService<CoreHostService>().InitializeAsync();
+        }
 
-        // 启动剪贴板监听
+        // 启动剪贴板监听（即使没有账号也启动，等待登录后使用）
         App.GetService<ClipboardWatcher>().Initialize();
 
     }

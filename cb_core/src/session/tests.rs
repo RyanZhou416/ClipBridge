@@ -69,7 +69,7 @@ struct TestContext {
     log_store: Arc<Mutex<LogStore>>,
 }
 
-async fn setup(name: &str, tag: &str) -> TestContext {
+async fn setup(name: &str, password: &str) -> TestContext {
     let mut path = std::env::temp_dir();
     path.push("cb_test_session");
     path.push(name);
@@ -81,7 +81,7 @@ async fn setup(name: &str, tag: &str) -> TestContext {
         device_id: name.to_string(),
         device_name: name.to_string(),
         account_uid: "test_uid".to_string(),
-        account_tag: tag.to_string(),
+        account_password: password.to_string(),
         // 注意：根据 api/mod.rs 的定义，data_dir 是 String 类型
         data_dir: path.to_string_lossy().to_string(),
         cache_dir: path.to_string_lossy().to_string(),

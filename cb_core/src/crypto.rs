@@ -41,14 +41,14 @@ pub type CbServerRegistration = opaque_ke::ServerRegistration<DefaultCipherSuite
 
 // --- 3. P2P 辅助：生成服务器验证记录 ---
 // 返回 (ServerSetup, ServerRegistration)
-pub fn p2p_get_server_registration(account_key: &str) -> anyhow::Result<(ServerSetup<DefaultCipherSuite>, CbServerRegistration)> {
-    // 1. 使用 AccountKey 生成确定性种子
+pub fn p2p_get_server_registration(password: &str) -> anyhow::Result<(ServerSetup<DefaultCipherSuite>, CbServerRegistration)> {
+    // 1. 使用密码生成确定性种子
     let mut hasher = Sha512::new();
-    hasher.update(account_key.as_bytes());
+    hasher.update(password.as_bytes());
     let seed: [u8; 32] = hasher.finalize()[0..32].try_into()?;
     let mut rng = ChaCha20Rng::from_seed(seed);
 
-    let password = account_key.as_bytes();
+    let password_bytes = password.as_bytes();
     let identifier = b"clipbridge-user";
 
     // 2. 生成 ServerSetup (OPRF Seed) - 登录时需要用到
@@ -59,7 +59,7 @@ pub fn p2p_get_server_registration(account_key: &str) -> anyhow::Result<(ServerS
     // Client: Start
     let client_reg_start = ClientRegistration::<DefaultCipherSuite>::start(
         &mut rng,
-        password,
+        password_bytes,
     )?;
 
     // Server: Start
@@ -74,7 +74,7 @@ pub fn p2p_get_server_registration(account_key: &str) -> anyhow::Result<(ServerS
     // Client: Finish
     let client_reg_finish = client_reg_start.state.finish(
         &mut rng,
-        password,
+        password_bytes,
         server_reg_start.message,
         ClientRegistrationFinishParameters::default(),
     )?;

@@ -154,13 +154,19 @@
     <value>About this application</value>
   </data>
   <data name="Settings_AboutDescription.Text" xml:space="preserve">
-    <value>TODO: Replace with your app description.</value>
+    <value>跨设备剪贴板同步工具，支持文本、图片和文件的实时共享。</value>
   </data>
-  <data name="SettingsPage_PrivacyTermsLink.Content" xml:space="preserve">
-    <value>Privacy Statement</value>
+  <data name="SettingsPage_LicenseLink.Content" xml:space="preserve">
+    <value>开源协议</value>
   </data>
-  <data name="SettingsPage_PrivacyTermsLink.NavigateUri" xml:space="preserve">
-    <value>https://YourPrivacyUrlGoesHere/</value>
+  <data name="SettingsPage_LicenseLink.NavigateUri" xml:space="preserve">
+    <value>https://github.com/RyanZhou416/ClipBridge/blob/main/LICENSE</value>
+  </data>
+  <data name="SettingsPage_GitHubLink.Content" xml:space="preserve">
+    <value>GitHub 仓库</value>
+  </data>
+  <data name="SettingsPage_GitHubLink.NavigateUri" xml:space="preserve">
+    <value>https://github.com/RyanZhou416/ClipBridge</value>
   </data>
   <data name="AppNotificationSamplePayload" xml:space="preserve">
     <value>&lt;toast launch="action=ToastClick"&gt;
@@ -248,7 +254,7 @@
   <data name="Shell_History.Content" xml:space="preserve">
     <value>历史</value>
   </data>
-  <data name="Settings_Database" xml:space="preserve">
+  <data name="Settings_Database.Text" xml:space="preserve">
     <value>数据库</value>
   </data>
   <data name="Settings_DeleteCloudDb_SettingsCard.Header" xml:space="preserve">
@@ -703,5 +709,56 @@
   </data>
   <data name="Settings_BackgroundImage_ResetDone.Text" xml:space="preserve">
     <value>背景图片已重置为默认图片。</value>
+  </data>
+  <data name="LoginDialog_Title" xml:space="preserve">
+    <value>登录</value>
+  </data>
+  <data name="LoginDialog.Title" xml:space="preserve">
+    <value>登录</value>
+  </data>
+  <data name="LoginDialog.PrimaryButtonText" xml:space="preserve">
+    <value>登录</value>
+  </data>
+  <data name="LoginDialog.CloseButtonText" xml:space="preserve">
+    <value>取消</value>
+  </data>
+  <data name="LoginDialog_UsernameTextBox.Header" xml:space="preserve">
+    <value>账号</value>
+  </data>
+  <data name="LoginDialog_UsernameTextBox.PlaceholderText" xml:space="preserve">
+    <value>请输入账号</value>
+  </data>
+  <data name="LoginDialog_PasswordBox.Header" xml:space="preserve">
+    <value>密码</value>
+  </data>
+  <data name="LoginDialog_PasswordBox.PlaceholderText" xml:space="preserve">
+    <value>请输入密码</value>
+  </data>
+  <data name="LoginDialog_LoginButton" xml:space="preserve">
+    <value>登录</value>
+  </data>
+  <data name="LoginDialog_CancelButton" xml:space="preserve">
+    <value>取消</value>
+  </data>
+  <data name="LoginDialog_ErrorEmpty" xml:space="preserve">
+    <value>账号和密码不能为空</value>
+  </data>
+  <data name="LoginDialog_ErrorFailed" xml:space="preserve">
+    <value>登录失败: {0}</value>
+  </data>
+  <data name="AccountInfo_Title" xml:space="preserve">
+    <value>账号信息</value>
+  </data>
+  <data name="AccountInfo_Account" xml:space="preserve">
+    <value>账号: {0}</value>
+  </data>
+  <data name="AccountInfo_Device" xml:space="preserve">
+    <value>设备: {0}</value>
+  </data>
+  <data name="AccountInfo_SwitchAccount" xml:space="preserve">
+    <value>更换账号</value>
+  </data>
+  <data name="AccountInfo_Close" xml:space="preserve">
+    <value>关闭</value>
   </data>
 </root>

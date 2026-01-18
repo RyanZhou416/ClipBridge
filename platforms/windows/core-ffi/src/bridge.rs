@@ -47,7 +47,7 @@ struct InitConfigDto {
 	device_id: String,
 	device_name: String,
 	account_uid: String,
-	account_tag: String,
+	account_password: String,
 	data_dir: String,
 	cache_dir: String,
 
@@ -136,7 +136,7 @@ pub fn parse_cfg(json: &str) -> anyhow::Result<cb_core::api::CoreConfig> {
 		device_id: dto.device_id,
 		device_name: dto.device_name,
 		account_uid: dto.account_uid,
-		account_tag: dto.account_tag,
+		account_password: dto.account_password,
 		data_dir: dto.data_dir,
 		cache_dir: dto.cache_dir,
 		app_config,

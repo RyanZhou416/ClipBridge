@@ -31,6 +31,7 @@
                     </LinearGradientBrush>
                     <SolidColorBrush x:Key="CardHoverOverlayBrush" Color="Black" Opacity="0.1"/>
                     <SolidColorBrush x:Key="CardSelectedBorderBrush" Color="Gray"/>
+                    <SolidColorBrush x:Key="AvatarBorderBackgroundBrush" Color="#E0E0E0"/>
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Dark">
                     <SolidColorBrush x:Key="BackgroundGradient" Color="#020B20" />
@@ -44,6 +45,7 @@
                     </LinearGradientBrush>
                     <SolidColorBrush x:Key="CardHoverOverlayBrush" Color="White" Opacity="0.1"/>
                     <SolidColorBrush x:Key="CardSelectedBorderBrush" Color="White"/>
+                    <SolidColorBrush x:Key="AvatarBorderBackgroundBrush" Color="#2A2A2A"/>
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
 
@@ -122,9 +124,15 @@
                     </controls:OpacityMaskView>
                     
                     <!-- 标题层 - 使用 Win2D Canvas 绘制，完全不受主题影响 -->
-					<Grid Margin="0,48,0,0" VerticalAlignment="Top" Height="60" Padding="36,0,0,0">
+					<Grid Margin="0,48,0,0" VerticalAlignment="Top" Height="60" Padding="36,0,36,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
                         <!-- 使用 Win2D Canvas 绘制文本，完全控制颜色 -->
-                        <canvas:CanvasControl x:Name="TitleCanvas" 
+                        <canvas:CanvasControl Grid.Column="0"
+                                                x:Name="TitleCanvas" 
                                                 Draw="OnTitleCanvasDraw"
                                                 HorizontalAlignment="Left"
                                                 VerticalAlignment="Top"
@@ -132,10 +140,28 @@
                                                 Height="60"
                                                 IsHitTestVisible="False"/>
                         <!-- 隐藏的 TextBlock 用于获取本地化文本和测量大小 -->
-                        <TextBlock x:Name="TitleTextBlock"
+                        <TextBlock Grid.Column="0"
+                                   x:Name="TitleTextBlock"
                                    l:Uids.Uid="AppName.Text" 
                                    Opacity="0"
                                    Visibility="Collapsed"/>
+                        <!-- 头像图标 -->
+                        <Border Grid.Column="2"
+                                x:Name="AvatarBorder"
+                                Width="60"
+                                Height="60"
+                                VerticalAlignment="Center"
+                                HorizontalAlignment="Right"
+                                CornerRadius="30"
+                                Background="{ThemeResource AvatarBorderBackgroundBrush}"
+                                Tapped="OnAvatarTapped">
+                            <FontIcon Glyph="&#xE8D4;"
+                                      FontFamily="Segoe MDL2 Assets"
+                                      FontSize="32"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"
+                                      Foreground="{ThemeResource SystemControlForegroundBaseHighBrush}"/>
+                        </Border>
                     </Grid>
                 </Grid>
                 

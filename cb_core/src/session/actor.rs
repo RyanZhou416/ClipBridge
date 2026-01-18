@@ -482,7 +482,7 @@ impl SessionActor {
                     msg_id: Some(uuid::Uuid::new_v4().to_string()),
                     protocol_version: PROTOCOL_VERSION,
                     device_id: self.config.device_id.clone(),
-                    account_tag: self.config.account_tag.clone(),
+                    account_uid: self.config.account_uid.clone(),
                     capabilities: vec!["text".into(), "image".into(), "file".into()],
                     client_nonce: Some(uuid::Uuid::new_v4().to_string()),
                 };
@@ -490,10 +490,10 @@ impl SessionActor {
                     let mut log_store = self.log_store.lock().unwrap();
                     let _ = log_store.log_info(
                         "Session",
-                        &format!("Hello message sent: device_id={}, account_tag={}",
-                                self.config.device_id, self.config.account_tag),
-                        Some(&format!("Hello 消息已发送: 设备ID={}，账号标签={}",
-                                self.config.device_id, self.config.account_tag)),
+                        &format!("Hello message sent: device_id={}, account_uid={}",
+                                self.config.device_id, self.config.account_uid),
+                        Some(&format!("Hello 消息已发送: 设备ID={}，账号={}",
+                                self.config.device_id, self.config.account_uid)),
                     );
                 }
                 self.send_ctrl(msg).await?;
@@ -515,39 +515,39 @@ impl SessionActor {
 
     async fn handle_control_msg(&mut self, msg: CtrlMsg) -> Result<()> {
         match msg {
-            CtrlMsg::Hello { device_id, account_tag, msg_id, .. } => {
+            CtrlMsg::Hello { device_id, account_uid, msg_id, .. } => {
                 if self.role == SessionRole::Server {
                     {
                         let mut log_store = self.log_store.lock().unwrap();
                         let _ = log_store.log_info(
                             "Session",
-                            &format!("Hello message received: remote_device_id={}, remote_account_tag={}",
-                                    device_id, account_tag),
-                            Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号标签={}",
-                                    device_id, account_tag)),
+                            &format!("Hello message received: remote_device_id={}, remote_account_uid={}",
+                                    device_id, account_uid),
+                            Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号={}",
+                                    device_id, account_uid)),
                         );
                     }
-                    if account_tag != self.config.account_tag {
+                    if account_uid != self.config.account_uid {
                         {
                             let mut log_store = self.log_store.lock().unwrap();
                             let _ = log_store.log_error(
                                 "Session",
-                                &format!("Account verification failed (tag mismatch): remote_device_id={}, remote_tag={}, local_tag={}",
-                                        device_id, account_tag, self.config.account_tag),
-                                Some(&format!("账号验证失败（标签不匹配）: 远程设备ID={}，远程标签={}，本地标签={}",
-                                        device_id, account_tag, self.config.account_tag)),
-                                Some("AUTH_ACCOUNT_TAG_MISMATCH"),
+                                &format!("Account verification failed (uid mismatch): remote_device_id={}, remote_uid={}, local_uid={}",
+                                        device_id, account_uid, self.config.account_uid),
+                                Some(&format!("账号验证失败（账号不匹配）: 远程设备ID={}，远程账号={}，本地账号={}",
+                                        device_id, account_uid, self.config.account_uid)),
+                                Some("AUTH_ACCOUNT_UID_MISMATCH"),
                             );
                         }
                         let _ = self.send_ctrl(CtrlMsg::AuthFail {
                             reply_to: msg_id.clone(),
-                            code: "AUTH_ACCOUNT_TAG_MISMATCH".into(),
+                            code: "AUTH_ACCOUNT_UID_MISMATCH".into(),
                         }).await;
                         let _ = self.send_ctrl(CtrlMsg::Close {
                             msg_id: None,
                             reason: "Auth failed".into(),
                         }).await;
-                        anyhow::bail!("Auth failed: tag mismatch");
+                        anyhow::bail!("Auth failed: uid mismatch");
                     }
                     self.update_remote_id(device_id.clone());
                     {
@@ -572,9 +572,9 @@ impl SessionActor {
                         let mut log_store = self.log_store.lock().unwrap();
                         let _ = log_store.log_info(
                             "Session",
-                            &format!("Hello message received: remote_device_id={}, remote_account_tag={}",
+                            &format!("Hello message received: remote_device_id={}, remote_account_uid={}",
                                     server_device_id, "N/A"),
-                            Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号标签=N/A",
+                            Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号=N/A",
                                     server_device_id)),
                         );
                     }
@@ -1249,7 +1249,7 @@ impl SessionActor {
 
     async fn start_opaque_login(&mut self) -> anyhow::Result<()> {
         let mut rng = OsRng;
-        let password = self.config.account_uid.as_bytes();
+        let password = self.config.account_password.as_bytes();
         let start_result = CbClientLogin::start(&mut rng, password)
             .map_err(|e| anyhow::anyhow!("OPAQUE start failed: {:?}", e))?;
         self.opaque_client_state = Some(start_result.state);
@@ -1266,7 +1266,7 @@ impl SessionActor {
     async fn handle_opaque_response(&mut self, response_bytes: &[u8]) -> anyhow::Result<()> {
         let client_state = self.opaque_client_state.take()
             .ok_or_else(|| anyhow::anyhow!("Protocol error: Missing client state"))?;
-        let password = self.config.account_uid.as_bytes();
+        let password = self.config.account_password.as_bytes();
         let server_response: opaque_ke::CredentialResponse<DefaultCipherSuite> =
             bincode::deserialize(response_bytes).map_err(|_| anyhow::anyhow!("Invalid OpaqueResponse bytes"))?;
         let finish_result = client_state.finish(password, server_response, ClientLoginFinishParameters::default())
@@ -1284,7 +1284,7 @@ impl SessionActor {
     async fn handle_opaque_start(&mut self, start_bytes: &[u8]) -> anyhow::Result<()> {
         let mut rng = OsRng;
         let identifier = b"clipbridge-user";
-        let (server_setup, server_rec) = p2p_get_server_registration(&self.config.account_uid)?;
+        let (server_setup, server_rec) = p2p_get_server_registration(&self.config.account_password)?;
         let client_message = bincode::deserialize(start_bytes).map_err(|_| anyhow::anyhow!("Invalid OpaqueStart bytes"))?;
         let start_result = CbServerLogin::start(&mut rng, &server_setup, Some(server_rec), client_message, identifier, ServerLoginStartParameters::default())
             .map_err(|e| anyhow::anyhow!("OPAQUE server start failed: {:?}", e))?;
