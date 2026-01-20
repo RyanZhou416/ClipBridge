@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" DefaultTargets="Build" InitialTargets="EnsureWixToolsetInstalled" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
+    <ProductVersion>3.10</ProductVersion>
+    <ProjectGuid>a1b2c3d4-e5f6-7890-abcd-ef1234567890</ProjectGuid>
+    <SchemaVersion>2.0</SchemaVersion>
+    <OutputName>ClipBridgeShell_CS</OutputName>
+    <OutputType>Package</OutputType>
+    <Cultures>zh-CN</Cultures>
+    <WixTargetsPath Condition=" '$(WixTargetsPath)' == '' AND '$(MSBuildExtensionsPath32)' != '' ">$(MSBuildExtensionsPath32)\Microsoft\WiX\v3.x\Wix.targets</WixTargetsPath>
+    <WixTargetsPath Condition=" '$(WixTargetsPath)' == '' ">$(MSBuildExtensionsPath)\Microsoft\WiX\v3.x\Wix.targets</WixTargetsPath>
+    <SuppressIces>ICE03;ICE30;ICE82;ICE90</SuppressIces>
+  </PropertyGroup>
+  
+  <PropertyGroup>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <IntermediateOutputPath>obj\$(Configuration)\</IntermediateOutputPath>
+  </PropertyGroup>
+
+  <!-- 预定义发布路径，确保在整个构建生命周期内可用 -->
+  <PropertyGroup>
+    <PublishConfiguration Condition=" '$(Configuration)' == 'Debug' ">Release</PublishConfiguration>
+    <PublishConfiguration Condition=" '$(PublishConfiguration)' == '' ">$(Configuration)</PublishConfiguration>
+    <RID Condition=" '$(Platform)' == 'x64' ">win-x64</RID>
+    <RID Condition=" '$(Platform)' == 'x86' ">win-x86</RID>
+    <RID Condition=" '$(Platform)' == 'arm64' ">win-arm64</RID>
+    <RID Condition=" '$(RID)' == '' ">win-x64</RID>
+    <BasePubDir>$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS\bin\$(PublishConfiguration)\net9.0-windows10.0.26100.0\$(RID)\publish</BasePubDir>
+    <!-- 显式定义变量，供 candle.exe 使用 -->
+    <DefineConstants>$(DefineConstants);PublishDir=$(BasePubDir)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Product.wxs" />
+    <Compile Include="$(IntermediateOutputPath)HeatGenerated.wxs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ClipBridgeShell_CS\ClipBridgeShell_CS.csproj">
+      <Name>ClipBridgeShell_CS</Name>
+      <Project>{a1b2c3d4-e5f6-7890-abcd-ef1234567897}</Project>
+      <Private>False</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <WixExtension Include="WixUtilExtension"><HintPath>$(WixExtDir)\WixUtilExtension.dll</HintPath></WixExtension>
+    <WixExtension Include="WixUIExtension"><HintPath>$(WixExtDir)\WixUIExtension.dll</HintPath></WixExtension>
+  </ItemGroup>
+
+  <Import Project="$(WixTargetsPath)" />
+
+  <Target Name="BeforeBuild">
+    <PropertyGroup>
+      <HeatPath Condition="'$(WixHeatPath)' == ''">$(WixExtDir)\heat.exe</HeatPath>
+      <HeatPath Condition="!Exists('$(HeatPath)')">C:\Program Files (x86)\WiX Toolset v3.14\bin\heat.exe</HeatPath>
+    </PropertyGroup>
+
+    <Message Text="[Setup] 1. dotnet publish" Importance="high" />
+    <Exec Command="dotnet publish &quot;$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS\ClipBridgeShell_CS.csproj&quot; -p:PublishProfile=Installer-$(Platform) -c $(PublishConfiguration)" />
+    
+    <Message Text="[Setup] 2. Running Heat with variable: PublishDir" Importance="high" />
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <!-- 使用 -var var.PublishDir，这样生成的 wxs 会引用该变量 -->
+    <Exec Command="&quot;$(HeatPath)&quot; dir &quot;$(BasePubDir)&quot; -cg RuntimeFiles -gg -sfrag -srd -scom -sreg -dr INSTALLFOLDER -var var.PublishDir -out &quot;$(IntermediateOutputPath)HeatGenerated.wxs&quot;" />
+  </Target>
+
+  <Target Name="EnsureWixToolsetInstalled" Condition=" '$(WixTargetsImported)' != 'true' ">
+    <Error Text="WiX Toolset 未安装。" />
+  </Target>
+</Project>

@@ -1,4 +1,4 @@
-﻿using System.Collections.Specialized;
+using System.Collections.Specialized;
 using System.Web;
 
 using ClipBridgeShell_CS.Contracts.Services;
@@ -24,9 +24,16 @@ public class AppNotificationService : IAppNotificationService
 
     public void Initialize()
     {
-        AppNotificationManager.Default.NotificationInvoked += OnNotificationInvoked;
-
-        AppNotificationManager.Default.Register();
+        try
+        {
+            AppNotificationManager.Default.NotificationInvoked += OnNotificationInvoked;
+            AppNotificationManager.Default.Register();
+        }
+        catch (Exception ex)
+        {
+            // 在非打包模式下，如果没有正确设置 AUMID，Register() 会失败
+            System.Diagnostics.Debug.WriteLine($"[AppNotificationService] Initialize failed: {ex.Message}");
+        }
     }
 
     public void OnNotificationInvoked(AppNotificationManager sender, AppNotificationActivatedEventArgs args)

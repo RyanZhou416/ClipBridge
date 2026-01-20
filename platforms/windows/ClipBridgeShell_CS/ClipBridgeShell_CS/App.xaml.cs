@@ -220,7 +220,14 @@ public partial class App : Application
         }).
         Build();
 
-        App.GetService<IAppNotificationService>().Initialize();
+        try
+        {
+            App.GetService<IAppNotificationService>().Initialize();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Notification init failed: {ex.Message}");
+        }
 
         // 测试日志系统 - 验证日志提供者是否工作
         try
@@ -277,6 +284,61 @@ public partial class App : Application
         {
             _ = App.GetService<CoreHostService>().InitializeAsync();
         }
+        else
+        {
+            // 如果没有账号，弹出登录提醒弹窗（延迟一会确保 UI 已加载）
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(1000);
+                App.MainWindow?.DispatcherQueue.TryEnqueue(async () =>
+                {
+                    if (App.MainWindow == null) return;
+                    
+                    var loc = WinUI3Localizer.Localizer.Get();
+                    var currentLang = loc.GetCurrentLanguage();
+                    bool isChinese = currentLang.StartsWith("zh", StringComparison.OrdinalIgnoreCase);
+                    
+                    // 尝试获取本地化字符串
+                    var title = loc.GetLocalizedString("Resources/Startup_LoginRequired_Title");
+                    if (string.IsNullOrEmpty(title) || title == "Resources/Startup_LoginRequired_Title") 
+                    {
+                        title = isChinese ? "需要登录" : "Login Required";
+                    }
+
+                    var content = loc.GetLocalizedString("Resources/Startup_LoginRequired_Content");
+                    if (string.IsNullOrEmpty(content) || content == "Resources/Startup_LoginRequired_Content")
+                    {
+                        content = isChinese 
+                            ? "需要登录账号才能初始化核心功能。账号和密码可以随意填写，但必须在所有设备上保持一致才能同步剪贴板。" 
+                            : "A login account is required to initialize core functions. You can use any username and password, but they must be consistent across all devices to sync your clipboard.";
+                    }
+
+                    var primaryButton = loc.GetLocalizedString("Resources/Startup_LoginRequired_PrimaryButton");
+                    if (string.IsNullOrEmpty(primaryButton) || primaryButton == "Resources/Startup_LoginRequired_PrimaryButton")
+                    {
+                        primaryButton = isChinese ? "前往登录" : "Go to Login";
+                    }
+
+                    var dialog = new ContentDialog
+                    {
+                        Title = title,
+                        Content = content,
+                        PrimaryButtonText = primaryButton,
+                        CloseButtonText = "OK",
+                        XamlRoot = App.MainWindow.Content.XamlRoot
+                    };
+
+                    var result = await dialog.ShowAsync();
+                    if (result == ContentDialogResult.Primary)
+                    {
+                        // 直接弹出登录对话框
+                        var loginDialog = new ClipBridgeShell_CS.Views.LoginDialog(App.GetService<IAccountService>());
+                        loginDialog.XamlRoot = App.MainWindow.Content.XamlRoot;
+                        await loginDialog.ShowAsync();
+                    }
+                });
+            });
+        }
 
         // 启动剪贴板监听（即使没有账号也启动，等待登录后使用）
         App.GetService<ClipboardWatcher>().Initialize();
@@ -313,29 +375,41 @@ public partial class App : Application
 
     private async Task InitializeLocalizer()
     {
-        // 1) 准备 LocalFolder\Strings（保持你原有的代码）
-        StorageFolder localFolder = ApplicationData.Current.LocalFolder;
-        StorageFolder stringsFolder = await localFolder.CreateFolderAsync("Strings", CreationCollisionOption.OpenIfExists);
-        const string resw = "Resources.resw";
-        await CreateStringResourceFileIfNotExists(stringsFolder, "en-US", resw);
-        await CreateStringResourceFileIfNotExists(stringsFolder, "zh-CN", resw);
+        // 兼容非打包（unpackaged）模式：ApplicationData.Current 在非打包模式下会崩溃
+        string localFolderPath;
+        try
+        {
+            localFolderPath = ApplicationData.Current.LocalFolder.Path;
+        }
+        catch (InvalidOperationException)
+        {
+            // 非打包模式下，使用标准的 LocalAppData 路径
+            localFolderPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+            if (!Directory.Exists(localFolderPath)) Directory.CreateDirectory(localFolderPath);
+        }
 
-        // 2) 读取已保存的语言；如果没有 → 第一次启动，用系统语言推断一个
+        // 1) 准备 Strings 文件夹
+        string stringsPath = Path.Combine(localFolderPath, "Strings");
+        if (!Directory.Exists(stringsPath)) Directory.CreateDirectory(stringsPath);
+        
+        const string resw = "Resources.resw";
+        await CreateStringResourceFileIfNotExists(stringsPath, "en-US", resw);
+        await CreateStringResourceFileIfNotExists(stringsPath, "zh-CN", resw);
+
+        // 2) 读取已保存的语言
         var settings = App.GetService<ILocalSettingsService>();
         var saved = await settings.ReadSettingAsync<string>("PreferredLanguage");
         string defaultLang = NormalizeLanguageTag(saved ?? CultureInfo.CurrentUICulture.Name);
 
-        // 如果是第一次启动（没有 PreferredLanguage），保存下来
         if (string.IsNullOrEmpty(saved))
         {
             await settings.SaveSettingAsync("PreferredLanguage", defaultLang);
-            // 你也可以顺手保存一个 “IsFirstRun = false”
             await settings.SaveSettingAsync("IsFirstRun", false);
         }
 
         // 3) 用默认语言构建 Localizer
         _ = await new LocalizerBuilder()
-            .AddStringResourcesFolderForLanguageDictionaries(stringsFolder.Path)
+            .AddStringResourcesFolderForLanguageDictionaries(stringsPath)
             .SetOptions(o => o.DefaultLanguage = defaultLang)
             .Build();
     }
@@ -351,22 +425,44 @@ public partial class App : Application
         return t;
     }
 
-    private static async Task CreateStringResourceFileIfNotExists(StorageFolder stringsFolder, string language, string resourceFileName)
+    private static async Task CreateStringResourceFileIfNotExists(string stringsPath, string language, string resourceFileName)
     {
-        StorageFolder languageFolder = await stringsFolder.CreateFolderAsync(
-            language, CreationCollisionOption.OpenIfExists);
+        string languagePath = Path.Combine(stringsPath, language);
+        if (!Directory.Exists(languagePath)) Directory.CreateDirectory(languagePath);
 
-        string resourceFilePath = Path.Combine(stringsFolder.Name, language, resourceFileName);
-        StorageFile resourceFile = await LoadStringResourcesFileFromAppResource(resourceFilePath);
+        string targetFilePath = Path.Combine(languagePath, resourceFileName);
+        // 开发阶段或版本更新时，我们希望覆盖旧的本地化文件以确保新键值生效
+        // if (File.Exists(targetFilePath)) return; 
 
-
-        _ = await resourceFile.CopyAsync(languageFolder, resourceFileName, NameCollisionOption.ReplaceExisting);
+        string resourceRelativePath = Path.Combine("Strings", language, resourceFileName);
+        try 
+        {
+            var file = await LoadStringResourcesFileFromAppResource(resourceRelativePath);
+            await file.CopyAsync(await StorageFolder.GetFolderFromPathAsync(languagePath), resourceFileName, NameCollisionOption.ReplaceExisting);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Failed to copy resource {language}: {ex.Message}");
+        }
     }
 
     private static async Task<StorageFile> LoadStringResourcesFileFromAppResource(string filePath)
     {
-        Uri resourcesFileUri = new($"ms-appx:///{filePath}");
-        return await StorageFile.GetFileFromApplicationUriAsync(resourcesFileUri);
+        try 
+        {
+            Uri resourcesFileUri = new($"ms-appx:///{filePath}");
+            return await StorageFile.GetFileFromApplicationUriAsync(resourcesFileUri);
+        }
+        catch
+        {
+            // 非打包模式下的退路：尝试直接从文件系统读取
+            var fullPath = Path.Combine(AppContext.BaseDirectory, filePath);
+            if (File.Exists(fullPath))
+            {
+                return await StorageFile.GetFileFromPathAsync(fullPath);
+            }
+            throw;
+        }
     }
 
     /// <summary>

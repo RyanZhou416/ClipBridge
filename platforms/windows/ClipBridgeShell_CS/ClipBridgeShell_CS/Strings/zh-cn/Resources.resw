@@ -761,4 +761,13 @@
   <data name="AccountInfo_Close" xml:space="preserve">
     <value>关闭</value>
   </data>
+  <data name="Startup_LoginRequired_Title" xml:space="preserve">
+    <value>需要登录</value>
+  </data>
+  <data name="Startup_LoginRequired_Content" xml:space="preserve">
+    <value>需要登录账号才能初始化核心功能。账号和密码可以随意填写，但必须在所有设备上保持一致才能同步剪贴板。</value>
+  </data>
+  <data name="Startup_LoginRequired_PrimaryButton" xml:space="preserve">
+    <value>前往登录</value>
+  </data>
 </root>

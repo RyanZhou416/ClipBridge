@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
 using ClipBridgeShell_CS.Core.Services;
+using ClipBridgeShell_CS.Helpers;
 using ClipBridgeShell_CS.Interop;
 using ClipBridgeShell_CS.Stores;
 using Windows.Storage;
@@ -84,8 +85,21 @@ public sealed class CoreHostService : ICoreHostService
         Diagnostics.CacheDir = paths.CacheDir;
         Diagnostics.LogDir = paths.LogDir;
 
-        var localFolder = ApplicationData.Current.LocalFolder.Path;
-        var cacheFolder = ApplicationData.Current.LocalCacheFolder.Path;
+        string localFolder;
+        string cacheFolder;
+
+        if (RuntimeHelper.IsMSIX)
+        {
+            localFolder = ApplicationData.Current.LocalFolder.Path;
+            cacheFolder = ApplicationData.Current.LocalCacheFolder.Path;
+        }
+        else
+        {
+            localFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+            cacheFolder = Path.Combine(localFolder, "Cache");
+            if (!Directory.Exists(localFolder)) Directory.CreateDirectory(localFolder);
+            if (!Directory.Exists(cacheFolder)) Directory.CreateDirectory(cacheFolder);
+        }
 
         // 从AccountService获取账号信息
         string accountUid = "default_user";
@@ -279,7 +293,16 @@ public sealed class CoreHostService : ICoreHostService
     {
         try
         {
-            var localFolder = ApplicationData.Current.LocalFolder.Path;
+            string localFolder;
+            if (RuntimeHelper.IsMSIX)
+            {
+                localFolder = ApplicationData.Current.LocalFolder.Path;
+            }
+            else
+            {
+                localFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+            }
+            
             var tlsDir = System.IO.Path.Combine(localFolder, "tls");
             
             if (System.IO.Directory.Exists(tlsDir))

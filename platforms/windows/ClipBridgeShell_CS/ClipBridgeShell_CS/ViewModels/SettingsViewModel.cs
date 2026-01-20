@@ -228,7 +228,15 @@ public partial class SettingsViewModel : ObservableRecipient
     private async void OnResetSettings()
     {
         // 1. 清空所有本地设置
-        Windows.Storage.ApplicationData.Current.LocalSettings.Values.Clear();
+        if (ClipBridgeShell_CS.Helpers.RuntimeHelper.IsMSIX)
+        {
+            Windows.Storage.ApplicationData.Current.LocalSettings.Values.Clear();
+        }
+        else
+        {
+            // 非打包模式下，LocalSettingsService 会处理 JSON 文件的重置
+            // 这里可以添加逻辑来删除 LocalSettings.json 文件，或者留空让 Service 逐个重置
+        }
 
         // 2. 恢复默认语言 (跟随系统)
         string defaultLang = NormalizeLanguageTag(CultureInfo.CurrentUICulture.Name);

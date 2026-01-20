@@ -18,9 +18,18 @@ public sealed class StashLogManager
 
     public StashLogManager()
     {
-        var localFolder = ApplicationData.Current.LocalFolder.Path;
-        var logsDir = Path.Combine(localFolder, "ClipBridge", "logs");
-        Directory.CreateDirectory(logsDir);
+        string localFolder;
+        if (ClipBridgeShell_CS.Helpers.RuntimeHelper.IsMSIX)
+        {
+            localFolder = ApplicationData.Current.LocalFolder.Path;
+        }
+        else
+        {
+            localFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+        }
+        
+        var logsDir = Path.Combine(localFolder, "logs");
+        if (!Directory.Exists(logsDir)) Directory.CreateDirectory(logsDir);
         _stashFilePath = Path.Combine(logsDir, "stash.log");
     }
 

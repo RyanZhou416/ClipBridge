@@ -147,7 +147,16 @@ public sealed partial class SettingsPage : Page
     // 打开本地文件夹
     private async void ShowLocalFolder_Click(object sender, RoutedEventArgs e)
     {
-        var path = Windows.Storage.ApplicationData.Current.LocalFolder.Path;
+        string path;
+        if (ClipBridgeShell_CS.Helpers.RuntimeHelper.IsMSIX)
+        {
+            path = Windows.Storage.ApplicationData.Current.LocalFolder.Path;
+        }
+        else
+        {
+            path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+        }
+        
         var dlg = new ContentDialog
         {
             Title = "LocalFolder",
@@ -559,8 +568,19 @@ public sealed partial class SettingsPage : Page
             }
 
             // 复制文件到本地存储
-            var localFolder = ApplicationData.Current.LocalFolder;
-            var imagesFolder = await localFolder.CreateFolderAsync("BackgroundImages", CreationCollisionOption.OpenIfExists);
+            StorageFolder imagesFolder;
+            if (ClipBridgeShell_CS.Helpers.RuntimeHelper.IsMSIX)
+            {
+                var localFolder = ApplicationData.Current.LocalFolder;
+                imagesFolder = await localFolder.CreateFolderAsync("BackgroundImages", CreationCollisionOption.OpenIfExists);
+            }
+            else
+            {
+                var localFolderPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+                var imagesFolderPath = Path.Combine(localFolderPath, "BackgroundImages");
+                if (!Directory.Exists(imagesFolderPath)) Directory.CreateDirectory(imagesFolderPath);
+                imagesFolder = await StorageFolder.GetFolderFromPathAsync(imagesFolderPath);
+            }
             
             // 删除旧的背景图片（如果存在）
             if (!string.IsNullOrEmpty(ViewModel.BackgroundImagePath))

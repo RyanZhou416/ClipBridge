@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Product Id="*" 
+           Name="ClipBridge Shell" 
+           Language="2052" 
+           Codepage="936"
+           Version="1.0.9.0" 
+           Manufacturer="Ryan416" 
+           UpgradeCode="a1b2c3d4-e5f6-7890-abcd-ef1234567891">
+    
+    <Package InstallerVersion="200" 
+             Compressed="yes" 
+             InstallScope="perMachine"
+             Languages="2052"
+             SummaryCodepage="936"
+             Description="ClipBridge Shell 安装程序"
+             Comments="ClipBridge Shell - 跨设备剪贴板同步工具"
+             Manufacturer="Ryan416" />
+    
+    <MajorUpgrade DowngradeErrorMessage="检测到更高版本的 ClipBridge Shell 已安装。请先卸载旧版本。" />
+    
+    <MediaTemplate EmbedCab="yes" />
+    
+    <Icon Id="AppIcon" SourceFile="$(var.ClipBridgeShell_CS.ProjectDir)Assets\WindowIcon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    
+    <!-- 安装目录：默认 C:\Program Files\ClipBridge -->
+    <SetDirectory Id="INSTALLFOLDER" Value="[ProgramFiles64Folder]ClipBridge" />
+    
+    <!-- 允许用户修改路径 -->
+    <UIRef Id="WixUI_InstallDir" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    
+    <Feature Id="ProductFeature" Title="ClipBridge Shell" Level="1">
+      <ComponentGroupRef Id="RuntimeFiles" />
+      <ComponentGroupRef Id="ApplicationShortcuts" />
+      <ComponentGroupRef Id="DesktopShortcut" />
+      <ComponentGroupRef Id="RegistryEntries" />
+      <ComponentGroupRef Id="CleanupComponents" />
+    </Feature>
+    
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="ClipBridge" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="ClipBridge" />
+      </Directory>
+      <Directory Id="DesktopFolder" Name="Desktop" />
+    </Directory>
+  </Product>
+  
+  <!-- 辅助组件组：负责清理和目录创建 -->
+  <Fragment>
+    <ComponentGroup Id="CleanupComponents" Directory="INSTALLFOLDER">
+      <Component Id="CleanupMainDir" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567892">
+        <CreateFolder />
+        <util:RemoveFolderEx On="uninstall" Property="INSTALLFOLDER" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+  
+  <Fragment>
+    <ComponentGroup Id="ApplicationShortcuts" Directory="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567894">
+        <Shortcut Id="ApplicationStartMenuShortcut"
+                  Name="ClipBridge Shell"
+                  Description="ClipBridge Shell - 跨设备剪贴板同步工具"
+                  Target="[INSTALLFOLDER]ClipBridgeShell_CS.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon" />
+        <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\ClipBridge\ClipBridgeShell" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+  
+  <Fragment>
+    <ComponentGroup Id="DesktopShortcut" Directory="DesktopFolder">
+      <Component Id="DesktopShortcutComponent" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567895">
+        <Shortcut Id="DesktopShortcut"
+                  Name="ClipBridge Shell"
+                  Description="ClipBridge Shell - 跨设备剪贴板同步工具"
+                  Target="[INSTALLFOLDER]ClipBridgeShell_CS.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon" />
+        <RegistryValue Root="HKCU" Key="Software\ClipBridge\ClipBridgeShell" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+  
+  <Fragment>
+    <ComponentGroup Id="RegistryEntries" Directory="INSTALLFOLDER">
+      <Component Id="RegistryEntries" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567896">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\ClipBridge\ClipBridgeShell">
+          <RegistryValue Name="InstallPath" Type="string" Value="[INSTALLFOLDER]" />
+          <RegistryValue Name="Version" Type="string" Value="1.0.9.0" />
+        </RegistryKey>
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>
