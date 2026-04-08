@@ -44,8 +44,15 @@ public class ActivationService : IActivationService
         // Handle activation via ActivationHandlers.
         await HandleActivationAsync(activationArgs);
 
-        // Activate the MainWindow.
-        App.MainWindow.Activate();
+        // 自启到托盘：若由注册表/计划任务传入 --startup-to-tray，不激活主窗口，直接隐藏到托盘
+        if (StartupService.IsStartupToTrayRequested())
+        {
+            App.MainWindow.Hide();
+        }
+        else
+        {
+            App.MainWindow.Activate();
+        }
 
         // Execute tasks after activation.
         await StartupAsync();

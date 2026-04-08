@@ -53,6 +53,15 @@
             <helpers:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
             <helpers:GridLengthConverter x:Key="GridLengthConverter" />
 
+            <!-- 5) 卡片关闭亚克力时的实色背景（与左侧菜单栏一致：浅灰/深灰） -->
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="CardSolidBackgroundBrush" Color="#F6F1F6"/>
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="CardSolidBackgroundBrush" Color="#2A2A2A"/>
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

@@ -1,4 +1,6 @@
+using System;
 using System.Diagnostics;
+using System.Threading.Tasks;
 using ClipBridgeShell_CS.Collections;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
@@ -7,7 +9,6 @@ using ClipBridgeShell_CS.Services;
 using ClipBridgeShell_CS.Stores;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-
 namespace ClipBridgeShell_CS.ViewModels;
 
 public partial class HistoryViewModel : ObservableRecipient
@@ -15,8 +16,57 @@ public partial class HistoryViewModel : ObservableRecipient
     private readonly ICoreHostService _coreService;
     private readonly ClipboardApplyService _clipboardApply;
     private readonly HistoryStore _historyStore;
+    private readonly IClipboardService _clipboardService;
+    private readonly MainViewModel _mainViewModel;
 
     public IAsyncRelayCommand<ItemMetaPayload> CopyCommand { get; }
+    public IAsyncRelayCommand<ItemMetaPayload> DeleteItemCommand { get; }
+    public IAsyncRelayCommand<ItemMetaPayload> GlobalDeleteItemCommand { get; }
+
+    /// <summary>当前锁定的项 Id，用于历史项锁定图标与首页同步。</summary>
+    public string? LockedItemId => _clipboardService.LockedItemId;
+
+    /// <summary>首页当前选中项 Id，与 MainViewModel 同步，用于历史行选中效果。</summary>
+    public string? SelectedItemId => _mainViewModel.SelectedItemId;
+
+    public bool IsItemLocked(string itemId) => _clipboardService.LockedItemId == itemId;
+
+    public bool IsItemSelected(string itemId) => _mainViewModel.SelectedItemId == itemId;
+
+    private string? _toastMessage;
+    public string? ToastMessage
+    {
+        get => _toastMessage;
+        set => SetProperty(ref _toastMessage, value);
+    }
+
+    private bool _isToastOpen;
+    public bool IsToastOpen
+    {
+        get => _isToastOpen;
+        set => SetProperty(ref _isToastOpen, value);
+    }
+
+    private bool _isToastSuccess;
+    public bool IsToastSuccess
+    {
+        get => _isToastSuccess;
+        set => SetProperty(ref _isToastSuccess, value);
+    }
+
+    private void ShowToast(string message, bool success)
+    {
+        IsToastSuccess = success;
+        ToastMessage = message;
+        IsToastOpen = true;
+        _ = HideToastAfterDelayAsync();
+    }
+
+    private async Task HideToastAfterDelayAsync()
+    {
+        await Task.Delay(2000);
+        IsToastOpen = false;
+    }
 
     // 这是我们的"无限滚动"数据源，UI 的 ListView 将绑定到它
     public HistoryIncrementalCollection Source
@@ -32,17 +82,60 @@ public partial class HistoryViewModel : ObservableRecipient
     [ObservableProperty]
     private string? _selectedKind = null;
 
-    public HistoryViewModel(ICoreHostService coreService, ClipboardApplyService clipboardApply, HistoryStore historyStore)
+    public HistoryViewModel(ICoreHostService coreService, ClipboardApplyService clipboardApply, HistoryStore historyStore, IClipboardService clipboardService, MainViewModel mainViewModel)
     {
         _coreService = coreService;
         _clipboardApply = clipboardApply;
         _historyStore = historyStore;
+        _clipboardService = clipboardService;
+        _mainViewModel = mainViewModel;
         CopyCommand = new AsyncRelayCommand<ItemMetaPayload>(CopyAsync);
-        // 初始化增量集合
+        DeleteItemCommand = new AsyncRelayCommand<ItemMetaPayload>(DeleteItemAsync);
+        GlobalDeleteItemCommand = new AsyncRelayCommand<ItemMetaPayload>(GlobalDeleteItemAsync);
         Source = new HistoryIncrementalCollection(_coreService);
 
-        // 监听 HistoryStore 的变化，当有新项添加时自动刷新
         _historyStore.Items.CollectionChanged += OnHistoryStoreItemsChanged;
+
+        _clipboardService.ClipboardLockChanged += OnClipboardLockChanged;
+        _mainViewModel.PropertyChanged += OnMainViewModelPropertyChanged;
+        SyncPinnedItem();
+    }
+
+    private void OnMainViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MainViewModel.SelectedItemId))
+            OnPropertyChanged(nameof(SelectedItemId));
+    }
+
+    private void OnClipboardLockChanged(object? sender, bool isLocked)
+    {
+        App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+        {
+            OnPropertyChanged(nameof(LockedItemId));
+            SyncPinnedItem();
+            ApplyFilters();
+        });
+    }
+
+    /// <summary>与首页一致的锁定/解锁，锁定项会置顶。</summary>
+    public async Task ToggleLockItemAsync(ItemMetaPayload item)
+    {
+        await _mainViewModel.ToggleLockItemAsync(item);
+    }
+
+    private void SyncPinnedItem()
+    {
+        var lockedId = _clipboardService.LockedItemId;
+        if (string.IsNullOrEmpty(lockedId))
+        {
+            Source.SetPinnedItem(null);
+            return;
+        }
+
+        var item = Source.FirstOrDefault(i => i.ItemId == lockedId)
+                   ?? _historyStore.Items.FirstOrDefault(i => i.ItemId == lockedId)
+                   ?? _mainViewModel.LockedItemMeta;
+        Source.SetPinnedItem(item);
     }
 
     private void OnHistoryStoreItemsChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
@@ -157,9 +250,71 @@ public partial class HistoryViewModel : ObservableRecipient
     private async Task CopyAsync(ItemMetaPayload? meta)
     {
         Debug.WriteLine($"[History.Copy] invoked item_id={meta?.ItemId}");
-        System.Diagnostics.Debug.WriteLine($"[History.Copy] invoked. meta={(meta == null ? "null" : $"{meta.ItemId} kind={meta.Kind} mime={meta.Content?.Mime} bytes={meta.Content?.TotalBytes}")}");
         if (meta == null)
             return;
-        await _clipboardApply.ApplyMetaToSystemClipboardAsync(meta);
+
+        if (_clipboardService.IsClipboardLocked && meta.ItemId != _clipboardService.LockedItemId)
+        {
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_ClipboardIsLocked");
+            ShowToast(string.IsNullOrEmpty(msg) || msg == "Main_ClipboardIsLocked" ? "Clipboard is locked" : msg, false);
+            return;
+        }
+
+        try
+        {
+            await _clipboardApply.ApplyMetaToSystemClipboardAsync(meta);
+            _mainViewModel.SelectedItemId = meta.ItemId;
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_CopySuccess");
+            ShowToast(string.IsNullOrEmpty(msg) || msg == "Main_CopySuccess" ? "Copied!" : msg, true);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[History.Copy] failed: {ex}");
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_CopyFailed");
+            ShowToast(string.IsNullOrEmpty(msg) || msg == "Main_CopyFailed" ? "Copy failed" : msg, false);
+        }
+    }
+
+    public async Task DeleteItemAsync(ItemMetaPayload? item)
+    {
+        if (item == null) return;
+        try
+        {
+            await _coreService.DeleteItemLocalAsync(item.ItemId);
+            ApplyFilters();
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_ItemDeleted");
+            ShowToast(string.IsNullOrEmpty(msg) || msg == "Main_ItemDeleted" ? "Deleted" : msg, true);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[HistoryViewModel] DeleteItemAsync failed: {ex}");
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_DeleteFailed");
+            ShowToast(string.IsNullOrEmpty(msg) || msg == "Main_DeleteFailed" ? "Delete failed" : msg, false);
+        }
+    }
+
+    public async Task GlobalDeleteItemAsync(ItemMetaPayload? item)
+    {
+        if (item == null) return;
+        try
+        {
+            await _coreService.DeleteItemGlobalAsync(item.ItemId);
+            ApplyFilters();
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_ItemDeletedGlobal");
+            ShowToast(string.IsNullOrEmpty(msg) || msg == "Main_ItemDeletedGlobal" ? "Deleted from all devices" : msg, true);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[HistoryViewModel] GlobalDeleteItemAsync failed: {ex}");
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_DeleteFailed");
+            ShowToast(string.IsNullOrEmpty(msg) || msg == "Main_DeleteFailed" ? "Delete failed" : msg, false);
+        }
     }
 }

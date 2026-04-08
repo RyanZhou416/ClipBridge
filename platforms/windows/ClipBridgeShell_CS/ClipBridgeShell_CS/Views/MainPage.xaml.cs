@@ -49,13 +49,21 @@ public sealed partial class MainPage : Page
     // 卡片选中状态管理（性能优化：只更新变化的卡片，而不是遍历所有卡片）
     private Microsoft.UI.Xaml.Controls.Border? _selectedBorder;
 
+    private DispatcherTimer? _relativeTimeTimer;
+    private readonly RelativeOrExactTimestampConverter _relativeTimeConverter = new();
+
+    // 卡片右键菜单：打开时暂存当前项，菜单项点击时使用
+    private ItemMetaPayload? _contextMenuCardItem;
+    private Microsoft.UI.Xaml.Controls.Border? _contextMenuCardBorder;
+    private Microsoft.UI.Xaml.Controls.MenuFlyout? _cardContextMenu;
+
     public MainPage()
     {
         try
         {
             ViewModel = App.GetService<MainViewModel>();
             InitializeComponent();
-            
+            InitCardContextMenu();
             // 监听数据变化，更新图表（在Loaded之后）
             Loaded += OnPageLoaded;
             Unloaded += OnPageUnloaded;
@@ -63,6 +71,35 @@ public sealed partial class MainPage : Page
         catch (Exception ex)
         {
             ShowError($"初始化主页失败: {ex.Message}");
+        }
+    }
+
+    private void InitCardContextMenu()
+    {
+        _cardContextMenu = new Microsoft.UI.Xaml.Controls.MenuFlyout();
+        var loc = WinUI3Localizer.Localizer.Get();
+        var deleteLocal = loc.GetLocalizedString("Main_ContextMenu_DeleteLocal");
+        if (string.IsNullOrEmpty(deleteLocal) || deleteLocal == "Main_ContextMenu_DeleteLocal") deleteLocal = "Local delete";
+        var deleteGlobal = loc.GetLocalizedString("Main_ContextMenu_GlobalDelete");
+        if (string.IsNullOrEmpty(deleteGlobal) || deleteGlobal == "Main_ContextMenu_GlobalDelete") deleteGlobal = "Global delete";
+
+        var itemDelete = new Microsoft.UI.Xaml.Controls.MenuFlyoutItem { Text = deleteLocal };
+        itemDelete.Click += OnCardContextMenuDeleteClick;
+        _cardContextMenu.Items.Add(itemDelete);
+
+        var itemGlobalDelete = new Microsoft.UI.Xaml.Controls.MenuFlyoutItem { Text = deleteGlobal };
+        itemGlobalDelete.Click += OnCardContextMenuGlobalDeleteClick;
+        _cardContextMenu.Items.Add(itemGlobalDelete);
+    }
+
+    private void OnCardContextRequested(object sender, Microsoft.UI.Xaml.Input.ContextRequestedEventArgs e)
+    {
+        if (sender is Microsoft.UI.Xaml.Controls.Border border && border.Tag is ItemMetaPayload item)
+        {
+            _contextMenuCardItem = item;
+            _contextMenuCardBorder = border;
+            _cardContextMenu?.ShowAt(border);
+            e.Handled = true;
         }
     }
 
@@ -91,6 +128,8 @@ public sealed partial class MainPage : Page
             };
             _chartUpdateTimer.Start();
             
+            ViewModel.PropertyChanged += OnViewModelPropertyChanged;
+
             // 监听数据变化，标记为脏（而不是立即绘制）
             ViewModel.CacheSeries.CollectionChanged += (s, args) => _cacheChartDirty = true;
             ViewModel.NetworkSeries.CollectionChanged += (s, args) => _networkChartDirty = true;
@@ -106,11 +145,13 @@ public sealed partial class MainPage : Page
             NetworkChartCanvas.SizeChanged += (s, args) => _networkChartDirty = true;
             ActivityChartCanvas.SizeChanged += (s, args) => _activityChartDirty = true;
 
-            // 监听RecentItems和选中状态变化
             ViewModel.RecentItems.CollectionChanged += (s, e) => 
             {
-                // 当RecentItems变化时，可能需要更新UI
-                // 由于ItemsRepeater会自动更新，这里可以留空或添加其他逻辑
+                if (ViewModel.LockedItemId != null)
+                {
+                    DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, 
+                        () => UpdateAllCardsLockIcon());
+                }
             };
             
             // 监听选中状态变化，更新所有卡片的选中效果
@@ -120,8 +161,14 @@ public sealed partial class MainPage : Page
                 {
                     UpdateAllCardsSelection();
                 }
+                else if (e.PropertyName == nameof(ViewModel.LockedItemId))
+                {
+                    UpdateAllCardsLockIcon();
+                }
             };
             
+            StartRelativeTimeRefresh();
+
             // 设置视差滚动效果（使用 RenderTransform，不影响布局）
             if (ContentScrollViewer != null && ParallaxContentContainer != null)
             {
@@ -162,7 +209,8 @@ public sealed partial class MainPage : Page
     {
         try
         {
-            // 停止定时器
+            _relativeTimeTimer?.Stop();
+            _relativeTimeTimer = null;
             _chartUpdateTimer?.Stop();
             
             // 清理标题文本布局
@@ -633,33 +681,211 @@ public sealed partial class MainPage : Page
         }
     }
 
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ViewModel.IsCopyStatusOpen))
+        {
+            if (ViewModel.IsCopyStatusOpen)
+            {
+                ShowCopyToast();
+            }
+            else
+            {
+                HideCopyToast();
+            }
+        }
+        else if (e.PropertyName == nameof(ViewModel.DisableAcrylicOnCards))
+        {
+            UpdateAllCopyCardsBackground();
+        }
+    }
+
+    private Brush GetCardBackgroundBrush()
+    {
+        var converter = Resources["AcrylicBrushConverter"] as AcrylicBrushConverter;
+        if (converter == null) return new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        return (Brush)converter.Convert(ViewModel.DisableAcrylicOnCards, typeof(Brush), null, null);
+    }
+
+    private void UpdateAllCopyCardsBackground()
+    {
+        if (RecentItemsRepeater == null || ViewModel?.RecentItems == null) return;
+        var brush = GetCardBackgroundBrush();
+        for (int i = 0; i < ViewModel.RecentItems.Count; i++)
+        {
+            var element = RecentItemsRepeater.TryGetElement(i);
+            if (element == null) continue;
+            var border = element as Microsoft.UI.Xaml.Controls.Border
+                ?? FindVisualChildByName<Microsoft.UI.Xaml.Controls.Border>(element, "CardBorder");
+            if (border != null)
+                border.Background = brush;
+        }
+    }
+
+    private void ShowCopyToast()
+    {
+        if (CopyToast == null) return;
+
+        // E73E = checkmark, EA39 = dismiss/error
+        CopyToastIcon.Glyph = ViewModel.IsCopySuccess ? "\uE73E" : "\uEA39";
+        CopyToastIcon.Foreground = ViewModel.IsCopySuccess
+            ? new SolidColorBrush(Microsoft.UI.Colors.LimeGreen)
+            : new SolidColorBrush(Microsoft.UI.Colors.OrangeRed);
+
+        CopyToast.Opacity = 1;
+        CopyToast.Translation = new System.Numerics.Vector3(0, 0, 32);
+    }
+
+    private void HideCopyToast()
+    {
+        if (CopyToast == null) return;
+        CopyToast.Opacity = 0;
+        CopyToast.Translation = new System.Numerics.Vector3(0, 12, 32);
+    }
+
+    private async void OnCardLockClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (sender is Microsoft.UI.Xaml.Controls.Button button)
+        {
+            var cardBorder = FindParent<Microsoft.UI.Xaml.Controls.Border>(button);
+            if (cardBorder?.Tag is ItemMetaPayload item)
+            {
+                await ViewModel.ToggleLockItemAsync(item);
+                UpdateAllCardsLockIcon();
+            }
+        }
+    }
+
+    private async void OnCardDeleteClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (sender is Microsoft.UI.Xaml.Controls.Button button)
+        {
+            var cardBorder = FindParent<Microsoft.UI.Xaml.Controls.Border>(button);
+            if (cardBorder?.Tag is ItemMetaPayload item)
+            {
+                if (_selectedBorder == cardBorder)
+                {
+                    _selectedBorder = null;
+                }
+                await ViewModel.DeleteRecentItemAsync(item);
+            }
+        }
+    }
+
+    private async void OnCardContextMenuDeleteClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        var item = _contextMenuCardItem;
+        var cardBorder = _contextMenuCardBorder;
+        _contextMenuCardItem = null;
+        _contextMenuCardBorder = null;
+        if (item == null) return;
+        if (_selectedBorder == cardBorder)
+            _selectedBorder = null;
+        await ViewModel.DeleteRecentItemAsync(item);
+    }
+
+    private async void OnCardContextMenuGlobalDeleteClick(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        var item = _contextMenuCardItem;
+        var cardBorder = _contextMenuCardBorder;
+        _contextMenuCardItem = null;
+        _contextMenuCardBorder = null;
+        if (item == null) return;
+        if (_selectedBorder == cardBorder)
+            _selectedBorder = null;
+        await ViewModel.GlobalDeleteItemAsync(item);
+    }
+
     private void OnCardTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
     {
+        // Skip if tap originated from a Button (lock/delete)
+        if (e.OriginalSource is Microsoft.UI.Xaml.DependencyObject source &&
+            FindParent<Microsoft.UI.Xaml.Controls.Button>(source) != null)
+        {
+            return;
+        }
+
         if (sender is Microsoft.UI.Xaml.Controls.Border cardBorder && cardBorder.Tag is ItemMetaPayload item)
         {
-            // 先更新 ViewModel 的选中状态
             ViewModel.SelectItemCommand.Execute(item);
             
-            // 取消之前选中卡片的选中状态（强制取消，不依赖 ViewModel 状态）
             if (_selectedBorder != null && _selectedBorder != cardBorder)
             {
                 UpdateCardSelection(_selectedBorder, forceUnselected: true);
             }
             
-            // 保存新的选中卡片引用并更新样式
             _selectedBorder = cardBorder;
             UpdateCardSelection(cardBorder);
         }
+    }
+
+    private void StartRelativeTimeRefresh()
+    {
+        if (_relativeTimeTimer != null) return;
+        _relativeTimeTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(30)
+        };
+        _relativeTimeTimer.Tick += (_, _) => RefreshCardRelativeTimes();
+        _relativeTimeTimer.Start();
+    }
+
+    private void RefreshCardRelativeTimes()
+    {
+        if (RecentItemsRepeater == null || ViewModel?.RecentItems == null) return;
+        var language = System.Globalization.CultureInfo.CurrentUICulture.Name;
+        for (int i = 0; i < ViewModel.RecentItems.Count; i++)
+        {
+            var element = RecentItemsRepeater.TryGetElement(i);
+            if (element == null) continue;
+            Microsoft.UI.Xaml.Controls.Border? border = element as Microsoft.UI.Xaml.Controls.Border;
+            border ??= FindVisualChildByName<Microsoft.UI.Xaml.Controls.Border>(element, "CardBorder");
+            if (border?.Tag is ItemMetaPayload item)
+            {
+                var tb = FindVisualChildByName<Microsoft.UI.Xaml.Controls.TextBlock>(border, "CardRelativeTimeText");
+                if (tb != null)
+                    tb.Text = (string)_relativeTimeConverter.Convert(item.CreatedTsMs, typeof(string), null, language);
+            }
+        }
+    }
+
+    private void UpdateAllCardsLockIcon()
+    {
+        if (RecentItemsRepeater == null || ViewModel?.RecentItems == null) return;
+        for (int i = 0; i < ViewModel.RecentItems.Count; i++)
+        {
+            var element = RecentItemsRepeater.TryGetElement(i);
+            if (element == null) continue;
+            Microsoft.UI.Xaml.Controls.Border? border = element as Microsoft.UI.Xaml.Controls.Border;
+            border ??= FindVisualChildByName<Microsoft.UI.Xaml.Controls.Border>(element, "CardBorder");
+            if (border != null)
+            {
+                UpdateCardLockIcon(border);
+            }
+        }
+    }
+
+    private void UpdateCardLockIcon(Microsoft.UI.Xaml.Controls.Border cardBorder)
+    {
+        var lockIcon = FindVisualChildByName<Microsoft.UI.Xaml.Controls.FontIcon>(cardBorder, "LockIcon");
+        if (lockIcon == null || cardBorder.Tag is not ItemMetaPayload item) return;
+
+        var isLocked = ViewModel.IsItemLocked(item.ItemId);
+        // E72E = Lock, E785 = Unlock
+        lockIcon.Glyph = isLocked ? "\uE72E" : "\uE785";
+        lockIcon.Foreground = isLocked
+            ? new SolidColorBrush(Microsoft.UI.Colors.Orange)
+            : (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["TextFillColorPrimaryBrush"];
     }
 
     private void OnCardLoaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         if (sender is Microsoft.UI.Xaml.Controls.Border cardBorder && cardBorder.Tag is ItemMetaPayload item)
         {
-            // 初始化卡片的选中状态
+            cardBorder.Background = GetCardBackgroundBrush();
             UpdateCardSelection(cardBorder);
+            UpdateCardLockIcon(cardBorder);
             
-            // 如果这个卡片是当前选中的，保存引用
             if (ViewModel.IsItemSelected(item.ItemId))
             {
                 _selectedBorder = cardBorder;

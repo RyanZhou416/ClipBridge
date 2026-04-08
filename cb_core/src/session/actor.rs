@@ -332,6 +332,14 @@ impl SessionActor {
                             Some(SessionCmd::CancelTransfer { transfer_id }) => {
                                 actor.handle_local_cancel(transfer_id).await?;
                             }
+                            Some(SessionCmd::SendDelete { item_id }) => {
+                                if actor.state == SessionState::Online {
+                                    actor.send_ctrl(CtrlMsg::ItemDelete {
+                                        msg_id: Some(uuid::Uuid::new_v4().to_string()),
+                                        item_id,
+                                    }).await?;
+                                }
+                            }
                             None => break,
                         }
                     }
@@ -688,6 +696,36 @@ impl SessionActor {
 
 				// 2. 如果我是接收者：调用 handle_content_cancel
 				self.handle_content_cancel(req_id, reason).await?;
+			}
+
+			CtrlMsg::ItemDelete { item_id, .. } => {
+				if self.state == SessionState::Online {
+					let account_uid = self.config.account_uid.clone();
+					let store = self.store.clone();
+					let cas = self.cas.clone();
+					let sink = self.sink.clone();
+					let item_id_emit = item_id.clone();
+					let deleted = tokio::task::spawn_blocking(move || {
+						let mut guard = store.lock().unwrap();
+						let ok = guard.soft_delete_item(&account_uid, &item_id).ok().unwrap_or(false);
+						let sha = guard.get_item_sha256(&item_id).ok().flatten();
+						(ok, sha)
+					}).await?;
+					let (ok, sha_opt) = deleted;
+					if ok {
+						if let Some(sha) = &sha_opt {
+							let _ = cas.remove_blob(sha);
+							let now = crate::util::now_ms();
+							let mut guard = self.store.lock().unwrap();
+							let _ = guard.mark_cache_missing(sha, now);
+						}
+						let evt = serde_json::json!({
+							"type": "ITEM_DELETED",
+							"item_id": item_id_emit,
+						});
+						sink.emit(evt.to_string());
+					}
+				}
 			}
         }
         Ok(())

@@ -733,6 +733,42 @@ impl Core {
 		store.list_history_metas(&self.inner.core_config.account_uid, limit)
 	}
 
+	/// 本地删除：软删除 + 从 CAS 移除 blob + 发出 item_deleted 事件
+	pub fn delete_item_local(&self, item_id: &str) -> anyhow::Result<()> {
+		if self.inner.is_shutdown.load(Ordering::Acquire) {
+			anyhow::bail!("core already shutdown");
+		}
+		let account_uid = self.inner.core_config.account_uid.clone();
+		let sha256_opt = {
+			let mut store = self.inner.store.lock().unwrap();
+			store.soft_delete_item(&account_uid, item_id)?;
+			store.get_item_sha256(item_id)?
+		};
+		if let Some(sha) = &sha256_opt {
+			let _ = self.inner.cas.remove_blob(sha);
+			let now = now_ms();
+			let mut store = self.inner.store.lock().unwrap();
+			let _ = store.mark_cache_missing(sha, now);
+		}
+		let evt = serde_json::json!({
+			"type": "ITEM_DELETED",
+			"item_id": item_id,
+		});
+		self.inner.emit(evt.to_string());
+		Ok(())
+	}
+
+	/// 全局删除：与本地删除相同，并广播给所有连接的设备
+	pub fn delete_item_global(&self, item_id: &str) -> anyhow::Result<()> {
+		self.delete_item_local(item_id)?;
+		if let Some(tx) = &self.inner.net {
+			let _ = tx.try_send(NetCmd::BroadcastDelete {
+				item_id: item_id.to_string(),
+			});
+		}
+		Ok(())
+	}
+
 	// [新增] 获取单条 Meta，供 FFI 调用
 	pub fn get_item_meta(&self, item_id: &str) -> anyhow::Result<Option<crate::model::ItemMeta>> {
 		if self.inner.is_shutdown.load(Ordering::Acquire) {

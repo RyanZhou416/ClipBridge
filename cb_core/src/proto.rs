@@ -98,6 +98,12 @@ pub enum CtrlMsg {
         item: crate::api::ItemMeta,
     },
 
+    /// 删除项（本地软删除 + 清理缓存）
+    ItemDelete {
+        msg_id: Option<String>,
+        item_id: String,
+    },
+
     // 通用错误
     Error {
         reply_to: Option<String>,

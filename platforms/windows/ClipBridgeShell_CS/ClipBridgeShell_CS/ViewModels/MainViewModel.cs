@@ -20,16 +20,18 @@ namespace ClipBridgeShell_CS.ViewModels;
 
 public partial class MainViewModel : ObservableRecipient
 {
-    // 持有 Store 的引用
     private readonly HistoryStore _historyStore;
     private readonly ICoreHostService _coreHost;
     private readonly PeerStore _peerStore;
     private readonly TransferStore _transferStore;
     private readonly ILocalSettingsService _localSettings;
     private readonly ClipboardApplyService? _clipboardApply;
+    private readonly IClipboardService? _clipboardService;
     private DispatcherTimer? _statsTimer;
-    private int _recentItemsCount = 10; // 默认10个
-    private string? _localDeviceId; // 缓存本机device_id
+    private int _recentItemsCount = 10;
+    private string? _localDeviceId;
+    private bool _enableAcrylicOnCards = true;
+    private bool _enableAcrylicOnStatsCards = true;
 
     // #region agent log
     private async Task LogAsync(string hypothesisId, string location, string message, object data)
@@ -61,12 +63,89 @@ public partial class MainViewModel : ObservableRecipient
     private readonly ObservableCollection<ItemMetaPayload> _recentItems = new();
     public ObservableCollection<ItemMetaPayload> RecentItems => _recentItems;
 
-    // 选中的卡片ItemId
     private string? _selectedItemId;
     public string? SelectedItemId
     {
         get => _selectedItemId;
         set => SetProperty(ref _selectedItemId, value);
+    }
+
+    private string? _lockedItemId;
+    public string? LockedItemId
+    {
+        get => _lockedItemId;
+        set => SetProperty(ref _lockedItemId, value);
+    }
+
+    private ItemMetaPayload? _lockedItemMeta;
+    public ItemMetaPayload? LockedItemMeta => _lockedItemMeta;
+
+    public bool IsItemLocked(string itemId) => LockedItemId == itemId;
+
+    /// <summary>是否关闭首页最近条目卡片的亚克力（= !EnableAcrylicOnCards，供绑定用）</summary>
+    public bool DisableAcrylicOnCards
+    {
+        get => !_enableAcrylicOnCards;
+        set
+        {
+            var newEnable = !value;
+            if (_enableAcrylicOnCards != newEnable)
+            {
+                _enableAcrylicOnCards = newEnable;
+                OnPropertyChanged(nameof(DisableAcrylicOnCards));
+            }
+        }
+    }
+
+    /// <summary>是否关闭首页统计信息卡片的亚克力（= !EnableAcrylicOnStatsCards，供绑定用）</summary>
+    public bool DisableAcrylicOnStatsCards
+    {
+        get => !_enableAcrylicOnStatsCards;
+        set
+        {
+            var newEnable = !value;
+            if (_enableAcrylicOnStatsCards != newEnable)
+            {
+                _enableAcrylicOnStatsCards = newEnable;
+                OnPropertyChanged(nameof(DisableAcrylicOnStatsCards));
+            }
+        }
+    }
+
+    // 复制状态提示
+    private string? _copyStatusMessage;
+    public string? CopyStatusMessage
+    {
+        get => _copyStatusMessage;
+        set => SetProperty(ref _copyStatusMessage, value);
+    }
+
+    private bool _isCopyStatusOpen;
+    public bool IsCopyStatusOpen
+    {
+        get => _isCopyStatusOpen;
+        set => SetProperty(ref _isCopyStatusOpen, value);
+    }
+
+    private bool _isCopySuccess;
+    public bool IsCopySuccess
+    {
+        get => _isCopySuccess;
+        set => SetProperty(ref _isCopySuccess, value);
+    }
+
+    private void ShowCopyStatus(string message, bool success)
+    {
+        IsCopySuccess = success;
+        CopyStatusMessage = message;
+        IsCopyStatusOpen = true;
+        _ = HideCopyStatusAfterDelayAsync();
+    }
+
+    private async Task HideCopyStatusAfterDelayAsync()
+    {
+        await Task.Delay(2000);
+        IsCopyStatusOpen = false;
     }
 
     /// <summary>
@@ -268,8 +347,9 @@ public partial class MainViewModel : ObservableRecipient
     public IRelayCommand ToggleSharingCommand { get; }
     public IRelayCommand NavigateToHistoryCommand { get; }
     public IRelayCommand<ItemMetaPayload> SelectItemCommand { get; }
+    public IAsyncRelayCommand<ItemMetaPayload> DeleteRecentItemCommand { get; }
+    public IAsyncRelayCommand<ItemMetaPayload> GlobalDeleteItemCommand { get; }
 
-    // 构造函数注入
     public MainViewModel(
         HistoryStore historyStore,
         Services.EventPumpService pump,
@@ -278,7 +358,8 @@ public partial class MainViewModel : ObservableRecipient
         TransferStore transferStore,
         INavigationService navigationService,
         ILocalSettingsService localSettings,
-        Services.ClipboardApplyService? clipboardApply = null)
+        Services.ClipboardApplyService? clipboardApply = null,
+        IClipboardService? clipboardService = null)
     {
         _historyStore = historyStore;
         _coreHost = coreHost;
@@ -286,6 +367,7 @@ public partial class MainViewModel : ObservableRecipient
         _transferStore = transferStore;
         _localSettings = localSettings;
         _clipboardApply = clipboardApply;
+        _clipboardService = clipboardService;
 
         // 创建一个测试按钮命令：点击后模拟 Core 发来一条数据
         TestAddEventCommand = new RelayCommand(() =>
@@ -316,6 +398,8 @@ public partial class MainViewModel : ObservableRecipient
             navigationService.NavigateTo(typeof(HistoryViewModel).FullName!);
         });
         SelectItemCommand = new AsyncRelayCommand<ItemMetaPayload>(SelectItemAsync);
+        DeleteRecentItemCommand = new AsyncRelayCommand<ItemMetaPayload>(DeleteRecentItemAsync);
+        GlobalDeleteItemCommand = new AsyncRelayCommand<ItemMetaPayload>(GlobalDeleteItemAsync);
 
         // 监听核心状态变化
         _coreHost.StateChanged += OnCoreStateChanged;
@@ -372,6 +456,8 @@ public partial class MainViewModel : ObservableRecipient
         if (count <= 0) count = 10; // 默认10个
         _recentItemsCount = count;
 
+        await LoadPerformanceSettingsAsync();
+
         // 如果Core已就绪，立即加载历史记录
         if (_coreHost.State == CoreState.Ready)
         {
@@ -379,11 +465,30 @@ public partial class MainViewModel : ObservableRecipient
         }
     }
 
+    private async Task LoadPerformanceSettingsAsync()
+    {
+        const string KeyCards = "Performance_EnableAcrylicOnCards";
+        const string KeyStats = "Performance_EnableAcrylicOnStatsCards";
+        var cards = await _localSettings.ReadSettingAsync<bool?>(KeyCards);
+        var stats = await _localSettings.ReadSettingAsync<bool?>(KeyStats);
+        App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+        {
+            _enableAcrylicOnCards = cards ?? true;
+            _enableAcrylicOnStatsCards = stats ?? true;
+            OnPropertyChanged(nameof(DisableAcrylicOnCards));
+            OnPropertyChanged(nameof(DisableAcrylicOnStatsCards));
+        });
+    }
+
     private void OnSettingChanged(object? sender, string key)
     {
         if (key == "MainPage_RecentItemsCount")
         {
             _ = LoadRecentItemsCountAndRefreshAsync();
+        }
+        else if (key == "Performance_EnableAcrylicOnCards" || key == "Performance_EnableAcrylicOnStatsCards")
+        {
+            _ = LoadPerformanceSettingsAsync();
         }
     }
 
@@ -404,8 +509,18 @@ public partial class MainViewModel : ObservableRecipient
             App.MainWindow.DispatcherQueue.TryEnqueue(() =>
             {
                 _recentItems.Clear();
+
+                // Pin locked item to top
+                if (_lockedItemMeta != null)
+                {
+                    var freshLocked = page.Items.FirstOrDefault(i => i.ItemId == _lockedItemMeta.ItemId);
+                    _recentItems.Add(freshLocked ?? _lockedItemMeta);
+                }
+
                 foreach (var item in page.Items)
                 {
+                    if (_lockedItemMeta != null && item.ItemId == _lockedItemMeta.ItemId)
+                        continue;
                     _recentItems.Add(item);
                 }
             });
@@ -555,33 +670,168 @@ public partial class MainViewModel : ObservableRecipient
         });
     }
 
+    /// <summary>
+    /// 仅从 UI 移除（不调用核心）。保留用于兼容或内部使用。
+    /// </summary>
+    public void RemoveRecentItem(ItemMetaPayload item)
+    {
+        if (LockedItemId == item.ItemId)
+        {
+            UnlockClipboard();
+        }
+        _recentItems.Remove(item);
+        if (SelectedItemId == item.ItemId)
+        {
+            SelectedItemId = null;
+        }
+
+        var loc = WinUI3Localizer.Localizer.Get();
+        var msg = loc.GetLocalizedString("Main_ItemRemoved");
+        ShowCopyStatus(string.IsNullOrEmpty(msg) || msg == "Main_ItemRemoved" ? "Removed" : msg, true);
+    }
+
+    /// <summary>
+    /// 本地删除：调用核心删除后从 UI 移除并提示。
+    /// </summary>
+    public async Task DeleteRecentItemAsync(ItemMetaPayload? item)
+    {
+        if (item == null) return;
+        try
+        {
+            await _coreHost.DeleteItemLocalAsync(item.ItemId);
+            if (LockedItemId == item.ItemId)
+                UnlockClipboard();
+            _recentItems.Remove(item);
+            if (SelectedItemId == item.ItemId)
+                SelectedItemId = null;
+
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_ItemDeleted");
+            ShowCopyStatus(string.IsNullOrEmpty(msg) || msg == "Main_ItemDeleted" ? "Deleted" : msg, true);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[MainViewModel] DeleteRecentItemAsync failed: {ex}");
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_DeleteFailed");
+            ShowCopyStatus(string.IsNullOrEmpty(msg) || msg == "Main_DeleteFailed" ? "Delete failed" : msg, false);
+        }
+    }
+
+    /// <summary>
+    /// 全局删除：从所有设备删除后从 UI 移除并提示。
+    /// </summary>
+    public async Task GlobalDeleteItemAsync(ItemMetaPayload? item)
+    {
+        if (item == null) return;
+        try
+        {
+            await _coreHost.DeleteItemGlobalAsync(item.ItemId);
+            if (LockedItemId == item.ItemId)
+                UnlockClipboard();
+            _recentItems.Remove(item);
+            if (SelectedItemId == item.ItemId)
+                SelectedItemId = null;
+
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_ItemDeletedGlobal");
+            ShowCopyStatus(string.IsNullOrEmpty(msg) || msg == "Main_ItemDeletedGlobal" ? "Deleted from all devices" : msg, true);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[MainViewModel] GlobalDeleteItemAsync failed: {ex}");
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_DeleteFailed");
+            ShowCopyStatus(string.IsNullOrEmpty(msg) || msg == "Main_DeleteFailed" ? "Delete failed" : msg, false);
+        }
+    }
+
+    public async Task ToggleLockItemAsync(ItemMetaPayload item)
+    {
+        if (_clipboardService == null || _clipboardApply == null) return;
+
+        if (LockedItemId == item.ItemId)
+        {
+            UnlockClipboard();
+            _ = LoadRecentItemsFromCoreAsync();
+            return;
+        }
+
+        try
+        {
+            await _clipboardApply.ApplyMetaToSystemClipboardAsync(item);
+
+            var text = await _clipboardService.GetTextAsync();
+            if (string.IsNullOrEmpty(text))
+            {
+                var loc = WinUI3Localizer.Localizer.Get();
+                var msg = loc.GetLocalizedString("Main_LockFailed");
+                ShowCopyStatus(string.IsNullOrEmpty(msg) || msg == "Main_LockFailed" ? "Lock failed" : msg, false);
+                return;
+            }
+
+            _clipboardService.LockClipboard(text, item.ItemId);
+            _lockedItemMeta = item;
+            LockedItemId = item.ItemId;
+            SelectedItemId = item.ItemId;
+            OnPropertyChanged(nameof(SelectedItemId));
+            _ = LoadRecentItemsFromCoreAsync();
+
+            var loc2 = WinUI3Localizer.Localizer.Get();
+            var msg2 = loc2.GetLocalizedString("Main_ClipboardLocked");
+            ShowCopyStatus(string.IsNullOrEmpty(msg2) || msg2 == "Main_ClipboardLocked" ? "Clipboard locked" : msg2, true);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[MainViewModel] ToggleLockItem failed: {ex}");
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_LockFailed");
+            ShowCopyStatus(string.IsNullOrEmpty(msg) || msg == "Main_LockFailed" ? "Lock failed" : msg, false);
+        }
+    }
+
+    private void UnlockClipboard()
+    {
+        _clipboardService?.UnlockClipboard();
+        _lockedItemMeta = null;
+        LockedItemId = null;
+        SelectedItemId = null;
+        OnPropertyChanged(nameof(SelectedItemId));
+
+        var loc = WinUI3Localizer.Localizer.Get();
+        var msg = loc.GetLocalizedString("Main_ClipboardUnlocked");
+        ShowCopyStatus(string.IsNullOrEmpty(msg) || msg == "Main_ClipboardUnlocked" ? "Clipboard unlocked" : msg, true);
+    }
+
     private async Task SelectItemAsync(ItemMetaPayload? item)
     {
         if (item == null) return;
+        if (_clipboardApply == null) return;
 
-        // 更新选中状态
+        if (_clipboardService != null && _clipboardService.IsClipboardLocked && item.ItemId != _lockedItemId)
+        {
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_ClipboardIsLocked");
+            ShowCopyStatus(string.IsNullOrEmpty(msg) || msg == "Main_ClipboardIsLocked" ? "Clipboard is locked" : msg, false);
+            return;
+        }
+
         SelectedItemId = item.ItemId;
         OnPropertyChanged(nameof(SelectedItemId));
-        
-        // 注意：由于使用 x:Bind 和 Converter，绑定可能不会自动更新
-        // 因为 ItemMetaPayload 对象本身没有改变
-        // 为了触发绑定更新，我们需要通知 ItemsRepeater 重新评估绑定
-        // 这通过触发集合的 CollectionChanged 事件来实现（但不会实际改变集合）
-        // 实际上，x:Bind 在编译时生成代码，可能不会响应 SelectedItemId 的变化
-        // 如果遇到问题，可以考虑使用 Binding 而不是 x:Bind，或者使用其他方法
 
-        // 如果ClipboardApplyService可用，调用它来写入剪切板
-        if (_clipboardApply != null)
+        try
         {
-            try
-            {
-                await _clipboardApply.ApplyMetaToSystemClipboardAsync(item);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[MainViewModel] ApplyMetaToSystemClipboardAsync failed: {ex}");
-                // TODO: 显示错误提示
-            }
+            await _clipboardApply.ApplyMetaToSystemClipboardAsync(item);
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_CopySuccess");
+            ShowCopyStatus(string.IsNullOrEmpty(msg) || msg == "Main_CopySuccess" ? "Copied!" : msg, true);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[MainViewModel] ApplyMetaToSystemClipboardAsync failed: {ex}");
+            var loc = WinUI3Localizer.Localizer.Get();
+            var msg = loc.GetLocalizedString("Main_CopyFailed");
+            ShowCopyStatus(string.IsNullOrEmpty(msg) || msg == "Main_CopyFailed" ? "Copy failed" : msg, false);
         }
     }
 }

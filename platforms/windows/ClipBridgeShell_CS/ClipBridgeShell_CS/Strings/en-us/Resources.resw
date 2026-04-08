@@ -488,11 +488,26 @@
   <data name="MainPage_NoPreview.Text" xml:space="preserve">
     <value>(No preview)</value>
   </data>
-  <data name="MainPage_LockButton.Content" xml:space="preserve">
-    <value>Lock</value>
+  <data name="Main_ItemRemoved" xml:space="preserve">
+    <value>Removed from recent list</value>
   </data>
-  <data name="MainPage_DeleteButton.Content" xml:space="preserve">
+  <data name="Main_ItemDeleted" xml:space="preserve">
+    <value>Deleted</value>
+  </data>
+  <data name="Main_ItemDeletedGlobal" xml:space="preserve">
+    <value>Deleted from all devices</value>
+  </data>
+  <data name="Main_DeleteFailed" xml:space="preserve">
+    <value>Delete failed</value>
+  </data>
+  <data name="Main_ContextMenu_Delete.Text" xml:space="preserve">
     <value>Delete</value>
+  </data>
+  <data name="Main_ContextMenu_DeleteLocal" xml:space="preserve">
+    <value>Local delete</value>
+  </data>
+  <data name="Main_ContextMenu_GlobalDelete" xml:space="preserve">
+    <value>Global delete</value>
   </data>
   <data name="HistoryPage_SearchBox.PlaceholderText" xml:space="preserve">
     <value>Search history...</value>
@@ -517,6 +532,9 @@
   </data>
   <data name="HistoryPage_CopyButton.Content" xml:space="preserve">
     <value>Copy</value>
+  </data>
+  <data name="HistoryPage_MoreButton.ToolTip" xml:space="preserve">
+    <value>More</value>
   </data>
   <data name="ShellPage_CoreUnavailable.Title" xml:space="preserve">
     <value>Core unavailable</value>
@@ -769,5 +787,95 @@
   </data>
   <data name="Startup_LoginRequired_PrimaryButton" xml:space="preserve">
     <value>Go to Login</value>
+  </data>
+  <data name="Settings_General.Text" xml:space="preserve">
+    <value>General</value>
+  </data>
+  <data name="Settings_Performance.Text" xml:space="preserve">
+    <value>Performance</value>
+  </data>
+  <data name="Settings_Performance_EnableAcrylicOnCards_SettingsCard.Header" xml:space="preserve">
+    <value>Acrylic effect on recent item cards</value>
+  </data>
+  <data name="Settings_Performance_EnableAcrylicOnCards_SettingsCard.Description" xml:space="preserve">
+    <value>Enable acrylic background on homepage recent item cards</value>
+  </data>
+  <data name="Settings_Performance_EnableAcrylicOnStatsCards_SettingsCard.Header" xml:space="preserve">
+    <value>Acrylic effect on statistics cards</value>
+  </data>
+  <data name="Settings_Performance_EnableAcrylicOnStatsCards_SettingsCard.Description" xml:space="preserve">
+    <value>Enable acrylic background on homepage statistics and chart cards</value>
+  </data>
+  <data name="Settings_CloseBehavior_SettingsCard.Header" xml:space="preserve">
+    <value>Close Button Behavior</value>
+  </data>
+  <data name="Settings_CloseBehavior_SettingsCard.Description" xml:space="preserve">
+    <value>Choose what happens when you close the window</value>
+  </data>
+  <data name="Settings_CloseBehavior_MinimizeToTray" xml:space="preserve">
+    <value>Minimize to tray</value>
+  </data>
+  <data name="Settings_CloseBehavior_ExitApp" xml:space="preserve">
+    <value>Exit application</value>
+  </data>
+  <data name="Settings_Startup_SettingsCard.Header" xml:space="preserve">
+    <value>Start to tray</value>
+  </data>
+  <data name="Settings_Startup_SettingsCard.Description" xml:space="preserve">
+    <value>Start ClipBridge at sign-in and minimize to system tray</value>
+  </data>
+  <data name="Settings_Startup_ToggleSwitch.OnContent" xml:space="preserve">
+    <value>On</value>
+  </data>
+  <data name="Settings_Startup_ToggleSwitch.OffContent" xml:space="preserve">
+    <value>Off</value>
+  </data>
+  <data name="Settings_Startup_DisabledByUser" xml:space="preserve">
+    <value>This method is disabled by system. Enable in Task Manager &gt; Startup, or switch to another method below</value>
+  </data>
+  <data name="Settings_StartupMethod_SettingsCard.Header" xml:space="preserve">
+    <value>Startup Method</value>
+  </data>
+  <data name="Settings_StartupMethod_SettingsCard.Description" xml:space="preserve">
+    <value>Choose how ClipBridge starts automatically</value>
+  </data>
+  <data name="Settings_StartupMethod_Registry" xml:space="preserve">
+    <value>Registry Run Key</value>
+  </data>
+  <data name="Settings_StartupMethod_ScheduledTask" xml:space="preserve">
+    <value>Scheduled Task</value>
+  </data>
+  <data name="Settings_StartupMethod_MsixStartupTask" xml:space="preserve">
+    <value>App Startup Task (MSIX)</value>
+  </data>
+  <data name="Tray_ShowWindow" xml:space="preserve">
+    <value>Show Window</value>
+  </data>
+  <data name="Tray_Exit" xml:space="preserve">
+    <value>Exit</value>
+  </data>
+  <data name="Tray_MinimizedHint_Title" xml:space="preserve">
+    <value>ClipBridge is running</value>
+  </data>
+  <data name="Tray_MinimizedHint_Content" xml:space="preserve">
+    <value>ClipBridge has been minimized to the system tray.</value>
+  </data>
+  <data name="Main_CopySuccess" xml:space="preserve">
+    <value>Copied to clipboard</value>
+  </data>
+  <data name="Main_CopyFailed" xml:space="preserve">
+    <value>Failed to copy content</value>
+  </data>
+  <data name="Main_ClipboardLocked" xml:space="preserve">
+    <value>Clipboard locked</value>
+  </data>
+  <data name="Main_ClipboardUnlocked" xml:space="preserve">
+    <value>Clipboard unlocked</value>
+  </data>
+  <data name="Main_LockFailed" xml:space="preserve">
+    <value>Failed to lock clipboard</value>
+  </data>
+  <data name="Main_ClipboardIsLocked" xml:space="preserve">
+    <value>Clipboard is locked, unlock first</value>
   </data>
 </root>

@@ -9,14 +9,18 @@ namespace ClipBridgeShell_CS.Contracts.Services;
 
 public interface IClipboardService
 {
-    // 暴露系统剪贴板变更事件
     event EventHandler ContentChanged;
     string? LastWriteFingerprint { get; }
 
     Task<bool> SetTextAsync(string text);
     Task<string?> GetTextAsync();
-    // 获取当前剪贴板的标准化快照
     Task<ClipboardSnapshot?> GetSnapshotAsync();
     Task SetImageFromPathAsync(string path);
     Task SetFilesFromPathsAsync(IReadOnlyList<string> paths);
+
+    bool IsClipboardLocked { get; }
+    string? LockedItemId { get; }
+    void LockClipboard(string text, string itemId);
+    void UnlockClipboard();
+    event EventHandler<bool>? ClipboardLockChanged;
 }

@@ -25,6 +25,16 @@ public class HistoryStore
         });
     }
 
+    public void RemoveByItemId(string itemId)
+    {
+        TryEnqueue(() =>
+        {
+            var existing = Items.FirstOrDefault(x => x.ItemId == itemId);
+            if (existing != null)
+                Items.Remove(existing);
+        });
+    }
+
     private void TryEnqueue(DispatcherQueueHandler handler)
     {
         Microsoft.UI.Dispatching.DispatcherQueue? dispatcher = null;

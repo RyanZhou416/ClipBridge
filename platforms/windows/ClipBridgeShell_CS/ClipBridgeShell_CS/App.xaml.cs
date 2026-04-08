@@ -161,6 +161,10 @@ public partial class App : Application
             services.AddSingleton<IClipboardService, ClipboardService>();
             services.AddSingleton<ClipboardApplyService>();
 
+            // System integration services
+            services.AddSingleton<IStartupService, StartupService>();
+            services.AddSingleton<TrayService>();
+
             // Views and ViewModels
             services.AddTransient<SettingsViewModel>();
             services.AddTransient<SettingsPage>();
@@ -182,7 +186,7 @@ public partial class App : Application
                 return new DevicesViewModel(coreHost, localSettings, eventPump);
             });
             services.AddTransient<DevicesPage>();
-            services.AddTransient<MainViewModel>(sp =>
+            services.AddSingleton<MainViewModel>(sp =>
             {
                 var historyStore = sp.GetRequiredService<Stores.HistoryStore>();
                 var pump = sp.GetRequiredService<EventPumpService>();
@@ -191,7 +195,9 @@ public partial class App : Application
                 var transferStore = sp.GetRequiredService<Stores.TransferStore>();
                 var navigationService = sp.GetRequiredService<INavigationService>();
                 var localSettings = sp.GetRequiredService<ILocalSettingsService>();
-                return new MainViewModel(historyStore, pump, coreHost, peerStore, transferStore, navigationService, localSettings);
+                var clipboardApply = sp.GetRequiredService<ClipboardApplyService>();
+                var clipboardService = sp.GetRequiredService<IClipboardService>();
+                return new MainViewModel(historyStore, pump, coreHost, peerStore, transferStore, navigationService, localSettings, clipboardApply, clipboardService);
             });
             services.AddTransient<MainPage>();
             services.AddTransient<ShellPage>();
@@ -208,13 +214,15 @@ public partial class App : Application
                 return new ClipboardWatcher(clipboardService, coreHostService, localSettings, loggerFactory);
             });
 
-            // History Service
+            // History Service（注入 MainViewModel 以同步锁定与复制选中）
             services.AddTransient<HistoryViewModel>(sp =>
             {
                 var coreService = sp.GetRequiredService<ICoreHostService>();
                 var clipboardApply = sp.GetRequiredService<ClipboardApplyService>();
                 var historyStore = sp.GetRequiredService<Stores.HistoryStore>();
-                return new HistoryViewModel(coreService, clipboardApply, historyStore);
+                var clipboardService = sp.GetRequiredService<IClipboardService>();
+                var mainViewModel = sp.GetRequiredService<MainViewModel>();
+                return new HistoryViewModel(coreService, clipboardApply, historyStore, clipboardService, mainViewModel);
             });
             services.AddTransient<HistoryPage>();
         }).
@@ -343,6 +351,40 @@ public partial class App : Application
         // 启动剪贴板监听（即使没有账号也启动，等待登录后使用）
         App.GetService<ClipboardWatcher>().Initialize();
 
+        // 初始化托盘图标
+        InitializeTray();
+    }
+
+    private void InitializeTray()
+    {
+        try
+        {
+            var tray = App.GetService<TrayService>();
+            tray.Initialize();
+
+            tray.ShowWindowRequested += (_, _) =>
+            {
+                if (App.MainWindow != null)
+                {
+                    App.MainWindow.Show();
+                    // 从最小化状态恢复到正常窗口
+                    if (App.MainWindow.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter p)
+                    {
+                        p.Restore();
+                    }
+                    App.MainWindow.Activate();
+                }
+            };
+
+            tray.ExitRequested += async (_, _) =>
+            {
+                await Helpers.AppLifecycleHelper.GracefulShutdownAsync();
+            };
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Tray init failed: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -401,28 +443,29 @@ public partial class App : Application
         var saved = await settings.ReadSettingAsync<string>("PreferredLanguage");
         string defaultLang = NormalizeLanguageTag(saved ?? CultureInfo.CurrentUICulture.Name);
 
-        if (string.IsNullOrEmpty(saved))
+        if (string.IsNullOrEmpty(saved) || saved != defaultLang)
         {
             await settings.SaveSettingAsync("PreferredLanguage", defaultLang);
-            await settings.SaveSettingAsync("IsFirstRun", false);
+            if (string.IsNullOrEmpty(saved))
+                await settings.SaveSettingAsync("IsFirstRun", false);
         }
 
-        // 3) 用默认语言构建 Localizer
-        _ = await new LocalizerBuilder()
+        // 3) 用默认语言构建 Localizer，然后显式 SetLanguage 覆盖内部持久化
+        var localizer = await new LocalizerBuilder()
             .AddStringResourcesFolderForLanguageDictionaries(stringsPath)
             .SetOptions(o => o.DefaultLanguage = defaultLang)
             .Build();
+        if (localizer.GetCurrentLanguage() != defaultLang)
+            localizer.SetLanguage(defaultLang);
     }
 
-    // 规范化常见语言代码：en -> en-US，zh / zh-Hans -> zh-CN
     private static string NormalizeLanguageTag(string? t)
     {
         if (string.IsNullOrWhiteSpace(t)) return "en-US";
         t = t.Trim();
-        if (t.Equals("en", StringComparison.OrdinalIgnoreCase)) return "en-US";
-        if (t.Equals("zh", StringComparison.OrdinalIgnoreCase)) return "zh-CN";
-        if (t.Equals("zh-Hans", StringComparison.OrdinalIgnoreCase)) return "zh-CN";
-        return t;
+        if (t.StartsWith("en", StringComparison.OrdinalIgnoreCase)) return "en-US";
+        if (t.StartsWith("zh", StringComparison.OrdinalIgnoreCase)) return "zh-CN";
+        return "en-US";
     }
 
     private static async Task CreateStringResourceFileIfNotExists(string stringsPath, string language, string resourceFileName)

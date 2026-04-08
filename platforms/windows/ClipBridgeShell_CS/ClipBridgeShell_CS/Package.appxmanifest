@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -46,6 +46,10 @@
         <uap:SplashScreen Image="Assets\SplashScreen.png" />
       </uap:VisualElements>
       <Extensions>
+          <desktop:Extension Category="windows.startupTask" Executable="ClipBridgeShell_CS.exe" EntryPoint="Windows.FullTrustApplication">
+              <desktop:StartupTask TaskId="ClipBridgeStartupTask" Enabled="false" DisplayName="ClipBridge" />
+          </desktop:Extension>
+
           <desktop:Extension Category="windows.toastNotificationActivation">
               <desktop:ToastNotificationActivation ToastActivatorCLSID="f6062d3d-26c1-48db-a0ba-c5477d628897" />
           </desktop:Extension>

@@ -90,8 +90,53 @@
                             </StackPanel>
 						</ctk:SettingsCard>
 
-						
-										  
+                    </StackPanel>
+
+                    <StackPanel Spacing="{StaticResource SettingsItemSpacing}">
+                        <TextBlock l:Uids.Uid="Settings_General" Style="{StaticResource GroupHeaderTextStyle}"/>
+
+                        <ctk:SettingsCard l:Uids.Uid="Settings_CloseBehavior_SettingsCard"
+                                          HeaderIcon="{ui:FontIcon Glyph=&#xEDAE;}"
+                                          HorizontalAlignment="Stretch">
+                            <ComboBox Width="240"
+                                      ItemsSource="{x:Bind ViewModel.CloseBehaviorOptions, Mode=OneWay}"
+                                      DisplayMemberPath="Label"
+                                      SelectedItem="{x:Bind ViewModel.SelectedCloseBehaviorOption, Mode=TwoWay}" />
+                        </ctk:SettingsCard>
+
+                        <ctk:SettingsCard l:Uids.Uid="Settings_Startup_SettingsCard"
+                                          HeaderIcon="{ui:FontIcon Glyph=&#xE7E8;}"
+                                          HorizontalAlignment="Stretch"
+                                          Description="{x:Bind ViewModel.StartupStateDescription, Mode=OneWay}">
+                            <ToggleSwitch IsOn="{x:Bind ViewModel.IsStartupEnabled, Mode=TwoWay}"
+                                          l:Uids.Uid="Settings_Startup_ToggleSwitch" />
+                        </ctk:SettingsCard>
+
+                        <ctk:SettingsCard l:Uids.Uid="Settings_StartupMethod_SettingsCard"
+                                          HeaderIcon="{ui:FontIcon Glyph=&#xE770;}"
+                                          HorizontalAlignment="Stretch">
+                            <ComboBox Width="240"
+                                      ItemsSource="{x:Bind ViewModel.StartupMethodOptions, Mode=OneWay}"
+                                      DisplayMemberPath="Label"
+                                      SelectedItem="{x:Bind ViewModel.SelectedStartupMethodOption, Mode=TwoWay}" />
+                        </ctk:SettingsCard>
+                    </StackPanel>
+
+                    <!-- 性能：左上角标题，一条一个开关 -->
+                    <StackPanel Spacing="{StaticResource SettingsItemSpacing}">
+                        <TextBlock l:Uids.Uid="Settings_Performance" Style="{StaticResource GroupHeaderTextStyle}"/>
+                        <ctk:SettingsCard l:Uids.Uid="Settings_Performance_EnableAcrylicOnCards_SettingsCard"
+                                          HeaderIcon="{ui:FontIcon Glyph=&#xE9F5;}"
+                                          HorizontalAlignment="Stretch">
+                            <ToggleSwitch IsOn="{x:Bind ViewModel.EnableAcrylicOnCards, Mode=TwoWay}"
+                                         l:Uids.Uid="Settings_Performance_EnableAcrylicOnCards_ToggleSwitch"/>
+                        </ctk:SettingsCard>
+                        <ctk:SettingsCard l:Uids.Uid="Settings_Performance_EnableAcrylicOnStatsCards_SettingsCard"
+                                          HeaderIcon="{ui:FontIcon Glyph=&#xE9F5;}"
+                                          HorizontalAlignment="Stretch">
+                            <ToggleSwitch IsOn="{x:Bind ViewModel.EnableAcrylicOnStatsCards, Mode=TwoWay}"
+                                         l:Uids.Uid="Settings_Performance_EnableAcrylicOnStatsCards_ToggleSwitch"/>
+                        </ctk:SettingsCard>
                     </StackPanel>
 
 					<StackPanel Spacing="{StaticResource SettingsItemSpacing}">

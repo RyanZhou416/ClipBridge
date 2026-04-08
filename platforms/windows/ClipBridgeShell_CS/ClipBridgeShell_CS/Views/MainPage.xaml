@@ -66,10 +66,11 @@
             <helpers:CardSelectionBorderThicknessConverter x:Key="CardSelectionBorderThicknessConverter"/>
             <helpers:CardSelectionBorderBrushConverter x:Key="CardSelectionBorderBrushConverter"/>
             <helpers:CardSelectionPaddingConverter x:Key="CardSelectionPaddingConverter"/>
+            <helpers:AcrylicBrushConverter x:Key="AcrylicBrushConverter"/>
+            <helpers:RelativeOrExactTimestampConverter x:Key="RelativeOrExactTimestampConverter"/>
 
-            <!-- 卡片样式 - WinUI-Gallery 风格（Acrylic 背景，带边框） -->
+            <!-- 卡片样式 - 背景由性能设置绑定，此处不设 Background -->
             <Style x:Key="ItemCardStyle" TargetType="Border">
-                <Setter Property="Background" Value="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"/>
                 <Setter Property="BorderThickness" Value="1"/>
                 <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
                 <Setter Property="CornerRadius" Value="8"/>
@@ -79,9 +80,8 @@
                 <Setter Property="Margin" Value="0,0,0,0"/>
             </Style>
 
-            <!-- 图表容器样式 - 使用 Acrylic 背景，与卡片一致 -->
+            <!-- 图表容器样式 - 背景由性能设置绑定（统计卡片亚克力开关） -->
             <Style x:Key="ChartContainerStyle" TargetType="Border">
-                <Setter Property="Background" Value="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"/>
                 <Setter Property="BorderThickness" Value="1"/>
                 <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
                 <Setter Property="CornerRadius" Value="8"/>
@@ -182,14 +182,15 @@
                                 <DataTemplate x:DataType="events:ItemMetaPayload" x:DefaultBindMode="OneWay">
                                     <!-- 卡片 Border：内容和背景，边框在内部 -->
                                     <Border x:Name="CardBorder" 
-                                            Style="{StaticResource ItemCardStyle}" 
+                                            Style="{StaticResource ItemCardStyle}"
                                             Tag="{x:Bind}"
                                             BorderThickness="{x:Bind Converter={StaticResource CardSelectionBorderThicknessConverter}}"
                                             BorderBrush="{x:Bind Converter={StaticResource CardSelectionBorderBrushConverter}}"
                                             Tapped="OnCardTapped"
                                             PointerEntered="OnCardPointerEntered"
                                             PointerExited="OnCardPointerExited"
-                                            Loaded="OnCardLoaded">
+                                            Loaded="OnCardLoaded"
+                                            ContextRequested="OnCardContextRequested">
                                         <Grid Margin="0,0,0,0" Padding="0,0,0,0">
                                             <!-- 悬停时的叠加层 - 覆盖整个 Border（包括边框），带圆角 -->
                                             <!-- 使用负 Margin 来覆盖边框（边框厚度为 1px，所以 Margin 为 -1） -->
@@ -217,8 +218,8 @@
                                                            TextTrimming="CharacterEllipsis"
                                                            Margin="0,0,0,0"/>
                                             
-                                                <!-- 元数据 -->
-                                                <StackPanel Grid.Row="1" Spacing="4" Margin="0,4,0,4">
+                                                <!-- 元数据：类型、来源、相对时间 -->
+                                                <StackPanel Grid.Row="1" Spacing="2" Margin="0,4,0,2">
                                                     <TextBlock Text="{x:Bind Kind, Converter={StaticResource ItemKindConverter}}" 
                                                                Style="{ThemeResource CaptionTextBlockStyle}"
                                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
@@ -228,10 +229,15 @@
                                                         <Run l:Uids.Uid="MainPage_From"/>
                                                         <Run x:Name="DeviceNameRun"/>
                                                     </TextBlock>
+                                                    <TextBlock x:Name="CardRelativeTimeText"
+                                                               Tag="CardRelativeTime"
+                                                               Text="{x:Bind CreatedTsMs, Converter={StaticResource RelativeOrExactTimestampConverter}}"
+                                                               Style="{ThemeResource CaptionTextBlockStyle}"
+                                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                                                 </StackPanel>
 
                                                 <!-- 状态徽标和操作按钮（同一行） -->
-                                                <Grid Grid.Row="2" Margin="0,12,0,0">
+                                                <Grid Grid.Row="2" Margin="0,4,0,0">
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="Auto"/>
                                                         <ColumnDefinition Width="*"/>
@@ -253,10 +259,18 @@
                                                     <!-- 操作按钮 -->
                                                     <StackPanel Grid.Column="2" 
                                                                 Orientation="Horizontal" 
-                                                                Spacing="8" 
+                                                                Spacing="4" 
                                                                 HorizontalAlignment="Right">
-                                                        <Button l:Uids.Uid="MainPage_LockButton" FontSize="10" Padding="8,4"/>
-                                                        <Button l:Uids.Uid="MainPage_DeleteButton" FontSize="10" Padding="8,4"/>
+                                                        <Button FontSize="10" Padding="8,4"
+                                                                Click="OnCardLockClick"
+                                                                ToolTipService.ToolTip="Lock clipboard">
+                                                            <FontIcon x:Name="LockIcon" Glyph="&#xE785;" FontSize="12"/>
+                                                        </Button>
+                                                        <Button FontSize="10" Padding="8,4"
+                                                                Click="OnCardDeleteClick"
+                                                                ToolTipService.ToolTip="Local delete">
+                                                            <FontIcon Glyph="&#xE74D;" FontSize="12"/>
+                                                        </Button>
                                                     </StackPanel>
                                                 </Grid>
                                             </Grid>
@@ -273,7 +287,7 @@
                                 Width="Auto"
                                 Margin="0,12,36,0"
                                 CornerRadius="4"
-                                Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+                                Background="{x:Bind ViewModel.DisableAcrylicOnStatsCards, Mode=OneWay, Converter={StaticResource AcrylicBrushConverter}}"
                                 BorderThickness="1"
                                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
                             <Button l:Uids.Uid="MainPage_ViewMoreHistory" 
@@ -286,7 +300,8 @@
                         <!-- 中部：状态与操作区 -->
                         <Grid ColumnDefinitions="*,*,*" ColumnSpacing="16" Margin="0" Padding="36,0,36,0">
                     <!-- A. Sharing（共享策略摘要） -->
-                    <Border Grid.Column="0" Style="{StaticResource ChartContainerStyle}">
+                    <Border Grid.Column="0" Style="{StaticResource ChartContainerStyle}"
+                            Background="{x:Bind ViewModel.DisableAcrylicOnStatsCards, Mode=OneWay, Converter={StaticResource AcrylicBrushConverter}}">
                         <StackPanel Spacing="8">
                             <TextBlock l:Uids.Uid="MainPage_Sharing" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
                             <StackPanel Spacing="4">
@@ -305,7 +320,8 @@
                     </Border>
 
                     <!-- B. Local Resources（本机资源） -->
-                    <Border Grid.Column="1" Style="{StaticResource ChartContainerStyle}">
+                    <Border Grid.Column="1" Style="{StaticResource ChartContainerStyle}"
+                            Background="{x:Bind ViewModel.DisableAcrylicOnStatsCards, Mode=OneWay, Converter={StaticResource AcrylicBrushConverter}}">
                         <StackPanel Spacing="8">
                             <TextBlock l:Uids.Uid="MainPage_LocalResources" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
                             <StackPanel Spacing="4">
@@ -322,7 +338,8 @@
                     </Border>
 
                     <!-- C. Toggles（全局开关） -->
-                    <Border Grid.Column="2" Style="{StaticResource ChartContainerStyle}">
+                    <Border Grid.Column="2" Style="{StaticResource ChartContainerStyle}"
+                            Background="{x:Bind ViewModel.DisableAcrylicOnStatsCards, Mode=OneWay, Converter={StaticResource AcrylicBrushConverter}}">
                         <StackPanel Spacing="12">
                             <TextBlock l:Uids.Uid="MainPage_Controls" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
                             <StackPanel Spacing="12">
@@ -331,7 +348,7 @@
                                 <ToggleSwitch l:Uids.Uid="MainPage_ClipboardSharing" 
                                             IsOn="{x:Bind ViewModel.ClipboardSharingEnabled, Mode=TwoWay}"/>
                                 <Border CornerRadius="4"
-                                        Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+                                        Background="{x:Bind ViewModel.DisableAcrylicOnStatsCards, Mode=OneWay, Converter={StaticResource AcrylicBrushConverter}}"
                                         BorderThickness="1"
                                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                         HorizontalAlignment="Stretch">
@@ -352,7 +369,8 @@
 
                             <!-- Cache usage over time -->
                             <!-- 优化：使用缓存模式，减少图表重绘时的布局计算 -->
-                            <Border Style="{StaticResource ChartContainerStyle}">
+                            <Border Style="{StaticResource ChartContainerStyle}"
+                                    Background="{x:Bind ViewModel.DisableAcrylicOnStatsCards, Mode=OneWay, Converter={StaticResource AcrylicBrushConverter}}">
                                 <StackPanel Spacing="8">
                                     <TextBlock l:Uids.Uid="MainPage_CacheUsage" FontWeight="SemiBold"/>
                                     <Canvas x:Name="CacheChartCanvas" Width="600" Height="200" Background="Transparent" CacheMode="BitmapCache"/>
@@ -360,7 +378,8 @@
                             </Border>
 
                             <!-- Network throughput -->
-                            <Border Style="{StaticResource ChartContainerStyle}">
+                            <Border Style="{StaticResource ChartContainerStyle}"
+                                    Background="{x:Bind ViewModel.DisableAcrylicOnStatsCards, Mode=OneWay, Converter={StaticResource AcrylicBrushConverter}}">
                                 <StackPanel Spacing="8">
                                     <TextBlock l:Uids.Uid="MainPage_NetworkThroughput" FontWeight="SemiBold"/>
                                     <Canvas x:Name="NetworkChartCanvas" Width="600" Height="200" Background="Transparent" CacheMode="BitmapCache"/>
@@ -368,7 +387,8 @@
                             </Border>
 
                             <!-- Activity charts -->
-                            <Border Style="{StaticResource ChartContainerStyle}">
+                            <Border Style="{StaticResource ChartContainerStyle}"
+                                    Background="{x:Bind ViewModel.DisableAcrylicOnStatsCards, Mode=OneWay, Converter={StaticResource AcrylicBrushConverter}}">
                                 <StackPanel Spacing="8">
                                     <TextBlock l:Uids.Uid="MainPage_GlobalCopyActivity" FontWeight="SemiBold"/>
                                     <Canvas x:Name="ActivityChartCanvas" Width="600" Height="200" Background="Transparent" CacheMode="BitmapCache"/>
@@ -376,7 +396,8 @@
                             </Border>
 
                             <!-- 设备连接列表 -->
-                            <Border Style="{StaticResource ChartContainerStyle}">
+                            <Border Style="{StaticResource ChartContainerStyle}"
+                                    Background="{x:Bind ViewModel.DisableAcrylicOnStatsCards, Mode=OneWay, Converter={StaticResource AcrylicBrushConverter}}">
                                 <StackPanel Spacing="8">
                                     <TextBlock l:Uids.Uid="MainPage_ConnectedDevices" FontWeight="SemiBold"/>
                                     <ListView ItemsSource="{x:Bind ViewModel.Peers, Mode=OneWay}" MaxHeight="300">
@@ -414,5 +435,39 @@
 
             </StackPanel>
         </ScrollViewer>
+
+        <!-- 复制状态浮动提示 -->
+        <Border x:Name="CopyToast"
+                VerticalAlignment="Bottom"
+                HorizontalAlignment="Center"
+                Margin="0,0,0,24"
+                Padding="16,10"
+                CornerRadius="8"
+                Opacity="0"
+                IsHitTestVisible="False"
+                Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                Translation="0,0,32">
+            <!-- Toast 保持亚克力，不随性能设置变化 -->
+            <Border.Shadow>
+                <ThemeShadow/>
+            </Border.Shadow>
+            <Border.OpacityTransition>
+                <ScalarTransition Duration="0:0:0.25"/>
+            </Border.OpacityTransition>
+            <Border.TranslationTransition>
+                <Vector3Transition Duration="0:0:0.25"/>
+            </Border.TranslationTransition>
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <FontIcon x:Name="CopyToastIcon"
+                          Glyph="&#xE73E;"
+                          FontSize="14"/>
+                <TextBlock x:Name="CopyToastText"
+                           Text="{x:Bind ViewModel.CopyStatusMessage, Mode=OneWay}"
+                           VerticalAlignment="Center"
+                           FontSize="13"/>
+            </StackPanel>
+        </Border>
     </Grid>
 </Page>

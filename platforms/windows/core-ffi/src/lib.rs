@@ -505,6 +505,52 @@ pub extern "C" fn cb_get_item_meta(h: *mut cb_handle, item_id_json: *const c_cha
 	}
 }
 
+#[no_mangle]
+pub extern "C" fn cb_delete_item_local(h: *mut cb_handle, item_id_json: *const c_char) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let hh = unsafe { &mut *h };
+		let json_str = crate::cstr_to_str(item_id_json)?;
+		let item_id = if let Ok(s) = serde_json::from_str::<String>(json_str) {
+			s
+		} else {
+			#[derive(serde::Deserialize)]
+			struct IdObj { item_id: String }
+			let obj: IdObj = serde_json::from_str(json_str).context("invalid item_id json")?;
+			obj.item_id
+		};
+		hh.core.delete_item_local(&item_id)?;
+		Ok(crate::error::ok_json(true))
+	})();
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("DELETE_ITEM_FAILED", &format!("{e:#}"))),
+	}
+}
+
+#[no_mangle]
+pub extern "C" fn cb_delete_item_global(h: *mut cb_handle, item_id_json: *const c_char) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() { anyhow::bail!("null handle"); }
+		let hh = unsafe { &mut *h };
+		let json_str = crate::cstr_to_str(item_id_json)?;
+		let item_id = if let Ok(s) = serde_json::from_str::<String>(json_str) {
+			s
+		} else {
+			#[derive(serde::Deserialize)]
+			struct IdObj { item_id: String }
+			let obj: IdObj = serde_json::from_str(json_str).context("invalid item_id json")?;
+			obj.item_id
+		};
+		hh.core.delete_item_global(&item_id)?;
+		Ok(crate::error::ok_json(true))
+	})();
+	match run {
+		Ok(s) => crate::ret(s),
+		Err(e) => crate::ret(crate::error::err_json("DELETE_ITEM_FAILED", &format!("{e:#}"))),
+	}
+}
+
 /// 写入日志（多语言版本）
 #[no_mangle]
 pub extern "C" fn cb_logs_write(

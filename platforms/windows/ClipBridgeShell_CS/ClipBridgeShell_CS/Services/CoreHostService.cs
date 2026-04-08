@@ -841,4 +841,18 @@ public sealed class CoreHostService : ICoreHostService
         }
     }
 
+    public Task DeleteItemLocalAsync(string itemId)
+    {
+        if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
+            throw new InvalidOperationException("Core is not ready");
+        return Task.Run(() => CoreInterop.DeleteItemLocal(_coreHandle, itemId));
+    }
+
+    public Task DeleteItemGlobalAsync(string itemId)
+    {
+        if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
+            throw new InvalidOperationException("Core is not ready");
+        return Task.Run(() => CoreInterop.DeleteItemGlobal(_coreHandle, itemId));
+    }
+
 }

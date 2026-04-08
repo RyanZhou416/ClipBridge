@@ -58,6 +58,8 @@ pub enum SessionCmd {
     CancelTransfer {
         transfer_id: String,
     },
+    /// 发送删除：向对端发送 ItemDelete
+    SendDelete { item_id: String },
 }
 
 /// Session 对外暴露的句柄 (线程安全)

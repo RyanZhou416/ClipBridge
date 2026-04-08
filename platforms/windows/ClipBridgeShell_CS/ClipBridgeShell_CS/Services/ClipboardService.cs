@@ -11,40 +11,71 @@ namespace ClipBridgeShell_CS.Services;
 public sealed class ClipboardService : IClipboardService
 {
     public event EventHandler? ContentChanged;
+    public event EventHandler<bool>? ClipboardLockChanged;
     private readonly ICoreHostService _coreHostService;
-    // 记录最后一次由本应用写入内容的指纹
     public string? LastWriteFingerprint { get; private set; }
+
+    private string? _lockedText;
+    private bool _isRestoringLock;
+    public bool IsClipboardLocked => _lockedText != null;
+    public string? LockedItemId { get; private set; }
 
     public ClipboardService(ICoreHostService coreHostService)
     {
-        // 订阅系统剪贴板事件并转发
         Clipboard.ContentChanged += OnClipboardContentChanged;
         _coreHostService = coreHostService;
     }
-    /// <summary>
-    /// 系统剪贴板内容变化回调
-    /// </summary>
+
+    public void LockClipboard(string text, string itemId)
+    {
+        _lockedText = text;
+        LockedItemId = itemId;
+        ClipboardLockChanged?.Invoke(this, true);
+    }
+
+    public void UnlockClipboard()
+    {
+        _lockedText = null;
+        LockedItemId = null;
+        ClipboardLockChanged?.Invoke(this, false);
+    }
+
     private async void OnClipboardContentChanged(object? sender, object e)
     {
         try
         {
-            // 1. 获取最新快照
-            var snapshot = await GetSnapshotAsync();
-            if (snapshot == null)
-                return;
+            if (_isRestoringLock) return;
 
-            // 2. 防循环检查：如果指纹和最后一次写入的一致，说明是自己写的，忽略
+            var snapshot = await GetSnapshotAsync();
+            if (snapshot == null) return;
+
             if (!string.IsNullOrEmpty(LastWriteFingerprint) && snapshot.Fingerprint == LastWriteFingerprint)
             {
                 System.Diagnostics.Debug.WriteLine("[Watcher] Ignored self-copy.");
                 return;
             }
 
-            // 3. 调用 CoreHostService 写入数据库
+            // Ingest to core regardless of lock state (record & share new content)
             await _coreHostService.IngestLocalCopyAsync(snapshot);
-
-            // 4. 触发内部事件（如果有其他 UI 监听）
             ContentChanged?.Invoke(this, EventArgs.Empty);
+
+            // If locked, restore locked content after ingestion
+            if (_lockedText != null)
+            {
+                var lockedFingerprint = ComputeHash(_lockedText);
+                if (snapshot.Fingerprint != lockedFingerprint)
+                {
+                    _isRestoringLock = true;
+                    try
+                    {
+                        await SetTextAsync(_lockedText);
+                    }
+                    finally
+                    {
+                        _isRestoringLock = false;
+                    }
+                }
+            }
         } catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[Watcher] Process clipboard change failed: {ex.Message}");

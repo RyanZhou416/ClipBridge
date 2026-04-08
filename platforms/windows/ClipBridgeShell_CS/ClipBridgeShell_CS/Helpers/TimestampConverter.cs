@@ -11,8 +11,9 @@ public class TimestampConverter : IValueConverter
         {
             try
             {
-                var dateTime = DateTimeOffset.FromUnixTimeMilliseconds(timestamp);
-                return dateTime.ToString("yyyy-MM-dd HH:mm:ss");
+                // 存储为 UTC（Unix 毫秒），显示时转为用户本地时间（含时区与冬/夏令时）
+                var utc = DateTimeOffset.FromUnixTimeMilliseconds(timestamp);
+                return utc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
             }
             catch
             {

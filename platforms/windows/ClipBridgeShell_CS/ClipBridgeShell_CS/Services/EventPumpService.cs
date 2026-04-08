@@ -243,6 +243,15 @@ public class EventPumpService
                     break;
                 }
 
+            // --- 删除项（本地或全局删除后 Core 发出）
+            case "ITEM_DELETED":
+                {
+                    var itemId = root.TryGetProperty("item_id", out var iidEl) ? iidEl.GetString() : null;
+                    if (!string.IsNullOrEmpty(itemId))
+                        _historyStore.RemoveByItemId(itemId);
+                    break;
+                }
+
             // --- 日志写入事件
             case "LOG_WRITTEN":
             case "LOGS_BATCH_WRITTEN":

@@ -1,15 +1,28 @@
+using System.Runtime.InteropServices;
+
+using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Helpers;
+using ClipBridgeShell_CS.Services;
+
+using Microsoft.UI.Windowing;
 
 using Windows.UI.ViewManagement;
+
 using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS;
 
 public sealed partial class MainWindow : WindowEx
 {
-    private Microsoft.UI.Dispatching.DispatcherQueue dispatcherQueue;
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
+    private const uint WM_NCMOUSELEAVE = 0x02A2;
+
+    private Microsoft.UI.Dispatching.DispatcherQueue dispatcherQueue;
     private UISettings settings;
+    private bool _closeHintShown;
 
     public MainWindow()
     {
@@ -18,40 +31,71 @@ public sealed partial class MainWindow : WindowEx
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets/WindowIcon.ico"));
         Content = null;
         var loc = Localizer.Get();
-        Title = loc.GetLocalizedString("AppDisplayName");   // 对应 Resources.resw -> AppDisplayName.Text/Content 等
+        Title = loc.GetLocalizedString("AppDisplayName");
 
-        // 确保启用硬件加速
-        // WinUI 3 默认使用硬件加速，但某些情况下可能回退到软件渲染
-        // 通过设置 CompositionTarget 相关属性来确保使用硬件加速
         try
         {
-            // 检查并设置 DPI awareness，这有助于硬件加速
-            // WinUI 3 会自动处理，但我们可以显式设置以确保最佳性能
-            var presenter = AppWindow.Presenter as Microsoft.UI.Windowing.OverlappedPresenter;
+            var presenter = AppWindow.Presenter as OverlappedPresenter;
             if (presenter != null)
             {
-                // 确保窗口使用硬件加速的合成
                 presenter.IsMaximizable = true;
                 presenter.IsMinimizable = true;
             }
         }
         catch
         {
-            // 忽略设置失败
         }
 
-        // Theme change code picked from https://github.com/microsoft/WinUI-Gallery/pull/1239
         dispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         settings = new UISettings();
-        settings.ColorValuesChanged += Settings_ColorValuesChanged; // cannot use FrameworkElement.ActualThemeChanged event
+        settings.ColorValuesChanged += Settings_ColorValuesChanged;
 
+        AppWindow.Closing += AppWindow_Closing;
     }
 
-    // this handles updating the caption button colors correctly when indows system theme is changed
-    // while the app is open
+    private async void AppWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        args.Cancel = true;
+
+        var settingsService = App.GetService<ILocalSettingsService>();
+        var closeBehavior = await settingsService.ReadSettingAsync<string>("CloseBehavior");
+
+        if (closeBehavior == "ExitApp")
+        {
+            await AppLifecycleHelper.GracefulShutdownAsync();
+            return;
+        }
+
+        // 清除标题栏按钮的悬浮状态，然后直接隐藏窗口
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        PostMessageW(hwnd, WM_NCMOUSELEAVE, IntPtr.Zero, IntPtr.Zero);
+        this.Hide();
+
+        if (!_closeHintShown)
+        {
+            var showHint = await settingsService.ReadSettingAsync<bool?>("ShowFirstCloseHint") ?? true;
+            if (showHint)
+            {
+                _closeHintShown = true;
+                var tray = App.GetService<TrayService>();
+                var loc = Localizer.Get();
+
+                var title = loc.GetLocalizedString("Tray_MinimizedHint_Title");
+                if (string.IsNullOrEmpty(title) || title == "Tray_MinimizedHint_Title")
+                    title = "ClipBridge is running";
+
+                var content = loc.GetLocalizedString("Tray_MinimizedHint_Content");
+                if (string.IsNullOrEmpty(content) || content == "Tray_MinimizedHint_Content")
+                    content = "ClipBridge has been minimized to the system tray.";
+
+                tray.ShowBalloonTip(title, content);
+                await settingsService.SaveSettingAsync("ShowFirstCloseHint", false);
+            }
+        }
+    }
+
     private void Settings_ColorValuesChanged(UISettings sender, object args)
     {
-        // This calls comes off-thread, hence we will need to dispatch it to current app's thread
         dispatcherQueue.TryEnqueue(() =>
         {
             TitleBarHelper.ApplySystemThemeToCaptionButtons();

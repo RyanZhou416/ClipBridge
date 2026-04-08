@@ -488,11 +488,26 @@
   <data name="MainPage_NoPreview.Text" xml:space="preserve">
     <value>（无预览）</value>
   </data>
-  <data name="MainPage_LockButton.Content" xml:space="preserve">
-    <value>锁定</value>
+  <data name="Main_ItemRemoved" xml:space="preserve">
+    <value>已从最近列表移除</value>
   </data>
-  <data name="MainPage_DeleteButton.Content" xml:space="preserve">
+  <data name="Main_ItemDeleted" xml:space="preserve">
+    <value>已删除</value>
+  </data>
+  <data name="Main_ItemDeletedGlobal" xml:space="preserve">
+    <value>已从所有设备删除</value>
+  </data>
+  <data name="Main_DeleteFailed" xml:space="preserve">
+    <value>删除失败</value>
+  </data>
+  <data name="Main_ContextMenu_Delete.Text" xml:space="preserve">
     <value>删除</value>
+  </data>
+  <data name="Main_ContextMenu_DeleteLocal" xml:space="preserve">
+    <value>本地删除</value>
+  </data>
+  <data name="Main_ContextMenu_GlobalDelete" xml:space="preserve">
+    <value>全局删除</value>
   </data>
   <data name="HistoryPage_SearchBox.PlaceholderText" xml:space="preserve">
     <value>搜索历史记录...</value>
@@ -517,6 +532,9 @@
   </data>
   <data name="HistoryPage_CopyButton.Content" xml:space="preserve">
     <value>复制</value>
+  </data>
+  <data name="HistoryPage_MoreButton.ToolTip" xml:space="preserve">
+    <value>更多</value>
   </data>
   <data name="ShellPage_CoreUnavailable.Title" xml:space="preserve">
     <value>核心不可用</value>
@@ -769,5 +787,95 @@
   </data>
   <data name="Startup_LoginRequired_PrimaryButton" xml:space="preserve">
     <value>前往登录</value>
+  </data>
+  <data name="Settings_General.Text" xml:space="preserve">
+    <value>通用</value>
+  </data>
+  <data name="Settings_Performance.Text" xml:space="preserve">
+    <value>性能</value>
+  </data>
+  <data name="Settings_Performance_EnableAcrylicOnCards_SettingsCard.Header" xml:space="preserve">
+    <value>首页卡片亚克力效果</value>
+  </data>
+  <data name="Settings_Performance_EnableAcrylicOnCards_SettingsCard.Description" xml:space="preserve">
+    <value>开启首页最近条目卡片的亚克力背景</value>
+  </data>
+  <data name="Settings_Performance_EnableAcrylicOnStatsCards_SettingsCard.Header" xml:space="preserve">
+    <value>首页统计卡片亚克力效果</value>
+  </data>
+  <data name="Settings_Performance_EnableAcrylicOnStatsCards_SettingsCard.Description" xml:space="preserve">
+    <value>开启首页统计与图表卡片的亚克力背景</value>
+  </data>
+  <data name="Settings_CloseBehavior_SettingsCard.Header" xml:space="preserve">
+    <value>关闭按钮行为</value>
+  </data>
+  <data name="Settings_CloseBehavior_SettingsCard.Description" xml:space="preserve">
+    <value>选择关闭窗口时的行为</value>
+  </data>
+  <data name="Settings_CloseBehavior_MinimizeToTray" xml:space="preserve">
+    <value>最小化到托盘</value>
+  </data>
+  <data name="Settings_CloseBehavior_ExitApp" xml:space="preserve">
+    <value>退出应用</value>
+  </data>
+  <data name="Settings_Startup_SettingsCard.Header" xml:space="preserve">
+    <value>自启到托盘</value>
+  </data>
+  <data name="Settings_Startup_SettingsCard.Description" xml:space="preserve">
+    <value>登录时自动启动并最小化到系统托盘</value>
+  </data>
+  <data name="Settings_Startup_ToggleSwitch.OnContent" xml:space="preserve">
+    <value>已启用</value>
+  </data>
+  <data name="Settings_Startup_ToggleSwitch.OffContent" xml:space="preserve">
+    <value>已关闭</value>
+  </data>
+  <data name="Settings_Startup_DisabledByUser" xml:space="preserve">
+    <value>当前方式已被系统禁用。请在任务管理器 &gt; 启动 中启用，或在下方切换其他自启方式</value>
+  </data>
+  <data name="Settings_StartupMethod_SettingsCard.Header" xml:space="preserve">
+    <value>自启方式</value>
+  </data>
+  <data name="Settings_StartupMethod_SettingsCard.Description" xml:space="preserve">
+    <value>选择 ClipBridge 自动启动的方式</value>
+  </data>
+  <data name="Settings_StartupMethod_Registry" xml:space="preserve">
+    <value>注册表启动项</value>
+  </data>
+  <data name="Settings_StartupMethod_ScheduledTask" xml:space="preserve">
+    <value>计划任务</value>
+  </data>
+  <data name="Settings_StartupMethod_MsixStartupTask" xml:space="preserve">
+    <value>应用启动任务 (MSIX)</value>
+  </data>
+  <data name="Tray_ShowWindow" xml:space="preserve">
+    <value>显示主窗口</value>
+  </data>
+  <data name="Tray_Exit" xml:space="preserve">
+    <value>退出</value>
+  </data>
+  <data name="Tray_MinimizedHint_Title" xml:space="preserve">
+    <value>ClipBridge 正在运行</value>
+  </data>
+  <data name="Tray_MinimizedHint_Content" xml:space="preserve">
+    <value>ClipBridge 已最小化到系统托盘。</value>
+  </data>
+  <data name="Main_CopySuccess" xml:space="preserve">
+    <value>已复制到剪贴板</value>
+  </data>
+  <data name="Main_CopyFailed" xml:space="preserve">
+    <value>复制内容失败</value>
+  </data>
+  <data name="Main_ClipboardLocked" xml:space="preserve">
+    <value>剪贴板已锁定</value>
+  </data>
+  <data name="Main_ClipboardUnlocked" xml:space="preserve">
+    <value>剪贴板已解锁</value>
+  </data>
+  <data name="Main_LockFailed" xml:space="preserve">
+    <value>锁定剪贴板失败</value>
+  </data>
+  <data name="Main_ClipboardIsLocked" xml:space="preserve">
+    <value>剪贴板已锁定，请先解锁</value>
   </data>
 </root>

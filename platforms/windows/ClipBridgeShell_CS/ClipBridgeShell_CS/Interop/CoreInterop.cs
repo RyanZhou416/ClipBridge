@@ -136,6 +136,14 @@ internal static class CoreInterop
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr cb_get_item_meta(IntPtr h, [MarshalAs(UnmanagedType.LPUTF8Str)] string item_id_json);
 
+    // CB_API const char* cb_delete_item_local(cb_handle* h, const char* item_id_json);
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr cb_delete_item_local(IntPtr h, [MarshalAs(UnmanagedType.LPUTF8Str)] string item_id_json);
+
+    // CB_API const char* cb_delete_item_global(cb_handle* h, const char* item_id_json);
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr cb_delete_item_global(IntPtr h, [MarshalAs(UnmanagedType.LPUTF8Str)] string item_id_json);
+
     // 统计查询接口
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr cb_query_cache_stats(IntPtr h, [MarshalAs(UnmanagedType.LPUTF8Str)] string query_json);
@@ -580,6 +588,42 @@ internal static class CoreInterop
         {
             System.Diagnostics.Debug.WriteLine($"ListHistory parsing failed: {ex}");
             return new();
+        }
+    }
+
+    /// <summary>
+    /// 本地删除：软删除 + 从 CAS 移除 blob，并发出 item_deleted 事件
+    /// </summary>
+    public static void DeleteItemLocal(IntPtr handle, string itemId)
+    {
+        if (handle == IntPtr.Zero)
+            throw new InvalidOperationException("Core not initialized");
+        var itemIdJson = JsonSerializer.Serialize(new { item_id = itemId }, _jsonOpts);
+        var ptr = cb_delete_item_local(handle, itemIdJson);
+        var result = PtrToStringAndFree(ptr);
+        using var doc = JsonDocument.Parse(result);
+        if (!doc.RootElement.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
+        {
+            var errMsg = doc.RootElement.TryGetProperty("error", out var err) && err.TryGetProperty("message", out var msg) ? msg.GetString() ?? "Unknown" : "Unknown";
+            throw new Exception($"DeleteItemLocal failed: {errMsg}");
+        }
+    }
+
+    /// <summary>
+    /// 全局删除：与本地删除相同，并广播给所有连接的设备
+    /// </summary>
+    public static void DeleteItemGlobal(IntPtr handle, string itemId)
+    {
+        if (handle == IntPtr.Zero)
+            throw new InvalidOperationException("Core not initialized");
+        var itemIdJson = JsonSerializer.Serialize(new { item_id = itemId }, _jsonOpts);
+        var ptr = cb_delete_item_global(handle, itemIdJson);
+        var result = PtrToStringAndFree(ptr);
+        using var doc = JsonDocument.Parse(result);
+        if (!doc.RootElement.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
+        {
+            var errMsg = doc.RootElement.TryGetProperty("error", out var err) && err.TryGetProperty("message", out var msg) ? msg.GetString() ?? "Unknown" : "Unknown";
+            throw new Exception($"DeleteItemGlobal failed: {errMsg}");
         }
     }
 

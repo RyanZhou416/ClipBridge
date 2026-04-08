@@ -62,6 +62,9 @@ pub enum NetCmd {
     CancelTransfer {
         transfer_id: String,
     },
+
+    /// 广播删除：从所有设备删除指定 item
+    BroadcastDelete { item_id: String },
 }
 
 impl NetManager {
@@ -213,6 +216,11 @@ impl NetManager {
                                 let _ = s.cmd_tx.send(SessionCmd::CancelTransfer { transfer_id: transfer_id.clone() }).await;
                             }
                         }
+
+                        Some(NetCmd::BroadcastDelete { item_id }) => {
+                            self.broadcast_delete(item_id).await;
+                        }
+
                         None => break,
                     }
                 }
@@ -467,6 +475,23 @@ impl NetManager {
         for session in &self.sessions {
             if session.is_online() {
                 let _ = session.cmd_tx.send(SessionCmd::SendMeta(meta.clone())).await;
+            }
+        }
+    }
+
+    async fn broadcast_delete(&self, item_id: String) {
+        let online_count = self.sessions.iter().filter(|s| s.is_online()).count();
+        let mut log_store = self.log_store.lock().unwrap();
+        let _ = log_store.log_info(
+            "Network",
+            &format!("Broadcasting delete to {} online peers: item_id={}", online_count, item_id),
+            Some(&format!("正在向 {} 个在线对等设备广播删除: 项目ID={}", online_count, item_id)),
+        );
+        drop(log_store);
+
+        for session in &self.sessions {
+            if session.is_online() {
+                let _ = session.cmd_tx.send(SessionCmd::SendDelete { item_id: item_id.clone() }).await;
             }
         }
     }

@@ -11,13 +11,13 @@ public class HistoryIncrementalCollection : ObservableCollection<ItemMetaPayload
 {
     private readonly ICoreHostService _coreService;
 
-    // 状态管理
-    private long? _currentCursor = null; // 上一页最后一条的 sort_ts_ms
+    private long? _currentCursor = null;
     private bool _hasMoreItems = true;
     private bool _isLoading = false;
     private HistoryFilter? _activeFilter = null;
 
-    // ISupportIncrementalLoading 接口属性
+    public string? PinnedItemId { get; set; }
+
     public bool HasMoreItems => _hasMoreItems;
 
     public HistoryIncrementalCollection(ICoreHostService coreService)
@@ -54,10 +54,10 @@ public class HistoryIncrementalCollection : ObservableCollection<ItemMetaPayload
                 // 2. 调用 Core API (我们在第一步封装的方法)
                 var page = await _coreService.ListHistoryAsync(query);
 
-                // 3. 将新数据加入集合
-                // 注意：ObservableCollection 会自动触发 UI 更新
                 foreach (var item in page.Items)
                 {
+                    if (!string.IsNullOrEmpty(PinnedItemId) && item.ItemId == PinnedItemId)
+                        continue;
                     Add(item);
                 }
 
@@ -83,9 +83,6 @@ public class HistoryIncrementalCollection : ObservableCollection<ItemMetaPayload
         });
     }
 
-    /// <summary>
-    /// 重置列表（用于刷新或改变搜索条件时）
-    /// </summary>
     public void Refresh(HistoryFilter? newFilter = null)
     {
         if (newFilter != null)
@@ -93,15 +90,24 @@ public class HistoryIncrementalCollection : ObservableCollection<ItemMetaPayload
             _activeFilter = newFilter;
         }
 
-        // 清空当前数据，这会触发 UI 清空
         Clear();
 
-        // 重置游标
         _currentCursor = null;
         _hasMoreItems = true;
         _isLoading = false;
 
-        // 注意：这里不需要手动调 LoadMoreItemsAsync。
-        // 因为 Clear() 后 ListView 变空，只要 HasMoreItems=true，UI 布局会自动触发 LoadMoreItemsAsync。
+        // Insert pinned item at position 0 before incremental loading starts
+        if (_pinnedItem != null)
+        {
+            Add(_pinnedItem);
+        }
+    }
+
+    private ItemMetaPayload? _pinnedItem;
+
+    public void SetPinnedItem(ItemMetaPayload? item)
+    {
+        _pinnedItem = item;
+        PinnedItemId = item?.ItemId;
     }
 }

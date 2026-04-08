@@ -65,6 +65,10 @@ CB_API const char* cb_list_history(cb_handle* h, const char* query_json);
 // 查询单条元数据
 CB_API const char* cb_get_item_meta(cb_handle* h, const char* item_id_json);
 
+// 删除项（本地 / 全局）
+CB_API const char* cb_delete_item_local(cb_handle* h, const char* item_id_json);
+CB_API const char* cb_delete_item_global(cb_handle* h, const char* item_id_json);
+
 // 日志系统
 CB_API int cb_logs_write(cb_handle* h, int level, const char* component, const char* category, const char* message_en, const char* message_zh_cn, const char* exception, const char* props_json, long long ts_utc, long long* out_id);
 CB_API int cb_logs_query_latest(cb_handle* h, int level_min, const char* like, int limit, const char* lang, const char** out_json);

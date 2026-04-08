@@ -470,6 +470,15 @@ pub fn insert_meta_and_history(
         Ok((after - before) as i64)
     }
 
+    /// 软删除指定 item 的 history 记录
+    pub fn soft_delete_item(&mut self, account_uid: &str, item_id: &str) -> anyhow::Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE history SET is_deleted=1 WHERE account_uid=?1 AND item_id=?2",
+            params![account_uid, item_id],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Cache GC：挑 LRU（present=1）最旧的若干条
     pub fn select_lru_present(&self, limit: i64) -> anyhow::Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(

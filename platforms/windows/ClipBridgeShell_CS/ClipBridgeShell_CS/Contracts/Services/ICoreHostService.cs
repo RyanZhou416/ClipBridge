@@ -28,4 +28,7 @@ public interface ICoreHostService
     void SetPeerPolicy(string peerId, bool? shareTo, bool? acceptFrom);
     void ClearPeerFingerprint(string peerId);
     void ClearLocalCert();
+
+    Task DeleteItemLocalAsync(string itemId);
+    Task DeleteItemGlobalAsync(string itemId);
 }
