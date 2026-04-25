@@ -141,3 +141,13 @@ captures/
 /ClipBridge_code_context.txt
 code_context_*.txt
 报错*.txt
+
+# macOS / Xcode / SwiftPM
+platforms/macos/ClipBridgeShell_macOS/.build/
+platforms/macos/ClipBridgeShell_macOS/.swiftpm/
+DerivedData/
+**/xcuserdata/
+**/*.xcuserstate
+
+# Local Air IDE config
+.air/

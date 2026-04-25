@@ -22,6 +22,14 @@ struct ContentView: View {
                     .fontWeight(.semibold)
             }
 
+            if let abi = coreHost.ffiABIVersion, !abi.isEmpty {
+                HStack(spacing: 8) {
+                    Text("FFI ABI:")
+                    Text(abi)
+                        .fontWeight(.semibold)
+                }
+            }
+
             if let status = coreHost.lastStatusJSON, !status.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Status JSON:")
@@ -38,6 +46,22 @@ struct ContentView: View {
 
             if let event = coreHost.lastEventJSON, !event.isEmpty {
                 Text("Last Event: \(event)")
+                    .font(.footnote)
+            }
+
+            if let eventType = coreHost.lastEventType, !eventType.isEmpty {
+                Text("Last Event Type: \(eventType)")
+                    .font(.footnote)
+            }
+
+            if let payload = coreHost.lastEventPayloadJSON, !payload.isEmpty {
+                Text("Last Event Payload: \(payload)")
+                    .font(.footnote)
+            }
+
+            if let parseError = coreHost.lastEventParseError, !parseError.isEmpty {
+                Text("Event Parse Error: \(parseError)")
+                    .foregroundStyle(.orange)
                     .font(.footnote)
             }
 

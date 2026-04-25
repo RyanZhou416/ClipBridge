@@ -77,6 +77,8 @@ CB_API int cb_logs_query_before_id(cb_handle* h, long long before_id, int level_
 CB_API int cb_logs_query_range(cb_handle* h, long long start_ms, long long end_ms, int level_min, const char* like, int limit, int offset, const char* lang, const char** out_json);
 CB_API int cb_logs_stats(cb_handle* h, const char** out_json);
 CB_API int cb_logs_delete_before(cb_handle* h, long long cutoff_ms, long long* out_deleted);
+CB_API int cb_logs_delete_by_ids(cb_handle* h, const char* ids_json, long long* out_deleted);
+CB_API int cb_logs_source_stats(cb_handle* h, const char** out_json);
 
 // 数据库清空
 CB_API const char* cb_clear_core_db(cb_handle* h);
@@ -88,6 +90,9 @@ CB_API const char* cb_clear_cache(cb_handle* h);
 CB_API const char* cb_query_cache_stats(cb_handle* h, const char* query_json);
 CB_API const char* cb_query_net_stats(cb_handle* h, const char* query_json);
 CB_API const char* cb_query_activity_stats(cb_handle* h, const char* query_json);
+
+// FFI ABI 版本（major/minor）
+CB_API void cb_get_ffi_version(uint32_t* out_major, uint32_t* out_minor);
 
 #ifdef __cplusplus
 }

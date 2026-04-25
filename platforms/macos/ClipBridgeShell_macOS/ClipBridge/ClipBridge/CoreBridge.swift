@@ -35,11 +35,17 @@ private struct ErrorBody: Decodable {
     let message: String
 }
 
+struct CoreFFIVersion {
+    let major: UInt32
+    let minor: UInt32
+}
+
 private typealias CbOnEventFn = @convention(c) (_ json: UnsafePointer<CChar>?, _ userData: UnsafeMutableRawPointer?) -> Void
 private typealias CbInitFn = @convention(c) (_ cfgJSON: UnsafePointer<CChar>?, _ onEvent: CbOnEventFn?, _ userData: UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
 private typealias CbGetStatusFn = @convention(c) (_ handle: UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
 private typealias CbShutdownFn = @convention(c) (_ handle: UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
 private typealias CbFreeStringFn = @convention(c) (_ ptr: UnsafePointer<CChar>?) -> Void
+private typealias CbGetFFIVersionFn = @convention(c) (_ major: UnsafeMutablePointer<UInt32>?, _ minor: UnsafeMutablePointer<UInt32>?) -> Void
 
 @MainActor
 final class CoreBridge {
@@ -53,6 +59,7 @@ final class CoreBridge {
     private var cbGetStatus: CbGetStatusFn?
     private var cbShutdown: CbShutdownFn?
     private var cbFreeString: CbFreeStringFn?
+    private var cbGetFFIVersion: CbGetFFIVersionFn?
 
     private init() {}
 
@@ -129,8 +136,19 @@ final class CoreBridge {
         releaseEventHandlerIfNeeded()
     }
 
+    func getFFIVersion() throws -> CoreFFIVersion {
+        if !isSymbolsLoaded {
+            try loadSymbols()
+        }
+        guard let cbGetFFIVersion else { throw CoreBridgeError.symbolMissing("cb_get_ffi_version") }
+        var major: UInt32 = 0
+        var minor: UInt32 = 0
+        cbGetFFIVersion(&major, &minor)
+        return CoreFFIVersion(major: major, minor: minor)
+    }
+
     private var isSymbolsLoaded: Bool {
-        cbInit != nil && cbGetStatus != nil && cbShutdown != nil && cbFreeString != nil
+        cbInit != nil && cbGetStatus != nil && cbShutdown != nil && cbFreeString != nil && cbGetFFIVersion != nil
     }
 
     private func loadSymbols() throws {
@@ -145,6 +163,7 @@ final class CoreBridge {
                     cbGetStatus = try loadSymbol(handle: h, name: "cb_get_status", as: CbGetStatusFn.self)
                     cbShutdown = try loadSymbol(handle: h, name: "cb_shutdown", as: CbShutdownFn.self)
                     cbFreeString = try loadSymbol(handle: h, name: "cb_free_string", as: CbFreeStringFn.self)
+                    cbGetFFIVersion = try loadSymbol(handle: h, name: "cb_get_ffi_version", as: CbGetFFIVersionFn.self)
                     return
                 } catch {
                     dlclose(h)
@@ -179,6 +198,9 @@ final class CoreBridge {
         if let execURL = Bundle.main.executableURL?.deletingLastPathComponent() {
             out.append(execURL.appendingPathComponent("libcore_ffi_macos.dylib").path)
             out.append(execURL.appendingPathComponent("../Frameworks/libcore_ffi_macos.dylib").path)
+        }
+        if let fwURL = Bundle.main.privateFrameworksURL {
+            out.append(fwURL.appendingPathComponent("libcore_ffi_macos.dylib").path)
         }
 
         var dedup: [String] = []

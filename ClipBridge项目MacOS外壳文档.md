@@ -153,6 +153,27 @@ Shell 内部定义 `CoreResult<T>`：
 * `ok=true` 解码为 `T`
 * `ok=false` 转为 `CoreError(code, message)`
 
+### 4.2.1 冻结口径（对齐 Windows，2026-04-25）
+
+macOS 端协议冻结为与 Windows 当前实现一致：
+
+* `cb_init(const char* cfg_json, cb_on_event_fn on_event, void* user_data)` 返回  
+  `{"ok":true,"data":{"handle":<usize整数>}}`
+* 所有 `const char*` 返回 API 使用统一 envelope：
+  * 成功：`{"ok":true,"data":...}`
+  * 失败：`{"ok":false,"error":{"code":"...","message":"..."}}`
+* 事件最小稳定形状：`{"type":"...","payload":{...}}`
+  * `payload` 可为空/缺省
+  * 必须忽略未知 `type` 与未知字段
+* `cb_get_ffi_version(out_major, out_minor)` 作为 ABI 诊断探针，初始化时记录版本。
+
+权威来源以代码为准：
+
+* `platforms/macos/core-ffi/src/lib.rs`
+* `platforms/windows/core-ffi/src/lib.rs`
+* `platforms/macos/include/clipbridge_core.h`
+* `platforms/windows/include/clipbridge_core.h`
+
 ### 4.3 内存管理约束
 
 * 所有 C 返回字符串必须由 `cb_free_string` 释放
@@ -575,4 +596,3 @@ Watcher 命中短窗口时直接拒绝 ingest。
 2. 建立 Xcode 工程骨架与 `CoreBridge` 空实现。  
 3. 优先打通 `cb_init -> cb_get_status -> cb_shutdown` 三步闭环。  
 4. 再推进 Watcher/QuickPaste 与 Lazy Fetch。
-

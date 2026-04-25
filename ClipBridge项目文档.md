@@ -2902,6 +2902,45 @@ v1 至少需要管理 3 类版本：
 
 > 设计原则：FFI 只做封送，不写业务逻辑；业务逻辑必须留在 `cb_core`（见 4.3）。
 
+### 4.8.0 2026-04-25 冻结基线（Windows/macOS 对齐）
+
+本小节用于“实现收敛”，优先级高于本章其他历史描述；以仓库内代码为准：
+
+- Rust 导出：`platforms/windows/core-ffi/src/lib.rs`、`platforms/macos/core-ffi/src/lib.rs`
+- C 头文件：`platforms/windows/include/clipbridge_core.h`、`platforms/macos/include/clipbridge_core.h`
+
+冻结口径如下。
+
+1) `cb_init` 与 handle 交付
+
+- 函数签名固定为：`cb_init(const char* cfg_json, cb_on_event_fn on_event, void* user_data)`
+- 返回统一 envelope，成功时为：
+  - `{"ok":true,"data":{"handle":<usize整数>}}`
+- Shell 必须把 `data.handle` 当作进程内不透明指针回传给后续 `cb_*`；不得持久化、不得跨进程。
+
+2) 同步返回 envelope
+
+- `const char*` 返回值的 API，一律返回：
+  - 成功：`{"ok":true,"data":...}`
+  - 失败：`{"ok":false,"error":{"code":"...","message":"..."}}`
+- 当前实现只保证 `error.code` 与 `error.message` 必有；`scope/retryable` 可选，不得作为壳侧必填依赖。
+
+3) 事件 envelope（Core -> Shell）
+
+- 最小稳定结构：`{"type":"...","payload":{...}}`
+- `payload` 可为空/缺省；壳侧必须按 `type` 分发并容忍字段缺失。
+- 壳侧必须忽略未知事件类型与未知字段，保证前向兼容。
+
+4) 内存与线程
+
+- 所有 `const char*` 返回值都必须由 `cb_free_string` 释放。
+- 回调 `on_event(json, user_data)` 中 `json` 仅在回调期间有效，壳侧必须立即拷贝。
+
+5) 版本探针
+
+- ABI 版本函数固定存在：`cb_get_ffi_version(uint32_t* out_major, uint32_t* out_minor)`。
+- 壳侧可在初始化后记录版本用于诊断；major 不一致视为不兼容。
+
 ---
 
 ### 4.8.1 ABI 版本与兼容策略
@@ -6043,4 +6082,3 @@ ClipBridge 使用 **cargo-deny** 进行供应链检查：
 * 一切网络/安全/策略权威逻辑仍在 Core，不下沉到 macOS Shell
 
 ---
-
