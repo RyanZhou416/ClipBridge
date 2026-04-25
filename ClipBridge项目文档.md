@@ -637,6 +637,7 @@ ClipBridge 将“连接”分为两层抽象：
 - **核心**：Rust
 - **Windows 外壳**：C# + WinUI 3（C#/WinRT），必要处使用 Win32 API
 - **Android 外壳**：Java（UI 设计器），JNI 连接 Rust（后做）
+- **macOS 外壳**：Swift + SwiftUI（界面）+ AppKit（系统集成），通过 C ABI 连接 Rust Core（后续实现）
 
 ## 3.2 Core ↔ Shell 接口（方向）
 ### 3.2.1 Windows端
@@ -5810,5 +5811,236 @@ ClipBridge 使用 **cargo-deny** 进行供应链检查：
 
 ---
 
+# 7) macOS 外壳（SwiftUI + AppKit）
 
+本章节定义 macOS Shell 的定稿方案：采用 **SwiftUI + AppKit 混合架构**，并复用现有 Core/FFI 的分层思路，确保与 Windows/Android 保持协议一致、实现解耦。
+
+详细设计与实施计划见：`ClipBridge项目MacOS外壳文档.md`。
+
+---
+
+## 7.1 目标与边界
+
+### 7.1.1 目标
+
+* 在 macOS 上完成与 Windows 外壳同等级的能力闭环：
+
+  * 后台常驻（菜单栏）
+  * 剪贴板监听与本机 ingest
+  * 历史展示与选择回填
+  * Lazy Fetch（按需拉正文）与进度反馈
+  * 可诊断日志与可恢复错误提示
+
+### 7.1.2 非目标（v1 不做）
+
+* 为跨平台统一而牺牲 macOS 原生体验（不采用 WebView/Electron）
+* 在 Shell 侧实现网络协议或会话状态机（仍由 Core 权威管理）
+* 与 iOS 通用二进制/界面（本阶段仅 macOS）
+
+---
+
+## 7.2 技术栈定稿
+
+* **UI 层**：SwiftUI
+* **系统集成层**：AppKit（`NSStatusItem` / `NSPanel` / `NSPasteboard` / `NSEvent`）
+* **并发模型**：Swift Concurrency（`async/await`）为主，必要时 Combine 辅助事件发布
+* **Core 互操作**：Rust `cdylib` + C ABI + 统一 `clipbridge_core.h`
+* **配置与本地设置**：`UserDefaults` + app sandbox 路径
+* **密钥与敏感信息**：macOS Keychain（与文档中的 keystore 契约对齐）
+* **日志**：Shell 本地 `OSLog` + Core 权威日志库（双通道，Core 为业务权威）
+* **发布**：`.app`（后续可扩展 `.dmg`），标准 codesign + notarization 流程
+
+---
+
+## 7.3 总体架构（与 Windows 对齐）
+
+### 7.3.1 进程与边界
+
+* **Shell（Swift）**：UI、菜单栏、热键、剪贴板、权限交互、用户策略
+* **Core（Rust）**：网络、会话、协议、安全、历史、CAS、日志权威
+
+### 7.3.2 Shell 内部分层
+
+#### A. Integration Layer（平台集成层）
+
+* `MenuBarService`：菜单栏图标与菜单命令
+* `HotKeyService`：全局热键注册与冲突处理
+* `PasteboardWatcher`：监听系统剪贴板变更，生成 `ClipboardSnapshot`
+* `PasteboardWriter`：将 `LocalContentRef` 写回系统剪贴板
+* `LaunchAtLoginService`：开机启动（`SMAppService`）
+* `KeychainService`：账号密钥/凭据托管
+
+#### B. Core Bridge Layer（核心桥接层）
+
+* `CoreBridge`：C ABI 原始绑定与内存释放封装
+* `CoreHostService`：生命周期与状态机（`NotLoaded/Loading/Ready/Degraded/ShuttingDown`）
+* `EventPumpService`：Core 回调 JSON → 事件分发 → Stores 更新
+
+#### C. Projection + UX Layer（投影与体验层）
+
+* Stores：`HistoryStore / PeerStore / TransferStore / StatusStore / LogStore`
+* ViewModels：页面状态、用户动作编排、异步任务生命周期
+* Views（SwiftUI）：主窗口、历史页、设备页、设置页、日志页、Quick Paste 小窗
+
+---
+
+## 7.4 目录与模块建议
+
+建议新增以下结构（与 Windows 平行）：
+
+* `platforms/macos/core-ffi/`：Rust FFI（macOS 动态库）
+* `platforms/macos/include/clipbridge_core.h`：头文件（与现有 ABI 同步）
+* `platforms/macos/ClipBridgeShell_macOS/`：Xcode 工程根目录
+* `platforms/macos/ClipBridgeShell_macOS/ClipBridgeShell/Interop/`：C ABI 桥接
+* `platforms/macos/ClipBridgeShell_macOS/ClipBridgeShell/Services/`：CoreHost/EventPump/Watcher
+* `platforms/macos/ClipBridgeShell_macOS/ClipBridgeShell/Stores/`：投影层
+* `platforms/macos/ClipBridgeShell_macOS/ClipBridgeShell/ViewModels/`：VM
+* `platforms/macos/ClipBridgeShell_macOS/ClipBridgeShell/Views/`：SwiftUI 页面
+
+---
+
+## 7.5 Core FFI 与线程契约（实现级）
+
+### 7.5.1 ABI 契约
+
+* 继续使用统一 envelope：
+
+  * 成功：`{"ok":true,"data":...}`
+  * 失败：`{"ok":false,"error":{"code":"...","message":"..."}}`
+* macOS 侧函数集合与 Windows/Android 保持同一语义，不做平台私有改名
+* 所有 `const char*` 返回值必须由 `cb_free_string` 释放（由 `CoreBridge` 统一处理）
+
+### 7.5.2 回调与线程模型
+
+* Core 事件回调线程不保证是主线程
+* 回调里只做：
+
+  * 复制 JSON
+  * 入队
+  * 立即返回
+* JSON 解析、Store 更新、UI 通知由 `EventPumpService` 异步处理
+
+### 7.5.3 CoreHost 状态机
+
+* `NotLoaded -> Loading -> Ready`
+* 任一初始化失败进入 `Degraded`（UI 仍可打开并显示诊断）
+* 应用退出或用户显式退出走 `ShuttingDown -> NotLoaded`
+
+---
+
+## 7.6 关键业务流程（实现级）
+
+### 7.6.1 初始化流程
+
+1. 生成/读取 `device_id`
+2. 构建 Core config JSON（目录、账号、limits、policy）
+3. 加载 FFI 动态库并做 ABI 版本检查
+4. 安装事件回调并启动 EventPump
+5. 调用 `cb_init`，成功后进入 `Ready`
+
+### 7.6.2 本机复制 ingest 流程
+
+1. `PasteboardWatcher` 检测变更，生成 `ClipboardSnapshot`
+2. `IngestPolicy` 执行：空值过滤、回环防护、去重、超限策略
+3. 允许后调用 `cb_ingest_local_copy`
+4. Core 产生 `ITEM_META_ADDED` 等事件，Stores 更新 UI
+
+### 7.6.3 选择历史并写回剪贴板流程
+
+1. 用户在主窗口/QuickPaste 选中条目
+2. 若内容未就绪，先调用 `cb_ensure_content_cached`
+3. 等待 `CONTENT_CACHED` 或 `TRANSFER_FAILED`
+4. 成功后由 `PasteboardWriter` 写入系统剪贴板
+5. 触发回环保护，避免重复 ingest
+
+---
+
+## 7.7 平台专项实现规则（macOS）
+
+### 7.7.1 菜单栏与窗口行为
+
+* 常驻入口使用 `NSStatusItem`
+* 主窗口与 Quick Paste 小窗分离
+* Quick Paste 使用 `NSPanel`（置顶、失焦关闭、不进入 Dock 任务切换）
+
+### 7.7.2 全局热键
+
+* 采用系统 API（Carbon Event HotKey）实现全局热键
+* 注册冲突必须提示用户并提供改键入口
+* 热键生命周期与 CoreHost 生命周期解耦（Core 降级时热键仍可打开诊断/设置）
+
+### 7.7.3 剪贴板监听
+
+* v1 使用 `NSPasteboard.changeCount` 轮询（例如 150~300ms）
+* 必须配合去抖与回环防护，避免事件风暴
+* 监听服务不得阻塞主线程
+
+### 7.7.4 密钥存储与账号切换
+
+* 账号敏感数据进入 Keychain，不落明文文件
+* `key_id` 命名与 Core 契约保持一致：`clipbridge/{account_uid}/opaque_data_key/v1`
+* 账号切换时执行证书/信任重建策略，与 Windows 行为保持同语义
+
+---
+
+## 7.8 里程碑（macOS Shell）
+
+### M7.0 工程骨架
+
+* 建立 Xcode 工程、菜单栏入口、基础 DI/Service 注册
+* 接入 CoreBridge 空实现与 Mock 状态页
+
+### M7.1 CoreHost + EventPump
+
+* 跑通 `cb_init/cb_shutdown`
+* 回调入队与 Stores 投影闭环
+* 完成降级与诊断页
+
+### M7.2 剪贴板采集与 IngestPolicy
+
+* 实现文本类型监听与 ingest
+* 回环防护、重复过滤、最小超限策略
+
+### M7.3 历史与 Lazy Fetch
+
+* 历史页展示与分页
+* `ensure_content_cached -> CONTENT_CACHED -> 写回剪贴板` 闭环
+* 支持取消传输与失败提示
+
+### M7.4 Quick Paste
+
+* 全局热键呼出/隐藏
+* 键盘导航与 Enter 粘贴
+* 失焦关闭与前台焦点恢复
+
+### M7.5 设备页/设置页/日志页
+
+* 设备状态展示与策略设置
+* 限制策略配置、启动项、热键设置
+* 日志检索、清理、导出
+
+### M7.6 打包与回归
+
+* 签名、公证、发布工件
+* 回归清单：生命周期、剪贴板、Quick Paste、日志、设置
+
+---
+
+## 7.9 验收标准（v1）
+
+* Core 初始化与关闭可稳定重复执行（无崩溃、无明显泄漏）
+* 文本复制可形成历史条目，并可从历史回填系统剪贴板
+* Lazy Fetch 可观测（进度/失败/取消）
+* 热键、菜单栏、后台驻留行为符合 macOS 交互预期
+* Core 不可用时 UI 可降级运行并输出可复制诊断信息
+
+---
+
+## 7.10 与 Windows 的一致性约束
+
+* 协议与 DTO 语义保持一致，差异只允许在 UI 与平台能力层
+* Event 类型命名与 payload 字段尽量复用，避免平台特化分叉
+* 一切网络/安全/策略权威逻辑仍在 Core，不下沉到 macOS Shell
+
+---
 
