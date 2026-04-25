@@ -261,6 +261,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-ffi-macos"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "cb_core",
+ "env",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "core-ffi-windows"
 version = "0.1.0"
 dependencies = [
