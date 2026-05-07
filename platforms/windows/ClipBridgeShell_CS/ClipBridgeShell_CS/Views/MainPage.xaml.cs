@@ -37,7 +37,7 @@ public sealed partial class MainPage : Page
     public MainViewModel ViewModel
     {
         get;
-    }
+    } = null!;
 
     private Microsoft.UI.Xaml.Controls.InfoBar? _errorInfoBar;
     
@@ -290,81 +290,79 @@ public sealed partial class MainPage : Page
     {
         try
         {
-            using (var stream = await file.OpenAsync(Windows.Storage.FileAccessMode.Read))
+            using var stream = await file.OpenAsync(Windows.Storage.FileAccessMode.Read);
+            var decoder = await BitmapDecoder.CreateAsync(stream);
+            
+            // 计算标题区域在图片中的位置（标题在图片的上方，大约在 48-100 像素的位置）
+            // 采样标题区域的颜色（左上角 36, 48 到 200, 100 的区域）
+            // 确保边界不超出图片范围
+            var x = (uint)Math.Min(36, decoder.PixelWidth);
+            var y = (uint)Math.Min(48, decoder.PixelHeight);
+            var maxWidth = decoder.PixelWidth > x ? decoder.PixelWidth - x : 1;
+            var maxHeight = decoder.PixelHeight > y ? decoder.PixelHeight - y : 1;
+            var width = (uint)Math.Min(200, maxWidth);
+            var height = (uint)Math.Min(100, maxHeight);
+            
+            // 如果图片太小，跳过颜色检测
+            if (width == 0 || height == 0 || decoder.PixelWidth == 0 || decoder.PixelHeight == 0)
             {
-                var decoder = await BitmapDecoder.CreateAsync(stream);
-                
-                // 计算标题区域在图片中的位置（标题在图片的上方，大约在 48-100 像素的位置）
-                // 采样标题区域的颜色（左上角 36, 48 到 200, 100 的区域）
-                // 确保边界不超出图片范围
-                var x = (uint)Math.Min(36, decoder.PixelWidth);
-                var y = (uint)Math.Min(48, decoder.PixelHeight);
-                var maxWidth = decoder.PixelWidth > x ? decoder.PixelWidth - x : 1;
-                var maxHeight = decoder.PixelHeight > y ? decoder.PixelHeight - y : 1;
-                var width = (uint)Math.Min(200, maxWidth);
-                var height = (uint)Math.Min(100, maxHeight);
-                
-                // 如果图片太小，跳过颜色检测
-                if (width == 0 || height == 0 || decoder.PixelWidth == 0 || decoder.PixelHeight == 0)
+                return;
+            }
+            
+            // 读取像素数据
+            var transform = new BitmapTransform
+            {
+                Bounds = new BitmapBounds
                 {
-                    return;
-                }
+                    X = x,
+                    Y = y,
+                    Width = width,
+                    Height = height
+                },
+                ScaledWidth = width,
+                ScaledHeight = height
+            };
+            
+            var pixelData = await decoder.GetPixelDataAsync(
+                BitmapPixelFormat.Rgba8,
+                BitmapAlphaMode.Premultiplied,
+                transform,
+                ExifOrientationMode.RespectExifOrientation,
+                ColorManagementMode.DoNotColorManage);
+            
+            var bytes = pixelData.DetachPixelData();
+            
+            // 计算平均亮度
+            long totalR = 0, totalG = 0, totalB = 0;
+            var pixelCount = 0;
+            
+            for (var i = 0; i < bytes.Length; i += 4)
+            {
+                var r = bytes[i];
+                var g = bytes[i + 1];
+                var b = bytes[i + 2];
+                // bytes[i + 3] 是 alpha，这里忽略
                 
-                // 读取像素数据
-                var transform = new BitmapTransform
-                {
-                    Bounds = new BitmapBounds
-                    {
-                        X = x,
-                        Y = y,
-                        Width = width,
-                        Height = height
-                    },
-                    ScaledWidth = width,
-                    ScaledHeight = height
-                };
+                totalR += r;
+                totalG += g;
+                totalB += b;
+                pixelCount++;
+            }
+            
+            if (pixelCount > 0)
+            {
+                var avgR = (int)(totalR / pixelCount);
+                var avgG = (int)(totalG / pixelCount);
+                var avgB = (int)(totalB / pixelCount);
                 
-                var pixelData = await decoder.GetPixelDataAsync(
-                    BitmapPixelFormat.Rgba8,
-                    BitmapAlphaMode.Premultiplied,
-                    transform,
-                    ExifOrientationMode.RespectExifOrientation,
-                    ColorManagementMode.DoNotColorManage);
+                // 计算亮度（使用相对亮度公式：0.299*R + 0.587*G + 0.114*B）
+                var luminance = 0.299 * avgR + 0.587 * avgG + 0.114 * avgB;
                 
-                var bytes = pixelData.DetachPixelData();
+                // 如果亮度小于 128（深色背景），使用白色文字；否则使用黑色文字
+                Color textColor = luminance < 128 ? Colors.White : Colors.Black;
                 
-                // 计算平均亮度
-                long totalR = 0, totalG = 0, totalB = 0;
-                int pixelCount = 0;
-                
-                for (int i = 0; i < bytes.Length; i += 4)
-                {
-                    byte r = bytes[i];
-                    byte g = bytes[i + 1];
-                    byte b = bytes[i + 2];
-                    // bytes[i + 3] 是 alpha，这里忽略
-                    
-                    totalR += r;
-                    totalG += g;
-                    totalB += b;
-                    pixelCount++;
-                }
-                
-                if (pixelCount > 0)
-                {
-                    int avgR = (int)(totalR / pixelCount);
-                    int avgG = (int)(totalG / pixelCount);
-                    int avgB = (int)(totalB / pixelCount);
-                    
-                    // 计算亮度（使用相对亮度公式：0.299*R + 0.587*G + 0.114*B）
-                    double luminance = 0.299 * avgR + 0.587 * avgG + 0.114 * avgB;
-                    
-                    // 如果亮度小于 128（深色背景），使用白色文字；否则使用黑色文字
-                    Color textColor = luminance < 128 ? Colors.White : Colors.Black;
-                    
-                    // 更新标题颜色（使用辅助方法，确保不受主题影响）
-                    UpdateTitleColor(textColor);
-                }
+                // 更新标题颜色（使用辅助方法，确保不受主题影响）
+                UpdateTitleColor(textColor);
             }
         }
         catch (Exception ex)
@@ -702,16 +700,16 @@ public sealed partial class MainPage : Page
 
     private Brush GetCardBackgroundBrush()
     {
-        var converter = Resources["AcrylicBrushConverter"] as AcrylicBrushConverter;
-        if (converter == null) return new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        return (Brush)converter.Convert(ViewModel.DisableAcrylicOnCards, typeof(Brush), null, null);
+        if (Resources["AcrylicBrushConverter"] is not AcrylicBrushConverter converter)
+            return new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        return (Brush)converter.Convert(ViewModel.DisableAcrylicOnCards, typeof(Brush), null!, null!);
     }
 
     private void UpdateAllCopyCardsBackground()
     {
         if (RecentItemsRepeater == null || ViewModel?.RecentItems == null) return;
         var brush = GetCardBackgroundBrush();
-        for (int i = 0; i < ViewModel.RecentItems.Count; i++)
+        for (var i = 0; i < ViewModel.RecentItems.Count; i++)
         {
             var element = RecentItemsRepeater.TryGetElement(i);
             if (element == null) continue;
@@ -834,7 +832,7 @@ public sealed partial class MainPage : Page
     {
         if (RecentItemsRepeater == null || ViewModel?.RecentItems == null) return;
         var language = System.Globalization.CultureInfo.CurrentUICulture.Name;
-        for (int i = 0; i < ViewModel.RecentItems.Count; i++)
+        for (var i = 0; i < ViewModel.RecentItems.Count; i++)
         {
             var element = RecentItemsRepeater.TryGetElement(i);
             if (element == null) continue;
@@ -844,7 +842,7 @@ public sealed partial class MainPage : Page
             {
                 var tb = FindVisualChildByName<Microsoft.UI.Xaml.Controls.TextBlock>(border, "CardRelativeTimeText");
                 if (tb != null)
-                    tb.Text = (string)_relativeTimeConverter.Convert(item.CreatedTsMs, typeof(string), null, language);
+                    tb.Text = (string)_relativeTimeConverter.Convert(item.CreatedTsMs, typeof(string), null!, language);
             }
         }
     }
@@ -852,7 +850,7 @@ public sealed partial class MainPage : Page
     private void UpdateAllCardsLockIcon()
     {
         if (RecentItemsRepeater == null || ViewModel?.RecentItems == null) return;
-        for (int i = 0; i < ViewModel.RecentItems.Count; i++)
+        for (var i = 0; i < ViewModel.RecentItems.Count; i++)
         {
             var element = RecentItemsRepeater.TryGetElement(i);
             if (element == null) continue;
@@ -941,7 +939,7 @@ public sealed partial class MainPage : Page
     
     private static T? FindVisualChildByName<T>(Microsoft.UI.Xaml.DependencyObject parent, string name) where T : Microsoft.UI.Xaml.DependencyObject
     {
-        for (int i = 0; i < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(parent); i++)
+        for (var i = 0; i < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(parent); i++)
         {
             var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(parent, i);
             if (child is T result)
@@ -1044,7 +1042,7 @@ public sealed partial class MainPage : Page
         if (!string.IsNullOrEmpty(ViewModel.SelectedItemId) && RecentItemsRepeater != null)
         {
             // 在 ItemsSource 中查找对应的项
-            for (int i = 0; i < ViewModel.RecentItems.Count; i++)
+            for (var i = 0; i < ViewModel.RecentItems.Count; i++)
             {
                 var item = ViewModel.RecentItems[i];
                 if (item.ItemId == ViewModel.SelectedItemId)
@@ -1054,7 +1052,7 @@ public sealed partial class MainPage : Page
                     if (element != null)
                     {
                         // 查找 Border（卡片）
-                        Microsoft.UI.Xaml.Controls.Border? border = null;
+                        Microsoft.UI.Xaml.Controls.Border? border;
                         if (element is Microsoft.UI.Xaml.Controls.Border b && b.Name == "CardBorder")
                         {
                             border = b;
@@ -1128,7 +1126,7 @@ public sealed partial class MainPage : Page
 
     private static T? FindVisualChild<T>(Microsoft.UI.Xaml.DependencyObject parent) where T : Microsoft.UI.Xaml.DependencyObject
     {
-        for (int i = 0; i < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(parent); i++)
+        for (var i = 0; i < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(parent); i++)
         {
             var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(parent, i);
             if (child is T result)
@@ -1181,7 +1179,7 @@ public sealed partial class MainPage : Page
                 _errorInfoBar.IsOpen = true;
             }
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             // Error display failed, ignore
         }
@@ -1233,7 +1231,7 @@ public sealed partial class MainPage : Page
             
             double maxValue = ViewModel.CacheSeries[0].CacheBytes;
             double minValue = ViewModel.CacheSeries[0].CacheBytes;
-            for (int i = 1; i < count; i++)
+            for (var i = 1; i < count; i++)
             {
                 var value = ViewModel.CacheSeries[i].CacheBytes;
                 if (value > maxValue) maxValue = value;
@@ -1245,7 +1243,7 @@ public sealed partial class MainPage : Page
                 valueRange = 1;
 
             var points = new PointCollection();
-            for (int i = 0; i < count; i++)
+            for (var i = 0; i < count; i++)
             {
                 var point = ViewModel.CacheSeries[i];
                 var x = padding + (count > 1 ? (i / (double)(count - 1)) : 0.5) * chartWidth;
@@ -1266,7 +1264,7 @@ public sealed partial class MainPage : Page
             
             // 重新启用缓存
             CacheChartCanvas.CacheMode = new Microsoft.UI.Xaml.Media.BitmapCache();
-        } catch (Exception ex)
+        } catch (Exception)
         {
             throw;
         }
@@ -1317,7 +1315,7 @@ public sealed partial class MainPage : Page
             }
             
             double maxValue = Math.Max(ViewModel.NetworkSeries[0].BytesSent, ViewModel.NetworkSeries[0].BytesRecv);
-            for (int i = 1; i < count; i++)
+            for (var i = 1; i < count; i++)
             {
                 var point = ViewModel.NetworkSeries[i];
                 var pointMax = Math.Max(point.BytesSent, point.BytesRecv);
@@ -1331,7 +1329,7 @@ public sealed partial class MainPage : Page
 
             // Sent line
             var sentPoints = new PointCollection();
-            for (int i = 0; i < count; i++)
+            for (var i = 0; i < count; i++)
             {
                 var point = ViewModel.NetworkSeries[i];
                 var x = padding + (count > 1 ? (i / (double)(count - 1)) : 0.5) * chartWidth;
@@ -1352,7 +1350,7 @@ public sealed partial class MainPage : Page
 
             // Received line
             var recvPoints = new PointCollection();
-            for (int i = 0; i < count; i++)
+            for (var i = 0; i < count; i++)
             {
                 var point = ViewModel.NetworkSeries[i];
                 var x = padding + (count > 1 ? (i / (double)(count - 1)) : 0.5) * chartWidth;
@@ -1373,7 +1371,7 @@ public sealed partial class MainPage : Page
             
             // 重新启用缓存
             NetworkChartCanvas.CacheMode = new Microsoft.UI.Xaml.Media.BitmapCache();
-        } catch (Exception ex)
+        } catch (Exception)
         {
             throw;
         }
@@ -1427,7 +1425,7 @@ public sealed partial class MainPage : Page
                 Math.Max(ViewModel.ActivitySeries[0].TextCount, ViewModel.ActivitySeries[0].ImageCount),
                 ViewModel.ActivitySeries[0].FilesCount
             );
-            for (int i = 1; i < count; i++)
+            for (var i = 1; i < count; i++)
             {
                 var point = ViewModel.ActivitySeries[i];
                 var pointMax = Math.Max(Math.Max(point.TextCount, point.ImageCount), point.FilesCount);
@@ -1441,7 +1439,7 @@ public sealed partial class MainPage : Page
 
             // Text line
             var textPoints = new PointCollection();
-            for (int i = 0; i < count; i++)
+            for (var i = 0; i < count; i++)
             {
                 var point = ViewModel.ActivitySeries[i];
                 var x = padding + (count > 1 ? (i / (double)(count - 1)) : 0.5) * chartWidth;
@@ -1462,7 +1460,7 @@ public sealed partial class MainPage : Page
 
             // Image line
             var imagePoints = new PointCollection();
-            for (int i = 0; i < count; i++)
+            for (var i = 0; i < count; i++)
             {
                 var point = ViewModel.ActivitySeries[i];
                 var x = padding + (count > 1 ? (i / (double)(count - 1)) : 0.5) * chartWidth;
@@ -1483,7 +1481,7 @@ public sealed partial class MainPage : Page
 
             // Files line
             var filesPoints = new PointCollection();
-            for (int i = 0; i < count; i++)
+            for (var i = 0; i < count; i++)
             {
                 var point = ViewModel.ActivitySeries[i];
                 var x = padding + (count > 1 ? (i / (double)(count - 1)) : 0.5) * chartWidth;
@@ -1504,7 +1502,7 @@ public sealed partial class MainPage : Page
             
             // 重新启用缓存
             ActivityChartCanvas.CacheMode = new Microsoft.UI.Xaml.Media.BitmapCache();
-        } catch (Exception ex)
+        } catch (Exception)
         {
             throw;
         }

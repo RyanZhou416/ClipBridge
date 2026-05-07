@@ -28,7 +28,6 @@ public partial class SettingsViewModel : ObservableRecipient
     private const string BackgroundImagePathKey = "MainPage_BackgroundImagePath";
     private const string CloseBehaviorKey = "CloseBehavior";
     private const string StartupMethodKey = "StartupMethod";
-    private const string StartupEnabledKey = "StartupEnabled";
     private const string PerformanceEnableAcrylicOnCardsKey = "Performance_EnableAcrylicOnCards";
     private const string PerformanceEnableAcrylicOnStatsKey = "Performance_EnableAcrylicOnStatsCards";
 
@@ -36,34 +35,36 @@ public partial class SettingsViewModel : ObservableRecipient
     private bool _suppressSettingWrites;
 
     [ObservableProperty]
-    private ElementTheme _elementTheme;
+    public partial ElementTheme ElementTheme { get; set; }
 
     [ObservableProperty]
-    private string _versionDescription;
+    public partial string VersionDescription { get; set; }
 
     [ObservableProperty]
-    private IReadOnlyList<ComboOption<ElementTheme>> _themeOptions = Array.Empty<ComboOption<ElementTheme>>();
+    public partial IReadOnlyList<ComboOption<ElementTheme>> ThemeOptions { get; set; }
 
     [ObservableProperty]
-    private IReadOnlyList<ComboOption<string>> _languageOptions = Array.Empty<ComboOption<string>>();
+    public partial IReadOnlyList<ComboOption<string>> LanguageOptions { get; set; }
 
     [ObservableProperty]
-    private IReadOnlyList<ComboOption<string>> _closeBehaviorOptions = Array.Empty<ComboOption<string>>();
+    public partial IReadOnlyList<ComboOption<string>> CloseBehaviorOptions { get; set; }
 
     [ObservableProperty]
-    private IReadOnlyList<ComboOption<string>> _startupMethodOptions = Array.Empty<ComboOption<string>>();
+    public partial IReadOnlyList<ComboOption<string>> StartupMethodOptions { get; set; }
 
     private bool _isClipboardCaptureEnabled;
     private string _currentLanguage = "en-US";
     private int _recentItemsCount = 10;
     private string? _backgroundImagePath;
-    private bool _isStartupEnabled;
     private string? _startupStateDescription;
     private bool _enableAcrylicOnCards = true;
     private bool _enableAcrylicOnStatsCards = true;
 
     private string _closeBehaviorValue = "MinimizeToTray";
     private string? _startupMethodValue;
+
+    /// <summary>Raised after a startup method change completes. Args: (bool success, string message).</summary>
+    public event Action<bool, string>? StartupChangeCompleted;
 
     // 命令：重置设置
     public ICommand ResetSettingsCommand
@@ -77,8 +78,12 @@ public partial class SettingsViewModel : ObservableRecipient
         _settingsService = settingsService;
         _startupService = startupService;
 
-        _elementTheme = _themeSelectorService.Theme;
-        _versionDescription = GetVersionDescription();
+        ElementTheme = _themeSelectorService.Theme;
+        VersionDescription = GetVersionDescription();
+        ThemeOptions = Array.Empty<ComboOption<ElementTheme>>();
+        LanguageOptions = Array.Empty<ComboOption<string>>();
+        CloseBehaviorOptions = Array.Empty<ComboOption<string>>();
+        StartupMethodOptions = Array.Empty<ComboOption<string>>();
 
         ResetSettingsCommand = new RelayCommand(OnResetSettings);
     }
@@ -110,43 +115,22 @@ public partial class SettingsViewModel : ObservableRecipient
                 await _settingsService.SaveSettingAsync(CloseBehaviorKey, savedCloseBehavior);
             }
 
-            // 6. 读取自启方式（首次运行根据运行模式自动选择）
-            var savedMethodStr = await _settingsService.ReadSettingAsync<string?>(StartupMethodKey);
-            var available = _startupService.GetAvailableMethods();
-            var savedMethod = RuntimeHelper.IsMSIX ? StartupMethod.MsixStartupTask : StartupMethod.Registry;
-            if (savedMethodStr != null
-                && Enum.TryParse<StartupMethod>(savedMethodStr, true, out var parsedMethod)
-                && available.Contains(parsedMethod))
+            // 6. 检测实际自启状态 — 遍历可用方式，找到已启用的那一个
+            _startupMethodValue = StartupMethod.None.ToString();
+            StartupStateDescription = null;
+            foreach (var m in _startupService.GetAvailableMethods())
             {
-                savedMethod = parsedMethod;
-            }
-            else
-            {
-                savedMethodStr = savedMethod.ToString();
-                await _settingsService.SaveSettingAsync(StartupMethodKey, savedMethodStr);
+                var state = await _startupService.GetStateAsync(m);
+                if (state == StartupState.Enabled)
+                {
+                    _startupMethodValue = m.ToString();
+                    StartupStateDescription = GetStartupStateDescription(state);
+                    break;
+                }
             }
 
-            // 7. 读取自启开关（首次运行写入默认值）
-            var savedEnabled = await _settingsService.ReadSettingAsync<bool?>(StartupEnabledKey);
-            if (savedEnabled == null)
-            {
-                savedEnabled = false;
-                await _settingsService.SaveSettingAsync(StartupEnabledKey, false);
-            }
-
-            if (savedEnabled.Value)
-            {
-                var state = await _startupService.GetStateAsync(savedMethod);
-                savedEnabled = state == StartupState.Enabled;
-                StartupStateDescription = GetStartupStateDescription(state);
-            }
-
-            _isStartupEnabled = savedEnabled.Value;
-            OnPropertyChanged(nameof(IsStartupEnabled));
-
-            // 8. 保存逻辑值，然后构建下拉选项并选中
+            // 7. 保存逻辑值，然后构建下拉选项并选中
             _closeBehaviorValue = savedCloseBehavior ?? "MinimizeToTray";
-            _startupMethodValue = savedMethodStr;
             RefreshComboOptions();
 
             // 10. 性能选项（开启效果，默认 true）
@@ -266,19 +250,7 @@ public partial class SettingsViewModel : ObservableRecipient
             {
                 _startupMethodValue = value.Value;
                 if (!_suppressSettingWrites)
-                    _ = OnStartupMethodChangedAsync(value.Value);
-            }
-        }
-    }
-
-    public bool IsStartupEnabled
-    {
-        get => _isStartupEnabled;
-        set
-        {
-            if (SetProperty(ref _isStartupEnabled, value) && !_suppressSettingWrites)
-            {
-                _ = OnStartupEnabledChangedAsync(value);
+                    _ = ApplyStartupMethodAsync(value.Value);
             }
         }
     }
@@ -289,7 +261,6 @@ public partial class SettingsViewModel : ObservableRecipient
         set => SetProperty(ref _startupStateDescription, value);
     }
 
-    /// <summary>开启首页最近条目卡片的亚克力效果（默认开启，持久化）</summary>
     public bool EnableAcrylicOnCards
     {
         get => _enableAcrylicOnCards;
@@ -300,7 +271,6 @@ public partial class SettingsViewModel : ObservableRecipient
         }
     }
 
-    /// <summary>开启首页统计信息卡片的亚克力效果（默认开启，持久化）</summary>
     public bool EnableAcrylicOnStatsCards
     {
         get => _enableAcrylicOnStatsCards;
@@ -311,78 +281,77 @@ public partial class SettingsViewModel : ObservableRecipient
         }
     }
 
-    private async Task OnStartupEnabledChangedAsync(bool enable)
+    private async Task ApplyStartupMethodAsync(string methodStr)
     {
-        var defaultMethod = RuntimeHelper.IsMSIX ? StartupMethod.MsixStartupTask : StartupMethod.Registry;
-        var methodStr = SelectedStartupMethodOption?.Value ?? defaultMethod.ToString();
-        if (!Enum.TryParse<StartupMethod>(methodStr, true, out var method))
-        {
-            method = defaultMethod;
-        }
+        var loc = Localizer.Get();
 
-        if (enable)
-        {
-            var state = await _startupService.SetEnabledAsync(method, true);
-            StartupStateDescription = GetStartupStateDescription(state);
-
-            if (state == StartupState.DisabledByUser)
-            {
-                _suppressSettingWrites = true;
-                IsStartupEnabled = false;
-                _suppressSettingWrites = false;
-            }
-            else
-            {
-                await _settingsService.SaveSettingAsync(StartupEnabledKey, state == StartupState.Enabled);
-                await _settingsService.SaveSettingAsync(StartupMethodKey, methodStr);
-            }
-        }
-        else
+        if (methodStr == StartupMethod.None.ToString())
         {
             await _startupService.DisableAllAsync();
-            StartupStateDescription = null;
-            await _settingsService.SaveSettingAsync(StartupEnabledKey, false);
-        }
-    }
-
-    private async Task OnStartupMethodChangedAsync(string methodStr)
-    {
-        if (!IsStartupEnabled)
-        {
-            await _settingsService.SaveSettingAsync(StartupMethodKey, methodStr);
+            StartupStateDescription = GetStartupStateDescription(StartupState.Disabled);
+            StartupChangeCompleted?.Invoke(true,
+                GetLocalized(loc, "Settings_Startup_Result_Disabled", "Auto-start has been disabled"));
             return;
         }
 
-        var defaultMethod = RuntimeHelper.IsMSIX ? StartupMethod.MsixStartupTask : StartupMethod.Registry;
         if (!Enum.TryParse<StartupMethod>(methodStr, true, out var method))
         {
-            method = defaultMethod;
+            return;
         }
 
+        await _startupService.DisableAllAsync();
         var state = await _startupService.SetEnabledAsync(method, true);
         StartupStateDescription = GetStartupStateDescription(state);
-        await _settingsService.SaveSettingAsync(StartupMethodKey, methodStr);
 
-        if (state == StartupState.DisabledByUser)
+        var methodLabel = SelectedStartupMethodOption?.Label ?? methodStr;
+        switch (state)
         {
-            _suppressSettingWrites = true;
-            IsStartupEnabled = false;
-            _suppressSettingWrites = false;
-            await _settingsService.SaveSettingAsync(StartupEnabledKey, false);
+            case StartupState.Enabled:
+                StartupChangeCompleted?.Invoke(true,
+                    GetLocalized(loc, "Settings_Startup_Result_Enabled", "Auto-start has been enabled successfully")
+                    + $" ({methodLabel})");
+                break;
+            case StartupState.DisabledByUser:
+                _suppressSettingWrites = true;
+                SelectedStartupMethodOption = StartupMethodOptions.FirstOrDefault(o => o.Value == StartupMethod.None.ToString());
+                _suppressSettingWrites = false;
+                StartupChangeCompleted?.Invoke(false,
+                    GetLocalized(loc, "Settings_Startup_State_DisabledByUser",
+                        "This method is disabled by system. Enable in Task Manager > Startup, or switch to another method"));
+                break;
+            case StartupState.NotSupported:
+                _suppressSettingWrites = true;
+                SelectedStartupMethodOption = StartupMethodOptions.FirstOrDefault(o => o.Value == StartupMethod.None.ToString());
+                _suppressSettingWrites = false;
+                StartupChangeCompleted?.Invoke(false,
+                    GetLocalized(loc, "Settings_Startup_State_NotSupported",
+                        "This startup method is not supported on the current system"));
+                break;
+            default:
+                StartupChangeCompleted?.Invoke(false,
+                    GetLocalized(loc, "Settings_Startup_State_Unknown",
+                        "Unable to determine startup status — the operation may have failed"));
+                break;
         }
     }
 
     private string? GetStartupStateDescription(StartupState state)
     {
-        if (state == StartupState.DisabledByUser)
+        var loc = Localizer.Get();
+        return state switch
         {
-            var loc = Localizer.Get();
-            var desc = loc.GetLocalizedString("Settings_Startup_DisabledByUser");
-            return string.IsNullOrEmpty(desc) || desc == "Settings_Startup_DisabledByUser"
-                ? "This method is disabled by system. Enable in Task Manager > Startup, or switch to another startup method below."
-                : desc;
-        }
-        return null;
+            StartupState.Enabled => GetLocalized(loc, "Settings_Startup_State_Enabled",
+                "Auto-start is enabled"),
+            StartupState.Disabled => GetLocalized(loc, "Settings_Startup_State_Disabled",
+                "Auto-start is disabled"),
+            StartupState.DisabledByUser => GetLocalized(loc, "Settings_Startup_State_DisabledByUser",
+                "This method is disabled by system. Enable in Task Manager > Startup, or switch to another method"),
+            StartupState.NotSupported => GetLocalized(loc, "Settings_Startup_State_NotSupported",
+                "This startup method is not supported on the current system"),
+            StartupState.Unknown => GetLocalized(loc, "Settings_Startup_State_Unknown",
+                "Unable to determine startup status — the operation may have failed"),
+            _ => null,
+        };
     }
 
     #endregion
@@ -398,7 +367,7 @@ public partial class SettingsViewModel : ObservableRecipient
         // 如果语言真的变了才切换
         if (loc.GetCurrentLanguage() != langTag)
         {
-            loc.SetLanguage(langTag);
+            _ = loc.SetLanguage(langTag);
             await _settingsService.SaveSettingAsync(LanguageSettingsKey, langTag);
             RefreshComboOptions();
         }
@@ -434,7 +403,10 @@ public partial class SettingsViewModel : ObservableRecipient
             new ComboOption<string>("ExitApp", GetLocalized(loc, "Settings_CloseBehavior_ExitApp", "Exit application")),
         };
 
-        var methodOptions = new List<ComboOption<string>>();
+        var methodOptions = new List<ComboOption<string>>
+        {
+            new(StartupMethod.None.ToString(), GetLocalized(loc, "Settings_StartupMethod_None", "Disabled")),
+        };
         foreach (var m in _startupService.GetAvailableMethods())
         {
             var label = m switch
@@ -444,7 +416,7 @@ public partial class SettingsViewModel : ObservableRecipient
                 StartupMethod.MsixStartupTask => GetLocalized(loc, "Settings_StartupMethod_MsixStartupTask", "App Startup Task (MSIX)"),
                 _ => m.ToString(),
             };
-            methodOptions.Add(new ComboOption<string>(m.ToString(), label));
+            methodOptions.Add(new(m.ToString(), label));
         }
         StartupMethodOptions = methodOptions;
 
@@ -452,6 +424,38 @@ public partial class SettingsViewModel : ObservableRecipient
         SelectedLanguageOption = LanguageOptions.FirstOrDefault(o => o.Value == savedLang);
         SelectedCloseBehaviorOption = CloseBehaviorOptions.FirstOrDefault(o => o.Value == savedCloseBehavior);
         SelectedStartupMethodOption = StartupMethodOptions.FirstOrDefault(o => o.Value == savedMethod);
+
+        // WinUI ComboBox 在替换 ItemsSource 后可能异步重置 SelectedItem，
+        // 通过 DispatcherQueue 延迟再次确认选中值，确保 UI 同步。
+        var dispatcher = App.MainWindow?.DispatcherQueue;
+        if (dispatcher != null)
+        {
+            var capturedMethod = savedMethod;
+            var capturedCloseBehavior = savedCloseBehavior;
+            var suppressWrites = _suppressSettingWrites;
+            dispatcher.TryEnqueue(() =>
+            {
+                var prevSuppress = _suppressSettingWrites;
+                _suppressSettingWrites = true;
+                try
+                {
+                    if (SelectedStartupMethodOption == null && StartupMethodOptions.Count > 0)
+                    {
+                        SelectedStartupMethodOption = StartupMethodOptions.FirstOrDefault(o => o.Value == capturedMethod)
+                                                      ?? StartupMethodOptions[0];
+                    }
+                    if (SelectedCloseBehaviorOption == null && CloseBehaviorOptions.Count > 0)
+                    {
+                        SelectedCloseBehaviorOption = CloseBehaviorOptions.FirstOrDefault(o => o.Value == capturedCloseBehavior)
+                                                      ?? CloseBehaviorOptions[0];
+                    }
+                }
+                finally
+                {
+                    _suppressSettingWrites = prevSuppress;
+                }
+            });
+        }
     }
 
     private static string GetLocalized(ILocalizer loc, string key, string fallback)
@@ -475,11 +479,9 @@ public partial class SettingsViewModel : ObservableRecipient
 
         // Reset startup and close behavior
         await _startupService.DisableAllAsync();
-        IsStartupEnabled = false;
         StartupStateDescription = null;
         SelectedCloseBehaviorOption = CloseBehaviorOptions.FirstOrDefault(o => o.Value == "MinimizeToTray");
-        var defaultMethod = RuntimeHelper.IsMSIX ? StartupMethod.MsixStartupTask : StartupMethod.Registry;
-        SelectedStartupMethodOption = StartupMethodOptions.FirstOrDefault(o => o.Value == defaultMethod.ToString());
+        SelectedStartupMethodOption = StartupMethodOptions.FirstOrDefault(o => o.Value == StartupMethod.None.ToString());
 
         // Reset performance options（效果默认开启）
         EnableAcrylicOnCards = true;
@@ -506,8 +508,7 @@ public partial class SettingsViewModel : ObservableRecipient
         {
             if (SetProperty(ref _selectedThemeOption, value) && value is not null)
             {
-                // 只在不同的时候写回，避免循环
-                if (ElementTheme != value.Value)
+                if (!_suppressSettingWrites && ElementTheme != value.Value)
                     ElementTheme = value.Value;
             }
         }
@@ -521,7 +522,7 @@ public partial class SettingsViewModel : ObservableRecipient
         {
             if (SetProperty(ref _selectedLanguageOption, value) && value is not null)
             {
-                if (CurrentLanguage != value.Value)
+                if (!_suppressSettingWrites && CurrentLanguage != value.Value)
                     CurrentLanguage = value.Value;
             }
         }

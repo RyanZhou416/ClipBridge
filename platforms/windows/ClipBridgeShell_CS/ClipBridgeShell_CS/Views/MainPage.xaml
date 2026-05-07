@@ -183,9 +183,9 @@
                                     <!-- 卡片 Border：内容和背景，边框在内部 -->
                                     <Border x:Name="CardBorder" 
                                             Style="{StaticResource ItemCardStyle}"
-                                            Tag="{x:Bind}"
-                                            BorderThickness="{x:Bind Converter={StaticResource CardSelectionBorderThicknessConverter}}"
-                                            BorderBrush="{x:Bind Converter={StaticResource CardSelectionBorderBrushConverter}}"
+                                            Tag="{x:Bind Mode=OneTime}"
+                                            BorderThickness="{x:Bind Converter={StaticResource CardSelectionBorderThicknessConverter}, Mode=OneTime}"
+                                            BorderBrush="{x:Bind Converter={StaticResource CardSelectionBorderBrushConverter}, Mode=OneTime}"
                                             Tapped="OnCardTapped"
                                             PointerEntered="OnCardPointerEntered"
                                             PointerExited="OnCardPointerExited"
@@ -207,10 +207,10 @@
                                                     <ScalarTransition Duration="0:0:0.200"/>
                                                 </Rectangle.OpacityTransition>
                                             </Rectangle>
-                                            <Grid x:Name="ContentGrid" RowDefinitions="Auto,Auto,Auto" Margin="0,0,0,0" Padding="{x:Bind Converter={StaticResource CardSelectionPaddingConverter}}">
+                                            <Grid x:Name="ContentGrid" RowDefinitions="Auto,Auto,Auto" Margin="0,0,0,0" Padding="{x:Bind Converter={StaticResource CardSelectionPaddingConverter}, Mode=OneTime}">
                                                 <!-- 预览区域 -->
                                                 <TextBlock Grid.Row="0" 
-                                                           Text="{x:Bind Preview.Text, TargetNullValue='(No preview)'}" 
+                                                           Text="{x:Bind Preview.Text, TargetNullValue='(No preview)', Mode=OneTime}" 
                                                            Style="{ThemeResource BodyStrongTextBlockStyle}"
                                                            TextWrapping="WrapWholeWords" 
                                                            MaxLines="3" 
@@ -220,7 +220,7 @@
                                             
                                                 <!-- 元数据：类型、来源、相对时间 -->
                                                 <StackPanel Grid.Row="1" Spacing="2" Margin="0,4,0,2">
-                                                    <TextBlock Text="{x:Bind Kind, Converter={StaticResource ItemKindConverter}}" 
+                                                    <TextBlock Text="{x:Bind Kind, Converter={StaticResource ItemKindConverter}, Mode=OneTime}" 
                                                                Style="{ThemeResource CaptionTextBlockStyle}"
                                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                                                     <TextBlock x:Name="DeviceNameText"
@@ -231,7 +231,7 @@
                                                     </TextBlock>
                                                     <TextBlock x:Name="CardRelativeTimeText"
                                                                Tag="CardRelativeTime"
-                                                               Text="{x:Bind CreatedTsMs, Converter={StaticResource RelativeOrExactTimestampConverter}}"
+                                                               Text="{x:Bind CreatedTsMs, Converter={StaticResource RelativeOrExactTimestampConverter}, Mode=OneTime}"
                                                                Style="{ThemeResource CaptionTextBlockStyle}"
                                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                                                 </StackPanel>
@@ -421,7 +421,7 @@
                                                                FontSize="12" 
                                                                Opacity="0.6"
                                                                HorizontalAlignment="Right">
-                                                        <Run Text="{x:Bind IsOnline, Mode=OneWay}"/>
+                                                        <Run Text="{x:Bind IsOnline, Mode=OneTime}"/>
                                                     </TextBlock>
                                                 </Grid>
                                             </DataTemplate>

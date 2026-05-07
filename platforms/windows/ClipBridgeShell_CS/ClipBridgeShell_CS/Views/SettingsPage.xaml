@@ -104,17 +104,10 @@
                                       SelectedItem="{x:Bind ViewModel.SelectedCloseBehaviorOption, Mode=TwoWay}" />
                         </ctk:SettingsCard>
 
-                        <ctk:SettingsCard l:Uids.Uid="Settings_Startup_SettingsCard"
+                        <ctk:SettingsCard l:Uids.Uid="Settings_AutoStart_SettingsCard"
                                           HeaderIcon="{ui:FontIcon Glyph=&#xE7E8;}"
                                           HorizontalAlignment="Stretch"
                                           Description="{x:Bind ViewModel.StartupStateDescription, Mode=OneWay}">
-                            <ToggleSwitch IsOn="{x:Bind ViewModel.IsStartupEnabled, Mode=TwoWay}"
-                                          l:Uids.Uid="Settings_Startup_ToggleSwitch" />
-                        </ctk:SettingsCard>
-
-                        <ctk:SettingsCard l:Uids.Uid="Settings_StartupMethod_SettingsCard"
-                                          HeaderIcon="{ui:FontIcon Glyph=&#xE770;}"
-                                          HorizontalAlignment="Stretch">
                             <ComboBox Width="240"
                                       ItemsSource="{x:Bind ViewModel.StartupMethodOptions, Mode=OneWay}"
                                       DisplayMemberPath="Label"

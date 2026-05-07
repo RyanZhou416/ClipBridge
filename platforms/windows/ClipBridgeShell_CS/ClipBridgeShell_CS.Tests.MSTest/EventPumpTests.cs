@@ -47,8 +47,8 @@ public class EventPumpTests
         // 3. Assert
         Assert.AreEqual(1, historyStore.Items.Count, "HistoryStore 应增加 1 条记录");
         var item = historyStore.Items[0];
-        Assert.AreEqual((ulong)1001, item.ItemId);
-        Assert.AreEqual("History Item Test", item.Preview);
+        Assert.AreEqual("1001", item.ItemId);
+        Assert.AreEqual("History Item Test", item.Preview?.Text);
 
         pump.Shutdown();
     }
@@ -114,7 +114,7 @@ public class EventPumpTests
         // 3. Assert
         Assert.AreEqual(1, transferStore.Transfers.Count, "TransferStore 应增加 1 个任务");
         var task = transferStore.Transfers[0];
-        Assert.AreEqual((ulong)555, task.TransferId);
+        Assert.AreEqual("555", task.TransferId);
         Assert.AreEqual("downloading", task.State);
         Assert.AreEqual(0.5, task.Progress, 0.001, "进度计算应为 50%");
 

@@ -818,26 +818,41 @@
   <data name="Settings_CloseBehavior_ExitApp" xml:space="preserve">
     <value>Exit application</value>
   </data>
-  <data name="Settings_Startup_SettingsCard.Header" xml:space="preserve">
-    <value>Start to tray</value>
+  <data name="Settings_AutoStart_SettingsCard.Header" xml:space="preserve">
+    <value>Auto Start</value>
   </data>
-  <data name="Settings_Startup_SettingsCard.Description" xml:space="preserve">
-    <value>Start ClipBridge at sign-in and minimize to system tray</value>
+  <data name="Settings_AutoStart_SettingsCard.Description" xml:space="preserve">
+    <value>Start ClipBridge automatically at sign-in and minimize to system tray</value>
   </data>
-  <data name="Settings_Startup_ToggleSwitch.OnContent" xml:space="preserve">
-    <value>On</value>
+  <data name="Settings_Startup_State_Enabled" xml:space="preserve">
+    <value>Auto-start is enabled</value>
   </data>
-  <data name="Settings_Startup_ToggleSwitch.OffContent" xml:space="preserve">
-    <value>Off</value>
+  <data name="Settings_Startup_State_Disabled" xml:space="preserve">
+    <value>Auto-start is disabled</value>
   </data>
-  <data name="Settings_Startup_DisabledByUser" xml:space="preserve">
-    <value>This method is disabled by system. Enable in Task Manager &gt; Startup, or switch to another method below</value>
+  <data name="Settings_Startup_State_DisabledByUser" xml:space="preserve">
+    <value>This method is disabled by system. Enable in Task Manager &gt; Startup, or switch to another method</value>
   </data>
-  <data name="Settings_StartupMethod_SettingsCard.Header" xml:space="preserve">
-    <value>Startup Method</value>
+  <data name="Settings_Startup_State_NotSupported" xml:space="preserve">
+    <value>This startup method is not supported on the current system</value>
   </data>
-  <data name="Settings_StartupMethod_SettingsCard.Description" xml:space="preserve">
-    <value>Choose how ClipBridge starts automatically</value>
+  <data name="Settings_Startup_State_Unknown" xml:space="preserve">
+    <value>Unable to determine startup status — the operation may have failed</value>
+  </data>
+  <data name="Settings_Startup_Result_Enabled" xml:space="preserve">
+    <value>Auto-start has been enabled successfully</value>
+  </data>
+  <data name="Settings_Startup_Result_Disabled" xml:space="preserve">
+    <value>Auto-start has been disabled</value>
+  </data>
+  <data name="Settings_Startup_Dialog_SuccessTitle" xml:space="preserve">
+    <value>Success</value>
+  </data>
+  <data name="Settings_Startup_Dialog_FailTitle" xml:space="preserve">
+    <value>Failed</value>
+  </data>
+  <data name="Settings_StartupMethod_None" xml:space="preserve">
+    <value>Disabled</value>
   </data>
   <data name="Settings_StartupMethod_Registry" xml:space="preserve">
     <value>Registry Run Key</value>

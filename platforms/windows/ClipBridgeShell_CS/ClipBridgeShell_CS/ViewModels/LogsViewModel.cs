@@ -340,7 +340,9 @@ public sealed class LogsViewModel : ObservableObject
     private readonly object _tickLock = new(); // 防止 TickOnce 并发执行
     private bool _isTickRunning = false; // 标记 TickOnce 是否正在执行
     private CoreState _previousCoreState = CoreState.NotInitialized; // 跟踪上一个核心状态，用于插入分隔符
+#pragma warning disable CS0414
     private long _separatorIdCounter = -1; // 分隔符ID计数器（使用负数，避免与真实日志ID冲突）
+#pragma warning restore CS0414
     private HashSet<long> _processedInitLogIds = new(); // 跟踪已处理过的"Core initializing"日志ID，避免重复插入分隔符
 
     // 历史查询（分页）
@@ -625,7 +627,7 @@ public sealed class LogsViewModel : ObservableObject
                     _testLogTimer.Start();
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 // 测试日志命令错误，静默处理
             }
@@ -678,7 +680,7 @@ public sealed class LogsViewModel : ObservableObject
         foreach (var entry in stashedLogs)
         {
             // 根据当前语言选择消息
-            string displayMessage;
+            string? displayMessage;
             if (CurrentLanguage.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
             {
                 // 中文：优先使用 MessageZhCn，否则使用 Message
@@ -706,7 +708,7 @@ public sealed class LogsViewModel : ObservableObject
                 Level = entry.Level,
                 Component = entry.Component,
                 Category = entry.Category,
-                Message = displayMessage, // 使用本地化后的消息
+                Message = displayMessage ?? string.Empty,
                 Exception = entry.Exception,
                 Props_Json = entry.PropsJson
             });
@@ -781,7 +783,7 @@ public sealed class LogsViewModel : ObservableObject
             }
 
             // 在UI线程更新集合
-            App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+            App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
                 _allItems.Clear();
                 Items.Clear();
@@ -893,7 +895,7 @@ public sealed class LogsViewModel : ObservableObject
             }
             
             // 在UI线程更新集合
-            App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+            App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
                 // 新日志按ID从大到小排序（最新的在前），插入到列表顶部
                 var newLogs = new List<LogRow>();
@@ -993,7 +995,7 @@ public sealed class LogsViewModel : ObservableObject
             if (batch.Count == 0) return; // 没有更早的日志了
             
             // 在 UI 线程插入到列表顶部（更早的日志在顶部）
-            App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+            App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
                 // 记录当前第一个元素的 ID，用于保持滚动位置
                 long? oldFirstId = Items.Count > 0 ? Items[0].Id : null;
@@ -1177,7 +1179,7 @@ public sealed class LogsViewModel : ObservableObject
             var deleted = CoreInterop.LogsDeleteByIds(handle, ids);
             
             // 从 Items 中移除已删除的项
-            App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+            App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
                 var itemsToRemove = Items.Where(item => ids.Contains(item.Id)).ToList();
                 foreach (var item in itemsToRemove)
@@ -1207,7 +1209,7 @@ public sealed class LogsViewModel : ObservableObject
             
             CoreInterop.ClearLogsDb(handle);
             
-            App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+            App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
                 Items.Clear();
                 SelectedLogIds.Clear();
@@ -1247,7 +1249,7 @@ public sealed class LogsViewModel : ObservableObject
     private void OnCoreStateChanged(CoreState state)
     {
         // 确保在 UI 线程刷新命令状态
-        App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+        App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
         {
             // 更新状态（分隔符现在从数据库读取，不需要在这里插入）
             if (_previousCoreState != state)

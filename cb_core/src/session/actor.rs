@@ -38,6 +38,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// 定义接收状态
+#[allow(dead_code)]
 enum ReceiverState {
     Receiving {
         transfer_id: String,
@@ -87,6 +88,7 @@ enum ReceiverState {
 }
 
 /// 定义发送任务的消息
+#[allow(dead_code)]
 enum UploadMsg {
 	Chunk { transfer_id: String, data: bytes::Bytes },
 	Done { transfer_id: String, sha256: String },

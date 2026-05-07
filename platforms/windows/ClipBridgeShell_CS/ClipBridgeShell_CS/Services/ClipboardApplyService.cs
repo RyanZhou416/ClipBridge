@@ -23,7 +23,7 @@ public sealed class ClipboardApplyService
         try
         {
             transferId = await _core.EnsureContentCachedAsync(meta.ItemId, fileId: null);
-        } catch (Exception ex)
+        } catch (Exception)
         {
             // TODO: 用 InfoBar / ContentDialog 提示"源设备离线，无法取回内容"
             return;
@@ -33,7 +33,7 @@ public sealed class ClipboardApplyService
         try
         {
             local = await _awaiter.WaitAsync(transferId, ct);
-        } catch (Exception ex)
+        } catch (Exception)
         {
             throw;
         }
