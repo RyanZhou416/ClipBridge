@@ -62,6 +62,9 @@ public partial class SettingsViewModel : ObservableRecipient
     private bool _enableAcrylicOnCards = true;
     private bool _enableAcrylicOnStatsCards = true;
 
+    private string _closeBehaviorValue = "MinimizeToTray";
+    private string? _startupMethodValue;
+
     // 命令：重置设置
     public ICommand ResetSettingsCommand
     {
@@ -141,12 +144,10 @@ public partial class SettingsViewModel : ObservableRecipient
             _isStartupEnabled = savedEnabled.Value;
             OnPropertyChanged(nameof(IsStartupEnabled));
 
-            // 8. 构建所有下拉选项（只构建一次）
+            // 8. 保存逻辑值，然后构建下拉选项并选中
+            _closeBehaviorValue = savedCloseBehavior ?? "MinimizeToTray";
+            _startupMethodValue = savedMethodStr;
             RefreshComboOptions();
-
-            // 9. 从已构建的选项中选中当前值（使用同一实例引用）
-            SelectedCloseBehaviorOption = CloseBehaviorOptions.FirstOrDefault(o => o.Value == savedCloseBehavior);
-            SelectedStartupMethodOption = StartupMethodOptions.FirstOrDefault(o => o.Value == savedMethodStr);
 
             // 10. 性能选项（开启效果，默认 true）
             EnableAcrylicOnCards = await _settingsService.ReadSettingAsync<bool?>(PerformanceEnableAcrylicOnCardsKey) ?? true;
@@ -246,9 +247,11 @@ public partial class SettingsViewModel : ObservableRecipient
         get => _selectedCloseBehaviorOption;
         set
         {
-            if (SetProperty(ref _selectedCloseBehaviorOption, value) && value is not null && !_suppressSettingWrites)
+            if (SetProperty(ref _selectedCloseBehaviorOption, value) && value is not null)
             {
-                _ = _settingsService.SaveSettingAsync(CloseBehaviorKey, value.Value);
+                _closeBehaviorValue = value.Value;
+                if (!_suppressSettingWrites)
+                    _ = _settingsService.SaveSettingAsync(CloseBehaviorKey, value.Value);
             }
         }
     }
@@ -259,9 +262,11 @@ public partial class SettingsViewModel : ObservableRecipient
         get => _selectedStartupMethodOption;
         set
         {
-            if (SetProperty(ref _selectedStartupMethodOption, value) && value is not null && !_suppressSettingWrites)
+            if (SetProperty(ref _selectedStartupMethodOption, value) && value is not null)
             {
-                _ = OnStartupMethodChangedAsync(value.Value);
+                _startupMethodValue = value.Value;
+                if (!_suppressSettingWrites)
+                    _ = OnStartupMethodChangedAsync(value.Value);
             }
         }
     }
@@ -401,6 +406,13 @@ public partial class SettingsViewModel : ObservableRecipient
 
     private void RefreshComboOptions()
     {
+        // ComboBox TwoWay 绑定会在 ItemsSource 替换时将 SelectedItem 置 null，
+        // 所以必须在重建列表之前通过后备字段保存当前选中值。
+        var savedTheme = _selectedThemeOption?.Value ?? ElementTheme;
+        var savedLang = _selectedLanguageOption?.Value ?? _currentLanguage;
+        var savedCloseBehavior = _selectedCloseBehaviorOption?.Value ?? _closeBehaviorValue;
+        var savedMethod = _selectedStartupMethodOption?.Value ?? _startupMethodValue;
+
         var loc = Localizer.Get();
 
         ThemeOptions = new[]
@@ -436,21 +448,10 @@ public partial class SettingsViewModel : ObservableRecipient
         }
         StartupMethodOptions = methodOptions;
 
-        SelectedThemeOption = ThemeOptions.FirstOrDefault(o => o.Value == ElementTheme);
-        SelectedLanguageOption = LanguageOptions.FirstOrDefault(o => o.Value == CurrentLanguage);
-
-        // CloseBehavior / StartupMethod 的选中由 InitializeAsync 或语言切换时重新匹配
-        var currentCloseBehavior = SelectedCloseBehaviorOption?.Value;
-        if (currentCloseBehavior != null)
-        {
-            SelectedCloseBehaviorOption = CloseBehaviorOptions.FirstOrDefault(o => o.Value == currentCloseBehavior);
-        }
-
-        var currentMethod = SelectedStartupMethodOption?.Value;
-        if (currentMethod != null)
-        {
-            SelectedStartupMethodOption = StartupMethodOptions.FirstOrDefault(o => o.Value == currentMethod);
-        }
+        SelectedThemeOption = ThemeOptions.FirstOrDefault(o => o.Value == savedTheme);
+        SelectedLanguageOption = LanguageOptions.FirstOrDefault(o => o.Value == savedLang);
+        SelectedCloseBehaviorOption = CloseBehaviorOptions.FirstOrDefault(o => o.Value == savedCloseBehavior);
+        SelectedStartupMethodOption = StartupMethodOptions.FirstOrDefault(o => o.Value == savedMethod);
     }
 
     private static string GetLocalized(ILocalizer loc, string key, string fallback)
