@@ -9,16 +9,13 @@
       xmlns:l="using:WinUI3Localizer"
       Loaded="OnLoaded">
     <Grid>
-
-
-		<!-- Titlebar -->
+		<!-- Titlebar (ZIndex=1 浮在最上层) -->
 		<Grid x:Name="AppTitleBar"
-		Grid.Row="0"
-		Height="{Binding ElementName=NavigationViewControl, Path=CompactPaneLength}"
-		Canvas.ZIndex="1"
-		IsHitTestVisible="True"
-		Background="Transparent"
-		VerticalAlignment="Top">
+		      Height="{Binding ElementName=NavigationViewControl, Path=CompactPaneLength}"
+		      Canvas.ZIndex="1"
+		      IsHitTestVisible="True"
+		      Background="Transparent"
+		      VerticalAlignment="Top">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
@@ -26,40 +23,11 @@
             </Grid.ColumnDefinitions>
             <Image Grid.Column="0" Source="/Assets/WindowIcon.ico" HorizontalAlignment="Left" Width="16" Height="16" />
             <TextBlock Grid.Column="1" x:Name="AppTitleBarText" VerticalAlignment="Center" TextWrapping="NoWrap" Style="{StaticResource CaptionTextBlockStyle}" Margin="28,0,0,0"/>
-
         </Grid>
 
-		<!-- Global degraded banner -->
-		<InfoBar Grid.Row="1"
-         IsOpen="{x:Bind ViewModel.IsCoreDegraded, Mode=OneWay}"
-         IsClosable="True"
-		 Height="Auto"
-         Severity="Error"
-         l:Uids.Uid="ShellPage_CoreUnavailable"
-         Message="{x:Bind ViewModel.CoreDegradedMessage, Mode=OneWay}">
-
-			<InfoBar.ActionButton>
-				<DropDownButton l:Uids.Uid="ShellPage_ActionsButton">
-					<DropDownButton.Flyout>
-						<MenuFlyout>
-							<MenuFlyoutItem l:Uids.Uid="ShellPage_Menu_Retry"
-                                    Command="{x:Bind ViewModel.RetryCoreInitCommand}" />
-							<MenuFlyoutSeparator />
-							<MenuFlyoutItem l:Uids.Uid="ShellPage_Menu_CopyDiagnostics"
-                                    Command="{x:Bind ViewModel.CopyDiagnosticsCommand}" />
-							<MenuFlyoutItem l:Uids.Uid="ShellPage_Menu_OpenLogs"
-                                    Command="{x:Bind ViewModel.OpenLogsCommand}" />
-						</MenuFlyout>
-					</DropDownButton.Flyout>
-				</DropDownButton>
-			</InfoBar.ActionButton>
-
-		</InfoBar>
-
-		<!-- NavigationView -->
+		<!-- NavigationView 占满全高，返回按钮与标题栏对齐 -->
 		<NavigationView x:Name="NavigationViewControl"
                         Canvas.ZIndex="0"
-						Height="Auto"
                         IsBackButtonVisible="Visible"
                         IsBackEnabled="{x:Bind ViewModel.IsBackEnabled, Mode=OneWay}"
                         SelectedItem="{x:Bind ViewModel.Selected, Mode=OneWay}"
@@ -70,7 +38,6 @@
                         DisplayModeChanged="NavigationViewControl_DisplayModeChanged" >
 
             <NavigationView.MenuItems>
-                <!-- TODO: Update item titles by updating <x:Uid>.Content entries in Strings/en-us/Resources.resw. https://docs.microsoft.com/windows/uwp/app-resources/localize-strings-ui-manifest#refer-to-a-string-resource-identifier-from-xaml TODO: Update item icons by updating FontIcon.Glyph properties. https://docs.microsoft.com/windows/apps/design/style/segoe-fluent-icons-font#icon-list -->
                 <NavigationViewItem l:Uids.Uid="Shell_Main" helpers:NavigationHelper.NavigateTo="ClipBridgeShell_CS.ViewModels.MainViewModel">
                     <NavigationViewItem.Icon>
 						<FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE80F;"/>
@@ -93,7 +60,36 @@
 				</NavigationViewItem>
 			</NavigationView.MenuItems>
             <Grid>
-                <Frame x:Name="NavigationFrame" />
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- InfoBar 放在 NavigationView 内容区顶部，不影响返回按钮位置 -->
+                <InfoBar Grid.Row="0"
+                         IsOpen="{x:Bind ViewModel.IsCoreDegraded, Mode=OneWay}"
+                         IsClosable="True"
+                         Severity="Error"
+                         l:Uids.Uid="ShellPage_CoreUnavailable"
+                         Message="{x:Bind ViewModel.CoreDegradedMessage, Mode=OneWay}">
+                    <InfoBar.ActionButton>
+                        <DropDownButton l:Uids.Uid="ShellPage_ActionsButton">
+                            <DropDownButton.Flyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem l:Uids.Uid="ShellPage_Menu_Retry"
+                                                    Command="{x:Bind ViewModel.RetryCoreInitCommand}" />
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem l:Uids.Uid="ShellPage_Menu_CopyDiagnostics"
+                                                    Command="{x:Bind ViewModel.CopyDiagnosticsCommand}" />
+                                    <MenuFlyoutItem l:Uids.Uid="ShellPage_Menu_OpenLogs"
+                                                    Command="{x:Bind ViewModel.OpenLogsCommand}" />
+                                </MenuFlyout>
+                            </DropDownButton.Flyout>
+                        </DropDownButton>
+                    </InfoBar.ActionButton>
+                </InfoBar>
+
+                <Frame Grid.Row="1" x:Name="NavigationFrame" />
             </Grid>
         </NavigationView>
         

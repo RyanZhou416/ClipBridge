@@ -24,8 +24,29 @@ public sealed partial class SettingsPage : Page
         ViewModel = App.GetService<SettingsViewModel>();
         InitializeComponent();
 
-        // 监听 VM 属性变化来更新非数据绑定的 UI (如 Window Title)
         ViewModel.PropertyChanged += ViewModel_PropertyChanged;
+        ViewModel.StartupChangeCompleted += OnStartupChangeCompleted;
+    }
+
+    private async void OnStartupChangeCompleted(bool success, string message)
+    {
+        var loc = Localizer.Get();
+        var dialog = new ContentDialog
+        {
+            Title = success
+                ? GetLocalized(loc, "Settings_Startup_Dialog_SuccessTitle", "Success")
+                : GetLocalized(loc, "Settings_Startup_Dialog_FailTitle", "Failed"),
+            Content = message,
+            PrimaryButtonText = "OK",
+            XamlRoot = Content.XamlRoot,
+        };
+        await dialog.ShowAsync();
+    }
+
+    private static string GetLocalized(ILocalizer loc, string key, string fallback)
+    {
+        var val = loc.GetLocalizedString(key);
+        return string.IsNullOrEmpty(val) || val == key ? fallback : val;
     }
 
     // 每次进入页面时初始化数据

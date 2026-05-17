@@ -31,7 +31,9 @@ public sealed class CoreLogDispatcher : IDisposable
     /// <summary>
     /// 单条日志写入完成回调：当一条日志写入完成时立即触发（用于实时显示）
     /// </summary>
+#pragma warning disable CS0067
     public event Action<LogEntry>? LogWritten;
+#pragma warning restore CS0067
 
     public CoreLogDispatcher(ICoreHostService coreHost, EventPumpService? eventPump = null)
     {

@@ -818,26 +818,41 @@
   <data name="Settings_CloseBehavior_ExitApp" xml:space="preserve">
     <value>退出应用</value>
   </data>
-  <data name="Settings_Startup_SettingsCard.Header" xml:space="preserve">
-    <value>自启到托盘</value>
+  <data name="Settings_AutoStart_SettingsCard.Header" xml:space="preserve">
+    <value>自动启动</value>
   </data>
-  <data name="Settings_Startup_SettingsCard.Description" xml:space="preserve">
-    <value>登录时自动启动并最小化到系统托盘</value>
+  <data name="Settings_AutoStart_SettingsCard.Description" xml:space="preserve">
+    <value>登录时自动启动 ClipBridge 并最小化到系统托盘</value>
   </data>
-  <data name="Settings_Startup_ToggleSwitch.OnContent" xml:space="preserve">
-    <value>已启用</value>
+  <data name="Settings_Startup_State_Enabled" xml:space="preserve">
+    <value>自启已启用</value>
   </data>
-  <data name="Settings_Startup_ToggleSwitch.OffContent" xml:space="preserve">
-    <value>已关闭</value>
+  <data name="Settings_Startup_State_Disabled" xml:space="preserve">
+    <value>自启已关闭</value>
   </data>
-  <data name="Settings_Startup_DisabledByUser" xml:space="preserve">
-    <value>当前方式已被系统禁用。请在任务管理器 &gt; 启动 中启用，或在下方切换其他自启方式</value>
+  <data name="Settings_Startup_State_DisabledByUser" xml:space="preserve">
+    <value>当前方式已被系统禁用。请在任务管理器 &gt; 启动 中启用，或切换其他自启方式</value>
   </data>
-  <data name="Settings_StartupMethod_SettingsCard.Header" xml:space="preserve">
-    <value>自启方式</value>
+  <data name="Settings_Startup_State_NotSupported" xml:space="preserve">
+    <value>当前系统不支持此自启方式</value>
   </data>
-  <data name="Settings_StartupMethod_SettingsCard.Description" xml:space="preserve">
-    <value>选择 ClipBridge 自动启动的方式</value>
+  <data name="Settings_Startup_State_Unknown" xml:space="preserve">
+    <value>无法确定自启状态，操作可能未成功</value>
+  </data>
+  <data name="Settings_Startup_Result_Enabled" xml:space="preserve">
+    <value>自启设置成功</value>
+  </data>
+  <data name="Settings_Startup_Result_Disabled" xml:space="preserve">
+    <value>自启已关闭</value>
+  </data>
+  <data name="Settings_Startup_Dialog_SuccessTitle" xml:space="preserve">
+    <value>成功</value>
+  </data>
+  <data name="Settings_Startup_Dialog_FailTitle" xml:space="preserve">
+    <value>失败</value>
+  </data>
+  <data name="Settings_StartupMethod_None" xml:space="preserve">
+    <value>关闭</value>
   </data>
   <data name="Settings_StartupMethod_Registry" xml:space="preserve">
     <value>注册表启动项</value>

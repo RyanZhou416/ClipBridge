@@ -12,7 +12,7 @@ namespace ClipBridgeShell_CS.Core.Services;
 // 5. Models/SampleOrderDetail.cs
 public class SampleDataService : ISampleDataService
 {
-    private List<SampleOrder> _allOrders;
+    private List<SampleOrder>? _allOrders;
 
     public SampleDataService()
     {

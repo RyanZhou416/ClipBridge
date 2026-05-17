@@ -1,9 +1,8 @@
-use std::sync::Arc;
 use anyhow::Context;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::Deserialize;
-use cb_core::api::{AppConfig, Core, CoreConfig, CoreEventSink, GlobalPolicy};
+use cb_core::api::{AppConfig, CoreConfig, GlobalPolicy};
 use cb_core::clipboard::{ClipboardFileEntry, ClipboardSnapshot};
 use cb_core::policy::SizeLimits;
 
@@ -76,6 +75,7 @@ enum SnapshotKind {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct TextDto {
     #[serde(default)]
     mime: Option<String>,
@@ -89,6 +89,7 @@ struct ImageDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ClipboardSnapshotDto {
     #[serde(rename = "type")]
     ty: Option<String>,

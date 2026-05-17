@@ -165,7 +165,7 @@ public class ClipboardWatcher
     private void ShowDebugPopup(bool isEnabled)
     {
         // 因为 Watcher 可能在后台线程运行，必须调度到 UI 线程
-        App.MainWindow.DispatcherQueue.TryEnqueue(async () =>
+        App.MainWindow?.DispatcherQueue.TryEnqueue(async () =>
         {
             try
             {
@@ -174,7 +174,7 @@ public class ClipboardWatcher
                     Title = "Watcher 状态已更新",
                     Content = $"收到回调！\n\n新状态: {(isEnabled ? "✅ 监听开启" : "⛔ 监听暂停")}\n\n(此弹窗仅供调试验证)",
                     CloseButtonText = "我知道了",
-                    XamlRoot = App.MainWindow.Content.XamlRoot
+                    XamlRoot = App.MainWindow?.Content?.XamlRoot
                 };
                 await dialog.ShowAsync();
             } catch

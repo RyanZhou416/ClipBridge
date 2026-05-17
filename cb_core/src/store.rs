@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -317,6 +317,70 @@ pub fn insert_meta_and_history(
     /// 从具有指定账号 UID 的用户历史记录中获取项元数据列表。
     ///
     /// 此函数查询数据库，以检索由给定 `account_uid` 标识的用户历史中存在的项元数据。
+    /// 将数据库行映射为 ItemMeta（SELECT 列顺序需与此函数一致）。
+    ///
+    /// 期望的列顺序：
+    /// 0: item_id, 1: kind, 2: owner_device_id, 3: created_ts_ms,
+    /// 4: size_bytes, 5: mime, 6: sha256_hex,
+    /// 7: preview_json, 8: files_json, 9: expires_ts_ms, 10: total_bytes
+    fn row_to_item_meta(r: &Row) -> rusqlite::Result<ItemMeta> {
+        let kind_s: String = r.get(1)?;
+        let kind = match kind_s.as_str() {
+            "text" => ItemKind::Text,
+            "image" => ItemKind::Image,
+            "file_list" => ItemKind::FileList,
+            _ => ItemKind::Text,
+        };
+
+        let preview_json: String = r.get(7)?;
+        let preview: crate::model::ItemPreview =
+            serde_json::from_str(&preview_json).unwrap_or_default();
+
+        let files_json: Option<String> = r.get(8)?;
+        let files: Vec<FileMeta> = files_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<FileMeta>>(s).ok())
+            .unwrap_or_default();
+
+        let total_bytes: i64 = r.get(10)?;
+
+        Ok(ItemMeta {
+            ty: "ItemMeta".to_string(),
+            item_id: r.get(0)?,
+            kind,
+            source_device_id: r.get(2)?,
+            source_device_name: None,
+            created_ts_ms: r.get(3)?,
+            size_bytes: r.get(4)?,
+            preview,
+            content: crate::model::ItemContent {
+                mime: r.get(5)?,
+                sha256: r.get(6)?,
+                total_bytes,
+            },
+            files,
+            expires_ts_ms: r.get(9)?,
+        })
+    }
+
+    /// 按 item_id 直查单条元数据（主键查询，O(1)）。
+    pub fn get_item_meta_by_id(&self, item_id: &str) -> anyhow::Result<Option<ItemMeta>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
+                i.size_bytes, i.mime, i.sha256_hex,
+                i.preview_json, i.files_json, i.expires_ts_ms,
+                cc.total_bytes
+            FROM items i
+            JOIN content_cache cc ON i.sha256_hex = cc.sha256_hex
+            WHERE i.item_id = ?1
+            "#,
+        )?;
+        let result = stmt.query_row(params![item_id], Self::row_to_item_meta).optional()?;
+        Ok(result)
+    }
+
     /// 查询受指定的数量限制 (`limit`)。返回的项按历史排序时间戳 (`h.sort_ts_ms`) 倒序排列，
     /// 如果时间戳相同，则按 `history_id` 倒序排列。
     ///
@@ -399,45 +463,73 @@ pub fn insert_meta_and_history(
             "#,
         )?;
 
-        let rows = stmt.query_map(params![account_uid, limit as i64], |r| {
-            let kind_s: String = r.get(1)?;
-            let kind = match kind_s.as_str() {
-                "text" => ItemKind::Text,
-                "image" => ItemKind::Image,
-                "file_list" => ItemKind::FileList,
-                _ => ItemKind::Text,
-            };
+        let rows = stmt.query_map(params![account_uid, limit as i64], Self::row_to_item_meta)?;
 
-            let preview_json: String = r.get(7)?;
-            let preview: crate::model::ItemPreview =
-                serde_json::from_str(&preview_json).unwrap_or_default();
+        let mut out = Vec::new();
+        for it in rows {
+            out.push(it?);
+        }
+        Ok(out)
+    }
 
-            let files_json: Option<String> = r.get(8)?;
-            let files: Vec<FileMeta> = files_json
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<Vec<FileMeta>>(s).ok())
-                .unwrap_or_default();
+    /// 游标分页查询历史元数据。
+    ///
+    /// 当 `cursor` 为 `Some(ts)` 时，只返回 `sort_ts_ms < ts` 的记录（即比游标更旧的）；
+    /// 当 `cursor` 为 `None` 时，从最新记录开始返回（等价于无 cursor 的首页查询）。
+    pub fn list_history_metas_paged(
+        &self,
+        account_uid: &str,
+        limit: usize,
+        cursor: Option<i64>,
+    ) -> anyhow::Result<Vec<ItemMeta>> {
+        let (sql, has_cursor) = match cursor {
+            Some(_) => (
+                r#"
+                SELECT
+                    i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
+                    i.size_bytes, i.mime, i.sha256_hex,
+                    i.preview_json, i.files_json, i.expires_ts_ms,
+                    cc.total_bytes
+                FROM history h
+                JOIN items i ON h.item_id = i.item_id
+                JOIN content_cache cc ON i.sha256_hex = cc.sha256_hex
+                WHERE h.account_uid=?1 AND h.is_deleted=0 AND h.sort_ts_ms < ?3
+                ORDER BY h.sort_ts_ms DESC, h.history_id DESC
+                LIMIT ?2
+                "#,
+                true,
+            ),
+            None => (
+                r#"
+                SELECT
+                    i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
+                    i.size_bytes, i.mime, i.sha256_hex,
+                    i.preview_json, i.files_json, i.expires_ts_ms,
+                    cc.total_bytes
+                FROM history h
+                JOIN items i ON h.item_id = i.item_id
+                JOIN content_cache cc ON i.sha256_hex = cc.sha256_hex
+                WHERE h.account_uid=?1 AND h.is_deleted=0
+                ORDER BY h.sort_ts_ms DESC, h.history_id DESC
+                LIMIT ?2
+                "#,
+                false,
+            ),
+        };
 
-            let total_bytes: i64 = r.get(10)?;
+        let mut stmt = self.conn.prepare(sql)?;
 
-            Ok(ItemMeta {
-                ty: "ItemMeta".to_string(),
-                item_id: r.get(0)?,
-                kind,
-                source_device_id: r.get(2)?,
-                source_device_name: None,
-                created_ts_ms: r.get(3)?,
-                size_bytes: r.get(4)?,
-                preview,
-                content: crate::model::ItemContent {
-                    mime: r.get(5)?,
-                    sha256: r.get(6)?,
-                    total_bytes,
-                },
-                files,
-                expires_ts_ms: r.get(9)?,
-            })
-        })?;
+        let rows = if has_cursor {
+            stmt.query_map(
+                params![account_uid, limit as i64, cursor.unwrap()],
+                Self::row_to_item_meta,
+            )?
+        } else {
+            stmt.query_map(
+                params![account_uid, limit as i64],
+                Self::row_to_item_meta,
+            )?
+        };
 
         let mut out = Vec::new();
         for it in rows {

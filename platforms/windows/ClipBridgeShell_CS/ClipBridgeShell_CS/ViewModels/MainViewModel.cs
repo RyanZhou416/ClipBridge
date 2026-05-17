@@ -471,7 +471,7 @@ public partial class MainViewModel : ObservableRecipient
         const string KeyStats = "Performance_EnableAcrylicOnStatsCards";
         var cards = await _localSettings.ReadSettingAsync<bool?>(KeyCards);
         var stats = await _localSettings.ReadSettingAsync<bool?>(KeyStats);
-        App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+        App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
         {
             _enableAcrylicOnCards = cards ?? true;
             _enableAcrylicOnStatsCards = stats ?? true;
@@ -506,7 +506,7 @@ public partial class MainViewModel : ObservableRecipient
 
             var page = await _coreHost.ListHistoryAsync(query);
             
-            App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+            App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
                 _recentItems.Clear();
 
@@ -593,7 +593,7 @@ public partial class MainViewModel : ObservableRecipient
             {
                 // 更新缓存统计
                 var cacheStats = CoreInterop.QueryCacheStats(handle);
-                App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+                App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
                 {
                     CurrentCacheBytes = cacheStats.CurrentCacheBytes;
                     // 使用批量更新，减少 CollectionChanged 事件触发次数
@@ -608,9 +608,8 @@ public partial class MainViewModel : ObservableRecipient
 
                 // 更新网络统计
                 var netStats = CoreInterop.QueryNetStats(handle);
-                App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+                App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
                 {
-                    // 使用批量更新，减少 CollectionChanged 事件触发次数
                     NetworkSeries.Clear();
                     foreach (var point in netStats.Series)
                     {
@@ -620,9 +619,8 @@ public partial class MainViewModel : ObservableRecipient
 
                 // 更新活动统计
                 var activityStats = CoreInterop.QueryActivityStats(handle);
-                App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+                App.MainWindow?.DispatcherQueue?.TryEnqueue(() =>
                 {
-                    // 使用批量更新，减少 CollectionChanged 事件触发次数
                     ActivitySeries.Clear();
                     foreach (var point in activityStats.Series)
                     {
@@ -630,14 +628,14 @@ public partial class MainViewModel : ObservableRecipient
                     }
                 });
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 // Log error if needed
             }
         });
 
         // 更新设备统计（从Store）- 优化：减少LINQ操作
-        App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+        App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
         {
             var peers = _peerStore.Peers;
             var transfers = _transferStore.Transfers;

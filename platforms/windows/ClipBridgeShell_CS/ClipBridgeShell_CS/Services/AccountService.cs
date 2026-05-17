@@ -79,7 +79,7 @@ public class AccountService : IAccountService
         }
         catch { }
 
-        await _localSettings.SaveSettingAsync<string>(USERNAME_KEY, null);
+        await _localSettings.SaveSettingAsync<string>(USERNAME_KEY, null!);
 
         // 触发状态变化事件
         AccountStatusChanged?.Invoke(this, false);

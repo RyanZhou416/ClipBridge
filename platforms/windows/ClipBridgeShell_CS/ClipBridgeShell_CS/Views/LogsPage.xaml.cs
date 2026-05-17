@@ -30,10 +30,12 @@ public sealed partial class LogsPage : Page
     private bool _isLoadingOlderLogs = false; // 防止重复加载
 
     private bool _isFirstLayout = true; // 标记是否是首次布局
-    private bool _hasScrolledToBottom = false; // 标记是否已经滚动到底部（防止重复滚动）
+#pragma warning disable CS0414
+    private readonly bool _hasScrolledToBottom = false; // 标记是否已经滚动到底部（防止重复滚动）
+#pragma warning restore CS0414
     private bool _userScrolledAway = false; // 标记用户是否主动向上滚动离开了底部
     private double _lastScrollOffset = 0; // 记录上次滚动位置，用于判断滚动方向
-    private HashSet<long> _animatedItemIds = new(); // 记录已动画过的日志项ID，避免重复动画
+    private readonly HashSet<long> _animatedItemIds = new(); // 记录已动画过的日志项ID，避免重复动画
 
     public LogsPage()
     {
@@ -196,7 +198,7 @@ public sealed partial class LogsPage : Page
             _ = Task.Run(async () =>
             {
                 await Task.Delay(150);
-                App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+                App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
                 {
                     ScrollToBottom();
                     // 标记所有初始项已动画（避免初始加载时动画）
@@ -246,14 +248,14 @@ public sealed partial class LogsPage : Page
     {
         if (sender is ScrollViewer scrollViewer)
         {
-            double verticalOffset = scrollViewer.VerticalOffset;
-            double scrollableHeight = scrollViewer.ScrollableHeight;
-            double viewportHeight = scrollViewer.ViewportHeight;
+            var verticalOffset = scrollViewer.VerticalOffset;
+            var scrollableHeight = scrollViewer.ScrollableHeight;
+            var viewportHeight = scrollViewer.ViewportHeight;
             
             // 判断滚动方向：向上滚动（离开底部）还是向下滚动（接近底部）
             // 注意：需要排除首次调用（_lastScrollOffset 为 0 的情况）
-            bool scrollingUp = _lastScrollOffset > 0 && verticalOffset < _lastScrollOffset;
-            bool scrollingDown = _lastScrollOffset > 0 && verticalOffset > _lastScrollOffset;
+            var scrollingUp = _lastScrollOffset > 0 && verticalOffset < _lastScrollOffset;
+            var scrollingDown = _lastScrollOffset > 0 && verticalOffset > _lastScrollOffset;
             _lastScrollOffset = verticalOffset;
             
             // 判断是否在底部（使用更严格的阈值，只有真正在底部才认为在底部）
@@ -267,7 +269,7 @@ public sealed partial class LogsPage : Page
             else
             {
                 // 计算距离底部的距离
-                double distanceFromBottom = scrollableHeight - (verticalOffset + viewportHeight);
+                var distanceFromBottom = scrollableHeight - (verticalOffset + viewportHeight);
                 
                 // 如果用户向上滚动（离开底部），立即标记为已离开，不再锁定
                 if (scrollingUp && distanceFromBottom > 0)

@@ -14,10 +14,10 @@ public class FileService : IFileService
         if (File.Exists(path))
         {
             var json = File.ReadAllText(path);
-            return JsonConvert.DeserializeObject<T>(json);
+            return JsonConvert.DeserializeObject<T>(json)!;
         }
 
-        return default;
+        return default!;
     }
 
     public void Save<T>(string folderPath, string fileName, T content)

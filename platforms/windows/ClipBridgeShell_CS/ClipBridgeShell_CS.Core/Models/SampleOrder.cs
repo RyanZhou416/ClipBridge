@@ -26,12 +26,12 @@ public class SampleOrder
     public string ShipperName
     {
         get; set;
-    }
+    } = string.Empty;
 
     public string ShipperPhone
     {
         get; set;
-    }
+    } = string.Empty;
 
     public double Freight
     {
@@ -41,12 +41,12 @@ public class SampleOrder
     public string Company
     {
         get; set;
-    }
+    } = string.Empty;
 
     public string ShipTo
     {
         get; set;
-    }
+    } = string.Empty;
 
     public double OrderTotal
     {
@@ -56,7 +56,7 @@ public class SampleOrder
     public string Status
     {
         get; set;
-    }
+    } = string.Empty;
 
     public int SymbolCode
     {
@@ -66,14 +66,14 @@ public class SampleOrder
     public string SymbolName
     {
         get; set;
-    }
+    } = string.Empty;
 
     public char Symbol => (char)SymbolCode;
 
     public ICollection<SampleOrderDetail> Details
     {
         get; set;
-    }
+    } = new List<SampleOrderDetail>();
 
     public string ShortDescription => $"Order ID: {OrderID}";
 

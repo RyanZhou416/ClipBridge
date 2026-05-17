@@ -722,15 +722,12 @@ impl Core {
         }
     }
 
-	// [修改] 增强 list_history，虽然底层 store 可能只支持 limit，但 API 要预留 cursor 位置
-	pub fn list_history(&self, limit: usize, _cursor: Option<i64>) -> anyhow::Result<Vec<crate::model::ItemMeta>> {
+	pub fn list_history(&self, limit: usize, cursor: Option<i64>) -> anyhow::Result<Vec<crate::model::ItemMeta>> {
 		if self.inner.is_shutdown.load(Ordering::Acquire) {
 			anyhow::bail!("core already shutdown");
 		}
 		let store = self.inner.store.lock().unwrap();
-		// 目前 store.rs 里的 list_history_metas 只接受 limit
-		// 后续你需要去 store.rs 实现基于 cursor 的分页
-		store.list_history_metas(&self.inner.core_config.account_uid, limit)
+		store.list_history_metas_paged(&self.inner.core_config.account_uid, limit, cursor)
 	}
 
 	/// 本地删除：软删除 + 从 CAS 移除 blob + 发出 item_deleted 事件
@@ -769,18 +766,12 @@ impl Core {
 		Ok(())
 	}
 
-	// [新增] 获取单条 Meta，供 FFI 调用
 	pub fn get_item_meta(&self, item_id: &str) -> anyhow::Result<Option<crate::model::ItemMeta>> {
 		if self.inner.is_shutdown.load(Ordering::Acquire) {
 			anyhow::bail!("core already shutdown");
 		}
 		let store = self.inner.store.lock().unwrap();
-
-		// 这里的 SQL 查询逻辑需要你确认 store.rs 里有没有。
-		// 如果 store.rs 还没有 get_item_meta，你需要去加一个简单的 select。
-		// 为了方便，这里暂时用 list_history 模拟（性能差，建议后续在 Store 实现专用查询）
-		let list = store.list_history_metas(&self.inner.core_config.account_uid, 100)?;
-		Ok(list.into_iter().find(|i| i.item_id == item_id))
+		store.get_item_meta_by_id(item_id)
 	}
 }
 

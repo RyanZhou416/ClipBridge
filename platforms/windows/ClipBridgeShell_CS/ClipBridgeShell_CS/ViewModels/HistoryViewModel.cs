@@ -74,13 +74,11 @@ public partial class HistoryViewModel : ObservableRecipient
         get;
     }
 
-    // 搜索过滤词
     [ObservableProperty]
-    private string _filterText = string.Empty;
+    public partial string FilterText { get; set; }
 
-    // 过滤类型 (可选: "text", "image", "file", null=全部)
     [ObservableProperty]
-    private string? _selectedKind = null;
+    public partial string? SelectedKind { get; set; }
 
     public HistoryViewModel(ICoreHostService coreService, ClipboardApplyService clipboardApply, HistoryStore historyStore, IClipboardService clipboardService, MainViewModel mainViewModel)
     {
@@ -93,6 +91,7 @@ public partial class HistoryViewModel : ObservableRecipient
         DeleteItemCommand = new AsyncRelayCommand<ItemMetaPayload>(DeleteItemAsync);
         GlobalDeleteItemCommand = new AsyncRelayCommand<ItemMetaPayload>(GlobalDeleteItemAsync);
         Source = new HistoryIncrementalCollection(_coreService);
+        FilterText = string.Empty;
 
         _historyStore.Items.CollectionChanged += OnHistoryStoreItemsChanged;
 
@@ -109,7 +108,7 @@ public partial class HistoryViewModel : ObservableRecipient
 
     private void OnClipboardLockChanged(object? sender, bool isLocked)
     {
-        App.MainWindow.DispatcherQueue.TryEnqueue(() =>
+        App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
         {
             OnPropertyChanged(nameof(LockedItemId));
             SyncPinnedItem();

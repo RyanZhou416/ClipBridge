@@ -27,10 +27,10 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
     public ObservableCollection<PeerMetaPayload> Devices { get; } = new();
 
     [ObservableProperty]
-    private int _outboundAllowedCount;
+    public partial int OutboundAllowedCount { get; set; }
 
     [ObservableProperty]
-    private int _inboundAllowedCount;
+    public partial int InboundAllowedCount { get; set; }
 
     public PeerMetaPayload? SelectedDevice
     {
@@ -85,7 +85,7 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
                 }
             }
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             // 忽略解析错误
         }
@@ -245,7 +245,7 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
             if (string.IsNullOrEmpty(newAlias))
             {
                 // 删除别名
-                await _localSettings.SaveSettingAsync<string>(aliasKey, null);
+                await _localSettings.SaveSettingAsync<string>(aliasKey, null!);
                 device.LocalAlias = null;
             }
             else

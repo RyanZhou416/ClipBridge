@@ -1,28 +1,11 @@
-use std::sync::Arc;
 use anyhow::Context;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::Deserialize;
-use cb_core::api::{AppConfig, Core, CoreConfig, CoreEventSink, GlobalPolicy};
+use cb_core::api::{AppConfig, CoreConfig, GlobalPolicy};
 use cb_core::clipboard::{ClipboardFileEntry, ClipboardSnapshot};
 use cb_core::policy::SizeLimits;
 
-
-#[derive(Deserialize)]
-pub struct FfiCfg {
-    pub device_id: String,
-    pub device_name: String,
-    pub account_uid: String,
-    pub account_tag: String,
-    pub data_dir: String,
-    pub cache_dir: String,
-    #[serde(default)]
-    pub limits: Option<SizeLimits>,
-    pub gc_history_max_items: String,
-    pub gc_cas_max_bytes: String,
-}
-
-// [新增] 定义 LimitsDto，所有字段均为 Option，以支持局部更新/默认值
 #[derive(Deserialize)]
 struct LimitsDto {
 	#[serde(default)] soft_text_bytes: Option<i64>,
@@ -62,11 +45,10 @@ struct InitConfigDto {
 	device_id: String,
 	device_name: String,
 	account_uid: String,
-	account_tag: String,
+	account_password: String,
 	data_dir: String,
 	cache_dir: String,
 
-	// [修改] 接受嵌套的 app_config
 	#[serde(default)]
 	app_config: Option<AppConfigDto>,
 }
@@ -91,6 +73,7 @@ enum SnapshotKind {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct TextDto {
     #[serde(default)]
     mime: Option<String>,
@@ -104,6 +87,7 @@ struct ImageDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ClipboardSnapshotDto {
     #[serde(rename = "type")]
     ty: Option<String>,
@@ -126,47 +110,9 @@ struct ClipboardSnapshotDto {
     files: Vec<ClipboardFileEntry>,
 }
 
-
-pub type cb_on_event_fn = extern "C" fn(json: *const std::os::raw::c_char, user_data: *mut std::ffi::c_void);
-
-pub fn init_from_json(json: &str, sink: Arc<dyn CoreEventSink>) -> anyhow::Result<Core> {
-	let dto: InitConfigDto = serde_json::from_str(json)?;
-
-	// 构造 AppConfig
-	let app_config = if let Some(app) = dto.app_config {
-		let policy = match app.global_policy.as_deref() {
-			Some("DenyAll") => GlobalPolicy::DenyAll,
-			_ => GlobalPolicy::AllowAll,
-		};
-		AppConfig {
-			size_limits: app.size_limits.map(|l| l.into()).unwrap_or_default(),
-			global_policy: policy,
-			gc_history_max_items: app.gc_history_max_items.unwrap_or(50_000),
-			gc_cas_max_bytes: app.gc_cas_max_bytes.unwrap_or(1024 * 1024 * 1024),
-		}
-	} else {
-		AppConfig::default()
-	};
-
-	let config = CoreConfig {
-		device_id: dto.device_id,
-		device_name: dto.device_name,
-		account_uid: dto.account_uid,
-		account_tag: dto.account_tag,
-		data_dir: dto.data_dir,
-		cache_dir: dto.cache_dir,
-		app_config, // 注入
-	};
-
-	let core = Core::init(config, sink);
-	Ok(core)
-}
-
 pub fn parse_cfg(json: &str) -> anyhow::Result<cb_core::api::CoreConfig> {
-	// 1. 使用 InitConfigDto 进行反序列化 (支持 app_config 嵌套和数字类型的 GC 配置)
 	let dto: InitConfigDto = serde_json::from_str(json).context("invalid cfg_json")?;
 
-	// 2. 构造 AppConfig (逻辑提取自之前的 init_from_json)
 	let app_config = if let Some(app) = dto.app_config {
 		let policy = match app.global_policy.as_deref() {
 			Some("DenyAll") => GlobalPolicy::DenyAll,
@@ -182,12 +128,11 @@ pub fn parse_cfg(json: &str) -> anyhow::Result<cb_core::api::CoreConfig> {
 		AppConfig::default()
 	};
 
-	// 3. 返回 CoreConfig
 	Ok(CoreConfig {
 		device_id: dto.device_id,
 		device_name: dto.device_name,
 		account_uid: dto.account_uid,
-		account_tag: dto.account_tag,
+		account_password: dto.account_password,
 		data_dir: dto.data_dir,
 		cache_dir: dto.cache_dir,
 		app_config,
@@ -200,7 +145,6 @@ pub fn parse_snapshot(json: &str) -> anyhow::Result<(ClipboardSnapshot, ShareMod
     let dto: ClipboardSnapshotDto =
         serde_json::from_str(json).context("invalid snapshot_json")?;
 
-    // type 字段：建议严格
     if dto.ty.as_deref() != Some("ClipboardSnapshot") {
         anyhow::bail!("invalid snapshot.type: expected ClipboardSnapshot");
     }
@@ -225,5 +169,3 @@ pub fn parse_snapshot(json: &str) -> anyhow::Result<(ClipboardSnapshot, ShareMod
 
     Ok((snap, dto.share_mode))
 }
-
-

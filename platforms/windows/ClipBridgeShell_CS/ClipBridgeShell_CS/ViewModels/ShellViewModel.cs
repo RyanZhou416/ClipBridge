@@ -16,12 +16,11 @@ namespace ClipBridgeShell_CS.ViewModels;
 
 public partial class ShellViewModel : ObservableRecipient
 {
-    // --- 原本就有的：导航状态 ---
     [ObservableProperty]
-    private bool isBackEnabled;
+    public partial bool IsBackEnabled { get; set; }
 
     [ObservableProperty]
-    private object? selected;
+    public partial object? Selected { get; set; }
 
     public INavigationService NavigationService
     {
@@ -37,10 +36,10 @@ public partial class ShellViewModel : ObservableRecipient
     private readonly IClipboardService _clipboard;
 
     [ObservableProperty]
-    private bool isCoreDegraded;
+    public partial bool IsCoreDegraded { get; set; }
 
     [ObservableProperty]
-    private string? coreDegradedMessage;
+    public partial string? CoreDegradedMessage { get; set; }
 
     public IAsyncRelayCommand RetryCoreInitCommand
     {

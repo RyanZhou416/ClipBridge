@@ -183,7 +183,6 @@ public sealed class CoreHostService : ICoreHostService
             // 注意：核心初始化日志是在 cb_init 调用时立即写入的，所以我们需要使用一个更早的时间戳
             var initStartTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 50; // 减去50ms，确保早于核心初始化日志
             
-            IntPtr outHandle;
             // [FIX] 必须使用 Task.Run 避免阻塞 UI 线程，虽然 init 应该很快
             await Task.Run(() =>
             {
@@ -441,9 +440,9 @@ public sealed class CoreHostService : ICoreHostService
                 if (root.TryGetProperty("error", out var errorElement))
                 {
                     if (errorElement.TryGetProperty("code", out var codeEl))
-                        errCode = codeEl.GetString();
+                        errCode = codeEl.GetString() ?? string.Empty;
                     if (errorElement.TryGetProperty("message", out var msgEl))
-                        errMsg = msgEl.GetString();
+                        errMsg = msgEl.GetString() ?? string.Empty;
                 }
                 return false;
             }
@@ -692,7 +691,7 @@ public sealed class CoreHostService : ICoreHostService
                     var peer = new Core.Models.Events.PeerMetaPayload
                     {
                         DeviceId = peerEl.TryGetProperty("device_id", out var did) ? did.GetString() ?? string.Empty : string.Empty,
-                        Name = peerEl.TryGetProperty("device_name", out var name) ? name.GetString() : "Unknown",
+                        Name = peerEl.TryGetProperty("device_name", out var name) ? name.GetString() ?? "Unknown" : "Unknown",
                         IsOnline = peerEl.TryGetProperty("state", out var stateEl) 
                             ? stateEl.GetString() == "Online" 
                             : false,

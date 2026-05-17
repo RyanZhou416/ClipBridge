@@ -244,7 +244,7 @@ public partial class App : Application
             var testLogger = loggerFactory.CreateLogger("App");
             testLogger.LogInformation("App started - testing log system");
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             // 日志系统初始化失败，但不影响应用启动
         }
@@ -456,7 +456,7 @@ public partial class App : Application
             .SetOptions(o => o.DefaultLanguage = defaultLang)
             .Build();
         if (localizer.GetCurrentLanguage() != defaultLang)
-            localizer.SetLanguage(defaultLang);
+            _ = localizer.SetLanguage(defaultLang);
     }
 
     private static string NormalizeLanguageTag(string? t)

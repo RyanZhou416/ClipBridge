@@ -13,17 +13,26 @@ public class IngestPolicyTests
     // 1. 定义一个简单的伪造服务，用于控制测试环境
     private class FakeClipboardService : IClipboardService
     {
-        public event EventHandler ContentChanged;
+#pragma warning disable CS0067
+        public event EventHandler? ContentChanged;
+        public event EventHandler<bool>? ClipboardLockChanged;
+#pragma warning restore CS0067
+
         public string? LastWriteFingerprint
         {
             get; set;
         }
+
+        public bool IsClipboardLocked => false;
+        public string? LockedItemId => null;
 
         public Task<ClipboardSnapshot?> GetSnapshotAsync() => Task.FromResult<ClipboardSnapshot?>(null);
         public Task<bool> SetTextAsync(string text) => Task.FromResult(true);
         public Task<string?> GetTextAsync() => Task.FromResult<string?>(null);
         public Task SetImageFromPathAsync(string path) => Task.CompletedTask;
         public Task SetFilesFromPathsAsync(IReadOnlyList<string> paths) => Task.CompletedTask;
+        public void LockClipboard(string text, string itemId) { }
+        public void UnlockClipboard() { }
     }
 
     private FakeClipboardService _fakeService = null!;

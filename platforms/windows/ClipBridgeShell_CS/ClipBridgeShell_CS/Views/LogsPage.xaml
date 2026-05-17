@@ -27,19 +27,19 @@
                            TextWrapping="Wrap"
                            TextTrimming="None"
                            Foreground="{ThemeResource SystemControlForegroundBaseHighBrush}">
-					<Run Text="{x:Bind FormattedTime, Mode=OneWay}" />
+					<Run Text="{x:Bind FormattedTime, Mode=OneTime}" />
 					<Run Text=" " />
-					<Run Text="{x:Bind FormattedLevel, Mode=OneWay}" 
-                         Foreground="{x:Bind Level, Mode=OneWay, Converter={StaticResource LogLevelToColorConverter}}" />
+					<Run Text="{x:Bind FormattedLevel, Mode=OneTime}" 
+                         Foreground="{x:Bind Level, Mode=OneTime, Converter={StaticResource LogLevelToColorConverter}}" />
 					<Run Text=" " />
-					<Run Text="{x:Bind FormattedComponent, Mode=OneWay}" />
+					<Run Text="{x:Bind FormattedComponent, Mode=OneTime}" />
 					<Run Text=" " />
-					<Run Text="{x:Bind FormattedCategory, Mode=OneWay}" 
+					<Run Text="{x:Bind FormattedCategory, Mode=OneTime}" 
                          Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
 					<Run Text=" " />
-					<Run Text="{x:Bind DisplayMessage, Mode=OneWay}" 
-                         Foreground="{x:Bind Level, Mode=OneWay, Converter={StaticResource LogLevelToColorConverter}}" />
-					<Run Text="{x:Bind ExceptionDisplay, Mode=OneWay}" 
+					<Run Text="{x:Bind DisplayMessage, Mode=OneTime}" 
+                         Foreground="{x:Bind Level, Mode=OneTime, Converter={StaticResource LogLevelToColorConverter}}" />
+					<Run Text="{x:Bind ExceptionDisplay, Mode=OneTime}" 
                          Foreground="Red" />
 				</TextBlock>
 			</Border>

@@ -11,7 +11,7 @@ public class SampleOrderDetail
     public string ProductName
     {
         get; set;
-    }
+    } = string.Empty;
 
     public int Quantity
     {
@@ -26,7 +26,7 @@ public class SampleOrderDetail
     public string QuantityPerUnit
     {
         get; set;
-    }
+    } = string.Empty;
 
     public double UnitPrice
     {
@@ -36,12 +36,12 @@ public class SampleOrderDetail
     public string CategoryName
     {
         get; set;
-    }
+    } = string.Empty;
 
     public string CategoryDescription
     {
         get; set;
-    }
+    } = string.Empty;
 
     public double Total
     {
