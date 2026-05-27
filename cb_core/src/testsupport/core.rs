@@ -22,7 +22,7 @@ impl TestCore {
 		let events = Arc::new(EventCollector::new());
 		let sink: Arc<dyn crate::api::CoreEventSink> = events.clone();
 
-		let core = crate::api::Core::init(cfg, sink);
+		let core = Core::init(cfg, sink);
 
 		Self { core, dirs, events }
 	}

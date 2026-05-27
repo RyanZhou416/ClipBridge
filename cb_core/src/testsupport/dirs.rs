@@ -1,3 +1,4 @@
+use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -15,10 +16,10 @@ impl TestDirs {
 
 		// 1) 优先尊重 CARGO_TARGET_DIR
 		// 2) 否则从 manifest 往上找第一个存在的 target/
-		let target = std::env::var_os("CARGO_TARGET_DIR")
+		let target = env::var_os("CARGO_TARGET_DIR")
 			.map_or_else(|| find_target_dir(&manifest), PathBuf::from);
 
-		let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+		let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
 
 		// target/<profile>/clipbridge_tests/<crate_tag>/<test_tag>_<uuid>/{data,cache}
 		let root = target
@@ -44,7 +45,7 @@ impl TestDirs {
 impl Drop for TestDirs {
 	fn drop(&mut self) {
 		// 如需保留现场排查：运行测试时加 CB_TEST_KEEP=1
-		if std::env::var_os("CB_TEST_KEEP").is_some() {
+		if env::var_os("CB_TEST_KEEP").is_some() {
 			eprintln!("[test] keeping test dirs: {}", self.root.display());
 			return;
 		}

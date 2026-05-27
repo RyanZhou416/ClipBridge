@@ -1,0 +1,14 @@
+<problems is_local_tool="true">
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/bin/demo.rs</file>
+  <line>175</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/bin/demo.rs" />
+  <problem_class id="RsSleepInsideAsyncFunction" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">阻塞 `sleep` 函数不能在 `async` 上下文中使用</problem_class>
+  <description>阻塞 `sleep` 函数不能在 `async` 上下文中使用</description>
+  <highlighted_element>thread::sleep</highlighted_element>
+  <language>Rust</language>
+  <offset>5</offset>
+  <length>13</length>
+</problem>
+</problems>

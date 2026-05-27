@@ -233,7 +233,7 @@ impl Cas {
 		let tmp_path = self.tmp_dir.join(tmp_name);
 
 		{
-			let mut file = std::fs::File::create(&tmp_path)?;
+			let mut file = fs::File::create(&tmp_path)?;
 			file.write_all(data)?;
 			file.flush()?;
 		}

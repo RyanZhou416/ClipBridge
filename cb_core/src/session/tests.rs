@@ -5,6 +5,7 @@ use crate::logs::LogStore;
 use crate::store::Store;
 use crate::transport::{Connection, Transport};
 use crate::util::now_ms;
+use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -77,7 +78,7 @@ struct TestContext {
 }
 
 fn setup(name: &str, password: &str) -> TestContext {
-	let mut path = std::env::temp_dir();
+	let mut path = env::temp_dir();
 	path.push("cb_test_session");
 	path.push(name);
 	// 清理旧数据，保证测试环境纯净

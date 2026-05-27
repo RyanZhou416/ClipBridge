@@ -174,7 +174,7 @@ impl LogStore {
 		// 使用结构体构建多语言消息（类型安全，易于扩展）
 		let msg = MultilingualMessage {
 			en: message_en.to_string(),
-			zh_cn: message_zh_cn.map(std::string::ToString::to_string),
+			zh_cn: message_zh_cn.map(ToString::to_string),
 		};
 		let message_json = serde_json::to_string(&msg)?;
 

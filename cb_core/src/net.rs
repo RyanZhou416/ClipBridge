@@ -55,7 +55,7 @@ pub enum NetCmd {
 		// 强制重传？通常 false
 		force: bool,
 		// 返回 transfer_id (即 req_id)
-		reply: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
+		reply: oneshot::Sender<anyhow::Result<String>>,
 	},
 
 	/// 取消传输

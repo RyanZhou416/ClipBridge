@@ -1,0 +1,376 @@
+<problems is_local_tool="true">
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/testsupport/dirs.rs</file>
+  <line>18</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/testsupport/dirs.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>std::</highlighted_element>
+  <language>Rust</language>
+  <offset>15</offset>
+  <length>5</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/testsupport/dirs.rs</file>
+  <line>21</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/testsupport/dirs.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>std::</highlighted_element>
+  <language>Rust</language>
+  <offset>16</offset>
+  <length>5</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/testsupport/dirs.rs</file>
+  <line>47</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/testsupport/dirs.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>std::</highlighted_element>
+  <language>Rust</language>
+  <offset>5</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs</file>
+  <line>90</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>std::</highlighted_element>
+  <language>Rust</language>
+  <offset>20</offset>
+  <length>5</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs</file>
+  <line>162</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::util::</highlighted_element>
+  <language>Rust</language>
+  <offset>9</offset>
+  <length>13</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs</file>
+  <line>252</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::api::</highlighted_element>
+  <language>Rust</language>
+  <offset>31</offset>
+  <length>12</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs</file>
+  <line>274</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::util::</highlighted_element>
+  <language>Rust</language>
+  <offset>10</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/testsupport/core.rs</file>
+  <line>25</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/testsupport/core.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::api::</highlighted_element>
+  <language>Rust</language>
+  <offset>13</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/crypto.rs</file>
+  <line>31</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/crypto.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>opaque_ke::</highlighted_element>
+  <language>Rust</language>
+  <offset>32</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/tests.rs</file>
+  <line>80</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/tests.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>std::</highlighted_element>
+  <language>Rust</language>
+  <offset>16</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>38</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::model::</highlighted_element>
+  <language>Rust</language>
+  <offset>11</offset>
+  <length>14</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>481</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::clipboard::</highlighted_element>
+  <language>Rust</language>
+  <offset>13</offset>
+  <length>18</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>483</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::api::</highlighted_element>
+  <language>Rust</language>
+  <offset>21</offset>
+  <length>12</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>495</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::clipboard::</highlighted_element>
+  <language>Rust</language>
+  <offset>12</offset>
+  <length>18</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>497</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::model::</highlighted_element>
+  <language>Rust</language>
+  <offset>21</offset>
+  <length>14</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>648</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>std::sync::atomic::</highlighted_element>
+  <language>Rust</language>
+  <offset>9</offset>
+  <length>19</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>740</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::net::</highlighted_element>
+  <language>Rust</language>
+  <offset>18</offset>
+  <length>12</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>757</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::net::</highlighted_element>
+  <language>Rust</language>
+  <offset>27</offset>
+  <length>12</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>767</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::model::</highlighted_element>
+  <language>Rust</language>
+  <offset>25</offset>
+  <length>14</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>811</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::model::</highlighted_element>
+  <language>Rust</language>
+  <offset>69</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>177</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>std::string::</highlighted_element>
+  <language>Rust</language>
+  <offset>28</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/cas.rs</file>
+  <line>236</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/cas.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>std::</highlighted_element>
+  <language>Rust</language>
+  <offset>18</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/store.rs</file>
+  <line>866</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/store.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::model::</highlighted_element>
+  <language>Rust</language>
+  <offset>28</offset>
+  <length>14</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/store.rs</file>
+  <line>875</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/store.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::model::</highlighted_element>
+  <language>Rust</language>
+  <offset>19</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/net.rs</file>
+  <line>58</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/net.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>tokio::sync::</highlighted_element>
+  <language>Rust</language>
+  <offset>9</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>802</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::util::</highlighted_element>
+  <language>Rust</language>
+  <offset>17</offset>
+  <length>13</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1191</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>crate::util::</highlighted_element>
+  <language>Rust</language>
+  <offset>12</offset>
+  <length>13</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1355</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>tokio::sync::</highlighted_element>
+  <language>Rust</language>
+  <offset>12</offset>
+  <length>13</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1355</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>anyhow::</highlighted_element>
+  <language>Rust</language>
+  <offset>41</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1425</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>anyhow::</highlighted_element>
+  <language>Rust</language>
+  <offset>43</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1442</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>anyhow::</highlighted_element>
+  <language>Rust</language>
+  <offset>70</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1471</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>anyhow::</highlighted_element>
+  <language>Rust</language>
+  <offset>64</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1499</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnnecessaryQualifications" severity="WEAK WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">不必要的路径前缀</problem_class>
+  <description>路径前缀不必要</description>
+  <highlighted_element>anyhow::</highlighted_element>
+  <language>Rust</language>
+  <offset>60</offset>
+  <length>8</length>
+</problem>
+</problems>

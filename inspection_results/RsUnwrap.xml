@@ -1,0 +1,433 @@
+<problems is_local_tool="true">
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>281</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>38</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>317</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>51</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>352</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>43</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>365</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>44</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>369</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>52</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>376</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>52</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>386</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>43</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>390</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>51</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>411</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>51</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>441</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>43</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>457</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>41</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>466</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>45</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>565</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>42</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>613</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>42</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>771</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>38</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>782</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>43</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>789</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>43</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>247</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>40</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>391</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>47</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>467</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>46</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>482</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>47</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>503</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>45</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>529</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>47</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>569</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>48</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>578</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>49</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>604</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>48</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>625</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>48</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>691</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>47</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>765</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>47</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>803</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>41</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>829</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>45</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1011</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>46</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1075</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>48</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1207</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>33</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1359</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>45</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1387</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>46</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1405</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>46</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1558</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>46</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1583</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="RsUnwrap" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">unwrap 可被替换为 `?`</problem_class>
+  <description>`unwrap()` 可被替换为 `?`</description>
+  <highlighted_element>unwrap()</highlighted_element>
+  <language>Rust</language>
+  <offset>46</offset>
+  <length>8</length>
+</problem>
+</problems>

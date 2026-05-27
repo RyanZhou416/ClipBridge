@@ -1,0 +1,14 @@
+<problems is_local_tool="true">
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1205</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">语法</problem_class>
+  <description>您的意思是“'不'全”？</description>
+  <highlighted_element>补</highlighted_element>
+  <language>Rust</language>
+  <offset>21</offset>
+  <length>1</length>
+</problem>
+</problems>

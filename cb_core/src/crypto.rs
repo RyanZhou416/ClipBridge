@@ -28,7 +28,7 @@ pub type CbServerLoginStartResult = opaque_ke::ServerLoginStartResult<DefaultCip
 pub type CbClientLoginState = CbClientLogin;
 pub type CbServerLoginState = CbServerLogin;
 
-pub type CbServerRegistration = opaque_ke::ServerRegistration<DefaultCipherSuite>;
+pub type CbServerRegistration = ServerRegistration<DefaultCipherSuite>;
 
 // --- 3. P2P 辅助：生成服务器验证记录 ---
 pub fn p2p_get_server_registration(

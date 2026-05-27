@@ -863,7 +863,7 @@ impl Store {
 		&self,
 		item_id: &str,
 		file_id: &str,
-	) -> anyhow::Result<Option<crate::model::FileMeta>> {
+	) -> anyhow::Result<Option<FileMeta>> {
 		let mut stmt = self
 			.conn
 			.prepare("SELECT files_json FROM items WHERE item_id = ?")?;
@@ -872,7 +872,7 @@ impl Store {
 		if let Some(row) = rows.next()? {
 			let json_str: Option<String> = row.get(0)?;
 			if let Some(s) = json_str {
-				let files: Vec<crate::model::FileMeta> =
+				let files: Vec<FileMeta> =
 					serde_json::from_str(&s).unwrap_or_default();
 				// 找到对应的 file_id
 				let target = files.into_iter().find(|f| f.file_id == file_id);

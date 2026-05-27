@@ -799,9 +799,9 @@ impl SessionActor {
 					if ok {
 						if let Some(sha) = &sha_opt {
 							let _ = cas.remove_blob(sha);
-							let now = crate::util::now_ms();
-							let mut guard = self.store.lock().unwrap();
-							let _ = guard.mark_cache_missing(sha, now);
+						let now = now_ms();
+						let mut guard = self.store.lock().unwrap();
+						let _ = guard.mark_cache_missing(sha, now);
 						}
 						let evt = serde_json::json!({
 							"type": "ITEM_DELETED",
@@ -1188,7 +1188,7 @@ impl SessionActor {
 		// 统一使用 TRANSFER_FAILED 或 CORE_ERROR
 		let evt = serde_json::json!({
 			"type": "TRANSFER_FAILED",
-			"ts_ms": crate::util::now_ms(),
+			"ts_ms": now_ms(),
 			"payload": payload
 		});
 		self.sink.emit(evt.to_string());
@@ -1352,7 +1352,7 @@ impl SessionActor {
 		&mut self,
 		item_id: String,
 		file_id: Option<String>,
-		reply_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
+		reply_tx: oneshot::Sender<Result<String>>,
 	) -> Result<()> {
 		let transfer_id = uuid::Uuid::new_v4().to_string();
 		{
@@ -1422,7 +1422,7 @@ impl SessionActor {
 	// handle_opaque_finish, perform_tofu_check_async, transition_to_online, tick_heartbeat
 	// are kept exactly as they were in the input file.
 
-	async fn start_opaque_login(&mut self) -> anyhow::Result<()> {
+	async fn start_opaque_login(&mut self) -> Result<()> {
 		let mut rng = OsRng;
 		let password = self.config.account_password.as_bytes();
 		let start_result = CbClientLogin::start(&mut rng, password)
@@ -1439,7 +1439,7 @@ impl SessionActor {
 		Ok(())
 	}
 
-	async fn handle_opaque_response(&mut self, response_bytes: &[u8]) -> anyhow::Result<()> {
+	async fn handle_opaque_response(&mut self, response_bytes: &[u8]) -> Result<()> {
 		let client_state = self
 			.opaque_client_state
 			.take()
@@ -1468,7 +1468,7 @@ impl SessionActor {
 		Ok(())
 	}
 
-	async fn handle_opaque_start(&mut self, start_bytes: &[u8]) -> anyhow::Result<()> {
+	async fn handle_opaque_start(&mut self, start_bytes: &[u8]) -> Result<()> {
 		let mut rng = OsRng;
 		let identifier = b"clipbridge-user";
 		let (server_setup, server_rec) =
@@ -1496,7 +1496,7 @@ impl SessionActor {
 		Ok(())
 	}
 
-	fn handle_opaque_finish(&mut self, finish_bytes: &[u8]) -> anyhow::Result<()> {
+	fn handle_opaque_finish(&mut self, finish_bytes: &[u8]) -> Result<()> {
 		let server_state = self
 			.opaque_server_state
 			.take()

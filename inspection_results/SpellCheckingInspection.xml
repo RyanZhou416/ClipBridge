@@ -1,0 +1,479 @@
+<problems is_local_tool="true">
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/lib.rs</file>
+  <line>34</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/lib.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'testsupport' 中</description>
+  <highlighted_element>testsupport</highlighted_element>
+  <language>Rust</language>
+  <offset>8</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/gc.rs</file>
+  <line>32</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/gc.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'oaicite' 中的拼写错误</description>
+  <highlighted_element>oaicite</highlighted_element>
+  <language>Rust</language>
+  <offset>78</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/testsupport/dirs.rs</file>
+  <line>26</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/testsupport/dirs.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'clipbridge' 中的拼写错误</description>
+  <highlighted_element>clipbridge</highlighted_element>
+  <language>Rust</language>
+  <offset>10</offset>
+  <length>10</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/testsupport/dirs.rs</file>
+  <line>59</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/testsupport/dirs.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'cand' 中</description>
+  <highlighted_element>cand</highlighted_element>
+  <language>Rust</language>
+  <offset>6</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs</file>
+  <line>41</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'clipbridge' 中的拼写错误</description>
+  <highlighted_element>clipbridge</highlighted_element>
+  <language>Rust</language>
+  <offset>12</offset>
+  <length>10</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs</file>
+  <line>148</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'broada' 中的拼写错误</description>
+  <highlighted_element>broada</highlighted_element>
+  <language>Rust</language>
+  <offset>49</offset>
+  <length>6</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs</file>
+  <line>149</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'broadb' 中的拼写错误</description>
+  <highlighted_element>broadb</highlighted_element>
+  <language>Rust</language>
+  <offset>53</offset>
+  <length>6</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs</file>
+  <line>155</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'broadb' 中的拼写错误</description>
+  <highlighted_element>broadb</highlighted_element>
+  <language>Rust</language>
+  <offset>28</offset>
+  <length>6</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs</file>
+  <line>222</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'Clearning' 中的拼写错误</description>
+  <highlighted_element>Clearning</highlighted_element>
+  <language>Rust</language>
+  <offset>15</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/clipboard.rs</file>
+  <line>8</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/clipboard.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'FILELIST' 中</description>
+  <highlighted_element>FILELIST</highlighted_element>
+  <language>Rust</language>
+  <offset>6</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/crypto.rs</file>
+  <line>16</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/crypto.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'Oprf' 中</description>
+  <highlighted_element>Oprf</highlighted_element>
+  <language>Rust</language>
+  <offset>6</offset>
+  <length>4</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/crypto.rs</file>
+  <line>43</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/crypto.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'clipbridge' 中的拼写错误</description>
+  <highlighted_element>clipbridge</highlighted_element>
+  <language>Rust</language>
+  <offset>20</offset>
+  <length>10</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/crypto.rs</file>
+  <line>96</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/crypto.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'clipbridge' 中的拼写错误</description>
+  <highlighted_element>clipbridge</highlighted_element>
+  <language>Rust</language>
+  <offset>5</offset>
+  <length>10</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/crypto.rs</file>
+  <line>144</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/crypto.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'clipbridge' 中的拼写错误</description>
+  <highlighted_element>clipbridge</highlighted_element>
+  <language>Rust</language>
+  <offset>5</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/tests.rs</file>
+  <line>252</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/tests.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'deadbeefdeadbeefdeadbeefdeadbeef' 中的拼写错误</description>
+  <highlighted_element>deadbeefdeadbeefdeadbeefdeadbeef</highlighted_element>
+  <language>Rust</language>
+  <offset>5</offset>
+  <length>32</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/tests.rs</file>
+  <line>283</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/tests.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'deadbeef' 中的拼写错误</description>
+  <highlighted_element>deadbeef</highlighted_element>
+  <language>Rust</language>
+  <offset>38</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport.rs</file>
+  <line>98</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'priv' 中</description>
+  <highlighted_element>priv</highlighted_element>
+  <language>Rust</language>
+  <offset>19</offset>
+  <length>4</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport.rs</file>
+  <line>99</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'clipbridge' 中的拼写错误</description>
+  <highlighted_element>clipbridge</highlighted_element>
+  <language>Rust</language>
+  <offset>63</offset>
+  <length>10</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport.rs</file>
+  <line>108</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'priv' 中</description>
+  <highlighted_element>priv</highlighted_element>
+  <language>Rust</language>
+  <offset>6</offset>
+  <length>4</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport.rs</file>
+  <line>108</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'oaicite' 中的拼写错误</description>
+  <highlighted_element>oaicite</highlighted_element>
+  <language>Rust</language>
+  <offset>102</offset>
+  <length>7</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport.rs</file>
+  <line>116</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'clipbridge' 中的拼写错误</description>
+  <highlighted_element>clipbridge</highlighted_element>
+  <language>Rust</language>
+  <offset>37</offset>
+  <length>10</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport.rs</file>
+  <line>119</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'rustls' 中的拼写错误</description>
+  <highlighted_element>rustls</highlighted_element>
+  <language>Rust</language>
+  <offset>51</offset>
+  <length>6</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport.rs</file>
+  <line>136</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'clipbridge' 中的拼写错误</description>
+  <highlighted_element>clipbridge</highlighted_element>
+  <language>Rust</language>
+  <offset>37</offset>
+  <length>10</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport.rs</file>
+  <line>139</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'rustls' 中的拼写错误</description>
+  <highlighted_element>rustls</highlighted_element>
+  <language>Rust</language>
+  <offset>51</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport/cert.rs</file>
+  <line>129</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport/cert.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'priv' 中</description>
+  <highlighted_element>priv</highlighted_element>
+  <language>Rust</language>
+  <offset>5</offset>
+  <length>4</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport/cert.rs</file>
+  <line>140</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport/cert.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'priv' 中</description>
+  <highlighted_element>priv</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>4</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport/cert.rs</file>
+  <line>189</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport/cert.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'rcgen' 中的拼写错误</description>
+  <highlighted_element>rcgen</highlighted_element>
+  <language>Rust</language>
+  <offset>12</offset>
+  <length>5</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport/cert.rs</file>
+  <line>193</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport/cert.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'priv' 中</description>
+  <highlighted_element>priv</highlighted_element>
+  <language>Rust</language>
+  <offset>5</offset>
+  <length>4</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport/cert.rs</file>
+  <line>207</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport/cert.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'priv' 中</description>
+  <highlighted_element>priv</highlighted_element>
+  <language>Rust</language>
+  <offset>23</offset>
+  <length>4</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/transport/cert.rs</file>
+  <line>222</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/transport/cert.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'priv' 中</description>
+  <highlighted_element>priv</highlighted_element>
+  <language>Rust</language>
+  <offset>18</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api.rs</file>
+  <line>458</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'cands' 中</description>
+  <highlighted_element>cands</highlighted_element>
+  <language>Rust</language>
+  <offset>9</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>16</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'serde' 中的拼写错误</description>
+  <highlighted_element>serde</highlighted_element>
+  <language>Rust</language>
+  <offset>6</offset>
+  <length>5</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>18</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'serde' 中的拼写错误</description>
+  <highlighted_element>serde</highlighted_element>
+  <language>Rust</language>
+  <offset>6</offset>
+  <length>5</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>163</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'multilang' 中</description>
+  <highlighted_element>multilang</highlighted_element>
+  <language>Rust</language>
+  <offset>14</offset>
+  <length>9</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>484</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'rusqlite' 中的拼写错误</description>
+  <highlighted_element>rusqlite</highlighted_element>
+  <language>Rust</language>
+  <offset>8</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/common.rs</file>
+  <line>5</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/common.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'testsupport' 中的拼写错误</description>
+  <highlighted_element>testsupport</highlighted_element>
+  <language>Rust</language>
+  <offset>8</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/net.rs</file>
+  <line>580</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/net.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'quinn' 中的拼写错误</description>
+  <highlighted_element>quinn</highlighted_element>
+  <language>Rust</language>
+  <offset>10</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>937</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'fmeta' 中</description>
+  <highlighted_element>fmeta</highlighted_element>
+  <language>Rust</language>
+  <offset>20</offset>
+  <length>5</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1213</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>拼写错误: 在单词 'fmeta' 中</description>
+  <highlighted_element>fmeta</highlighted_element>
+  <language>Rust</language>
+  <offset>16</offset>
+  <length>5</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1308</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'BytesMut' 中的拼写错误</description>
+  <highlighted_element>BytesMut</highlighted_element>
+  <language>Rust</language>
+  <offset>18</offset>
+  <length>8</length>
+</problem><problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1473</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'clipbridge' 中的拼写错误</description>
+  <highlighted_element>clipbridge</highlighted_element>
+  <language>Rust</language>
+  <offset>21</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/proto.rs</file>
+  <line>38</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/proto.rs" />
+  <problem_class id="SpellCheckingInspection" severity="TYPO" attribute_key="TYPO">拼写</problem_class>
+  <description>单词 'HelloAck' 中的拼写错误</description>
+  <highlighted_element>HelloAck</highlighted_element>
+  <language>Rust</language>
+  <offset>10</offset>
+  <length>8</length>
+</problem>
+</problems>

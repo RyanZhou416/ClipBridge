@@ -2,6 +2,8 @@
 
 use crate::api::*;
 use crate::clipboard::ClipboardSnapshot;
+use crate::util::now_ms;
+use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -87,7 +89,7 @@ where
 }
 
 fn workspace_target_dir() -> PathBuf {
-	if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
+	if let Some(dir) = env::var_os("CARGO_TARGET_DIR") {
 		return PathBuf::from(dir);
 	}
 	let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -159,7 +161,7 @@ async fn test_m1_data_broadcast() {
 
 	let snapshot = ClipboardSnapshot::Text {
 		text_utf8: "Hello M1 Network".to_string(),
-		ts_ms: crate::util::now_ms(),
+		ts_ms: now_ms(),
 	};
 	println!("A ingesting data...");
 	let meta = core_a.ingest_local_copy(snapshot).expect("Ingest failed");
@@ -249,7 +251,7 @@ async fn test_m1_policy_deny() {
 	let shared_uid = "m1_policy_secret";
 	// 注意：Core A 设置了 DenyAll
 	let (core_a, _rx_a, _dir_a) = create_test_core("deny_a", shared_uid, |c| {
-		c.app_config.global_policy = crate::api::GlobalPolicy::DenyAll;
+		c.app_config.global_policy = GlobalPolicy::DenyAll;
 	});
 	let (_core_b, mut rx_b, _dir_b) = create_test_core("deny_b", shared_uid, |_| {});
 
@@ -271,7 +273,7 @@ async fn test_m1_policy_deny() {
 
 		let snapshot = ClipboardSnapshot::Text {
 			text_utf8: "Should NOT be sent".to_string(),
-			ts_ms: crate::util::now_ms(),
+			ts_ms: now_ms(),
 		};
 		// A 尝试发送数据
 		let _ = core_a.ingest_local_copy(snapshot);

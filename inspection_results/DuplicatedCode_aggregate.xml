@@ -1,0 +1,55 @@
+<root>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" line="199" start="5468" end="5687" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" line="234" start="6623" end="6844" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/api/tests/m2_meta.rs" line="42" start="1309" end="1581" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/api/tests/m2_meta.rs" line="163" start="4802" end="5073" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs" line="48" start="1548" end="1820" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs" line="169" start="5160" end="5437" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs" line="192" start="5863" end="6295" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs" line="331" start="9939" end="10371" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/discovery.rs" line="85" start="1995" end="2125" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/discovery.rs" line="195" start="4595" end="4729" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/logs.rs" line="296" start="6919" end="7251" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/logs.rs" line="326" start="7723" end="8055" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/logs.rs" line="375" start="9005" end="9351" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/logs.rs" line="407" start="9882" end="10228" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/logs.rs" line="522" start="12842" end="13174" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/logs.rs" line="554" start="13694" end="14026" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/logs.rs" line="628" start="15810" end="16126" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/logs.rs" line="657" start="16578" end="16894" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" line="1386" start="38223" end="38485" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" line="1404" start="38717" end="38979" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/session/tests.rs" line="149" start="3896" end="4107" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/session/tests.rs" line="207" start="5473" end="5685" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/session/tests.rs" line="260" start="6660" end="6872" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/stats.rs" line="93" start="2334" end="2543" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/stats.rs" line="123" start="3042" end="3251" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/stats.rs" line="153" start="3756" end="3965" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/store.rs" line="668" start="19540" end="19878" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/store.rs" line="717" start="21090" end="21423" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/store.rs" line="825" start="24423" end="24538" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/store.rs" line="839" start="24807" end="24918" />
+  <fragment file="file://$PROJECT_DIR$/cb_core/src/store.rs" line="853" start="25188" end="25301" />
+</duplicate>
+</root>

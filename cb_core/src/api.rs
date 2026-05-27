@@ -35,7 +35,7 @@ pub struct CoreConfig {
  */
 #[derive(Clone, Debug)]
 pub struct PlanResult {
-	pub meta: crate::model::ItemMeta,
+	pub meta: ItemMeta,
 	pub needs_user_confirm: bool,
 	pub strategy: String, // 用字符串，FFI/壳侧更省事
 }
@@ -478,9 +478,9 @@ impl Core {
 
 	pub fn plan_local_ingest_result(
 		&self,
-		snapshot: &crate::clipboard::ClipboardSnapshot,
+		snapshot: &ClipboardSnapshot,
 		force: bool,
-	) -> anyhow::Result<crate::api::PlanResult> {
+	) -> anyhow::Result<PlanResult> {
 		let plan = self.plan_local_ingest(snapshot, force)?;
 		Ok(PlanResult {
 			meta: plan.meta,
@@ -492,9 +492,9 @@ impl Core {
 	#[allow(clippy::needless_pass_by_value)]
 	pub fn ingest_local_copy_with_force(
 		&self,
-		snapshot: crate::clipboard::ClipboardSnapshot,
+		snapshot: ClipboardSnapshot,
 		force: bool,
-	) -> anyhow::Result<crate::model::ItemMeta> {
+	) -> anyhow::Result<ItemMeta> {
 		let plan = self.plan_local_ingest(&snapshot, force)?;
 		self.apply_ingest(&plan)
 	}
@@ -645,7 +645,7 @@ impl Core {
 		if self
 			.inner
 			.is_shutdown
-			.load(std::sync::atomic::Ordering::Acquire)
+			.load(Ordering::Acquire)
 		{
 			anyhow::bail!("core shutdown");
 		}
@@ -737,7 +737,7 @@ impl Core {
 
 		let (tx, rx) = tokio::sync::oneshot::channel();
 		net_tx
-			.blocking_send(crate::net::NetCmd::EnsureContentCached {
+			.blocking_send(NetCmd::EnsureContentCached {
 				item_id: item_id.to_string(),
 				file_id: file_id.map(ToString::to_string),
 				force: false,
@@ -754,7 +754,7 @@ impl Core {
 	/// M3: 取消传输
 	pub fn cancel_transfer(&self, transfer_id: &str) {
 		if let Some(net_tx) = &self.inner.net {
-			let _ = net_tx.try_send(crate::net::NetCmd::CancelTransfer {
+			let _ = net_tx.try_send(NetCmd::CancelTransfer {
 				transfer_id: transfer_id.to_string(),
 			});
 		}
@@ -764,7 +764,7 @@ impl Core {
 		&self,
 		limit: usize,
 		cursor: Option<i64>,
-	) -> anyhow::Result<Vec<crate::model::ItemMeta>> {
+	) -> anyhow::Result<Vec<ItemMeta>> {
 		if self.inner.is_shutdown.load(Ordering::Acquire) {
 			anyhow::bail!("core already shutdown");
 		}
@@ -808,7 +808,7 @@ impl Core {
 		Ok(())
 	}
 
-	pub fn get_item_meta(&self, item_id: &str) -> anyhow::Result<Option<crate::model::ItemMeta>> {
+	pub fn get_item_meta(&self, item_id: &str) -> anyhow::Result<Option<ItemMeta>> {
 		if self.inner.is_shutdown.load(Ordering::Acquire) {
 			anyhow::bail!("core already shutdown");
 		}

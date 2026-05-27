@@ -1,0 +1,374 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs</file>
+  <line>199</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 199-205</description>
+  <highlighted_element>let connected = wait_for(Duration::from_secs(15), || async {</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>60</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs</file>
+  <line>234</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m1_net.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 234-240</description>
+  <highlighted_element>let reconnected = wait_for(Duration::from_secs(15), || async {</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>62</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m2_meta.rs</file>
+  <line>42</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m2_meta.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 42-50</description>
+  <highlighted_element>while start.elapsed() &lt; Duration::from_secs(3) {</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>48</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m2_meta.rs</file>
+  <line>163</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m2_meta.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 163-171</description>
+  <highlighted_element>while start.elapsed() &lt; Duration::from_secs(3) {</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>48</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs</file>
+  <line>48</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 48-56</description>
+  <highlighted_element>while start.elapsed() &lt; Duration::from_secs(15) {</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>49</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs</file>
+  <line>169</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 169-177</description>
+  <highlighted_element>while start_meta.elapsed() &lt; Duration::from_secs(15) {</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>54</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs</file>
+  <line>192</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 192-204</description>
+  <highlighted_element>while start.elapsed() &lt; Duration::from_secs(15) {</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>49</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs</file>
+  <line>331</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/api/tests/m3_content.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 331-343</description>
+  <highlighted_element>while start.elapsed() &lt; Duration::from_secs(15) {</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>49</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/discovery.rs</file>
+  <line>85</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/discovery.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 85-89</description>
+  <highlighted_element>let capabilities: Vec&lt;String&gt; = caps_str</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/discovery.rs</file>
+  <line>195</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/discovery.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 195-199</description>
+  <highlighted_element>let capabilities: Vec&lt;String&gt; = caps_str</highlighted_element>
+  <language>Rust</language>
+  <offset>2</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>296</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 296-310</description>
+  <highlighted_element>|r| {</highlighted_element>
+  <language>Rust</language>
+  <offset>80</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>326</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 326-340</description>
+  <highlighted_element>|r| {</highlighted_element>
+  <language>Rust</language>
+  <offset>66</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>375</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 375-389</description>
+  <highlighted_element>|r| {</highlighted_element>
+  <language>Rust</language>
+  <offset>4</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>407</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 407-421</description>
+  <highlighted_element>|r| {</highlighted_element>
+  <language>Rust</language>
+  <offset>72</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>522</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 522-536</description>
+  <highlighted_element>|r| {</highlighted_element>
+  <language>Rust</language>
+  <offset>81</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>554</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 554-568</description>
+  <highlighted_element>|r| {</highlighted_element>
+  <language>Rust</language>
+  <offset>67</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>628</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 628-641</description>
+  <highlighted_element>|r| {</highlighted_element>
+  <language>Rust</language>
+  <offset>70</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/logs.rs</file>
+  <line>657</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/logs.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 657-670</description>
+  <highlighted_element>|r| {</highlighted_element>
+  <language>Rust</language>
+  <offset>56</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1386</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 1,386-1,393</description>
+  <highlighted_element>{</highlighted_element>
+  <language>Rust</language>
+  <offset>3</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/actor.rs</file>
+  <line>1404</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/actor.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 1,404-1,411</description>
+  <highlighted_element>{</highlighted_element>
+  <language>Rust</language>
+  <offset>3</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/tests.rs</file>
+  <line>149</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/tests.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 149-158</description>
+  <highlighted_element>let srv_handle = SessionActor::spawn(</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/tests.rs</file>
+  <line>207</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/tests.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 207-216</description>
+  <highlighted_element>let _srv_handle = SessionActor::spawn(</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>38</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/session/tests.rs</file>
+  <line>260</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/session/tests.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 260-269</description>
+  <highlighted_element>let _srv_handle = SessionActor::spawn(</highlighted_element>
+  <language>Rust</language>
+  <offset>1</offset>
+  <length>38</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/stats.rs</file>
+  <line>93</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/stats.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 93-100</description>
+  <highlighted_element>let rows = stmt.query_map(params![start_ts_ms, end_ts_ms, bucket_sec], |r| {</highlighted_element>
+  <language>Rust</language>
+  <offset>2</offset>
+  <length>76</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/stats.rs</file>
+  <line>123</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/stats.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 123-130</description>
+  <highlighted_element>let rows = stmt.query_map(params![start_ts_ms, end_ts_ms, bucket_sec], |r| {</highlighted_element>
+  <language>Rust</language>
+  <offset>2</offset>
+  <length>76</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/stats.rs</file>
+  <line>153</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/stats.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 153-160</description>
+  <highlighted_element>let rows = stmt.query_map(params![start_ts_ms, end_ts_ms, bucket_sec], |r| {</highlighted_element>
+  <language>Rust</language>
+  <offset>2</offset>
+  <length>76</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/store.rs</file>
+  <line>668</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/store.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 668-672</description>
+  <highlighted_element>let existing: Option&lt;(bool, bool, i64)&gt; = self.conn.query_row(</highlighted_element>
+  <language>Rust</language>
+  <offset>2</offset>
+  <length>62</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/store.rs</file>
+  <line>717</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/store.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 717-721</description>
+  <highlighted_element>let res: Option&lt;(bool, bool, i64)&gt; = self.conn.query_row(</highlighted_element>
+  <language>Rust</language>
+  <offset>2</offset>
+  <length>57</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/store.rs</file>
+  <line>825</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/store.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 825-830</description>
+  <highlighted_element>if let Some(row) = rows.next()? {</highlighted_element>
+  <language>Rust</language>
+  <offset>2</offset>
+  <length>33</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/store.rs</file>
+  <line>839</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/store.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 839-844</description>
+  <highlighted_element>if let Some(row) = rows.next()? {</highlighted_element>
+  <language>Rust</language>
+  <offset>2</offset>
+  <length>33</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/cb_core/src/store.rs</file>
+  <line>853</line>
+  <module>ClipBridge</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/cb_core/src/store.rs" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">重复的代码段</problem_class>
+  <description>重复代码: 行 853-858</description>
+  <highlighted_element>if let Some(row) = rows.next()? {</highlighted_element>
+  <language>Rust</language>
+  <offset>2</offset>
+  <length>33</length>
+</problem>
+</problems>
