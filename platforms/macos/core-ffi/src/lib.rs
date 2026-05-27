@@ -1,19 +1,18 @@
 mod bridge;
 mod error;
 
-
+use anyhow::Context;
+use cb_core::api::{Core, CoreEventSink};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
-use anyhow::Context;
-use cb_core::api::{Core, CoreEventSink};
 
 use crate::error::{err_json, ok_json};
 
 /// 包装 `cb_core::api::Core` 的 C 兼容句柄。
 #[repr(C)]
 pub struct cb_handle {
-    core: Core,
+	core: Core,
 }
 
 /// 壳侧提供的事件回调函数原型。
@@ -21,8 +20,8 @@ type OnEventFn = extern "C" fn(json: *const c_char, user_data: *mut c_void);
 
 /// 内部结构，用于将 FFI 回调和用户数据转发给核心层。
 struct FfiSink {
-    cb: OnEventFn,
-    user: *mut c_void,
+	cb: OnEventFn,
+	user: *mut c_void,
 }
 
 // function pointer + raw pointer：我们保证只“转发调用”，线程安全由壳侧处理
@@ -30,19 +29,21 @@ unsafe impl Send for FfiSink {}
 unsafe impl Sync for FfiSink {}
 
 impl CoreEventSink for FfiSink {
-    fn emit(&self, event_json: String) {
-        let Ok(cstr) = CString::new(event_json) else { return };
-        (self.cb)(cstr.as_ptr(), self.user);
-        // cstr 释放后指针失效；壳侧必须在回调里拷贝
-    }
+	fn emit(&self, event_json: String) {
+		let Ok(cstr) = CString::new(event_json) else {
+			return;
+		};
+		(self.cb)(cstr.as_ptr(), self.user);
+		// cstr 释放后指针失效；壳侧必须在回调里拷贝
+	}
 }
 
 fn cstr_to_str<'a>(p: *const c_char) -> anyhow::Result<&'a str> {
-    if p.is_null() {
-        anyhow::bail!("null c string");
-    }
-    let s = unsafe { CStr::from_ptr(p) }.to_str()?;
-    Ok(s)
+	if p.is_null() {
+		anyhow::bail!("null c string");
+	}
+	let s = unsafe { CStr::from_ptr(p) }.to_str()?;
+	Ok(s)
 }
 
 #[derive(serde::Deserialize)]
@@ -53,12 +54,13 @@ struct HistoryQueryDto {
 	cursor: Option<i64>, // 分页游标，可选
 }
 
-fn default_limit() -> usize { 20 }
-
-fn ret(s: String) -> *const c_char {
-    CString::new(s).unwrap().into_raw()
+fn default_limit() -> usize {
+	20
 }
 
+fn ret(s: String) -> *const c_char {
+	CString::new(s).unwrap().into_raw()
+}
 
 /// # `cb_free_string`
 ///
@@ -93,8 +95,12 @@ fn ret(s: String) -> *const c_char {
 /// - 确保外部代码遵守这些约束，以避免内存泄漏或未定义行为。
 #[no_mangle]
 pub extern "C" fn cb_free_string(s: *const c_char) {
-    if s.is_null() { return; }
-    unsafe { drop(CString::from_raw(s as *mut c_char)); }
+	if s.is_null() {
+		return;
+	}
+	unsafe {
+		drop(CString::from_raw(s as *mut c_char));
+	}
 }
 
 /// 初始化回调系统。
@@ -133,24 +139,31 @@ pub extern "C" fn cb_free_string(s: *const c_char) {
 /// printf("初始化结果: %s\n", result);
 /// ```
 #[no_mangle]
-pub extern "C" fn cb_init(cfg_json: *const c_char, on_event: OnEventFn, user_data: *mut c_void) -> *const c_char {
-    let run = (|| -> anyhow::Result<String> {
-        let cfg_s = cstr_to_str(cfg_json)?;
-        let cfg = bridge::parse_cfg(cfg_s)?;
+pub extern "C" fn cb_init(
+	cfg_json: *const c_char,
+	on_event: OnEventFn,
+	user_data: *mut c_void,
+) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		let cfg_s = cstr_to_str(cfg_json)?;
+		let cfg = bridge::parse_cfg(cfg_s)?;
 
-        let sink: Arc<dyn CoreEventSink> = Arc::new(FfiSink { cb: on_event, user: user_data });
-        let core = Core::init(cfg, sink);
+		let sink: Arc<dyn CoreEventSink> = Arc::new(FfiSink {
+			cb: on_event,
+			user: user_data,
+		});
+		let core = Core::init(cfg, sink);
 
-        let h = Box::new(cb_handle { core });
-        let handle_ptr = Box::into_raw(h) as usize;
+		let h = Box::new(cb_handle { core });
+		let handle_ptr = Box::into_raw(h) as usize;
 
-        Ok(ok_json(serde_json::json!({ "handle": handle_ptr })))
-    })();
+		Ok(ok_json(serde_json::json!({ "handle": handle_ptr })))
+	})();
 
-    match run {
-        Ok(s) => ret(s),
-        Err(e) => ret(err_json("INIT_FAILED", &format!("{e:#}"))),
-    }
+	match run {
+		Ok(s) => ret(s),
+		Err(e) => ret(err_json("INIT_FAILED", &format!("{e:#}"))),
+	}
 }
 
 /// # `cb_shutdown` 函数
@@ -202,66 +215,75 @@ pub extern "C" fn cb_init(cfg_json: *const c_char, on_event: OnEventFn, user_dat
 /// - 假定 `ret` 函数将 Rust `String` 转换为 C 兼容的 null 结尾 `*const c_char`。
 #[no_mangle]
 pub extern "C" fn cb_shutdown(h: *mut cb_handle) -> *const c_char {
-    let run = (|| -> anyhow::Result<String> {
-        if h.is_null() { anyhow::bail!("null handle"); }
-        let boxed = unsafe { Box::from_raw(h) };
-        boxed.core.shutdown();
-        Ok(ok_json(serde_json::json!({})))
-    })();
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
+		let boxed = unsafe { Box::from_raw(h) };
+		boxed.core.shutdown();
+		Ok(ok_json(serde_json::json!({})))
+	})();
 
-    match run {
-        Ok(s) => ret(s),
-        Err(e) => ret(err_json("SHUTDOWN_FAILED", &format!("{e:#}"))),
-    }
+	match run {
+		Ok(s) => ret(s),
+		Err(e) => ret(err_json("SHUTDOWN_FAILED", &format!("{e:#}"))),
+	}
 }
 
-
 #[no_mangle]
-pub extern "C" fn cb_plan_local_ingest(h: *mut cb_handle, snapshot_json: *const c_char) -> *const c_char {
-    let run = (|| -> anyhow::Result<String> {
-        if h.is_null() { anyhow::bail!("null handle"); }
-        let snap_s = cstr_to_str(snapshot_json)?;
-        let (snap, share_mode) = bridge::parse_snapshot(snap_s)?;
+pub extern "C" fn cb_plan_local_ingest(
+	h: *mut cb_handle,
+	snapshot_json: *const c_char,
+) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
+		let snap_s = cstr_to_str(snapshot_json)?;
+		let (snap, share_mode) = bridge::parse_snapshot(snap_s)?;
 
-        let force = matches!(share_mode, bridge::ShareMode::Force);
+		let force = matches!(share_mode, bridge::ShareMode::Force);
 
-        let hh = unsafe { &mut *h };
-        let r = hh.core.plan_local_ingest_result(&snap, force)?;
-        Ok(ok_json(serde_json::json!({
-        "plan": {
-        "meta": r.meta,
-        "needs_user_confirm": r.needs_user_confirm,
-        "strategy": r.strategy
-    }
-})))
-    })();
+		let hh = unsafe { &mut *h };
+		let r = hh.core.plan_local_ingest_result(&snap, force)?;
+		Ok(ok_json(serde_json::json!({
+				"plan": {
+				"meta": r.meta,
+				"needs_user_confirm": r.needs_user_confirm,
+				"strategy": r.strategy
+			}
+		})))
+	})();
 
-    match run {
-        Ok(s) => ret(s),
-        Err(e) => ret(err_json("PLAN_FAILED", &format!("{e:#}"))),
-    }
+	match run {
+		Ok(s) => ret(s),
+		Err(e) => ret(err_json("PLAN_FAILED", &format!("{e:#}"))),
+	}
 }
 
-
-
 #[no_mangle]
-pub extern "C" fn cb_ingest_local_copy(h: *mut cb_handle, snapshot_json: *const c_char) -> *const c_char {
-    let run = (|| -> anyhow::Result<String> {
-        if h.is_null() { anyhow::bail!("null handle"); }
-        let snap_s = cstr_to_str(snapshot_json)?;
-        let (snap, share_mode) = bridge::parse_snapshot(snap_s)?;
+pub extern "C" fn cb_ingest_local_copy(
+	h: *mut cb_handle,
+	snapshot_json: *const c_char,
+) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
+		let snap_s = cstr_to_str(snapshot_json)?;
+		let (snap, share_mode) = bridge::parse_snapshot(snap_s)?;
 
-        let force = matches!(share_mode, bridge::ShareMode::Force);
+		let force = matches!(share_mode, bridge::ShareMode::Force);
 
-        let hh = unsafe { &mut *h };
-        let meta = hh.core.ingest_local_copy_with_force(snap, force)?;
-        Ok(ok_json(serde_json::json!({ "meta": meta })))
-    })();
+		let hh = unsafe { &mut *h };
+		let meta = hh.core.ingest_local_copy_with_force(snap, force)?;
+		Ok(ok_json(serde_json::json!({ "meta": meta })))
+	})();
 
-    match run {
-        Ok(s) => ret(s),
-        Err(e) => ret(err_json("INGEST_FAILED", &format!("{e:#}"))),
-    }
+	match run {
+		Ok(s) => ret(s),
+		Err(e) => ret(err_json("INGEST_FAILED", &format!("{e:#}"))),
+	}
 }
 
 /// 获取当前在线设备列表
@@ -269,21 +291,23 @@ pub extern "C" fn cb_ingest_local_copy(h: *mut cb_handle, snapshot_json: *const 
 /// 返回格式：{"ok": true, "data": [{"device_id": "...", "is_online": true, ...}]}
 #[no_mangle]
 pub extern "C" fn cb_list_peers(h: *mut cb_handle) -> *const c_char {
-    let run = (|| -> anyhow::Result<String> {
-        if h.is_null() { anyhow::bail!("null handle"); }
-        let hh = unsafe { &mut *h };
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
+		let hh = unsafe { &mut *h };
 
-        // 调用 Core 的 list_peers
-        let peers = hh.core.list_peers()?;
+		// 调用 Core 的 list_peers
+		let peers = hh.core.list_peers()?;
 
-        // 序列化结果
-        Ok(ok_json(serde_json::json!(peers)))
-    })();
+		// 序列化结果
+		Ok(ok_json(serde_json::json!(peers)))
+	})();
 
-    match run {
-        Ok(s) => ret(s),
-        Err(e) => ret(err_json("LIST_PEERS_FAILED", &format!("{e:#}"))),
-    }
+	match run {
+		Ok(s) => ret(s),
+		Err(e) => ret(err_json("LIST_PEERS_FAILED", &format!("{e:#}"))),
+	}
 }
 
 /// 获取核心状态
@@ -291,19 +315,21 @@ pub extern "C" fn cb_list_peers(h: *mut cb_handle) -> *const c_char {
 /// 返回格式：{"ok": true, "data": {"status": "Running", "device_id": "...", ...}}
 #[no_mangle]
 pub extern "C" fn cb_get_status(h: *mut cb_handle) -> *const c_char {
-    let run = (|| -> anyhow::Result<String> {
-        if h.is_null() { anyhow::bail!("null handle"); }
-        let hh = unsafe { &mut *h };
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
+		let hh = unsafe { &mut *h };
 
-        let status = hh.core.get_status()?;
+		let status = hh.core.get_status()?;
 
-        Ok(ok_json(status))
-    })();
+		Ok(ok_json(status))
+	})();
 
-    match run {
-        Ok(s) => ret(s),
-        Err(e) => ret(err_json("GET_STATUS_FAILED", &format!("{e:#}"))),
-    }
+	match run {
+		Ok(s) => ret(s),
+		Err(e) => ret(err_json("GET_STATUS_FAILED", &format!("{e:#}"))),
+	}
 }
 
 /// 设置单个设备的共享策略
@@ -311,31 +337,37 @@ pub extern "C" fn cb_get_status(h: *mut cb_handle) -> *const c_char {
 /// 入参格式：{"peer_id": "device_uuid", "share_to_peer": true, "accept_from_peer": false}
 /// 返回格式：{"ok": true}
 #[no_mangle]
-pub extern "C" fn cb_set_peer_policy(h: *mut cb_handle, policy_json: *const c_char) -> *const c_char {
-    let run = (|| -> anyhow::Result<String> {
-        if h.is_null() { anyhow::bail!("null handle"); }
-        let hh = unsafe { &mut *h };
-        let policy_str = crate::cstr_to_str(policy_json)?;
+pub extern "C" fn cb_set_peer_policy(
+	h: *mut cb_handle,
+	policy_json: *const c_char,
+) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
+		let hh = unsafe { &mut *h };
+		let policy_str = crate::cstr_to_str(policy_json)?;
 
-        #[derive(serde::Deserialize)]
-        struct PolicyRequest {
-            peer_id: String,
-            #[serde(default)]
-            share_to_peer: Option<bool>,
-            #[serde(default)]
-            accept_from_peer: Option<bool>,
-        }
+		#[derive(serde::Deserialize)]
+		struct PolicyRequest {
+			peer_id: String,
+			#[serde(default)]
+			share_to_peer: Option<bool>,
+			#[serde(default)]
+			accept_from_peer: Option<bool>,
+		}
 
-        let req: PolicyRequest = serde_json::from_str(policy_str)?;
-        hh.core.set_peer_policy(&req.peer_id, req.share_to_peer, req.accept_from_peer)?;
+		let req: PolicyRequest = serde_json::from_str(policy_str)?;
+		hh.core
+			.set_peer_policy(&req.peer_id, req.share_to_peer, req.accept_from_peer)?;
 
-        Ok(ok_json(serde_json::json!({ "ok": true })))
-    })();
+		Ok(ok_json(serde_json::json!({ "ok": true })))
+	})();
 
-    match run {
-        Ok(s) => ret(s),
-        Err(e) => ret(err_json("SET_PEER_POLICY_FAILED", &format!("{e:#}"))),
-    }
+	match run {
+		Ok(s) => ret(s),
+		Err(e) => ret(err_json("SET_PEER_POLICY_FAILED", &format!("{e:#}"))),
+	}
 }
 
 /// 清除设备指纹（用于重新配对，解决 TLS_PIN_MISMATCH 问题）
@@ -343,27 +375,32 @@ pub extern "C" fn cb_set_peer_policy(h: *mut cb_handle, policy_json: *const c_ch
 /// 入参格式：{"peer_id": "device_uuid"}
 /// 返回格式：{"ok": true}
 #[no_mangle]
-pub extern "C" fn cb_clear_peer_fingerprint(h: *mut cb_handle, peer_id_json: *const c_char) -> *const c_char {
-    let run = (|| -> anyhow::Result<String> {
-        if h.is_null() { anyhow::bail!("null handle"); }
-        let hh = unsafe { &mut *h };
-        let json_str = crate::cstr_to_str(peer_id_json)?;
+pub extern "C" fn cb_clear_peer_fingerprint(
+	h: *mut cb_handle,
+	peer_id_json: *const c_char,
+) -> *const c_char {
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
+		let hh = unsafe { &mut *h };
+		let json_str = crate::cstr_to_str(peer_id_json)?;
 
-        #[derive(serde::Deserialize)]
-        struct ClearFingerprintRequest {
-            peer_id: String,
-        }
+		#[derive(serde::Deserialize)]
+		struct ClearFingerprintRequest {
+			peer_id: String,
+		}
 
-        let req: ClearFingerprintRequest = serde_json::from_str(json_str)?;
-        hh.core.clear_peer_fingerprint(&req.peer_id)?;
+		let req: ClearFingerprintRequest = serde_json::from_str(json_str)?;
+		hh.core.clear_peer_fingerprint(&req.peer_id)?;
 
-        Ok(ok_json(serde_json::json!({ "ok": true })))
-    })();
+		Ok(ok_json(serde_json::json!({ "ok": true })))
+	})();
 
-    match run {
-        Ok(s) => ret(s),
-        Err(e) => ret(err_json("CLEAR_PEER_FINGERPRINT_FAILED", &format!("{e:#}"))),
-    }
+	match run {
+		Ok(s) => ret(s),
+		Err(e) => ret(err_json("CLEAR_PEER_FINGERPRINT_FAILED", &format!("{e:#}"))),
+	}
 }
 
 /// 清除本地证书（用于重新生成证书，需要重新配对所有设备）
@@ -372,17 +409,19 @@ pub extern "C" fn cb_clear_peer_fingerprint(h: *mut cb_handle, peer_id_json: *co
 /// 返回格式：{"ok": true}
 #[no_mangle]
 pub extern "C" fn cb_clear_local_cert(h: *mut cb_handle) -> *const c_char {
-    let run = (|| -> anyhow::Result<String> {
-        if h.is_null() { anyhow::bail!("null handle"); }
-        let hh = unsafe { &mut *h };
-        hh.core.clear_local_cert()?;
-        Ok(ok_json(serde_json::json!({ "ok": true })))
-    })();
+	let run = (|| -> anyhow::Result<String> {
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
+		let hh = unsafe { &mut *h };
+		hh.core.clear_local_cert()?;
+		Ok(ok_json(serde_json::json!({ "ok": true })))
+	})();
 
-    match run {
-        Ok(s) => ret(s),
-        Err(e) => ret(err_json("CLEAR_LOCAL_CERT_FAILED", &format!("{e:#}"))),
-    }
+	match run {
+		Ok(s) => ret(s),
+		Err(e) => ret(err_json("CLEAR_LOCAL_CERT_FAILED", &format!("{e:#}"))),
+	}
 }
 
 #[derive(serde::Deserialize)]
@@ -393,29 +432,46 @@ struct EnsureContentDto {
 }
 
 #[no_mangle]
-pub extern "C" fn cb_ensure_content_cached(h: *mut cb_handle, req_json: *const c_char) -> *const c_char {
+pub extern "C" fn cb_ensure_content_cached(
+	h: *mut cb_handle,
+	req_json: *const c_char,
+) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let hh = unsafe { &mut *h };
 
 		let json_str = crate::cstr_to_str(req_json)?;
 		let dto: EnsureContentDto = serde_json::from_str(json_str).context("invalid json")?;
 
 		// 调用 Core API
-		let transfer_id = hh.core.ensure_content_cached(&dto.item_id, dto.file_id.as_deref())?;
+		let transfer_id = hh
+			.core
+			.ensure_content_cached(&dto.item_id, dto.file_id.as_deref())?;
 
-		Ok(crate::error::ok_json(serde_json::json!({ "transfer_id": transfer_id })))
+		Ok(crate::error::ok_json(
+			serde_json::json!({ "transfer_id": transfer_id }),
+		))
 	})();
 	match run {
 		Ok(s) => crate::ret(s),
-		Err(e) => crate::ret(crate::error::err_json("START_FETCH_FAILED", &format!("{e:#}"))),
+		Err(e) => crate::ret(crate::error::err_json(
+			"START_FETCH_FAILED",
+			&format!("{e:#}"),
+		)),
 	}
 }
 
 #[no_mangle]
-pub extern "C" fn cb_cancel_transfer(h: *mut cb_handle, transfer_id_json: *const c_char) -> *const c_char {
+pub extern "C" fn cb_cancel_transfer(
+	h: *mut cb_handle,
+	transfer_id_json: *const c_char,
+) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let hh = unsafe { &mut *h };
 
 		let json_str = crate::cstr_to_str(transfer_id_json)?;
@@ -434,7 +490,9 @@ pub extern "C" fn cb_cancel_transfer(h: *mut cb_handle, transfer_id_json: *const
 #[no_mangle]
 pub extern "C" fn cb_list_history(h: *mut cb_handle, query_json: *const c_char) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let hh = unsafe { &mut *h };
 
 		// 1. 解析入参
@@ -455,23 +513,31 @@ pub extern "C" fn cb_list_history(h: *mut cb_handle, query_json: *const c_char) 
 
 		// 构造符合 C# HistoryPage 定义的 JSON 对象
 		let page_data = serde_json::json!({
-            "items": items,
-            "next_cursor": next_cursor
-        });
+			"items": items,
+			"next_cursor": next_cursor
+		});
 
 		// 4. 包装返回
 		Ok(crate::error::ok_json(page_data))
 	})();
 	match run {
 		Ok(s) => crate::ret(s),
-		Err(e) => crate::ret(crate::error::err_json("LIST_HISTORY_FAILED", &format!("{e:#}"))),
+		Err(e) => crate::ret(crate::error::err_json(
+			"LIST_HISTORY_FAILED",
+			&format!("{e:#}"),
+		)),
 	}
 }
 
 #[no_mangle]
-pub extern "C" fn cb_get_item_meta(h: *mut cb_handle, item_id_json: *const c_char) -> *const c_char {
+pub extern "C" fn cb_get_item_meta(
+	h: *mut cb_handle,
+	item_id_json: *const c_char,
+) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let hh = unsafe { &mut *h };
 
 		// 1. 解析入参 (假设传入的是单纯的字符串 "uuid..."，或者是 { "item_id": "..." })
@@ -484,7 +550,9 @@ pub extern "C" fn cb_get_item_meta(h: *mut cb_handle, item_id_json: *const c_cha
 		} else {
 			// 尝试解析为对象
 			#[derive(serde::Deserialize)]
-			struct IdObj { item_id: String }
+			struct IdObj {
+				item_id: String,
+			}
 			let obj: IdObj = serde_json::from_str(json_str).context("invalid item_id json")?;
 			obj.item_id
 		};
@@ -506,16 +574,23 @@ pub extern "C" fn cb_get_item_meta(h: *mut cb_handle, item_id_json: *const c_cha
 }
 
 #[no_mangle]
-pub extern "C" fn cb_delete_item_local(h: *mut cb_handle, item_id_json: *const c_char) -> *const c_char {
+pub extern "C" fn cb_delete_item_local(
+	h: *mut cb_handle,
+	item_id_json: *const c_char,
+) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let hh = unsafe { &mut *h };
 		let json_str = crate::cstr_to_str(item_id_json)?;
 		let item_id = if let Ok(s) = serde_json::from_str::<String>(json_str) {
 			s
 		} else {
 			#[derive(serde::Deserialize)]
-			struct IdObj { item_id: String }
+			struct IdObj {
+				item_id: String,
+			}
 			let obj: IdObj = serde_json::from_str(json_str).context("invalid item_id json")?;
 			obj.item_id
 		};
@@ -524,21 +599,31 @@ pub extern "C" fn cb_delete_item_local(h: *mut cb_handle, item_id_json: *const c
 	})();
 	match run {
 		Ok(s) => crate::ret(s),
-		Err(e) => crate::ret(crate::error::err_json("DELETE_ITEM_FAILED", &format!("{e:#}"))),
+		Err(e) => crate::ret(crate::error::err_json(
+			"DELETE_ITEM_FAILED",
+			&format!("{e:#}"),
+		)),
 	}
 }
 
 #[no_mangle]
-pub extern "C" fn cb_delete_item_global(h: *mut cb_handle, item_id_json: *const c_char) -> *const c_char {
+pub extern "C" fn cb_delete_item_global(
+	h: *mut cb_handle,
+	item_id_json: *const c_char,
+) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let hh = unsafe { &mut *h };
 		let json_str = crate::cstr_to_str(item_id_json)?;
 		let item_id = if let Ok(s) = serde_json::from_str::<String>(json_str) {
 			s
 		} else {
 			#[derive(serde::Deserialize)]
-			struct IdObj { item_id: String }
+			struct IdObj {
+				item_id: String,
+			}
 			let obj: IdObj = serde_json::from_str(json_str).context("invalid item_id json")?;
 			obj.item_id
 		};
@@ -547,7 +632,10 @@ pub extern "C" fn cb_delete_item_global(h: *mut cb_handle, item_id_json: *const 
 	})();
 	match run {
 		Ok(s) => crate::ret(s),
-		Err(e) => crate::ret(crate::error::err_json("DELETE_ITEM_FAILED", &format!("{e:#}"))),
+		Err(e) => crate::ret(crate::error::err_json(
+			"DELETE_ITEM_FAILED",
+			&format!("{e:#}"),
+		)),
 	}
 }
 
@@ -566,13 +654,18 @@ pub extern "C" fn cb_logs_write(
 	out_id: *mut i64,
 ) -> i32 {
 	let run = (|| -> anyhow::Result<()> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let component_s = cstr_to_str(component)?;
 		let category_s = cstr_to_str(category)?;
-		
+
 		// #region agent log
-		eprintln!("[cb_logs_write] H_A: Received component={}, category={}, level={}, ts_utc={}", component_s, category_s, level, ts_utc);
+		eprintln!(
+			"[cb_logs_write] H_A: Received component={}, category={}, level={}, ts_utc={}",
+			component_s, category_s, level, ts_utc
+		);
 		// #endregion
 		let message_en_s = cstr_to_str(message_en)?;
 		let message_zh_cn_s = if message_zh_cn.is_null() {
@@ -636,7 +729,9 @@ pub extern "C" fn cb_logs_query_after_id(
 	out_json: *mut *const c_char,
 ) -> i32 {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let like_s = if like.is_null() {
 			None
@@ -650,7 +745,13 @@ pub extern "C" fn cb_logs_query_after_id(
 		};
 
 		let log_store = handle.core.inner.log_store.lock().unwrap();
-		let entries = log_store.query_after_id(after_id, level_min, like_s.as_deref(), limit, lang_s.as_deref())?;
+		let entries = log_store.query_after_id(
+			after_id,
+			level_min,
+			like_s.as_deref(),
+			limit,
+			lang_s.as_deref(),
+		)?;
 
 		Ok(crate::error::ok_json(entries))
 	})();
@@ -667,7 +768,10 @@ pub extern "C" fn cb_logs_query_after_id(
 		Err(_) => {
 			unsafe {
 				if !out_json.is_null() {
-					*out_json = crate::ret(crate::error::err_json("QUERY_FAILED", "Failed to query logs"));
+					*out_json = crate::ret(crate::error::err_json(
+						"QUERY_FAILED",
+						"Failed to query logs",
+					));
 				}
 			}
 			1
@@ -686,7 +790,9 @@ pub extern "C" fn cb_logs_query_latest(
 	out_json: *mut *const c_char,
 ) -> i32 {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let like_s = if like.is_null() {
 			None
@@ -700,7 +806,8 @@ pub extern "C" fn cb_logs_query_latest(
 		};
 
 		let log_store = handle.core.inner.log_store.lock().unwrap();
-		let entries = log_store.query_latest(level_min, like_s.as_deref(), limit, lang_s.as_deref())?;
+		let entries =
+			log_store.query_latest(level_min, like_s.as_deref(), limit, lang_s.as_deref())?;
 
 		Ok(crate::error::ok_json(entries))
 	})();
@@ -717,7 +824,10 @@ pub extern "C" fn cb_logs_query_latest(
 		Err(_) => {
 			unsafe {
 				if !out_json.is_null() {
-					*out_json = crate::ret(crate::error::err_json("QUERY_FAILED", "Failed to query logs"));
+					*out_json = crate::ret(crate::error::err_json(
+						"QUERY_FAILED",
+						"Failed to query logs",
+					));
 				}
 			}
 			1
@@ -737,7 +847,9 @@ pub extern "C" fn cb_logs_query_before_id(
 	out_json: *mut *const c_char,
 ) -> i32 {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let like_s = if like.is_null() {
 			None
@@ -751,7 +863,13 @@ pub extern "C" fn cb_logs_query_before_id(
 		};
 
 		let log_store = handle.core.inner.log_store.lock().unwrap();
-		let entries = log_store.query_before_id(before_id, level_min, like_s.as_deref(), limit, lang_s.as_deref())?;
+		let entries = log_store.query_before_id(
+			before_id,
+			level_min,
+			like_s.as_deref(),
+			limit,
+			lang_s.as_deref(),
+		)?;
 
 		Ok(crate::error::ok_json(entries))
 	})();
@@ -768,7 +886,10 @@ pub extern "C" fn cb_logs_query_before_id(
 		Err(_) => {
 			unsafe {
 				if !out_json.is_null() {
-					*out_json = crate::ret(crate::error::err_json("QUERY_FAILED", "Failed to query logs"));
+					*out_json = crate::ret(crate::error::err_json(
+						"QUERY_FAILED",
+						"Failed to query logs",
+					));
 				}
 			}
 			1
@@ -790,7 +911,9 @@ pub extern "C" fn cb_logs_query_range(
 	out_json: *mut *const c_char,
 ) -> i32 {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let like_s = if like.is_null() {
 			None
@@ -804,7 +927,15 @@ pub extern "C" fn cb_logs_query_range(
 		};
 
 		let log_store = handle.core.inner.log_store.lock().unwrap();
-		let entries = log_store.query_range(start_ms, end_ms, level_min, like_s.as_deref(), limit, offset, lang_s.as_deref())?;
+		let entries = log_store.query_range(
+			start_ms,
+			end_ms,
+			level_min,
+			like_s.as_deref(),
+			limit,
+			offset,
+			lang_s.as_deref(),
+		)?;
 
 		Ok(crate::error::ok_json(entries))
 	})();
@@ -821,7 +952,10 @@ pub extern "C" fn cb_logs_query_range(
 		Err(_) => {
 			unsafe {
 				if !out_json.is_null() {
-					*out_json = crate::ret(crate::error::err_json("QUERY_FAILED", "Failed to query logs"));
+					*out_json = crate::ret(crate::error::err_json(
+						"QUERY_FAILED",
+						"Failed to query logs",
+					));
 				}
 			}
 			1
@@ -833,7 +967,9 @@ pub extern "C" fn cb_logs_query_range(
 #[no_mangle]
 pub extern "C" fn cb_logs_stats(h: *mut cb_handle, out_json: *mut *const c_char) -> i32 {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let log_store = handle.core.inner.log_store.lock().unwrap();
 		let stats = log_store.stats()?;
@@ -853,7 +989,10 @@ pub extern "C" fn cb_logs_stats(h: *mut cb_handle, out_json: *mut *const c_char)
 		Err(_) => {
 			unsafe {
 				if !out_json.is_null() {
-					*out_json = crate::ret(crate::error::err_json("STATS_FAILED", "Failed to get log stats"));
+					*out_json = crate::ret(crate::error::err_json(
+						"STATS_FAILED",
+						"Failed to get log stats",
+					));
 				}
 			}
 			1
@@ -863,9 +1002,15 @@ pub extern "C" fn cb_logs_stats(h: *mut cb_handle, out_json: *mut *const c_char)
 
 /// 删除指定时间之前的日志
 #[no_mangle]
-pub extern "C" fn cb_logs_delete_before(h: *mut cb_handle, cutoff_ms: i64, out_deleted: *mut i64) -> i32 {
+pub extern "C" fn cb_logs_delete_before(
+	h: *mut cb_handle,
+	cutoff_ms: i64,
+	out_deleted: *mut i64,
+) -> i32 {
 	let run = (|| -> anyhow::Result<i64> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let mut log_store = handle.core.inner.log_store.lock().unwrap();
 		let deleted = log_store.delete_before(cutoff_ms)?;
@@ -887,13 +1032,19 @@ pub extern "C" fn cb_logs_delete_before(h: *mut cb_handle, cutoff_ms: i64, out_d
 
 /// 按 ID 列表删除日志
 #[no_mangle]
-pub extern "C" fn cb_logs_delete_by_ids(h: *mut cb_handle, ids_json: *const c_char, out_deleted: *mut i64) -> i32 {
+pub extern "C" fn cb_logs_delete_by_ids(
+	h: *mut cb_handle,
+	ids_json: *const c_char,
+	out_deleted: *mut i64,
+) -> i32 {
 	let run = (|| -> anyhow::Result<i64> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let ids_json_str = cstr_to_str(ids_json)?;
 		let ids: Vec<i64> = serde_json::from_str(ids_json_str)?;
-		
+
 		let mut log_store = handle.core.inner.log_store.lock().unwrap();
 		let deleted = log_store.delete_by_ids(&ids)?;
 		Ok(deleted)
@@ -916,7 +1067,9 @@ pub extern "C" fn cb_logs_delete_by_ids(h: *mut cb_handle, ids_json: *const c_ch
 #[no_mangle]
 pub extern "C" fn cb_logs_source_stats(h: *mut cb_handle, out_json: *mut *const c_char) -> i32 {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let log_store = handle.core.inner.log_store.lock().unwrap();
 		let stats = log_store.get_source_stats()?;
@@ -936,7 +1089,10 @@ pub extern "C" fn cb_logs_source_stats(h: *mut cb_handle, out_json: *mut *const 
 		Err(_) => {
 			unsafe {
 				if !out_json.is_null() {
-					*out_json = crate::ret(crate::error::err_json("STATS_FAILED", "Failed to get source stats"));
+					*out_json = crate::ret(crate::error::err_json(
+						"STATS_FAILED",
+						"Failed to get source stats",
+					));
 				}
 			}
 			1
@@ -948,7 +1104,9 @@ pub extern "C" fn cb_logs_source_stats(h: *mut cb_handle, out_json: *mut *const 
 #[no_mangle]
 pub extern "C" fn cb_clear_core_db(h: *mut cb_handle) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let mut store = handle.core.inner.store.lock().unwrap();
 		store.clear_core_db()?;
@@ -965,7 +1123,9 @@ pub extern "C" fn cb_clear_core_db(h: *mut cb_handle) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn cb_clear_logs_db(h: *mut cb_handle) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let mut log_store = handle.core.inner.log_store.lock().unwrap();
 		log_store.clear_logs_db()?;
@@ -982,7 +1142,9 @@ pub extern "C" fn cb_clear_logs_db(h: *mut cb_handle) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn cb_clear_stats_db(h: *mut cb_handle) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let mut stats_store = handle.core.inner.stats_store.lock().unwrap();
 		stats_store.clear_stats_db()?;
@@ -999,7 +1161,9 @@ pub extern "C" fn cb_clear_stats_db(h: *mut cb_handle) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn cb_clear_cache(h: *mut cb_handle) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		handle.core.clear_cache()?;
 		Ok(crate::error::ok_json(serde_json::json!({ "ok": true })))
@@ -1013,12 +1177,17 @@ pub extern "C" fn cb_clear_cache(h: *mut cb_handle) -> *const c_char {
 
 /// 查询缓存统计
 #[no_mangle]
-pub extern "C" fn cb_query_cache_stats(h: *mut cb_handle, query_json: *const c_char) -> *const c_char {
+pub extern "C" fn cb_query_cache_stats(
+	h: *mut cb_handle,
+	query_json: *const c_char,
+) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let query_str = cstr_to_str(query_json)?;
-		
+
 		#[derive(serde::Deserialize)]
 		struct StatsQuery {
 			#[serde(default)]
@@ -1028,7 +1197,9 @@ pub extern "C" fn cb_query_cache_stats(h: *mut cb_handle, query_json: *const c_c
 			#[serde(default = "default_bucket")]
 			bucket_sec: i32,
 		}
-		fn default_bucket() -> i32 { 10 }
+		fn default_bucket() -> i32 {
+			10
+		}
 
 		let query: StatsQuery = serde_json::from_str(query_str)?;
 		let start_ts = if query.start_ts_ms == 0 && query.end_ts_ms == 0 {
@@ -1079,12 +1250,17 @@ pub extern "C" fn cb_query_cache_stats(h: *mut cb_handle, query_json: *const c_c
 
 /// 查询网络统计
 #[no_mangle]
-pub extern "C" fn cb_query_net_stats(h: *mut cb_handle, query_json: *const c_char) -> *const c_char {
+pub extern "C" fn cb_query_net_stats(
+	h: *mut cb_handle,
+	query_json: *const c_char,
+) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let query_str = cstr_to_str(query_json)?;
-		
+
 		#[derive(serde::Deserialize)]
 		struct StatsQuery {
 			#[serde(default)]
@@ -1094,7 +1270,9 @@ pub extern "C" fn cb_query_net_stats(h: *mut cb_handle, query_json: *const c_cha
 			#[serde(default = "default_bucket")]
 			bucket_sec: i32,
 		}
-		fn default_bucket() -> i32 { 10 }
+		fn default_bucket() -> i32 {
+			10
+		}
 
 		let query: StatsQuery = serde_json::from_str(query_str)?;
 		let start_ts = if query.start_ts_ms == 0 && query.end_ts_ms == 0 {
@@ -1139,12 +1317,17 @@ pub extern "C" fn cb_query_net_stats(h: *mut cb_handle, query_json: *const c_cha
 
 /// 查询活动统计
 #[no_mangle]
-pub extern "C" fn cb_query_activity_stats(h: *mut cb_handle, query_json: *const c_char) -> *const c_char {
+pub extern "C" fn cb_query_activity_stats(
+	h: *mut cb_handle,
+	query_json: *const c_char,
+) -> *const c_char {
 	let run = (|| -> anyhow::Result<String> {
-		if h.is_null() { anyhow::bail!("null handle"); }
+		if h.is_null() {
+			anyhow::bail!("null handle");
+		}
 		let handle = unsafe { &mut *h };
 		let query_str = cstr_to_str(query_json)?;
-		
+
 		#[derive(serde::Deserialize)]
 		struct StatsQuery {
 			#[serde(default)]
@@ -1154,7 +1337,9 @@ pub extern "C" fn cb_query_activity_stats(h: *mut cb_handle, query_json: *const 
 			#[serde(default = "default_bucket")]
 			bucket_sec: i32,
 		}
-		fn default_bucket() -> i32 { 60 }
+		fn default_bucket() -> i32 {
+			60
+		}
 
 		let query: StatsQuery = serde_json::from_str(query_str)?;
 		let start_ts = if query.start_ts_ms == 0 && query.end_ts_ms == 0 {

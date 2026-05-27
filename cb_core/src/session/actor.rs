@@ -1,38 +1,34 @@
 // cb_core/src/session/actor.rs
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use std::collections::HashMap;
-use std::io::SeekFrom;
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::io::SeekFrom;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::fs::{File, OpenOptions};
+use tokio::io::AsyncSeekExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, MissedTickBehavior};
-use tokio::io::AsyncSeekExt;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use std::path::PathBuf;
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
-use sha2::{Digest, Sha256};
 
 use crate::api::{CoreConfig, CoreEventSink};
 use crate::crypto::{
-    CbClientLogin, CbServerLogin,
-    CbClientLoginState, CbServerLoginState,
-    p2p_get_server_registration, DefaultCipherSuite
+	p2p_get_server_registration, CbClientLogin, CbClientLoginState, CbServerLogin,
+	CbServerLoginState, DefaultCipherSuite,
 };
 // 只引入存在的结构体
-use opaque_ke::{
-    ClientLoginFinishParameters,
-    ServerLoginStartParameters
-};
+use opaque_ke::{ClientLoginFinishParameters, ServerLoginParameters};
 use rand::rngs::OsRng;
 
-use crate::proto::{CBFrameCodec, CtrlMsg, PROTOCOL_VERSION, AuthSessionFlags, CBFrame};
-use crate::transport::{Connection, SendStream, RecvStream};
+use super::{HandshakeStep, SessionCmd, SessionHandle, SessionRole, SessionState};
+use crate::proto::{AuthSessionFlags, CBFrame, CBFrameCodec, CtrlMsg, PROTOCOL_VERSION};
 use crate::store::Store;
+use crate::transport::{Connection, RecvStream, SendStream};
 use crate::util::{now_ms, sha256_hex};
-use super::{SessionCmd, SessionHandle, SessionRole, SessionState, HandshakeStep};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
@@ -40,17 +36,17 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 /// 定义接收状态
 #[allow(dead_code)]
 enum ReceiverState {
-    Receiving {
-        transfer_id: String,
-        item_id: String,
-        file_id: Option<String>, // 如果是 FileList 中的子文件
+	Receiving {
+		transfer_id: String,
+		item_id: String,
+		file_id: Option<String>, // 如果是 FileList 中的子文件
 		expected_sha256: String,
-        mime: String,
+		mime: String,
 		tx: mpsc::Sender<ReceiverTaskMsg>,
-        received_bytes: u64,
-        total_bytes: u64,
-        last_progress_emit: i64, // 用于节流 progress 事件
-    },
+		received_bytes: u64,
+		total_bytes: u64,
+		last_progress_emit: i64, // 用于节流 progress 事件
+	},
 	// 已触发 Finish，等待落地结果（避免重复 Finish / 重复 End）
 	Committing {
 		transfer_id: String,
@@ -90,15 +86,24 @@ enum ReceiverState {
 /// 定义发送任务的消息
 #[allow(dead_code)]
 enum UploadMsg {
-	Chunk { transfer_id: String, data: bytes::Bytes },
-	Done { transfer_id: String, sha256: String },
-	Error { transfer_id: String, err: String },
+	Chunk {
+		transfer_id: String,
+		data: bytes::Bytes,
+	},
+	Done {
+		transfer_id: String,
+		sha256: String,
+	},
+	Error {
+		transfer_id: String,
+		err: String,
+	},
 }
 
 enum ReceiverTaskMsg {
 	Chunk(bytes::Bytes),
 	Finish {
-		expected_sha256: String, // 这里指本次传输片段的 Hash
+		expected_sha256: String,                    // 这里指本次传输片段的 Hash
 		reply_tx: oneshot::Sender<Result<PathBuf>>, // 返回最终文件路径
 	},
 	Cancel,
@@ -122,336 +127,352 @@ impl Drop for TempFileGuard {
 }
 
 pub struct SessionActor {
-    role: SessionRole,
-    writer: FramedWrite<SendStream, CBFrameCodec>,
-    reader: FramedRead<RecvStream, CBFrameCodec>,
-    config: Arc<CoreConfig>,
-    sink: Arc<dyn CoreEventSink>,
-    state_ref: Arc<Mutex<SessionState>>,
-    peer_id_ref: Arc<Mutex<Option<String>>>,
-    state: SessionState,
-    remote_device_id: Option<String>,
-    remote_fingerprint: String,
-    last_active_at: i64,
-    cmd_rx: mpsc::Receiver<SessionCmd>,
-    store: Arc<Mutex<Store>>,
-    log_store: Arc<Mutex<crate::logs::LogStore>>,
-    opaque_client_state: Option<CbClientLoginState>,
-    opaque_server_state: Option<CbServerLoginState>,
+	role: SessionRole,
+	writer: FramedWrite<SendStream, CBFrameCodec>,
+	reader: FramedRead<RecvStream, CBFrameCodec>,
+	config: Arc<CoreConfig>,
+	sink: Arc<dyn CoreEventSink>,
+	state_ref: Arc<Mutex<SessionState>>,
+	peer_id_ref: Arc<Mutex<Option<String>>>,
+	state: SessionState,
+	remote_device_id: Option<String>,
+	remote_fingerprint: String,
+	last_active_at: i64,
+	cmd_rx: mpsc::Receiver<SessionCmd>,
+	store: Arc<Mutex<Store>>,
+	log_store: Arc<Mutex<crate::logs::LogStore>>,
+	opaque_client_state: Option<CbClientLoginState>,
+	opaque_server_state: Option<CbServerLoginState>,
 	receivers: HashMap<String, ReceiverState>,
 	senders: HashMap<String, tokio::task::AbortHandle>,
-    cas: crate::cas::Cas,
+	cas: crate::cas::Cas,
 	upload_tx: mpsc::Sender<UploadMsg>,
 }
 
 impl SessionActor {
-    pub fn spawn(
-        role: SessionRole,
-        conn: Connection,
-        config: CoreConfig,
-        sink: Arc<dyn CoreEventSink>,
-        store: Arc<Mutex<Store>>,
-        cas: crate::cas::Cas,
-        expected_peer_id: Option<String>,
-        log_store: Arc<Mutex<crate::logs::LogStore>>,
-    ) -> SessionHandle {
-        let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        let state_ref = Arc::new(Mutex::new(SessionState::TransportReady));
-        let peer_id_ref = Arc::new(Mutex::new(None));
+	#[allow(clippy::too_many_arguments)]
+	pub fn spawn(
+		role: SessionRole,
+		conn: Connection,
+		config: CoreConfig,
+		sink: Arc<dyn CoreEventSink>,
+		store: Arc<Mutex<Store>>,
+		cas: crate::cas::Cas,
+		expected_peer_id: Option<String>,
+		log_store: Arc<Mutex<crate::logs::LogStore>>,
+	) -> SessionHandle {
+		let (cmd_tx, cmd_rx) = mpsc::channel(32);
+		let state_ref = Arc::new(Mutex::new(SessionState::TransportReady));
+		let peer_id_ref = Arc::new(Mutex::new(None));
 
-        let fingerprint = match conn.peer_identity() {
-            Some(id) => {
-                let certs = id.downcast::<Vec<rustls::pki_types::CertificateDer>>().unwrap_or_default();
-                if let Some(cert) = certs.first() {
-                    sha256_hex(cert.as_ref())
-                } else {
-                    "unknown".to_string()
-                }
-            }
-            None => "unknown".to_string(),
-        };
+		let fingerprint = match conn.peer_identity() {
+			Some(id) => {
+				let certs = id
+					.downcast::<Vec<rustls::pki_types::CertificateDer>>()
+					.unwrap_or_default();
+				if let Some(cert) = certs.first() {
+					sha256_hex(cert.as_ref())
+				} else {
+					"unknown".to_string()
+				}
+			}
+			None => "unknown".to_string(),
+		};
 
-        let initial_did = expected_peer_id.unwrap_or_else(|| "pending_server".to_string());
+		let initial_did = expected_peer_id.unwrap_or_else(|| "pending_server".to_string());
 
-        let handle = SessionHandle {
-            initial_id: initial_did.clone(),
-            peer_id: peer_id_ref.clone(),
-            state: state_ref.clone(),
-            cmd_tx,
-        };
+		let handle = SessionHandle {
+			initial_id: initial_did.clone(),
+			peer_id: peer_id_ref.clone(),
+			state: state_ref.clone(),
+			cmd_tx,
+		};
 
-        let actor_log_id = initial_did.clone();
-        let state_ref_clone = state_ref.clone();
-        let peer_id_ref_clone = peer_id_ref.clone();
-        let config_arc = Arc::new(config);
+		let actor_log_id = initial_did.clone();
+		let state_ref_clone = state_ref.clone();
+		let peer_id_ref_clone = peer_id_ref.clone();
+		let config_arc = Arc::new(config);
 
-        tokio::spawn(async move {
+		tokio::spawn(async move {
 			let (upload_tx, upload_rx) = mpsc::channel(32);
-            if let Err(e) = Self::run_actor(
-                role,
-                conn,
-                config_arc,
-                sink,
-                store,
-                cas,
-                state_ref_clone,
-                peer_id_ref_clone,
-                cmd_rx,
-                fingerprint,
+			if let Err(e) = Self::run_actor(
+				role,
+				conn,
+				config_arc,
+				sink,
+				store,
+				cas,
+				state_ref_clone,
+				peer_id_ref_clone,
+				cmd_rx,
+				fingerprint,
 				upload_tx,
 				upload_rx,
-                log_store,
-            ).await {
-                eprintln!("[Session] Actor {} error: {:?}", actor_log_id, e);
-            }
-        });
-        handle
-    }
+				log_store,
+			)
+			.await
+			{
+				eprintln!("[Session] Actor {actor_log_id} error: {e:?}");
+			}
+		});
+		handle
+	}
 
-    #[allow(clippy::too_many_arguments)]
-    async fn run_actor(
-        role: SessionRole,
-        conn: Connection,
-        config: Arc<CoreConfig>,
-        sink: Arc<dyn CoreEventSink>,
-        store: Arc<Mutex<Store>>,
-        cas: crate::cas::Cas,
-        state_ref: Arc<Mutex<SessionState>>,
-        peer_id_ref: Arc<Mutex<Option<String>>>,
-        cmd_rx: mpsc::Receiver<SessionCmd>,
-        fingerprint: String,
+	#[allow(clippy::too_many_arguments)]
+	async fn run_actor(
+		role: SessionRole,
+		conn: Connection,
+		config: Arc<CoreConfig>,
+		sink: Arc<dyn CoreEventSink>,
+		store: Arc<Mutex<Store>>,
+		cas: crate::cas::Cas,
+		state_ref: Arc<Mutex<SessionState>>,
+		peer_id_ref: Arc<Mutex<Option<String>>>,
+		cmd_rx: mpsc::Receiver<SessionCmd>,
+		fingerprint: String,
 		upload_tx: mpsc::Sender<UploadMsg>,
 		mut upload_rx: mpsc::Receiver<UploadMsg>,
-        log_store: Arc<Mutex<crate::logs::LogStore>>,
-    ) -> Result<()> {
-        let (send, recv) = match role {
-            SessionRole::Client => conn.open_bi().await.context("Client open_bi failed")?,
-            SessionRole::Server => conn.accept_bi().await.context("Server accept_bi failed")?,
-        };
+		log_store: Arc<Mutex<crate::logs::LogStore>>,
+	) -> Result<()> {
+		let (send, recv) = match role {
+			SessionRole::Client => conn.open_bi().await.context("Client open_bi failed")?,
+			SessionRole::Server => conn.accept_bi().await.context("Server accept_bi failed")?,
+		};
 
-        let writer = FramedWrite::new(send, CBFrameCodec);
-        let reader = FramedRead::new(recv, CBFrameCodec);
+		let writer = FramedWrite::new(send, CBFrameCodec);
+		let reader = FramedRead::new(recv, CBFrameCodec);
 
-        // 记录会话创建
-        {
-            let mut log_store = log_store.lock().unwrap();
-            let _ = log_store.log_info(
-                "Session",
-                &format!("Session actor spawned: role={:?}, fingerprint={}", role, fingerprint),
-                Some(&format!("会话执行器已创建: 角色={:?}，指纹={}", role, fingerprint)),
-            );
-        }
+		// 记录会话创建
+		{
+			let mut log_store = log_store.lock().unwrap();
+			let _ = log_store.log_info(
+				"Session",
+				&format!("Session actor spawned: role={role:?}, fingerprint={fingerprint}"),
+				Some(&format!("会话执行器已创建: 角色={role:?}，指纹={fingerprint}")),
+			);
+		}
 
-        let mut actor = Self {
-            role,
-            writer,
-            reader,
-            config,
-            sink,
-            store,
-            log_store,
-            state_ref,
-            peer_id_ref,
-            state: SessionState::TransportReady,
-            remote_device_id: None,
-            remote_fingerprint: fingerprint,
-            last_active_at: now_ms(),
-            cmd_rx,
-            opaque_client_state: None,
-            opaque_server_state: None,
+		let mut actor = Self {
+			role,
+			writer,
+			reader,
+			config,
+			sink,
+			store,
+			log_store,
+			state_ref,
+			peer_id_ref,
+			state: SessionState::TransportReady,
+			remote_device_id: None,
+			remote_fingerprint: fingerprint,
+			last_active_at: now_ms(),
+			cmd_rx,
+			opaque_client_state: None,
+			opaque_server_state: None,
 			receivers: HashMap::new(),
 			senders: HashMap::new(),
-            cas,
+			cas,
 			upload_tx,
-        };
+		};
 
-        actor.start_handshake().await?;
+		actor.start_handshake().await?;
 
-        let mut heartbeat_ticker = interval(HEARTBEAT_INTERVAL);
-        heartbeat_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+		let mut heartbeat_ticker = interval(HEARTBEAT_INTERVAL);
+		heartbeat_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-        let run_result: Result<()> = async {
-            loop {
-                tokio::select! {
-                    // 1. 网络消息
-                    msg = actor.reader.next() => {
-                        match msg {
-                            Some(Ok(frame)) => {
-                                actor.last_active_at = now_ms();
-                                if let Err(e) = actor.handle_frame(frame).await {
-                                     eprintln!("[Session] Frame error: {:?}", e);
-                                     // 严重错误断开连接
-                                     return Err(e);
-                                }
-                            }
-                            Some(Err(e)) => return Err(e.into()),
-                            None => break, // EOF
-                        }
-                    }
+		let run_result: Result<()> = async {
+			loop {
+				tokio::select! {
+					// 1. 网络消息
+					msg = actor.reader.next() => {
+						match msg {
+							Some(Ok(frame)) => {
+								actor.last_active_at = now_ms();
+								if let Err(e) = actor.handle_frame(frame).await {
+									 eprintln!("[Session] Frame error: {e:?}");
+									 // 严重错误断开连接
+									 return Err(e);
+								}
+							}
+							Some(Err(e)) => return Err(e),
+							None => break, // EOF
+						}
+					}
 
-                    // 2. 本地命令
-                    cmd = actor.cmd_rx.recv() => {
-                        match cmd {
-                            Some(SessionCmd::SendMeta(mut meta)) => {
-                                if actor.state == SessionState::Online {
-                                    let msg_id = uuid::Uuid::new_v4().to_string();
-                                    let item_id = meta.item_id.clone();
-                                    let device_id = actor.remote_device_id.clone().unwrap_or_else(|| "unknown".to_string());
+					// 2. 本地命令
+					cmd = actor.cmd_rx.recv() => {
+						match cmd {
+							Some(SessionCmd::SendMeta(mut meta)) => {
+								if actor.state == SessionState::Online {
+									let msg_id = uuid::Uuid::new_v4().to_string();
+									let item_id = meta.item_id.clone();
+									let device_id = actor.remote_device_id.clone().unwrap_or_else(|| "unknown".to_string());
 
-                                    // 不要把发送端的本地路径告诉接收端
-                                    for f in &mut meta.files {
-                                        f.local_path = None;
-                                    }
+									// 不要把发送端的本地路径告诉接收端
+									for f in &mut meta.files {
+										f.local_path = None;
+									}
 
-                                    {
-                                        let mut log_store = actor.log_store.lock().unwrap();
-                                        let _ = log_store.log_info(
-                                            "Session",
-                                            &format!("Metadata sent to peer: device_id={}, item_id={}, msg_id={}",
-                                                    device_id, item_id, msg_id),
-                                            Some(&format!("元数据已发送至对等设备: 设备ID={}，项目ID={}，消息ID={}",
-                                                    device_id, item_id, msg_id)),
-                                        );
-                                    }
+									{
+										let mut log_store = actor.log_store.lock().unwrap();
+										let _ = log_store.log_info(
+											"Session",
+											&format!("Metadata sent to peer: device_id={device_id}, item_id={item_id}, msg_id={msg_id}"),
+											Some(&format!("元数据已发送至对等设备: 设备ID={device_id}，项目ID={item_id}，消息ID={msg_id}")),
+										);
+									}
 
-                                    actor.send_ctrl(CtrlMsg::ItemMeta {
-                                        msg_id: Some(msg_id),
-                                        item: meta
-                                    }).await?;
-                                }
-                            }
-                            Some(SessionCmd::Shutdown) => {
-                                let _ = actor.send_ctrl(CtrlMsg::Close {
-                                    msg_id: Some(uuid::Uuid::new_v4().to_string()),
-                                    reason: "Shutdown".into()
-                                }).await;
-                                break;
-                            }
-                            Some(SessionCmd::RequestTransfer { item_id, file_id, reply_tx }) => {
-                                // M3: B 端发起拉取
-                                let _ = actor.start_pull_request(item_id, file_id, reply_tx).await;
-                            }
-                            Some(SessionCmd::CancelTransfer { transfer_id }) => {
-                                actor.handle_local_cancel(transfer_id).await?;
-                            }
-                            Some(SessionCmd::SendDelete { item_id }) => {
-                                if actor.state == SessionState::Online {
-                                    actor.send_ctrl(CtrlMsg::ItemDelete {
-                                        msg_id: Some(uuid::Uuid::new_v4().to_string()),
-                                        item_id,
-                                    }).await?;
-                                }
-                            }
-                            None => break,
-                        }
-                    }
+									actor.send_ctrl(CtrlMsg::ItemMeta {
+										msg_id: Some(msg_id),
+										item: *meta
+									}).await?;
+								}
+							}
+							Some(SessionCmd::Shutdown) => {
+								let _ = actor.send_ctrl(CtrlMsg::Close {
+									msg_id: Some(uuid::Uuid::new_v4().to_string()),
+									reason: "Shutdown".into()
+								}).await;
+								break;
+							}
+							Some(SessionCmd::RequestTransfer { item_id, file_id, reply_tx }) => {
+								// M3: B 端发起拉取
+								let _ = actor.start_pull_request(item_id, file_id, reply_tx).await;
+							}
+							Some(SessionCmd::CancelTransfer { transfer_id }) => {
+								actor.handle_local_cancel(transfer_id).await?;
+							}
+							Some(SessionCmd::SendDelete { item_id }) => {
+								if actor.state == SessionState::Online {
+									actor.send_ctrl(CtrlMsg::ItemDelete {
+										msg_id: Some(uuid::Uuid::new_v4().to_string()),
+										item_id,
+									}).await?;
+								}
+							}
+							None => break,
+						}
+					}
 
 					Some(msg) = upload_rx.recv() => {
-                        match msg {
-                            UploadMsg::Chunk { transfer_id, data } => {
-                                actor.send_data_chunk(transfer_id, data).await?;
-                            }
-                            UploadMsg::Done { transfer_id, sha256: _ } => {
-                                actor.send_ctrl(CtrlMsg::ContentEnd { req_id: transfer_id.clone() }).await?;
-                                actor.senders.remove(&transfer_id);
-                            }
-                            UploadMsg::Error { transfer_id, err } => {
-                                actor.senders.remove(&transfer_id);
-                                // 可选：发送 Error 给对方
-								eprintln!("[Session] Upload error for {}: {}", transfer_id, err);
-                            }
-                        }
-                    }
+						match msg {
+							UploadMsg::Chunk { transfer_id, data } => {
+								actor.send_data_chunk(transfer_id, data).await?;
+							}
+							UploadMsg::Done { transfer_id, sha256: _ } => {
+								actor.send_ctrl(CtrlMsg::ContentEnd { req_id: transfer_id.clone() }).await?;
+								actor.senders.remove(&transfer_id);
+							}
+							UploadMsg::Error { transfer_id, err } => {
+								actor.senders.remove(&transfer_id);
+								// 可选：发送 Error 给对方
+								eprintln!("[Session] Upload error for {transfer_id}: {err}");
+							}
+						}
+					}
 
-                    // 3. 心跳
-                    _ = heartbeat_ticker.tick() => {
-                        actor.tick_heartbeat().await?;
-                    }
-                }
-            }
-            Ok(())
-        }.await;
+					// 3. 心跳
+					_ = heartbeat_ticker.tick() => {
+						actor.tick_heartbeat().await?;
+					}
+				}
+			}
+			Ok(())
+		}
+		.await;
 
-        actor.update_state(SessionState::Terminated);
-        if let Some(did) = &actor.remote_device_id {
-            let reason = match &run_result {
-                Ok(_) => "Connection closed".to_string(),
-                Err(e) => format!("Error: {}", e),
-            };
-            {
-                let mut log_store = actor.log_store.lock().unwrap();
-                let log_level = if run_result.is_ok() { 2 } else { 4 }; // Info or Error
-                if log_level == 2 {
-                    let _ = log_store.log_info(
-                        "Session",
-                        &format!("Session terminated: device_id={}, reason={}", did, reason),
-                        Some(&format!("会话已终止: 设备ID={}，原因={}", did, reason)),
-                    );
-                } else {
-                    let _ = log_store.log_error(
-                        "Session",
-                        &format!("Session terminated due to error: device_id={}, error={}", did, reason),
-                        Some(&format!("会话因错误终止: 设备ID={}，错误={}", did, reason)),
-                        Some(&reason),
-                    );
-                }
-            }
-            let json = serde_json::json!({
-                "type": "PEER_OFFLINE",
-                "ts_ms": now_ms(),
-                "payload": { "device_id": did, "reason": reason }
-            });
-            actor.sink.emit(json.to_string());
-        }
-        run_result
-    }
+		actor.update_state(SessionState::Terminated);
+		if let Some(did) = &actor.remote_device_id {
+			let reason = match &run_result {
+				Ok(()) => "Connection closed".to_string(),
+				Err(e) => format!("Error: {e}"),
+			};
+			{
+				let mut log_store = actor.log_store.lock().unwrap();
+				let log_level = if run_result.is_ok() { 2 } else { 4 }; // Info or Error
+				if log_level == 2 {
+					let _ = log_store.log_info(
+						"Session",
+						&format!("Session terminated: device_id={did}, reason={reason}"),
+						Some(&format!("会话已终止: 设备ID={did}，原因={reason}")),
+					);
+				} else {
+					let _ = log_store.log_error(
+						"Session",
+						&format!("Session terminated due to error: device_id={did}, error={reason}"),
+						Some(&format!("会话因错误终止: 设备ID={did}，错误={reason}")),
+						Some(&reason),
+					);
+				}
+			}
+			let json = serde_json::json!({
+				"type": "PEER_OFFLINE",
+				"ts_ms": now_ms(),
+				"payload": { "device_id": did, "reason": reason }
+			});
+			actor.sink.emit(json.to_string());
+		}
+		run_result
+	}
 
-    fn update_state(&mut self, new_state: SessionState) {
-        let old_state = self.state.clone();
-        self.state = new_state.clone();
-        let mut s = self.state_ref.lock().unwrap();
-        *s = new_state.clone();
+	fn update_state(&mut self, new_state: SessionState) {
+		let old_state = self.state.clone();
+		self.state = new_state.clone();
+		{
+			let mut s = self.state_ref.lock().unwrap();
+			*s = new_state;
+		}
 
-        // 记录状态转换
-        if let Some(device_id) = &self.remote_device_id {
-            let mut log_store = self.log_store.lock().unwrap();
-            let _ = log_store.log_info(
-                "Session",
-                &format!("Session state changed: device_id={}, old_state={:?}, new_state={:?}",
-                        device_id, old_state, new_state),
-                Some(&format!("会话状态已变化: 设备ID={}，旧状态={:?}，新状态={:?}",
-                        device_id, old_state, new_state)),
-            );
-        }
-    }
+		// 记录状态转换
+		if let Some(device_id) = &self.remote_device_id {
+			let mut log_store = self.log_store.lock().unwrap();
+			let _ = log_store.log_info(
+				"Session",
+				&format!(
+					"Session state changed: device_id={device_id}, old_state={old_state:?}, new_state={:?}",
+					self.state
+				),
+				Some(&format!(
+					"会话状态已变化: 设备ID={device_id}，旧状态={old_state:?}，新状态={:?}",
+					self.state
+				)),
+			);
+		}
+	}
 
-    fn update_remote_id(&mut self, id: String) {
-        self.remote_device_id = Some(id.clone());
-        let mut lock = self.peer_id_ref.lock().unwrap();
-        *lock = Some(id);
-    }
+	fn update_remote_id(&mut self, id: String) {
+		self.remote_device_id = Some(id.clone());
+		let mut lock = self.peer_id_ref.lock().unwrap();
+		*lock = Some(id);
+	}
 
-    async fn send_ctrl(&mut self, msg: CtrlMsg) -> Result<()> {
-        self.writer.send(CBFrame::Control(msg)).await.context("Failed to send CtrlMsg")
-    }
+	async fn send_ctrl(&mut self, msg: CtrlMsg) -> Result<()> {
+		self.writer
+			.send(CBFrame::Control(Box::new(msg)))
+			.await
+			.context("Failed to send CtrlMsg")
+	}
 
 	async fn send_data_chunk(&mut self, transfer_id: String, data: bytes::Bytes) -> Result<()> {
 		// [修改] 增加超时控制，防止网络拥塞阻塞心跳
 		// 如果 500ms 发不出去，认为网络拥塞严重，报错断开传输，保住连接
 		let data_size = data.len();
-		let send_future = self.writer.send(CBFrame::Data { transfer_id: transfer_id.clone(), data });
+		let send_future = self.writer.send(CBFrame::Data {
+			transfer_id: transfer_id.clone(),
+			data,
+		});
 		match tokio::time::timeout(Duration::from_millis(500), send_future).await {
-			Ok(Ok(_)) => {
+			Ok(Ok(())) => {
 				// 数据块发送成功（Debug 级别，避免日志过多）
 				let mut log_store = self.log_store.lock().unwrap();
 				let _ = log_store.log_debug(
 					"Session",
-					&format!("Data chunk sent: transfer_id={}, size={} bytes", transfer_id, data_size),
-					Some(&format!("数据块已发送: 传输ID={}，大小={} 字节", transfer_id, data_size)),
+					&format!("Data chunk sent: transfer_id={transfer_id}, size={data_size} bytes"),
+					Some(&format!("数据块已发送: 传输ID={transfer_id}，大小={data_size} 字节")),
 				);
 				Ok(())
 			}
-			Ok(Err(e)) => Err(e.into()), // 协议栈错误
+			Ok(Err(e)) => Err(e), // 协议栈错误
 			Err(_) => {
 				// 超时：主动移除 Sender 任务并通知对方 Cancel
 				if let Some(handle) = self.senders.remove(&transfer_id) {
@@ -461,199 +482,241 @@ impl SessionActor {
 					let mut log_store = self.log_store.lock().unwrap();
 					let _ = log_store.log_warn(
 						"Session",
-						&format!("Data chunk send timeout (network congestion): transfer_id={}, cancelling transfer", transfer_id),
-						Some(&format!("数据块发送超时（网络拥塞）: 传输ID={}，正在取消传输", transfer_id)),
+						&format!("Data chunk send timeout (network congestion): transfer_id={transfer_id}, cancelling transfer"),
+						Some(&format!("数据块发送超时（网络拥塞）: 传输ID={transfer_id}，正在取消传输")),
 					);
 				}
 				// 尝试发一个 Cancel 包（尽力而为）
-				let _ = self.send_ctrl(CtrlMsg::ContentCancel {
-					req_id: transfer_id,
-					reason: "Network congested/timeout".into()
-				}).await;
+				let _ = self
+					.send_ctrl(CtrlMsg::ContentCancel {
+						req_id: transfer_id,
+						reason: "Network congested/timeout".into(),
+					})
+					.await;
 				anyhow::bail!("Send data chunk timeout (network congestion)");
 			}
 		}
 	}
 
-    async fn start_handshake(&mut self) -> Result<()> {
-        {
-            let mut log_store = self.log_store.lock().unwrap();
-            let _ = log_store.log_info(
-                "Session",
-                &format!("Handshake started: role={:?}, protocol_version={}", self.role, PROTOCOL_VERSION),
-                Some(&format!("握手已开始: 角色={:?}，协议版本={}", self.role, PROTOCOL_VERSION)),
-            );
-        }
+	async fn start_handshake(&mut self) -> Result<()> {
+		{
+			let mut log_store = self.log_store.lock().unwrap();
+			let _ = log_store.log_info(
+				"Session",
+				&format!(
+					"Handshake started: role={:?}, protocol_version={}",
+					self.role, PROTOCOL_VERSION
+				),
+				Some(&format!(
+					"握手已开始: 角色={:?}，协议版本={}",
+					self.role, PROTOCOL_VERSION
+				)),
+			);
+		}
 
-        match self.role {
-            SessionRole::Client => {
-                self.update_state(SessionState::Handshaking(HandshakeStep::SendingHello));
-                let msg = CtrlMsg::Hello {
-                    msg_id: Some(uuid::Uuid::new_v4().to_string()),
-                    protocol_version: PROTOCOL_VERSION,
-                    device_id: self.config.device_id.clone(),
-                    account_uid: self.config.account_uid.clone(),
-                    capabilities: vec!["text".into(), "image".into(), "file".into()],
-                    client_nonce: Some(uuid::Uuid::new_v4().to_string()),
-                };
-                {
-                    let mut log_store = self.log_store.lock().unwrap();
-                    let _ = log_store.log_info(
-                        "Session",
-                        &format!("Hello message sent: device_id={}, account_uid={}",
-                                self.config.device_id, self.config.account_uid),
-                        Some(&format!("Hello 消息已发送: 设备ID={}，账号={}",
-                                self.config.device_id, self.config.account_uid)),
-                    );
-                }
-                self.send_ctrl(msg).await?;
-                self.update_state(SessionState::Handshaking(HandshakeStep::WaitingForHelloAck));
-            }
-            SessionRole::Server => {
-                self.update_state(SessionState::Handshaking(HandshakeStep::WaitingForHello));
-            }
-        }
-        Ok(())
-    }
+		match self.role {
+			SessionRole::Client => {
+				self.update_state(SessionState::Handshaking(HandshakeStep::SendingHello));
+				let msg = CtrlMsg::Hello {
+					msg_id: Some(uuid::Uuid::new_v4().to_string()),
+					protocol_version: PROTOCOL_VERSION,
+					device_id: self.config.device_id.clone(),
+					account_uid: self.config.account_uid.clone(),
+					capabilities: vec!["text".into(), "image".into(), "file".into()],
+					client_nonce: Some(uuid::Uuid::new_v4().to_string()),
+				};
+				{
+					let mut log_store = self.log_store.lock().unwrap();
+					let _ = log_store.log_info(
+						"Session",
+						&format!(
+							"Hello message sent: device_id={}, account_uid={}",
+							self.config.device_id, self.config.account_uid
+						),
+						Some(&format!(
+							"Hello 消息已发送: 设备ID={}，账号={}",
+							self.config.device_id, self.config.account_uid
+						)),
+					);
+				}
+				self.send_ctrl(msg).await?;
+				self.update_state(SessionState::Handshaking(HandshakeStep::WaitingForHelloAck));
+			}
+			SessionRole::Server => {
+				self.update_state(SessionState::Handshaking(HandshakeStep::WaitingForHello));
+			}
+		}
+		Ok(())
+	}
 
-    async fn handle_frame(&mut self, frame: CBFrame) -> Result<()> {
-        match frame {
-            CBFrame::Control(msg) => self.handle_control_msg(msg).await,
+	async fn handle_frame(&mut self, frame: CBFrame) -> Result<()> {
+		match frame {
+			CBFrame::Control(msg) => self.handle_control_msg(*msg).await,
 			CBFrame::Data { transfer_id, data } => self.handle_data_chunk(transfer_id, data).await,
-        }
-    }
+		}
+	}
 
-    async fn handle_control_msg(&mut self, msg: CtrlMsg) -> Result<()> {
-        match msg {
-            CtrlMsg::Hello { device_id, account_uid, msg_id, .. } => {
-                if self.role == SessionRole::Server {
-                    {
-                        let mut log_store = self.log_store.lock().unwrap();
-                        let _ = log_store.log_info(
+	async fn handle_control_msg(&mut self, msg: CtrlMsg) -> Result<()> {
+		match msg {
+			CtrlMsg::Hello {
+				device_id,
+				account_uid,
+				msg_id,
+				..
+			} => {
+				if self.role == SessionRole::Server {
+					{
+						let mut log_store = self.log_store.lock().unwrap();
+						let _ = log_store.log_info(
                             "Session",
-                            &format!("Hello message received: remote_device_id={}, remote_account_uid={}",
-                                    device_id, account_uid),
-                            Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号={}",
-                                    device_id, account_uid)),
+                            &format!("Hello message received: remote_device_id={device_id}, remote_account_uid={account_uid}"),
+                            Some(&format!("Hello 消息已接收: 远程设备ID={device_id}，远程账号={account_uid}")),
                         );
-                    }
-                    if account_uid != self.config.account_uid {
-                        {
-                            let mut log_store = self.log_store.lock().unwrap();
-                            let _ = log_store.log_error(
+					}
+					if account_uid != self.config.account_uid {
+						{
+							let mut log_store = self.log_store.lock().unwrap();
+							let _ = log_store.log_error(
                                 "Session",
-                                &format!("Account verification failed (uid mismatch): remote_device_id={}, remote_uid={}, local_uid={}",
-                                        device_id, account_uid, self.config.account_uid),
-                                Some(&format!("账号验证失败（账号不匹配）: 远程设备ID={}，远程账号={}，本地账号={}",
-                                        device_id, account_uid, self.config.account_uid)),
+                                &format!("Account verification failed (uid mismatch): remote_device_id={device_id}, remote_uid={account_uid}, local_uid={}",
+                                        self.config.account_uid),
+                                Some(&format!("账号验证失败（账号不匹配）: 远程设备ID={device_id}，远程账号={account_uid}，本地账号={}",
+                                        self.config.account_uid)),
                                 Some("AUTH_ACCOUNT_UID_MISMATCH"),
                             );
-                        }
-                        let _ = self.send_ctrl(CtrlMsg::AuthFail {
-                            reply_to: msg_id.clone(),
-                            code: "AUTH_ACCOUNT_UID_MISMATCH".into(),
-                        }).await;
-                        let _ = self.send_ctrl(CtrlMsg::Close {
-                            msg_id: None,
-                            reason: "Auth failed".into(),
-                        }).await;
-                        anyhow::bail!("Auth failed: uid mismatch");
-                    }
-                    self.update_remote_id(device_id.clone());
-                    {
-                        let mut log_store = self.log_store.lock().unwrap();
-                        let _ = log_store.log_info(
+						}
+						let _ = self
+							.send_ctrl(CtrlMsg::AuthFail {
+								reply_to: msg_id.clone(),
+								code: "AUTH_ACCOUNT_UID_MISMATCH".into(),
+							})
+							.await;
+						let _ = self
+							.send_ctrl(CtrlMsg::Close {
+								msg_id: None,
+								reason: "Auth failed".into(),
+							})
+							.await;
+						anyhow::bail!("Auth failed: uid mismatch");
+					}
+					self.update_remote_id(device_id.clone());
+					{
+						let mut log_store = self.log_store.lock().unwrap();
+						let _ = log_store.log_info(
                             "Session",
-                            &format!("Account verification completed: remote_device_id={}, verified=true", device_id),
-                            Some(&format!("账号验证已完成: 远程设备ID={}，已验证=true", device_id)),
+                            &format!("Account verification completed: remote_device_id={device_id}, verified=true"),
+                            Some(&format!("账号验证已完成: 远程设备ID={device_id}，已验证=true")),
                         );
-                    }
-                    self.send_ctrl(CtrlMsg::HelloAck {
-                        reply_to: msg_id,
-                        server_device_id: self.config.device_id.clone(),
-                        protocol_version: PROTOCOL_VERSION,
-                    }).await?;
-                    self.update_state(SessionState::Handshaking(HandshakeStep::OpaqueStart));
-                }
-            }
-            CtrlMsg::HelloAck { server_device_id, .. } => {
-                if self.role == SessionRole::Client {
-                    {
-                        let mut log_store = self.log_store.lock().unwrap();
-                        let _ = log_store.log_info(
+					}
+					self.send_ctrl(CtrlMsg::HelloAck {
+						reply_to: msg_id,
+						server_device_id: self.config.device_id.clone(),
+						protocol_version: PROTOCOL_VERSION,
+					})
+					.await?;
+					self.update_state(SessionState::Handshaking(HandshakeStep::OpaqueStart));
+				}
+			}
+			CtrlMsg::HelloAck {
+				server_device_id, ..
+			} => {
+				if self.role == SessionRole::Client {
+					{
+						let mut log_store = self.log_store.lock().unwrap();
+						let _ = log_store.log_info(
                             "Session",
-                            &format!("Hello message received: remote_device_id={}, remote_account_uid={}",
-                                    server_device_id, "N/A"),
-                            Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号=N/A",
-                                    server_device_id)),
+                            &format!("Hello message received: remote_device_id={server_device_id}, remote_account_uid=N/A"),
+                            Some(&format!("Hello 消息已接收: 远程设备ID={server_device_id}，远程账号=N/A")),
                         );
-                    }
-                    self.update_remote_id(server_device_id.clone());
-                    self.start_opaque_login().await?;
-                }
-            }
-            CtrlMsg::OpaqueStart { opaque: bytes, .. } => {
-                if self.role == SessionRole::Server { self.handle_opaque_start(&bytes).await?; }
-            }
-            CtrlMsg::OpaqueResponse { opaque: bytes, .. } => {
-                if self.role == SessionRole::Client { self.handle_opaque_response(&bytes).await?; }
-            }
-            CtrlMsg::OpaqueFinish { msg_id, opaque: bytes, .. } => {
-                if self.role == SessionRole::Server {
-                    self.handle_opaque_finish(&bytes).await?;
-                    if let Err(e) = self.perform_tofu_check_async().await {
-                        let _ = self.send_ctrl(CtrlMsg::Error {
-                            reply_to: msg_id.clone(),
-                            code: "POLICY_REJECT".into(),
-                            message: Some(e.to_string()),
-                        }).await;
-                        return Err(e);
-                    }
-                    self.send_ctrl(CtrlMsg::AuthOk {
-                        reply_to: msg_id,
-                        session_flags: AuthSessionFlags { account_verified: true }
-                    }).await?;
-                    self.transition_to_online().await?;
-                }
-            }
-            CtrlMsg::AuthOk { .. } => {
-                if self.role == SessionRole::Client {
-                    self.update_state(SessionState::AccountVerified);
-                    self.perform_tofu_check_async().await?;
-                    self.transition_to_online().await?;
-                }
-            }
-            CtrlMsg::AuthFail { code, .. } => anyhow::bail!("Remote AuthFail: {}", code),
-            CtrlMsg::Ping { ts, msg_id } => {
-                self.send_ctrl(CtrlMsg::Pong { reply_to: msg_id, ts }).await?;
-            }
-            CtrlMsg::Pong { .. } => {},
-            CtrlMsg::ItemMeta { item, msg_id, .. } => {
-                if let Some(did) = &self.remote_device_id {
-                    let mut log_store = self.log_store.lock().unwrap();
-                    let _ = log_store.log_info(
-                        "Session",
-                        &format!("Metadata received from peer: device_id={}, item_id={}, msg_id={:?}",
-                                did, item.item_id, msg_id),
-                        Some(&format!("从对等设备接收元数据: 设备ID={}，项目ID={}，消息ID={:?}",
-                                did, item.item_id, msg_id)),
-                    );
-                }
-                if self.state == SessionState::Online {
-                    let store = self.store.clone();
-                    let account_uid = self.config.account_uid.clone();
-                    let item_clone = item.clone();
+					}
+					self.update_remote_id(server_device_id.clone());
+					self.start_opaque_login().await?;
+				}
+			}
+			CtrlMsg::OpaqueStart { opaque: bytes, .. } => {
+				if self.role == SessionRole::Server {
+					self.handle_opaque_start(&bytes).await?;
+				}
+			}
+			CtrlMsg::OpaqueResponse { opaque: bytes, .. } => {
+				if self.role == SessionRole::Client {
+					self.handle_opaque_response(&bytes).await?;
+				}
+			}
+			CtrlMsg::OpaqueFinish {
+				msg_id,
+				opaque: bytes,
+				..
+			} => {
+				if self.role == SessionRole::Server {
+					self.handle_opaque_finish(&bytes)?;
+					if let Err(e) = self.perform_tofu_check_async().await {
+						let _ = self
+							.send_ctrl(CtrlMsg::Error {
+								reply_to: msg_id.clone(),
+								code: "POLICY_REJECT".into(),
+								message: Some(e.to_string()),
+							})
+							.await;
+						return Err(e);
+					}
+					self.send_ctrl(CtrlMsg::AuthOk {
+						reply_to: msg_id,
+						session_flags: AuthSessionFlags {
+							account_verified: true,
+						},
+					})
+					.await?;
+					self.transition_to_online();
+				}
+			}
+			CtrlMsg::AuthOk { .. } => {
+				if self.role == SessionRole::Client {
+					self.update_state(SessionState::AccountVerified);
+					self.perform_tofu_check_async().await?;
+					self.transition_to_online();
+				}
+			}
+			CtrlMsg::AuthFail { code, .. } => anyhow::bail!("Remote AuthFail: {}", code),
+			CtrlMsg::Ping { ts, msg_id } => {
+				self.send_ctrl(CtrlMsg::Pong {
+					reply_to: msg_id,
+					ts,
+				})
+				.await?;
+			}
+			CtrlMsg::Pong { .. } => {}
+			CtrlMsg::ItemMeta { item, msg_id, .. } => {
+				if let Some(did) = &self.remote_device_id {
+					let mut log_store = self.log_store.lock().unwrap();
+					let _ = log_store.log_info(
+						"Session",
+						&format!(
+							"Metadata received from peer: device_id={did}, item_id={}, msg_id={msg_id:?}",
+							item.item_id
+						),
+						Some(&format!(
+							"从对等设备接收元数据: 设备ID={did}，项目ID={}，消息ID={msg_id:?}",
+							item.item_id
+						)),
+					);
+				}
+				if self.state == SessionState::Online {
+					let store = self.store.clone();
+					let account_uid = self.config.account_uid.clone();
+					let item_clone = item.clone();
 					let is_new = tokio::task::spawn_blocking(move || {
 						let mut guard = store.lock().unwrap();
 						guard.insert_remote_item(&account_uid, &item_clone, now_ms())
-					}).await??;
-                    if is_new {
-                        let json = serde_json::json!({
-                            "type": "ITEM_META_ADDED",
-                            "ts_ms": now_ms(),
-                            "payload": { "meta": item }
-                        });
-                        self.sink.emit(json.to_string());
+					})
+					.await??;
+					if is_new {
+						let json = serde_json::json!({
+							"type": "ITEM_META_ADDED",
+							"ts_ms": now_ms(),
+							"payload": { "meta": item }
+						});
+						self.sink.emit(json.to_string());
 						// 禁用核心的文字自动预取，而是在外壳实现。
 						/*
 						if item.kind == crate::model::ItemKind::Text {
@@ -664,31 +727,46 @@ impl SessionActor {
 							}
 						}
 						*/
-
-                    }
-                }
-            }
-            CtrlMsg::Error { code, message, .. } => anyhow::bail!("Remote error {}: {:?}", code, message),
-            CtrlMsg::Close { .. } => anyhow::bail!("Remote closed connection"),
-
-            // === M3: 传输逻辑 ===
-			CtrlMsg::ContentGet { msg_id, item_id, file_id, offset } => {
-				let transfer_id = msg_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-				self.handle_content_get(transfer_id, item_id, file_id, offset).await?;
+					}
+				}
 			}
-            CtrlMsg::ContentBegin { req_id, item_id, file_id, total_bytes, sha256, mime} => {
-                self.handle_content_begin(req_id, item_id, file_id, total_bytes, sha256, mime).await?;
-            }
-            CtrlMsg::ContentEnd { req_id } => {
-                self.handle_content_end(req_id).await?;
-            }
+			CtrlMsg::Error { code, message, .. } => {
+				anyhow::bail!("Remote error {}: {:?}", code, message)
+			}
+			CtrlMsg::Close { .. } => anyhow::bail!("Remote closed connection"),
+
+			// === M3: 传输逻辑 ===
+			CtrlMsg::ContentGet {
+				msg_id,
+				item_id,
+				file_id,
+				offset,
+			} => {
+				let transfer_id = msg_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+				self.handle_content_get(transfer_id, item_id, file_id, offset)
+					.await?;
+			}
+			CtrlMsg::ContentBegin {
+				req_id,
+				item_id,
+				file_id,
+				total_bytes,
+				sha256,
+				mime,
+			} => {
+				self.handle_content_begin(req_id, item_id, file_id, total_bytes, sha256, mime)
+					.await?;
+			}
+			CtrlMsg::ContentEnd { req_id } => {
+				self.handle_content_end(req_id).await?;
+			}
 			CtrlMsg::ContentCancel { req_id, reason } => {
 				{
 					let mut log_store = self.log_store.lock().unwrap();
 					let _ = log_store.log_info(
 						"Session",
-						&format!("Transfer cancelled: transfer_id={}, reason={}", req_id, reason),
-						Some(&format!("传输已取消: 传输ID={}，原因={}", req_id, reason)),
+						&format!("Transfer cancelled: transfer_id={req_id}, reason={reason}"),
+						Some(&format!("传输已取消: 传输ID={req_id}，原因={reason}")),
 					);
 				}
 				// 1. 如果我是发送者：在 senders map 里找
@@ -709,10 +787,14 @@ impl SessionActor {
 					let item_id_emit = item_id.clone();
 					let deleted = tokio::task::spawn_blocking(move || {
 						let mut guard = store.lock().unwrap();
-						let ok = guard.soft_delete_item(&account_uid, &item_id).ok().unwrap_or(false);
+						let ok = guard
+							.soft_delete_item(&account_uid, &item_id)
+							.ok()
+							.unwrap_or(false);
 						let sha = guard.get_item_sha256(&item_id).ok().flatten();
 						(ok, sha)
-					}).await?;
+					})
+					.await?;
 					let (ok, sha_opt) = deleted;
 					if ok {
 						if let Some(sha) = &sha_opt {
@@ -729,9 +811,9 @@ impl SessionActor {
 					}
 				}
 			}
-        }
-        Ok(())
-    }
+		}
+		Ok(())
+	}
 
 	// --- M3 Receiver Logic ---
 	async fn handle_content_begin(
@@ -741,16 +823,14 @@ impl SessionActor {
 		file_id: Option<String>,
 		total_bytes: u64,
 		file_sha256: String, // 注意：这是整个文件的 Hash，Resume 时不需要校验它
-		mime: String
+		mime: String,
 	) -> Result<()> {
 		{
 			let mut log_store = self.log_store.lock().unwrap();
 			let _ = log_store.log_info(
 				"Session",
-				&format!("Transfer request received: transfer_id={}, item_id={}, file_id={:?}",
-						req_id, item_id, file_id),
-				Some(&format!("传输请求已接收: 传输ID={}，项目ID={}，文件ID={:?}",
-						req_id, item_id, file_id)),
+				&format!("Transfer request received: transfer_id={req_id}, item_id={item_id}, file_id={file_id:?}"),
+				Some(&format!("传输请求已接收: 传输ID={req_id}，项目ID={item_id}，文件ID={file_id:?}")),
 			);
 		}
 
@@ -780,7 +860,10 @@ impl SessionActor {
 
 		tokio::spawn(async move {
 			// RAII Guard: 任务退出时如果没 commit，自动删除 tmp 文件
-			let mut guard = TempFileGuard { path: tmp_path_clone.clone(), committed: false };
+			let mut guard = TempFileGuard {
+				path: tmp_path_clone.clone(),
+				committed: false,
+			};
 
 			// 打开文件
 			let mut opts = OpenOptions::new();
@@ -793,7 +876,7 @@ impl SessionActor {
 
 			let file_res = opts.open(&guard.path).await;
 			if let Err(e) = file_res {
-				eprintln!("[Session] Writer open failed: {}", e);
+				eprintln!("[Session] Writer open failed: {e}");
 				return;
 			}
 			let mut writer = tokio::io::BufWriter::new(file_res.unwrap());
@@ -803,16 +886,23 @@ impl SessionActor {
 				match msg {
 					ReceiverTaskMsg::Chunk(data) => {
 						if let Err(e) = writer.write_all(&data).await {
-							eprintln!("[Session] Write failed: {}", e);
+							eprintln!("[Session] Write failed: {e}");
 							return; // 触发 Drop 删除
 						}
 						hasher.update(&data);
 					}
-					ReceiverTaskMsg::Finish { expected_sha256, reply_tx } => {
+					ReceiverTaskMsg::Finish {
+						expected_sha256,
+						reply_tx,
+					} => {
 						// 1. Flush & Sync
-						if let Err(_) = writer.flush().await { return; }
+						if writer.flush().await.is_err() {
+							return;
+						}
 						let mut f = writer.into_inner();
-						if let Err(_) = f.shutdown().await { return; }
+						if f.shutdown().await.is_err() {
+							return;
+						}
 						drop(f); // 关闭文件句柄
 
 						// 2. 校验 Hash (本次传输片段)
@@ -837,14 +927,19 @@ impl SessionActor {
 							// 暂定：用片段 Hash 存，或者如果不做全量校验，直接 commit。
 
 							// 这里复用原本的逻辑
-							let blob_path = cas_clone.commit_tmp_file(&guard_path, &expected_sha256)?;
+							let blob_path =
+								cas_clone.commit_tmp_file(&guard_path, &expected_sha256)?;
 
 							// B. 决定落地路径 (Materialize)
 							if let Some(real_fid) = fid {
 								// FileList 模式
 								let store = store_clone.lock().unwrap();
 								if let Some(fmeta) = store.get_file_meta(&iid, &real_fid)? {
-									cas_clone.materialize_file(&expected_sha256, &tid, &fmeta.rel_name)
+									cas_clone.materialize_file(
+										&expected_sha256,
+										&tid,
+										&fmeta.rel_name,
+									)
 								} else {
 									Ok(blob_path)
 								}
@@ -853,7 +948,7 @@ impl SessionActor {
 								let ext = match mime_clone.as_str() {
 									"image/png" => Some("png"),
 									"image/jpeg" | "image/jpg" => Some("jpg"),
-									_ => None
+									_ => None,
 								};
 								if let Some(extension) = ext {
 									cas_clone.materialize_blob(&expected_sha256, extension)
@@ -861,7 +956,8 @@ impl SessionActor {
 									Ok(blob_path)
 								}
 							}
-						}).await;
+						})
+						.await;
 
 						// 发送结果回主 Actor
 						let res = match commit_res {
@@ -895,160 +991,169 @@ impl SessionActor {
 	}
 
 	async fn handle_data_chunk(&mut self, transfer_id: String, data: bytes::Bytes) -> Result<()> {
-		if let Some(receiver) = self.receivers.get_mut(&transfer_id) {
-			match receiver {
-				ReceiverState::Receiving {
-					tx,
-					received_bytes,
-					total_bytes,
-					last_progress_emit,
-					..
-				} => {
-					let chunk_size = data.len();
-					*received_bytes += chunk_size as u64;
+		if let Some(ReceiverState::Receiving {
+			tx,
+			received_bytes,
+			total_bytes,
+			last_progress_emit,
+			..
+		}) = self.receivers.get_mut(&transfer_id)
+		{
+			let chunk_size = data.len();
+			*received_bytes += chunk_size as u64;
 
-					// 发送给 Writer 任务 (非阻塞)
-					if let Err(_) = tx.send(ReceiverTaskMsg::Chunk(data)).await {
-						// 任务已死 (比如写入失败)，停止接收
-						self.receivers.remove(&transfer_id);
-						return Ok(());
-					}
+			if tx.send(ReceiverTaskMsg::Chunk(data)).await.is_err() {
+				self.receivers.remove(&transfer_id);
+				return Ok(());
+			}
 
-					// 记录数据块接收（Debug 级别，避免日志过多）
-					{
-						let mut log_store = self.log_store.lock().unwrap();
-						let _ = log_store.log_debug(
-							"Session",
-							&format!("Data chunk received: transfer_id={}, size={} bytes, total_received={}",
-									transfer_id, chunk_size, *received_bytes),
-							Some(&format!("数据块已接收: 传输ID={}，大小={} 字节，已接收总计={}",
-									transfer_id, chunk_size, *received_bytes)),
-						);
-					}
+			{
+				let mut log_store = self.log_store.lock().unwrap();
+				let _ = log_store.log_debug(
+					"Session",
+					&format!(
+						"Data chunk received: transfer_id={transfer_id}, size={chunk_size} bytes, total_received={}",
+						*received_bytes
+					),
+					Some(&format!(
+						"数据块已接收: 传输ID={transfer_id}，大小={chunk_size} 字节，已接收总计={}",
+						*received_bytes
+					)),
+				);
+			}
 
-					// 进度节流
-					let now = now_ms();
-					if now - *last_progress_emit > 200 {
-						let progress_evt = serde_json::json!({
-                            "type": "TRANSFER_PROGRESS",
-                            "payload": {
-                                "transfer_id": transfer_id,
-                                "received": *received_bytes,
-                                "total": *total_bytes
-                            }
-                        });
-						self.sink.emit(progress_evt.to_string());
-						*last_progress_emit = now;
+			let now = now_ms();
+			if now - *last_progress_emit > 200 {
+				let progress_evt = serde_json::json!({
+					"type": "TRANSFER_PROGRESS",
+					"payload": {
+						"transfer_id": transfer_id,
+						"received": *received_bytes,
+						"total": *total_bytes
 					}
-				}
-				_ => {}
+				});
+				self.sink.emit(progress_evt.to_string());
+				*last_progress_emit = now;
 			}
 		}
 		Ok(())
 	}
 
 	async fn handle_content_end(&mut self, req_id: String) -> Result<()> {
-		if let Some(state) = self.receivers.remove(&req_id) {
-			if let ReceiverState::Receiving {
-				tx, item_id, file_id, transfer_id,
-				expected_sha256, total_bytes,
-				..
-			} = state {
-				// 1. 创建回传通道
-				let (reply_tx, reply_rx) = oneshot::channel();
+		if let Some(ReceiverState::Receiving {
+			tx,
+			item_id,
+			file_id,
+			transfer_id,
+			expected_sha256,
+			total_bytes,
+			..
+		}) = self.receivers.remove(&req_id)
+		{
+			// 1. 创建回传通道
+			let (reply_tx, reply_rx) = oneshot::channel();
 
-				// 2. 发送 Finish 指令给 Writer Task
-				// 注意：这里的 sha256 是发送端传来的“本次传输片段 Hash”
-				if let Err(_) = tx.send(ReceiverTaskMsg::Finish { expected_sha256: expected_sha256.clone(), reply_tx }).await {
-					self.emit_transfer_failed(&req_id, "WRITE_TASK_DEAD", "Writer task crashed");
-					return Ok(());
-				}
+			// 2. 发送 Finish 指令给 Writer Task
+			// 注意：这里的 sha256 是发送端传来的“本次传输片段 Hash”
+			if tx
+				.send(ReceiverTaskMsg::Finish {
+					expected_sha256: expected_sha256.clone(),
+					reply_tx,
+				})
+				.await
+				.is_err()
+			{
+				self.emit_transfer_failed(&req_id, "WRITE_TASK_DEAD", "Writer task crashed");
+				return Ok(());
+			}
 
-				// 3. 等待结果 (await 可能会短时间阻塞，但只是等待 flush/rename，比 write loop 快)
-				// 也可以 spawn 一个新的 task 去等，防止阻塞 Actor 处理其他消息，但这里简单处理即可
-				match reply_rx.await {
-					Ok(Ok(final_path)) => {
-						{
-							let mut log_store = self.log_store.lock().unwrap();
-							let _ = log_store.log_info(
+			// 3. 等待结果 (await 可能会短时间阻塞，但只是等待 flush/rename，比 write loop 快)
+			// 也可以 spawn 一个新的 task 去等，防止阻塞 Actor 处理其他消息，但这里简单处理即可
+			match reply_rx.await {
+				Ok(Ok(final_path)) => {
+					{
+						let mut log_store = self.log_store.lock().unwrap();
+						let _ = log_store.log_info(
 								"Session",
-								&format!("Transfer completed successfully: transfer_id={}, total_bytes={}, sha256={}",
-										transfer_id, total_bytes, expected_sha256),
-								Some(&format!("传输成功完成: 传输ID={}，总字节数={}，SHA256={}",
-										transfer_id, total_bytes, expected_sha256)),
+								&format!("Transfer completed successfully: transfer_id={transfer_id}, total_bytes={total_bytes}, sha256={expected_sha256}"),
+								Some(&format!("传输成功完成: 传输ID={transfer_id}，总字节数={total_bytes}，SHA256={expected_sha256}")),
 							);
-						}
-						let store = self.store.clone();
-						let sha_for_db = expected_sha256.clone();
-						let iid = item_id.clone();
-						let fid = file_id.clone();
-						let final_path_str = final_path.to_string_lossy().to_string();
-
-						// 【新增】查询 DB 获取完整元数据
-						let meta_info = tokio::task::spawn_blocking(move || {
-							let mut guard = store.lock().unwrap();
-							guard.mark_cache_present(&sha_for_db, now_ms())?; // 原有逻辑 [cite: 298]
-
-							// 补充查询
-							let mime = guard.get_item_mime(&iid)?.unwrap_or_default();
-							// 简单判断类型
-							let kind = if fid.is_some() {
-								"file"
-							} else if mime.starts_with("text/") {
-								"text"
-							} else if mime.starts_with("image/") {
-								"image"
-							} else {
-								"file" // 或 "binary"，但要和文档一致
-							};
-
-							Ok::<(String, String), anyhow::Error>((mime, kind.to_string()))
-						}).await??;
-
-						let (mime, kind) = meta_info;
-
-						// 【修改】构造符合文档的 local_ref
-						let local_ref = serde_json::json!({
-							"local_path": final_path_str,
-							"item_id": item_id,
-							"mime": mime,
-							"kind": kind,
-							"sha256": expected_sha256,
-							"total_bytes": total_bytes
-						});
-
-						// 发送事件
-						let evt = serde_json::json!({
-							"type": "CONTENT_CACHED",
-							"payload": {
-								"transfer_id": transfer_id,
-								"item_id": item_id,
-								"file_id": file_id,
-								"local_ref": local_ref
-							}
-						});
-						self.sink.emit(evt.to_string());
 					}
-					Ok(Err(e)) => self.emit_transfer_failed(&req_id, "COMMIT_FAILED", &e.to_string()),
-					Err(_) => self.emit_transfer_failed(&req_id, "COMMIT_TIMEOUT", "Writer task dropped reply"),
+					let store = self.store.clone();
+					let sha_for_db = expected_sha256.clone();
+					let iid = item_id.clone();
+					let fid = file_id.clone();
+					let final_path_str = final_path.to_string_lossy().to_string();
+
+					// 【新增】查询 DB 获取完整元数据
+					let meta_info = tokio::task::spawn_blocking(move || {
+						let mut guard = store.lock().unwrap();
+						guard.mark_cache_present(&sha_for_db, now_ms())?; // 原有逻辑 [cite: 298]
+
+						// 补充查询
+						let mime = guard.get_item_mime(&iid)?.unwrap_or_default();
+						// 简单判断类型
+						let kind = if fid.is_some() {
+							"file"
+						} else if mime.starts_with("text/") {
+							"text"
+						} else if mime.starts_with("image/") {
+							"image"
+						} else {
+							"file" // 或 "binary"，但要和文档一致
+						};
+
+						Ok::<(String, String), anyhow::Error>((mime, kind.to_string()))
+					})
+					.await??;
+
+					let (mime, kind) = meta_info;
+
+					// 【修改】构造符合文档的 local_ref
+					let local_ref = serde_json::json!({
+						"local_path": final_path_str,
+						"item_id": item_id,
+						"mime": mime,
+						"kind": kind,
+						"sha256": expected_sha256,
+						"total_bytes": total_bytes
+					});
+
+					// 发送事件
+					let evt = serde_json::json!({
+						"type": "CONTENT_CACHED",
+						"payload": {
+							"transfer_id": transfer_id,
+							"item_id": item_id,
+							"file_id": file_id,
+							"local_ref": local_ref
+						}
+					});
+					self.sink.emit(evt.to_string());
 				}
+				Ok(Err(e)) => self.emit_transfer_failed(&req_id, "COMMIT_FAILED", &e.to_string()),
+				Err(_) => self.emit_transfer_failed(
+					&req_id,
+					"COMMIT_TIMEOUT",
+					"Writer task dropped reply",
+				),
 			}
 		}
 		Ok(())
 	}
 
 	async fn handle_content_cancel(&mut self, req_id: String, _reason: String) -> Result<()> {
-		if let Some(state) = self.receivers.remove(&req_id) {
-			if let ReceiverState::Receiving { tx, transfer_id, .. } = state {
-				// 发送 Cancel，触发 Writer Task 的 Guard Drop 清理文件
-				let _ = tx.send(ReceiverTaskMsg::Cancel).await;
+		if let Some(ReceiverState::Receiving {
+			tx, transfer_id, ..
+		}) = self.receivers.remove(&req_id)
+		{
+			let _ = tx.send(ReceiverTaskMsg::Cancel).await;
 
-				let evt = serde_json::json!({
-                    "type": "TRANSFER_CANCELLED",
-                    "payload": { "transfer_id": transfer_id }
-                });
-				self.sink.emit(evt.to_string());
-			}
+			let evt = serde_json::json!({
+				"type": "TRANSFER_CANCELLED",
+				"payload": { "transfer_id": transfer_id }
+			});
+			self.sink.emit(evt.to_string());
 		}
 		Ok(())
 	}
@@ -1059,15 +1164,14 @@ impl SessionActor {
 			let mut log_store = self.log_store.lock().unwrap();
 			let _ = log_store.log_error(
 				"Session",
-				&format!("Transfer failed: transfer_id={}, error={}", tid, msg),
-				Some(&format!("传输失败: 传输ID={}，错误={}", tid, msg)),
+				&format!("Transfer failed: transfer_id={tid}, error={msg}"),
+				Some(&format!("传输失败: 传输ID={tid}，错误={msg}")),
 				Some(msg),
 			);
 		}
 
 		// 根据文档规则硬编码属性
 		let (retryable, affects_session) = match code {
-			"PERMISSION_DENIED" | "ITEM_NOT_FOUND" => (false, false),
 			"CONN_TIMEOUT" => (true, true),
 			_ => (false, false),
 		};
@@ -1083,15 +1187,21 @@ impl SessionActor {
 
 		// 统一使用 TRANSFER_FAILED 或 CORE_ERROR
 		let evt = serde_json::json!({
-        "type": "TRANSFER_FAILED",
-        "ts_ms": crate::util::now_ms(),
-        "payload": payload
-    });
+			"type": "TRANSFER_FAILED",
+			"ts_ms": crate::util::now_ms(),
+			"payload": payload
+		});
 		self.sink.emit(evt.to_string());
 	}
 
-    // --- M3 Sender Logic ---
-	async fn handle_content_get(&mut self, transfer_id: String, item_id: String, file_id: Option<String>, offset: Option<u64>) -> Result<()> {
+	// --- M3 Sender Logic ---
+	async fn handle_content_get(
+		&mut self,
+		transfer_id: String,
+		item_id: String,
+		file_id: Option<String>,
+		offset: Option<u64>,
+	) -> Result<()> {
 		// [修改] 1. 查找文件路径 (补全了 CAS 和 Local Path 的双重查找)
 		let (file_path_res, mime_val) = {
 			let store = self.store.lock().unwrap();
@@ -1113,7 +1223,9 @@ impl SessionActor {
 			};
 
 			// B. 获取 MIME (用于通知接收端)
-			let mime = store.get_item_mime(&item_id)?.unwrap_or("application/octet-stream".to_string());
+			let mime = store
+				.get_item_mime(&item_id)?
+				.unwrap_or("application/octet-stream".to_string());
 
 			// C. 决定最终读取路径
 			let mut final_path = None;
@@ -1155,7 +1267,8 @@ impl SessionActor {
 				total_bytes,
 				sha256, // 注意：这是整个文件的 Hash
 				mime: mime_val,
-			}).await?;
+			})
+			.await?;
 
 			// [新增] 启动独立任务读取文件
 			let tx = self.upload_tx.clone();
@@ -1164,7 +1277,15 @@ impl SessionActor {
 			let handle = tokio::spawn(async move {
 				let mut file = match File::open(&path).await {
 					Ok(f) => f,
-					Err(e) => { let _ = tx.send(UploadMsg::Error { transfer_id: tid, err: e.to_string() }).await; return; }
+					Err(e) => {
+						let _ = tx
+							.send(UploadMsg::Error {
+								transfer_id: tid,
+								err: e.to_string(),
+							})
+							.await;
+						return;
+					}
 				};
 
 				// 断点续传 Seek
@@ -1180,19 +1301,25 @@ impl SessionActor {
 
 				loop {
 					match reader.read(&mut buf).await {
-						Ok(0) => break, // EOF
-						Ok(n) => {
+						Ok(n) if n > 0 => {
 							hasher.update(&buf[..n]);
 							// 使用 Bytes::copy_from_slice 会发生一次内存拷贝，
 							// 但对于 64KB chunk 来说开销可控。
 							// 若极致优化可用 BytesMut，但此处保持简单即可。
 							let data = bytes::Bytes::copy_from_slice(&buf[..n]);
 
-							if tx.send(UploadMsg::Chunk { transfer_id: tid.clone(), data }).await.is_err() {
+							if tx
+								.send(UploadMsg::Chunk {
+									transfer_id: tid.clone(),
+									data,
+								})
+								.await
+								.is_err()
+							{
 								break; // Actor 挂了或取消了
 							}
 						}
-						Err(_) => break,
+						_ => break,
 					}
 				}
 
@@ -1200,7 +1327,12 @@ impl SessionActor {
 				// 在 Resume 场景下，这与 ContentBegin 里的完整 Hash 不同
 				// 接收端需要根据协议逻辑决定如何校验（目前 V3 简化版接收端已适配校验片段 Hash）
 				let final_sha = hex::encode(hasher.finalize());
-				let _ = tx.send(UploadMsg::Done { transfer_id: tid, sha256: final_sha }).await;
+				let _ = tx
+					.send(UploadMsg::Done {
+						transfer_id: tid,
+						sha256: final_sha,
+					})
+					.await;
 			});
 
 			self.senders.insert(transfer_id, handle.abort_handle());
@@ -1210,37 +1342,37 @@ impl SessionActor {
 				reply_to: Some(transfer_id),
 				code: "ITEM_NOT_FOUND".into(),
 				message: Some("File content not found in CAS or local path".into()),
-			}).await?;
+			})
+			.await?;
 		}
 		Ok(())
 	}
 
-    async fn start_pull_request(
-        &mut self,
-        item_id: String,
-        file_id: Option<String>,
-        reply_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>
-    ) -> Result<()> {
-        let transfer_id = uuid::Uuid::new_v4().to_string();
-        {
-            let mut log_store = self.log_store.lock().unwrap();
-            let _ = log_store.log_info(
-                "Session",
-                &format!("Transfer request initiated: transfer_id={}, item_id={}, file_id={:?}",
-                        transfer_id, item_id, file_id),
-                Some(&format!("传输请求已发起: 传输ID={}，项目ID={}，文件ID={:?}",
-                        transfer_id, item_id, file_id)),
-            );
-        }
-        self.send_ctrl(CtrlMsg::ContentGet {
-            msg_id: Some(transfer_id.clone()),
-            item_id,
-            file_id,
-            offset: Some(0),
-        }).await?;
-        let _ = reply_tx.send(Ok(transfer_id));
-        Ok(())
-    }
+	async fn start_pull_request(
+		&mut self,
+		item_id: String,
+		file_id: Option<String>,
+		reply_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
+	) -> Result<()> {
+		let transfer_id = uuid::Uuid::new_v4().to_string();
+		{
+			let mut log_store = self.log_store.lock().unwrap();
+			let _ = log_store.log_info(
+				"Session",
+				&format!("Transfer request initiated: transfer_id={transfer_id}, item_id={item_id}, file_id={file_id:?}"),
+				Some(&format!("传输请求已发起: 传输ID={transfer_id}，项目ID={item_id}，文件ID={file_id:?}")),
+			);
+		}
+		self.send_ctrl(CtrlMsg::ContentGet {
+			msg_id: Some(transfer_id.clone()),
+			item_id,
+			file_id,
+			offset: Some(0),
+		})
+		.await?;
+		let _ = reply_tx.send(Ok(transfer_id));
+		Ok(())
+	}
 
 	async fn handle_local_cancel(&mut self, transfer_id: String) -> Result<()> {
 		// 1. 尝试作为 Sender 取消
@@ -1248,14 +1380,15 @@ impl SessionActor {
 			handle.abort(); // 杀掉读文件任务
 			self.send_ctrl(CtrlMsg::ContentCancel {
 				req_id: transfer_id.clone(),
-				reason: "User cancelled".into()
-			}).await?;
+				reason: "User cancelled".into(),
+			})
+			.await?;
 			{
 				let mut log_store = self.log_store.lock().unwrap();
 				let _ = log_store.log_info(
 					"Session",
-					&format!("Transfer cancelled: transfer_id={}, reason=User cancelled", transfer_id),
-					Some(&format!("传输已取消: 传输ID={}，原因=用户取消", transfer_id)),
+					&format!("Transfer cancelled: transfer_id={transfer_id}, reason=User cancelled"),
+					Some(&format!("传输已取消: 传输ID={transfer_id}，原因=用户取消")),
 				);
 			}
 			return Ok(());
@@ -1265,155 +1398,201 @@ impl SessionActor {
 		if self.receivers.contains_key(&transfer_id) {
 			self.send_ctrl(CtrlMsg::ContentCancel {
 				req_id: transfer_id.clone(),
-				reason: "User cancelled".into()
-			}).await?;
+				reason: "User cancelled".into(),
+			})
+			.await?;
 			{
 				let mut log_store = self.log_store.lock().unwrap();
 				let _ = log_store.log_info(
 					"Session",
-					&format!("Transfer cancelled: transfer_id={}, reason=User cancelled", transfer_id),
-					Some(&format!("传输已取消: 传输ID={}，原因=用户取消", transfer_id)),
+					&format!("Transfer cancelled: transfer_id={transfer_id}, reason=User cancelled"),
+					Some(&format!("传输已取消: 传输ID={transfer_id}，原因=用户取消")),
 				);
 			}
 			// 调用上面的处理函数清理资源
-			self.handle_content_cancel(transfer_id, "User cancelled".into()).await?;
+			self.handle_content_cancel(transfer_id, "User cancelled".into())
+				.await?;
 		}
 		Ok(())
 	}
 
-    // --- OPAQUE Core Logic (v3.0.0 Fixed) ---
-    // (Existing Opaque methods omitted for brevity as they are unchanged from previous context)
-    // Please ensure start_opaque_login, handle_opaque_response, handle_opaque_start,
-    // handle_opaque_finish, perform_tofu_check_async, transition_to_online, tick_heartbeat
-    // are kept exactly as they were in the input file.
+	// --- OPAQUE Core Logic (v3.0.0 Fixed) ---
+	// (Existing Opaque methods omitted for brevity as they are unchanged from previous context)
+	// Please ensure start_opaque_login, handle_opaque_response, handle_opaque_start,
+	// handle_opaque_finish, perform_tofu_check_async, transition_to_online, tick_heartbeat
+	// are kept exactly as they were in the input file.
 
-    async fn start_opaque_login(&mut self) -> anyhow::Result<()> {
-        let mut rng = OsRng;
-        let password = self.config.account_password.as_bytes();
-        let start_result = CbClientLogin::start(&mut rng, password)
-            .map_err(|e| anyhow::anyhow!("OPAQUE start failed: {:?}", e))?;
-        self.opaque_client_state = Some(start_result.state);
-        let payload = bincode::serialize(&start_result.message)?;
-        self.send_ctrl(CtrlMsg::OpaqueStart {
-            msg_id: Some(uuid::Uuid::new_v4().to_string()),
-            reply_to: None,
-            opaque: payload
-        }).await?;
-        self.update_state(SessionState::Handshaking(HandshakeStep::OpaqueResponse));
-        Ok(())
-    }
+	async fn start_opaque_login(&mut self) -> anyhow::Result<()> {
+		let mut rng = OsRng;
+		let password = self.config.account_password.as_bytes();
+		let start_result = CbClientLogin::start(&mut rng, password)
+			.map_err(|e| anyhow::anyhow!("OPAQUE start failed: {:?}", e))?;
+		self.opaque_client_state = Some(start_result.state);
+		let payload = bincode::serialize(&start_result.message)?;
+		self.send_ctrl(CtrlMsg::OpaqueStart {
+			msg_id: Some(uuid::Uuid::new_v4().to_string()),
+			reply_to: None,
+			opaque: payload,
+		})
+		.await?;
+		self.update_state(SessionState::Handshaking(HandshakeStep::OpaqueResponse));
+		Ok(())
+	}
 
-    async fn handle_opaque_response(&mut self, response_bytes: &[u8]) -> anyhow::Result<()> {
-        let client_state = self.opaque_client_state.take()
-            .ok_or_else(|| anyhow::anyhow!("Protocol error: Missing client state"))?;
-        let password = self.config.account_password.as_bytes();
-        let server_response: opaque_ke::CredentialResponse<DefaultCipherSuite> =
-            bincode::deserialize(response_bytes).map_err(|_| anyhow::anyhow!("Invalid OpaqueResponse bytes"))?;
-        let finish_result = client_state.finish(password, server_response, ClientLoginFinishParameters::default())
-            .map_err(|e| anyhow::anyhow!("OPAQUE finish failed: {:?}", e))?;
-        let payload = bincode::serialize(&finish_result.message)?;
-        self.send_ctrl(CtrlMsg::OpaqueFinish {
-            msg_id: Some(uuid::Uuid::new_v4().to_string()),
-            reply_to: None,
-            opaque: payload
-        }).await?;
-        self.update_state(SessionState::Handshaking(HandshakeStep::WaitingAuthOk));
-        Ok(())
-    }
+	async fn handle_opaque_response(&mut self, response_bytes: &[u8]) -> anyhow::Result<()> {
+		let client_state = self
+			.opaque_client_state
+			.take()
+			.ok_or_else(|| anyhow::anyhow!("Protocol error: Missing client state"))?;
+		let password = self.config.account_password.as_bytes();
+		let mut rng = OsRng;
+		let server_response: opaque_ke::CredentialResponse<DefaultCipherSuite> =
+			bincode::deserialize(response_bytes)
+				.map_err(|_| anyhow::anyhow!("Invalid OpaqueResponse bytes"))?;
+		let finish_result = client_state
+			.finish(
+				&mut rng,
+				password,
+				server_response,
+				ClientLoginFinishParameters::default(),
+			)
+			.map_err(|e| anyhow::anyhow!("OPAQUE finish failed: {:?}", e))?;
+		let payload = bincode::serialize(&finish_result.message)?;
+		self.send_ctrl(CtrlMsg::OpaqueFinish {
+			msg_id: Some(uuid::Uuid::new_v4().to_string()),
+			reply_to: None,
+			opaque: payload,
+		})
+		.await?;
+		self.update_state(SessionState::Handshaking(HandshakeStep::WaitingAuthOk));
+		Ok(())
+	}
 
-    async fn handle_opaque_start(&mut self, start_bytes: &[u8]) -> anyhow::Result<()> {
-        let mut rng = OsRng;
-        let identifier = b"clipbridge-user";
-        let (server_setup, server_rec) = p2p_get_server_registration(&self.config.account_password)?;
-        let client_message = bincode::deserialize(start_bytes).map_err(|_| anyhow::anyhow!("Invalid OpaqueStart bytes"))?;
-        let start_result = CbServerLogin::start(&mut rng, &server_setup, Some(server_rec), client_message, identifier, ServerLoginStartParameters::default())
-            .map_err(|e| anyhow::anyhow!("OPAQUE server start failed: {:?}", e))?;
-        self.opaque_server_state = Some(start_result.state);
-        let payload = bincode::serialize(&start_result.message)?;
-        self.send_ctrl(CtrlMsg::OpaqueResponse {
-            msg_id: Some(uuid::Uuid::new_v4().to_string()),
-            reply_to: None,
-            opaque: payload
-        }).await?;
-        self.update_state(SessionState::Handshaking(HandshakeStep::OpaqueFinish));
-        Ok(())
-    }
+	async fn handle_opaque_start(&mut self, start_bytes: &[u8]) -> anyhow::Result<()> {
+		let mut rng = OsRng;
+		let identifier = b"clipbridge-user";
+		let (server_setup, server_rec) =
+			p2p_get_server_registration(&self.config.account_password)?;
+		let client_message = bincode::deserialize(start_bytes)
+			.map_err(|_| anyhow::anyhow!("Invalid OpaqueStart bytes"))?;
+		let start_result = CbServerLogin::start(
+			&mut rng,
+			&server_setup,
+			Some(server_rec),
+			client_message,
+			identifier,
+			ServerLoginParameters::default(),
+		)
+		.map_err(|e| anyhow::anyhow!("OPAQUE server start failed: {:?}", e))?;
+		self.opaque_server_state = Some(start_result.state);
+		let payload = bincode::serialize(&start_result.message)?;
+		self.send_ctrl(CtrlMsg::OpaqueResponse {
+			msg_id: Some(uuid::Uuid::new_v4().to_string()),
+			reply_to: None,
+			opaque: payload,
+		})
+		.await?;
+		self.update_state(SessionState::Handshaking(HandshakeStep::OpaqueFinish));
+		Ok(())
+	}
 
-    async fn handle_opaque_finish(&mut self, finish_bytes: &[u8]) -> anyhow::Result<()> {
-        let server_state = self.opaque_server_state.take().ok_or_else(|| anyhow::anyhow!("Protocol error: Missing server state"))?;
-        let client_message = bincode::deserialize(finish_bytes).map_err(|_| anyhow::anyhow!("Invalid OpaqueFinish bytes"))?;
-        let _session_key = server_state.finish(client_message).map_err(|e| anyhow::anyhow!("Authentication failed: {:?}", e))?;
-        self.update_state(SessionState::AccountVerified);
-        Ok(())
-    }
+	fn handle_opaque_finish(&mut self, finish_bytes: &[u8]) -> anyhow::Result<()> {
+		let server_state = self
+			.opaque_server_state
+			.take()
+			.ok_or_else(|| anyhow::anyhow!("Protocol error: Missing server state"))?;
+		let client_message = bincode::deserialize(finish_bytes)
+			.map_err(|_| anyhow::anyhow!("Invalid OpaqueFinish bytes"))?;
+		let _session_key = server_state
+			.finish(client_message, ServerLoginParameters::default())
+			.map_err(|e| anyhow::anyhow!("Authentication failed: {:?}", e))?;
+		self.update_state(SessionState::AccountVerified);
+		Ok(())
+	}
 
-    async fn perform_tofu_check_async(&self) -> Result<()> {
-        let data_dir = self.config.data_dir.clone();
-        let uid = self.config.account_uid.clone();
-        let did = self.remote_device_id.clone().context("missing remote device id")?;
-        let rfp = self.remote_fingerprint.clone();
-        tokio::task::spawn_blocking(move || {
-            let store = Store::open(&data_dir)?;
-            match store.get_peer_fingerprint(&uid, &did)? {
-                Some(saved_fp) => {
-                    if saved_fp != rfp { anyhow::bail!("TLS_PIN_MISMATCH: saved={}, got={}", saved_fp, rfp); }
-                }
-                None => {
-                    let mut store_mut = Store::open(&data_dir)?;
-                    store_mut.save_peer_fingerprint(&uid, &did, &rfp, now_ms())?;
-                    println!("[Session] TOFU pinned device {} with fp {}", did, rfp);
-                }
-            }
-            Ok(())
-        }).await?
-    }
+	async fn perform_tofu_check_async(&self) -> Result<()> {
+		let data_dir = self.config.data_dir.clone();
+		let uid = self.config.account_uid.clone();
+		let did = self
+			.remote_device_id
+			.clone()
+			.context("missing remote device id")?;
+		let rfp = self.remote_fingerprint.clone();
+		tokio::task::spawn_blocking(move || {
+			let store = Store::open(&data_dir)?;
+			if let Some(saved_fp) = store.get_peer_fingerprint(&uid, &did)? {
+				if saved_fp != rfp {
+					anyhow::bail!("TLS_PIN_MISMATCH: saved={saved_fp}, got={rfp}");
+				}
+			} else {
+				let mut store_mut = Store::open(&data_dir)?;
+				store_mut.save_peer_fingerprint(&uid, &did, &rfp, now_ms())?;
+				println!("[Session] TOFU pinned device {did} with fp {rfp}");
+			}
+			Ok(())
+		})
+		.await?
+	}
 
-    async fn transition_to_online(&mut self) -> Result<()> {
-        self.update_state(SessionState::Online);
-        if let Some(did) = &self.remote_device_id {
-            let mut log_store = self.log_store.lock().unwrap();
-            let _ = log_store.log_info(
-                "Session",
-                &format!("Handshake completed, session online: remote_device_id={}", did),
-                Some(&format!("握手已完成，会话在线: 远程设备ID={}", did)),
-            );
-            let json = serde_json::json!({
-                "type": "PEER_ONLINE",
-                "ts_ms": now_ms(),
-                "payload": { "device_id": did }
-            });
-            self.sink.emit(json.to_string());
-        }
-        Ok(())
-    }
+	fn transition_to_online(&mut self) {
+		self.update_state(SessionState::Online);
+		if let Some(did) = &self.remote_device_id {
+			let mut log_store = self.log_store.lock().unwrap();
+			let _ = log_store.log_info(
+				"Session",
+				&format!("Handshake completed, session online: remote_device_id={did}"),
+				Some(&format!("握手已完成，会话在线: 远程设备ID={did}")),
+			);
+			let json = serde_json::json!({
+				"type": "PEER_ONLINE",
+				"ts_ms": now_ms(),
+				"payload": { "device_id": did }
+			});
+			self.sink.emit(json.to_string());
+		}
+	}
 
-    async fn tick_heartbeat(&mut self) -> Result<()> {
-        if now_ms() - self.last_active_at > HEARTBEAT_TIMEOUT.as_millis() as i64 {
-            if let Some(did) = &self.remote_device_id {
-                let mut log_store = self.log_store.lock().unwrap();
-                let _ = log_store.log_warn(
-                    "Session",
-                    &format!("Heartbeat timeout, session may be dead: device_id={}, last_active={}",
-                            did, self.last_active_at),
-                    Some(&format!("心跳超时，会话可能已死亡: 设备ID={}，最后活跃={}",
-                            did, self.last_active_at)),
-                );
-            }
-            let _ = self.send_ctrl(CtrlMsg::Error { reply_to: None, code: "TIMEOUT".into(), message: Some("Heartbeat timeout".into()) }).await;
-            anyhow::bail!("Heartbeat timeout");
-        }
-        if self.state == SessionState::Online {
-            // 心跳发送（Debug 级别，避免日志过多）
-            if let Some(did) = &self.remote_device_id {
-                let mut log_store = self.log_store.lock().unwrap();
-                let _ = log_store.log_debug(
-                    "Session",
-                    &format!("Heartbeat sent: device_id={}", did),
-                    Some(&format!("心跳已发送: 设备ID={}", did)),
-                );
-            }
-            self.send_ctrl(CtrlMsg::Ping { msg_id: Some(uuid::Uuid::new_v4().to_string()), ts: now_ms() }).await?;
-        }
-        Ok(())
-    }
+	async fn tick_heartbeat(&mut self) -> Result<()> {
+		if now_ms() - self.last_active_at > HEARTBEAT_TIMEOUT.as_millis() as i64 {
+			if let Some(did) = &self.remote_device_id {
+				let mut log_store = self.log_store.lock().unwrap();
+				let _ = log_store.log_warn(
+					"Session",
+					&format!(
+						"Heartbeat timeout, session may be dead: device_id={did}, last_active={}",
+						self.last_active_at
+					),
+					Some(&format!(
+						"心跳超时，会话可能已死亡: 设备ID={did}，最后活跃={}",
+						self.last_active_at
+					)),
+				);
+			}
+			let _ = self
+				.send_ctrl(CtrlMsg::Error {
+					reply_to: None,
+					code: "TIMEOUT".into(),
+					message: Some("Heartbeat timeout".into()),
+				})
+				.await;
+			anyhow::bail!("Heartbeat timeout");
+		}
+		if self.state == SessionState::Online {
+			// 心跳发送（Debug 级别，避免日志过多）
+			if let Some(did) = &self.remote_device_id {
+				let mut log_store = self.log_store.lock().unwrap();
+				let _ = log_store.log_debug(
+					"Session",
+					&format!("Heartbeat sent: device_id={did}"),
+					Some(&format!("心跳已发送: 设备ID={did}")),
+				);
+			}
+			self.send_ctrl(CtrlMsg::Ping {
+				msg_id: Some(uuid::Uuid::new_v4().to_string()),
+				ts: now_ms(),
+			})
+			.await?;
+		}
+		Ok(())
+	}
 }

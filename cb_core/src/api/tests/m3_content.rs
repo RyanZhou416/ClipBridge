@@ -1,8 +1,8 @@
 // cb_core/src/api/tests/m3_content.rs
 
-use std::time::Duration;
 use crate::api::PeerConnectionState;
 use crate::clipboard::ClipboardSnapshot;
+use std::time::Duration;
 // 复用 m1_net 的测试脚手架
 use super::m1_net::{create_test_core, list_peers_async, wait_for};
 
@@ -23,8 +23,11 @@ async fn test_m3_1_text_fetch_success() {
 	// 2. 等待互联
 	let connected = wait_for(Duration::from_secs(15), || async {
 		let peers = list_peers_async(&core_a).await;
-		peers.iter().any(|p| p.device_id == "m3_b" && p.state == PeerConnectionState::Online)
-	}).await;
+		peers
+			.iter()
+			.any(|p| p.device_id == "m3_b" && p.state == PeerConnectionState::Online)
+	})
+	.await;
 	assert!(connected, "Peers failed to connect");
 
 	// 3. A 产生数据
@@ -60,24 +63,29 @@ async fn test_m3_1_text_fetch_success() {
 		let sha = sha256.clone();
 		tokio::task::spawn_blocking(move || {
 			let conn = rusqlite::Connection::open(path).unwrap();
-			let present: i64 = conn.query_row(
-				"SELECT present FROM content_cache WHERE sha256_hex = ?",
-				[&sha],
-				|r| r.get(0)
-			).unwrap_or(0);
+			let present: i64 = conn
+				.query_row(
+					"SELECT present FROM content_cache WHERE sha256_hex = ?",
+					[&sha],
+					|r| r.get(0),
+				)
+				.unwrap_or(0);
 			assert_eq!(present, 0, "Content should be Lazy Fetched (present=0)");
-		}).await.unwrap();
+		})
+		.await
+		.unwrap();
 	}
 
 	// 6. [核心] B 发起拉取请求
 	println!("B calling ensure_content_cached...");
 	let c_b = core_b.clone();
 	let i_id = item_id.clone();
-	let transfer_id = tokio::task::spawn_blocking(move || {
-		c_b.ensure_content_cached(&i_id, None)
-	}).await.unwrap().expect("ensure_content_cached failed");
+	let transfer_id = tokio::task::spawn_blocking(move || c_b.ensure_content_cached(&i_id, None))
+		.await
+		.unwrap()
+		.expect("ensure_content_cached failed");
 
-	println!("Transfer initiated: {}", transfer_id);
+	println!("Transfer initiated: {transfer_id}");
 
 	// 7. 等待传输完成
 	let mut received_cached = false;
@@ -101,7 +109,8 @@ async fn test_m3_1_text_fetch_success() {
 	assert!(!local_path_str.is_empty(), "local_path should not be empty");
 
 	// 8. 最终验证
-	let file_content = std::fs::read_to_string(&local_path_str).expect("Failed to read downloaded file");
+	let file_content =
+		std::fs::read_to_string(&local_path_str).expect("Failed to read downloaded file");
 	assert_eq!(file_content, raw_text, "Content mismatch!");
 
 	{
@@ -109,13 +118,17 @@ async fn test_m3_1_text_fetch_success() {
 		let sha = sha256.clone();
 		tokio::task::spawn_blocking(move || {
 			let conn = rusqlite::Connection::open(path).unwrap();
-			let present: i64 = conn.query_row(
-				"SELECT present FROM content_cache WHERE sha256_hex = ?",
-				[&sha],
-				|r| r.get(0)
-			).unwrap();
+			let present: i64 = conn
+				.query_row(
+					"SELECT present FROM content_cache WHERE sha256_hex = ?",
+					[&sha],
+					|r| r.get(0),
+				)
+				.unwrap();
 			assert_eq!(present, 1, "DB should be updated to present=1");
-		}).await.unwrap();
+		})
+		.await
+		.unwrap();
 	}
 
 	println!("M3-1 Text Fetch Integration Test Passed!");
@@ -132,11 +145,16 @@ async fn test_m3_2_image_fetch_success() {
 
 	wait_for(Duration::from_secs(5), || async {
 		let peers = list_peers_async(&core_a).await;
-		peers.iter().any(|p| p.device_id == "m3_img_b" && p.state == PeerConnectionState::Online)
-	}).await;
+		peers
+			.iter()
+			.any(|p| p.device_id == "m3_img_b" && p.state == PeerConnectionState::Online)
+	})
+	.await;
 
 	// 1. A 产生图片数据 (模拟 PNG)
-	let png_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x01];
+	let png_bytes = vec![
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x01,
+	];
 	let snapshot = ClipboardSnapshot::Image {
 		bytes: png_bytes.clone(),
 		mime: "image/png".to_string(),
@@ -163,9 +181,10 @@ async fn test_m3_2_image_fetch_success() {
 	println!("B requesting image...");
 	let c_b = core_b.clone();
 	let i_id = item_id.clone();
-	let transfer_id = tokio::task::spawn_blocking(move || {
-		c_b.ensure_content_cached(&i_id, None)
-	}).await.unwrap().expect("ensure failed");
+	let transfer_id = tokio::task::spawn_blocking(move || c_b.ensure_content_cached(&i_id, None))
+		.await
+		.unwrap()
+		.expect("ensure failed");
 
 	// 3. 等待传输完成并验证后缀
 	let start = std::time::Instant::now();
@@ -174,7 +193,10 @@ async fn test_m3_2_image_fetch_success() {
 		if let Ok(evt_json) = rx_b.try_recv() {
 			if evt_json.contains("CONTENT_CACHED") && evt_json.contains(&transfer_id) {
 				let v: serde_json::Value = serde_json::from_str(&evt_json).unwrap();
-				local_path_str = v["payload"]["local_ref"]["local_path"].as_str().unwrap().to_string();
+				local_path_str = v["payload"]["local_ref"]["local_path"]
+					.as_str()
+					.unwrap()
+					.to_string();
 				break;
 			}
 		}
@@ -182,7 +204,12 @@ async fn test_m3_2_image_fetch_success() {
 	}
 
 	assert!(!local_path_str.is_empty(), "Image transfer timed out");
-	assert!(local_path_str.ends_with(".png"), "Local path must have .png extension: {}", local_path_str);
+	assert!(
+		std::path::Path::new(&local_path_str)
+			.extension()
+			.is_some_and(|ext| ext.eq_ignore_ascii_case("png")),
+		"Local path must have .png extension: {local_path_str}",
+	);
 
 	let content = std::fs::read(&local_path_str).unwrap();
 	assert_eq!(content, png_bytes, "Image content mismatch");
@@ -199,8 +226,11 @@ async fn test_m3_3_file_fetch_success() {
 
 	wait_for(Duration::from_secs(15), || async {
 		let peers = list_peers_async(&core_a).await;
-		peers.iter().any(|p| p.device_id == "m3_file_b" && p.state == PeerConnectionState::Online)
-	}).await;
+		peers
+			.iter()
+			.any(|p| p.device_id == "m3_file_b" && p.state == PeerConnectionState::Online)
+	})
+	.await;
 
 	// 1. A Ingest FileList
 	let file_content = b"Content of report.pdf";
@@ -218,21 +248,19 @@ async fn test_m3_3_file_fetch_success() {
 		source_device_id: "m3_file_a".to_string(),
 		source_device_name: None,
 		size_bytes: file_content.len() as i64,
-		preview: Default::default(),
+		preview: crate::model::ItemPreview::default(),
 		content: crate::model::ItemContent {
 			mime: "application/x-clipbridge-filelist+json".to_string(),
 			sha256: "manifest_sha_ignored_in_this_test".to_string(),
 			total_bytes: 100,
 		},
-		files: vec![
-			crate::model::FileMeta {
-				file_id: file_id.clone(),
-				rel_name: "report.pdf".to_string(),
-				size_bytes: file_content.len() as i64,
-				sha256: Some(sha.clone()),
-				local_path: None, // 模拟只有 CAS 的情况
-			}
-		],
+		files: vec![crate::model::FileMeta {
+			file_id: file_id.clone(),
+			rel_name: "report.pdf".to_string(),
+			size_bytes: file_content.len() as i64,
+			sha256: Some(sha.clone()),
+			local_path: None, // 模拟只有 CAS 的情况
+		}],
 		expires_ts_ms: None,
 	};
 
@@ -241,29 +269,34 @@ async fn test_m3_3_file_fetch_success() {
 		let store = core_a.inner.store.lock().unwrap();
 		let files_json = serde_json::to_string(&meta.files).unwrap();
 
-		store.conn.execute(
-			"INSERT INTO items (
+		store
+			.conn
+			.execute(
+				"INSERT INTO items (
                 item_id, kind, owner_device_id, created_ts_ms, size_bytes,
                 mime, sha256_hex, files_json, expires_ts_ms
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			(
-				&meta.item_id,
-				"file_list",
-				&meta.source_device_id,
-				meta.created_ts_ms,
-				meta.size_bytes,
-				&meta.content.mime,
-				&meta.content.sha256,
-				&files_json,
-				Option::<i64>::None
+				(
+					&meta.item_id,
+					"file_list",
+					&meta.source_device_id,
+					meta.created_ts_ms,
+					meta.size_bytes,
+					&meta.content.mime,
+					&meta.content.sha256,
+					&files_json,
+					Option::<i64>::None,
+				),
 			)
-		).expect("Failed to insert meta into A's DB");
+			.expect("Failed to insert meta into A's DB");
 	}
 
 	// C. A 广播 Meta
 	if let Some(net) = &core_a.inner.net {
-		net.send(crate::net::NetCmd::BroadcastMeta(meta.clone())).await.unwrap();
+		net.send(crate::net::NetCmd::BroadcastMeta(Box::new(meta.clone())))
+			.await
+			.unwrap();
 	}
 
 	// 2. B 等待 Meta
@@ -286,9 +319,11 @@ async fn test_m3_3_file_fetch_success() {
 	let c_b = core_b.clone();
 	let i_id = "item_files_001".to_string();
 	let f_id = file_id.clone();
-	let transfer_id = tokio::task::spawn_blocking(move || {
-		c_b.ensure_content_cached(&i_id, Some(&f_id))
-	}).await.unwrap().expect("ensure failed");
+	let transfer_id =
+		tokio::task::spawn_blocking(move || c_b.ensure_content_cached(&i_id, Some(&f_id)))
+			.await
+			.unwrap()
+			.expect("ensure failed");
 
 	// 4. 验证结果
 	let start = std::time::Instant::now();
@@ -297,7 +332,10 @@ async fn test_m3_3_file_fetch_success() {
 		if let Ok(evt_json) = rx_b.try_recv() {
 			if evt_json.contains("CONTENT_CACHED") && evt_json.contains(&transfer_id) {
 				let v: serde_json::Value = serde_json::from_str(&evt_json).unwrap();
-				local_path_str = v["payload"]["local_ref"]["local_path"].as_str().unwrap().to_string();
+				local_path_str = v["payload"]["local_ref"]["local_path"]
+					.as_str()
+					.unwrap()
+					.to_string();
 				break;
 			}
 		}
@@ -305,7 +343,10 @@ async fn test_m3_3_file_fetch_success() {
 	}
 
 	assert!(!local_path_str.is_empty(), "File transfer timed out");
-	assert!(local_path_str.ends_with("report.pdf"), "Filename mismatch: {}", local_path_str);
+	assert!(
+		local_path_str.ends_with("report.pdf"),
+		"Filename mismatch: {local_path_str}",
+	);
 
 	let got = std::fs::read(local_path_str).unwrap();
 	assert_eq!(got, file_content);

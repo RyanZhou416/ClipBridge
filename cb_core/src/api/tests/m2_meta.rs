@@ -1,10 +1,10 @@
 // cb_core/src/api/tests/m2_meta.rs
 
-use std::time::Duration;
-use crate::api::{PeerConnectionState};
 use super::m1_net::{create_test_core, list_peers_async, wait_for};
+use crate::api::PeerConnectionState;
 use crate::clipboard::ClipboardSnapshot;
 use crate::net::NetCmd;
+use std::time::Duration;
 
 #[tokio::test]
 async fn test_m2_meta_sync_and_db_persistence() {
@@ -21,8 +21,11 @@ async fn test_m2_meta_sync_and_db_persistence() {
 	// 2. 等待互联
 	let connected = wait_for(Duration::from_secs(10), || async {
 		let peers = list_peers_async(&core_a).await;
-		peers.iter().any(|p| p.device_id == "m2_b" && p.state == PeerConnectionState::Online)
-	}).await;
+		peers
+			.iter()
+			.any(|p| p.device_id == "m2_b" && p.state == PeerConnectionState::Online)
+	})
+	.await;
 	assert!(connected, "Peers not connected");
 
 	// 3. A 产生数据
@@ -51,40 +54,51 @@ async fn test_m2_meta_sync_and_db_persistence() {
 	{
 		let db_path = dir_b.path().join("core.db");
 		// 使用 spawn_blocking 避免在该 async test 中阻塞
-		let _verify_db = tokio::task::spawn_blocking(move || {
+		tokio::task::spawn_blocking(move || {
 			let conn = rusqlite::Connection::open(db_path).unwrap();
 
 			// 验证 items 表
-			let count: i64 = conn.query_row(
-				"SELECT COUNT(*) FROM items WHERE item_id = ?",
-				[&item_id], |r| r.get(0)
-			).unwrap();
+			let count: i64 = conn
+				.query_row(
+					"SELECT COUNT(*) FROM items WHERE item_id = ?",
+					[&item_id],
+					|r| r.get(0),
+				)
+				.unwrap();
 			assert_eq!(count, 1, "Item should be in DB");
 
 			// 验证 history 表
-			let hist_count: i64 = conn.query_row(
-				"SELECT COUNT(*) FROM history WHERE item_id = ?",
-				[&item_id], |r| r.get(0)
-			).unwrap();
+			let hist_count: i64 = conn
+				.query_row(
+					"SELECT COUNT(*) FROM history WHERE item_id = ?",
+					[&item_id],
+					|r| r.get(0),
+				)
+				.unwrap();
 			assert_eq!(hist_count, 1, "History should be in DB");
 
 			// 验证 content_cache 表 (Lazy Fetch: present 应该是 0)
 			// 注意：因为我们禁用了 text_auto_prefetch_bytes，所以这里一定是 0
-			let (present, total): (i64, i64) = conn.query_row(
-				"SELECT present, total_bytes FROM content_cache WHERE sha256_hex = ?",
-				[&meta.content.sha256], |r| Ok((r.get(0)?, r.get(1)?))
-			).unwrap();
+			let (present, total): (i64, i64) = conn
+				.query_row(
+					"SELECT present, total_bytes FROM content_cache WHERE sha256_hex = ?",
+					[&meta.content.sha256],
+					|r| Ok((r.get(0)?, r.get(1)?)),
+				)
+				.unwrap();
 			assert_eq!(present, 0, "Content should NOT be present (Lazy Fetch)");
 			assert!(total > 0, "Total bytes should be recorded");
-		}).await.unwrap();
+		})
+		.await
+		.unwrap();
 	}
 }
 
 #[test]
 fn test_m2_store_idempotency() {
 	// 这是一个单元测试，专门测 Step 1 的 Store 逻辑
+	use crate::model::{ItemContent, ItemKind, ItemMeta, ItemPreview};
 	use crate::store::Store;
-	use crate::model::{ItemMeta, ItemKind, ItemContent, ItemPreview};
 
 	let dir = tempfile::tempdir().unwrap();
 	let mut store = Store::open(dir.path()).unwrap();
@@ -100,7 +114,11 @@ fn test_m2_store_idempotency() {
 		source_device_name: None,
 		size_bytes: 100,
 		preview: ItemPreview::default(),
-		content: ItemContent { mime: "text/plain".to_string(), sha256: "abc".to_string(), total_bytes: 100 },
+		content: ItemContent {
+			mime: "text/plain".to_string(),
+			sha256: "abc".to_string(),
+			total_bytes: 100,
+		},
 		files: vec![],
 		expires_ts_ms: None,
 	};
@@ -124,8 +142,11 @@ async fn test_m2_robustness_network_replay() {
 	// 2. 建立连接
 	let connected = wait_for(Duration::from_secs(5), || async {
 		let peers = list_peers_async(&core_a).await;
-		peers.iter().any(|p| p.device_id == "m2_rob_b" && p.state == PeerConnectionState::Online)
-	}).await;
+		peers
+			.iter()
+			.any(|p| p.device_id == "m2_rob_b" && p.state == PeerConnectionState::Online)
+	})
+	.await;
 	assert!(connected, "Peers not connected");
 
 	// 3. A 产生第一条数据
@@ -157,12 +178,17 @@ async fn test_m2_robustness_network_replay() {
 		let iid = item_id.clone();
 		tokio::task::spawn_blocking(move || {
 			let conn = rusqlite::Connection::open(path).unwrap();
-			let count: i64 = conn.query_row(
-				"SELECT COUNT(*) FROM history WHERE item_id = ?",
-				[&iid], |r| r.get(0)
-			).unwrap();
+			let count: i64 = conn
+				.query_row(
+					"SELECT COUNT(*) FROM history WHERE item_id = ?",
+					[&iid],
+					|r| r.get(0),
+				)
+				.unwrap();
 			assert_eq!(count, 1, "Initial history count should be 1");
-		}).await.unwrap();
+		})
+		.await
+		.unwrap();
 	}
 
 	// --- 关键步骤：模拟网络重放 ---
@@ -170,7 +196,7 @@ async fn test_m2_robustness_network_replay() {
 	// 我们直接获取 A 的内部 NetManager 通道，手动发送一个 BroadcastMeta 命令
 	// 这完全模拟了 A 决定重发旧数据的场景
 	if let Some(net_tx) = &core_a.inner.net {
-		let _ = net_tx.try_send(NetCmd::BroadcastMeta(meta.clone()));
+		let _ = net_tx.try_send(NetCmd::BroadcastMeta(Box::new(meta.clone())));
 	} else {
 		panic!("Core A net is missing");
 	}
@@ -183,10 +209,13 @@ async fn test_m2_robustness_network_replay() {
 	while let Ok(evt_json) = rx_b.try_recv() {
 		if evt_json.contains("ITEM_META_ADDED") && evt_json.contains(&item_id) {
 			duplicate_event = true;
-			println!("Fail: Received duplicate event: {}", evt_json);
+			println!("Fail: Received duplicate event: {evt_json}");
 		}
 	}
-	assert!(!duplicate_event, "B should NOT emit ITEM_META_ADDED for duplicate meta");
+	assert!(
+		!duplicate_event,
+		"B should NOT emit ITEM_META_ADDED for duplicate meta"
+	);
 
 	// 7. 验证数据库：History 数量仍应为 1 (DB 层的幂等性)
 	{
@@ -194,12 +223,17 @@ async fn test_m2_robustness_network_replay() {
 		let iid = item_id.clone();
 		tokio::task::spawn_blocking(move || {
 			let conn = rusqlite::Connection::open(path).unwrap();
-			let count: i64 = conn.query_row(
-				"SELECT COUNT(*) FROM history WHERE item_id = ?",
-				[&iid], |r| r.get(0)
-			).unwrap();
+			let count: i64 = conn
+				.query_row(
+					"SELECT COUNT(*) FROM history WHERE item_id = ?",
+					[&iid],
+					|r| r.get(0),
+				)
+				.unwrap();
 			assert_eq!(count, 1, "History count should remain 1 after replay");
-		}).await.unwrap();
+		})
+		.await
+		.unwrap();
 	}
 
 	println!("SUCCESS: Network replay robustness test passed.");

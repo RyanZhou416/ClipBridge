@@ -1,8 +1,8 @@
 // cb_core/src/api/tests/m1_net.rs
 
-use std::path::PathBuf;
 use crate::api::*;
 use crate::clipboard::ClipboardSnapshot;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -28,8 +28,13 @@ impl CoreEventSink for TestSink {
 }
 
 // 统一的 Core 创建函数
-pub(crate) fn create_test_core<F>(device_id: &str, uid: &str, config_modifier: F) -> (Arc<Core>, broadcast::Receiver<String>, tempfile::TempDir)
-where F: FnOnce(&mut CoreConfig)
+pub(crate) fn create_test_core<F>(
+	device_id: &str,
+	uid: &str,
+	config_modifier: F,
+) -> (Arc<Core>, broadcast::Receiver<String>, tempfile::TempDir)
+where
+	F: FnOnce(&mut CoreConfig),
 {
 	let mut base = workspace_target_dir();
 	base.push("debug");
@@ -37,14 +42,14 @@ where F: FnOnce(&mut CoreConfig)
 	std::fs::create_dir_all(&base).unwrap();
 
 	let dir = tempfile::Builder::new()
-		.prefix(&format!("cb_{}_{}", device_id, uid))
+		.prefix(&format!("cb_{device_id}_{uid}"))
 		.tempdir_in(&base)
 		.unwrap();
 	let data_path = dir.path().to_string_lossy().to_string();
 
 	let mut config = CoreConfig {
 		device_id: device_id.to_string(),
-		device_name: format!("Test Device {}", device_id),
+		device_name: format!("Test Device {device_id}"),
 		account_uid: uid.to_string(),
 		account_password: "test_password".to_string(),
 		data_dir: data_path.clone(),
@@ -61,9 +66,9 @@ where F: FnOnce(&mut CoreConfig)
 // 异步包装：将阻塞调用移到 blocking thread
 pub(crate) async fn list_peers_async(core: &Arc<Core>) -> Vec<PeerStatus> {
 	let c = core.clone();
-	tokio::task::spawn_blocking(move || {
-		c.list_peers().unwrap_or_default()
-	}).await.unwrap()
+	tokio::task::spawn_blocking(move || c.list_peers().unwrap_or_default())
+		.await
+		.unwrap()
 }
 
 pub(crate) async fn wait_for<F, Fut>(timeout: Duration, mut condition: F) -> bool
@@ -117,11 +122,16 @@ async fn test_m1_simulation_loopback() {
 		let peers_a = list_peers_async(&core_a).await;
 		let peers_b = list_peers_async(&core_b).await;
 
-		let a_sees_b = peers_a.iter().any(|p| p.device_id == "dev_b" && p.state == PeerConnectionState::Online);
-		let b_sees_a = peers_b.iter().any(|p| p.device_id == "dev_a" && p.state == PeerConnectionState::Online);
+		let a_sees_b = peers_a
+			.iter()
+			.any(|p| p.device_id == "dev_b" && p.state == PeerConnectionState::Online);
+		let b_sees_a = peers_b
+			.iter()
+			.any(|p| p.device_id == "dev_a" && p.state == PeerConnectionState::Online);
 
 		a_sees_b && b_sees_a
-	}).await;
+	})
+	.await;
 	assert!(connected, "Peers failed to connect via OPAQUE");
 
 	core_a.shutdown();
@@ -140,8 +150,11 @@ async fn test_m1_data_broadcast() {
 	println!("Waiting for connection...");
 	let connected = wait_for(Duration::from_secs(15), || async {
 		let peers = list_peers_async(&core_a).await;
-		peers.iter().any(|p| p.device_id == "broadb" && p.state == PeerConnectionState::Online)
-	}).await;
+		peers
+			.iter()
+			.any(|p| p.device_id == "broadb" && p.state == PeerConnectionState::Online)
+	})
+	.await;
 	assert!(connected, "Peers not connected");
 
 	let snapshot = ClipboardSnapshot::Text {
@@ -162,7 +175,9 @@ async fn test_m1_data_broadcast() {
 				break;
 			}
 		}
-		if received { break; }
+		if received {
+			break;
+		}
 		sleep(Duration::from_millis(100)).await;
 	}
 
@@ -183,8 +198,11 @@ async fn test_m1_reconnection() {
 	println!("1. Waiting for initial connection...");
 	let connected = wait_for(Duration::from_secs(15), || async {
 		let peers = list_peers_async(&core_a).await;
-		peers.iter().any(|p| p.device_id == "recon_b" && p.state == PeerConnectionState::Online)
-	}).await;
+		peers
+			.iter()
+			.any(|p| p.device_id == "recon_b" && p.state == PeerConnectionState::Online)
+	})
+	.await;
 	assert!(connected, "Initial connection failed");
 
 	println!("2. Killing B...");
@@ -194,18 +212,19 @@ async fn test_m1_reconnection() {
 	println!("Waiting for A to detect disconnect...");
 	let disconnected = wait_for(Duration::from_secs(15), || async {
 		let peers = list_peers_async(&core_a).await;
-		!peers.iter().any(|p| p.device_id == "recon_b" && p.state == PeerConnectionState::Online)
-	}).await;
+		!peers
+			.iter()
+			.any(|p| p.device_id == "recon_b" && p.state == PeerConnectionState::Online)
+	})
+	.await;
 	assert!(disconnected, "A should have detected B offline");
 
 	println!("2.5 Clearning TOFU record for B in A's DB...");
 	{
 		let db_path = dir_a.path().join("core.db");
 		let conn = rusqlite::Connection::open(db_path).expect("Failed to open DB");
-		conn.execute(
-			"DELETE FROM trusted_peers WHERE device_id = ?",
-			["recon_b"],
-		).expect("Failed to delete TOFU record");
+		conn.execute("DELETE FROM trusted_peers WHERE device_id = ?", ["recon_b"])
+			.expect("Failed to delete TOFU record");
 	}
 
 	println!("3. Reviving B...");
@@ -214,8 +233,11 @@ async fn test_m1_reconnection() {
 	println!("Waiting for reconnection...");
 	let reconnected = wait_for(Duration::from_secs(15), || async {
 		let peers = list_peers_async(&core_a).await;
-		peers.iter().any(|p| p.device_id == "recon_b" && p.state == PeerConnectionState::Online)
-	}).await;
+		peers
+			.iter()
+			.any(|p| p.device_id == "recon_b" && p.state == PeerConnectionState::Online)
+	})
+	.await;
 	assert!(reconnected, "A failed to reconnect to B");
 	core_a.shutdown();
 	drop(core_a);
@@ -235,8 +257,11 @@ async fn test_m1_policy_deny() {
 	// 尝试等待连接
 	let connected = wait_for(Duration::from_secs(15), || async {
 		let peers = list_peers_async(&core_a).await;
-		peers.iter().any(|p| p.device_id == "deny_b" && p.state == PeerConnectionState::Online)
-	}).await;
+		peers
+			.iter()
+			.any(|p| p.device_id == "deny_b" && p.state == PeerConnectionState::Online)
+	})
+	.await;
 
 	// [修改点] 逻辑调整：
 	// 如果连接成功，则验证数据是否被拦截 (M1 原始逻辑)。

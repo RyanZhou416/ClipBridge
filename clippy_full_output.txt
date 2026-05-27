@@ -1,0 +1,2356 @@
+    Checking cb_core v0.1.0 (C:\Project\ClipBridge\cb_core)
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:112:4
+    |
+112 | /             r#"
+113 | |             PRAGMA journal_mode=WAL;
+114 | |             PRAGMA synchronous=NORMAL;
+115 | |             PRAGMA foreign_keys=ON;
+116 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+    = note: `-D clippy::needless-raw-string-hashes` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_raw_string_hashes)]`
+help: remove all the hashes around the string literal
+    |
+112 ~             r"
+113 |             PRAGMA journal_mode=WAL;
+114 |             PRAGMA synchronous=NORMAL;
+115 |             PRAGMA foreign_keys=ON;
+116 ~             ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:123:4
+    |
+123 | /             r#"
+124 | |             CREATE TABLE IF NOT EXISTS logs (
+125 | |                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+126 | |                 ts_utc INTEGER NOT NULL,
+...   |
+136 | |             CREATE INDEX IF NOT EXISTS idx_logs_category ON logs(category);
+137 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+123 ~             r"
+124 |             CREATE TABLE IF NOT EXISTS logs (
+...
+136 |             CREATE INDEX IF NOT EXISTS idx_logs_category ON logs(category);
+137 ~             ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:155:4
+    |
+155 | /             r#"
+156 | |             INSERT INTO logs (ts_utc, level, component, category, message, exception, props_json)
+157 | |             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+158 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+155 ~             r"
+156 |             INSERT INTO logs (ts_utc, level, component, category, message, exception, props_json)
+157 |             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+158 ~             ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:185:4
+    |
+185 | /             r#"
+186 | |             INSERT INTO logs (ts_utc, level, component, category, message, exception, props_json)
+187 | |             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+188 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+185 ~             r"
+186 |             INSERT INTO logs (ts_utc, level, component, category, message, exception, props_json)
+187 |             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+188 ~             ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:291:17
+    |
+291 | /                 r#"
+292 | |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+293 | |                 FROM logs
+294 | |                 WHERE id > ?1 AND level >= ?2 AND (message LIKE ?3 OR category LIKE ?3 OR exception LIKE ?3)
+295 | |                 ORDER BY ts_utc ASC, id ASC
+296 | |                 LIMIT ?4
+297 | |                 "#,
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+291 ~                 r"
+292 |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+...
+296 |                 LIMIT ?4
+297 ~                 ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:321:5
+    |
+321 | /                 r#"
+322 | |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+323 | |                 FROM logs
+324 | |                 WHERE id > ?1 AND level >= ?2
+325 | |                 ORDER BY ts_utc ASC, id ASC
+326 | |                 LIMIT ?3
+327 | |                 "#,
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+321 ~                 r"
+322 |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+...
+326 |                 LIMIT ?3
+327 ~                 ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:367:5
+    |
+367 | /                 r#"
+368 | |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+369 | |                 FROM logs
+370 | |                 WHERE ts_utc >= ?1 AND ts_utc <= ?2 AND level >= ?3
+...   |
+373 | |                 LIMIT ?5 OFFSET ?6
+374 | |                 "#,
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+367 ~                 r"
+368 |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+...
+373 |                 LIMIT ?5 OFFSET ?6
+374 ~                 ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:401:5
+    |
+401 | /                 r#"
+402 | |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+403 | |                 FROM logs
+404 | |                 WHERE ts_utc >= ?1 AND ts_utc <= ?2 AND level >= ?3
+405 | |                 ORDER BY ts_utc DESC, id DESC
+406 | |                 LIMIT ?4 OFFSET ?5
+407 | |                 "#,
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+401 ~                 r"
+402 |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+...
+406 |                 LIMIT ?4 OFFSET ?5
+407 ~                 ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:517:17
+    |
+517 | /                 r#"
+518 | |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+519 | |                 FROM logs
+520 | |                 WHERE id < ?1 AND level >= ?2 AND (message LIKE ?3 OR category LIKE ?3 OR exception LIKE ?3)
+521 | |                 ORDER BY ts_utc DESC, id DESC
+522 | |                 LIMIT ?4
+523 | |                 "#,
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+517 ~                 r"
+518 |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+...
+522 |                 LIMIT ?4
+523 ~                 ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:549:5
+    |
+549 | /                 r#"
+550 | |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+551 | |                 FROM logs
+552 | |                 WHERE id < ?1 AND level >= ?2
+553 | |                 ORDER BY ts_utc DESC, id DESC
+554 | |                 LIMIT ?3
+555 | |                 "#,
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+549 ~                 r"
+550 |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+...
+554 |                 LIMIT ?3
+555 ~                 ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:623:5
+    |
+623 | /                 r#"
+624 | |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+625 | |                 FROM logs
+626 | |                 WHERE level >= ?1 AND (message LIKE ?2 OR category LIKE ?2 OR exception LIKE ?2)
+627 | |                 ORDER BY ts_utc DESC, id DESC
+628 | |                 LIMIT ?3
+629 | |                 "#,
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+623 ~                 r"
+624 |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+...
+628 |                 LIMIT ?3
+629 ~                 ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\logs.rs:652:5
+    |
+652 | /                 r#"
+653 | |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+654 | |                 FROM logs
+655 | |                 WHERE level >= ?1
+656 | |                 ORDER BY ts_utc DESC, id DESC
+657 | |                 LIMIT ?2
+658 | |                 "#,
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+652 ~                 r"
+653 |                 SELECT id, ts_utc, level, component, category, message, exception, props_json
+...
+657 |                 LIMIT ?2
+658 ~                 ",
+    |
+
+error: unnecessary hashes around raw string literal
+  --> cb_core\src\stats.rs:34:4
+   |
+34 | /             r#"
+35 | |             PRAGMA journal_mode=WAL;
+36 | |             PRAGMA synchronous=NORMAL;
+37 | |             PRAGMA foreign_keys=ON;
+38 | |             "#,
+   | |______________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+   |
+34 ~             r"
+35 |             PRAGMA journal_mode=WAL;
+36 |             PRAGMA synchronous=NORMAL;
+37 |             PRAGMA foreign_keys=ON;
+38 ~             ",
+   |
+
+error: unnecessary hashes around raw string literal
+  --> cb_core\src\stats.rs:45:4
+   |
+45 | /             r#"
+46 | |             CREATE TABLE IF NOT EXISTS stats (
+47 | |                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+48 | |                 ts_ms INTEGER NOT NULL,
+...  |
+54 | |             CREATE INDEX IF NOT EXISTS idx_stats_type ON stats(stat_type);
+55 | |             "#,
+   | |______________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+   |
+45 ~             r"
+46 |             CREATE TABLE IF NOT EXISTS stats (
+...
+54 |             CREATE INDEX IF NOT EXISTS idx_stats_type ON stats(stat_type);
+55 ~             ",
+   |
+
+error: unnecessary hashes around raw string literal
+  --> cb_core\src\stats.rs:69:4
+   |
+69 | /             r#"
+70 | |             INSERT INTO stats (ts_ms, bucket_sec, stat_type, data_json)
+71 | |             VALUES (?1, ?2, ?3, ?4)
+72 | |             "#,
+   | |______________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+   |
+69 ~             r"
+70 |             INSERT INTO stats (ts_ms, bucket_sec, stat_type, data_json)
+71 |             VALUES (?1, ?2, ?3, ?4)
+72 ~             ",
+   |
+
+error: unnecessary hashes around raw string literal
+  --> cb_core\src\stats.rs:86:4
+   |
+86 | /             r#"
+87 | |             SELECT ts_ms, bucket_sec, stat_type, data_json
+88 | |             FROM stats
+89 | |             WHERE stat_type = 'cache' AND ts_ms >= ?1 AND ts_ms <= ?2 AND bucket_sec = ?3
+90 | |             ORDER BY ts_ms ASC
+91 | |             "#,
+   | |______________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+   |
+86 ~             r"
+87 |             SELECT ts_ms, bucket_sec, stat_type, data_json
+...
+90 |             ORDER BY ts_ms ASC
+91 ~             ",
+   |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\stats.rs:116:4
+    |
+116 | /             r#"
+117 | |             SELECT ts_ms, bucket_sec, stat_type, data_json
+118 | |             FROM stats
+119 | |             WHERE stat_type = 'network' AND ts_ms >= ?1 AND ts_ms <= ?2 AND bucket_sec = ?3
+120 | |             ORDER BY ts_ms ASC
+121 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+116 ~             r"
+117 |             SELECT ts_ms, bucket_sec, stat_type, data_json
+...
+120 |             ORDER BY ts_ms ASC
+121 ~             ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\stats.rs:146:4
+    |
+146 | /             r#"
+147 | |             SELECT ts_ms, bucket_sec, stat_type, data_json
+148 | |             FROM stats
+149 | |             WHERE stat_type = 'activity' AND ts_ms >= ?1 AND ts_ms <= ?2 AND bucket_sec = ?3
+150 | |             ORDER BY ts_ms ASC
+151 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+146 ~             r"
+147 |             SELECT ts_ms, bucket_sec, stat_type, data_json
+...
+150 |             ORDER BY ts_ms ASC
+151 ~             ",
+    |
+
+error: unnecessary hashes around raw string literal
+  --> cb_core\src\store.rs:38:4
+   |
+38 | /             r#"
+39 | |             PRAGMA journal_mode=WAL;
+40 | |             PRAGMA synchronous=NORMAL;
+41 | |             PRAGMA foreign_keys=ON;
+42 | |             "#,
+   | |______________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+   |
+38 ~             r"
+39 |             PRAGMA journal_mode=WAL;
+40 |             PRAGMA synchronous=NORMAL;
+41 |             PRAGMA foreign_keys=ON;
+42 ~             ",
+   |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:66:13
+    |
+ 66 | /             r#"
+ 67 | |             -- items 表：存储项的元数据
+ 68 | |             CREATE TABLE IF NOT EXISTS items (
+ 69 | |               item_id TEXT PRIMARY KEY,
+...   |
+125 | |             );
+126 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+ 66 ~             r"
+ 67 |             -- items 表：存储项的元数据
+...
+125 |             );
+126 ~             ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:209:4
+    |
+209 | /             r#"INSERT OR IGNORE INTO content_cache
+210 | |                (sha256_hex, total_bytes, present, last_access_ts_ms, created_ts_ms)
+211 | |                VALUES (?1, ?2, 0, ?3, ?4)"#,
+    | |___________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+209 ~             r"INSERT OR IGNORE INTO content_cache
+210 |                (sha256_hex, total_bytes, present, last_access_ts_ms, created_ts_ms)
+211 ~                VALUES (?1, ?2, 0, ?3, ?4)",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:224:13
+    |
+224 | /             r#"INSERT INTO items
+225 | |                (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, files_json, expires_ts_ms)
+226 | |                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+    | |_________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+224 ~             r"INSERT INTO items
+225 |                (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, files_json, expires_ts_ms)
+226 ~                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:244:4
+    |
+244 | /             r#"INSERT OR IGNORE INTO history(account_uid, item_id, sort_ts_ms, source_device_id)
+245 | |                VALUES (?1, ?2, ?3, ?4)"#,
+    | |________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+244 ~             r"INSERT OR IGNORE INTO history(account_uid, item_id, sort_ts_ms, source_device_id)
+245 ~                VALUES (?1, ?2, ?3, ?4)",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:271:4
+    |
+271 | /             r#"UPDATE content_cache
+272 | |            SET present=0, last_access_ts_ms=?2
+273 | |            WHERE sha256_hex=?1"#,
+    | |________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+271 ~             r"UPDATE content_cache
+272 |            SET present=0, last_access_ts_ms=?2
+273 ~            WHERE sha256_hex=?1",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:282:4
+    |
+282 | /             r#"UPDATE content_cache
+283 | |            SET present=1, last_access_ts_ms=?2
+284 | |            WHERE sha256_hex=?1"#,
+    | |________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+282 ~             r"UPDATE content_cache
+283 |            SET present=1, last_access_ts_ms=?2
+284 ~            WHERE sha256_hex=?1",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:292:4
+    |
+292 | /             r#"UPDATE content_cache
+293 | |            SET last_access_ts_ms=?2
+294 | |            WHERE sha256_hex=?1"#,
+    | |________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+292 ~             r"UPDATE content_cache
+293 |            SET last_access_ts_ms=?2
+294 ~            WHERE sha256_hex=?1",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:379:4
+    |
+379 | /             r#"
+380 | |             SELECT
+381 | |                 i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
+382 | |                 i.size_bytes, i.mime, i.sha256_hex,
+...   |
+387 | |             WHERE i.item_id = ?1
+388 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+379 ~             r"
+380 |             SELECT
+...
+387 |             WHERE i.item_id = ?1
+388 ~             ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:467:4
+    |
+467 | /             r#"
+468 | |             SELECT
+469 | |                 i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
+470 | |                 i.size_bytes, i.mime, i.sha256_hex,
+...   |
+478 | |             LIMIT ?2
+479 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+467 ~             r"
+468 |             SELECT
+...
+478 |             LIMIT ?2
+479 ~             ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:503:5
+    |
+503 | /                 r#"
+504 | |                 SELECT
+505 | |                     i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
+506 | |                     i.size_bytes, i.mime, i.sha256_hex,
+...   |
+514 | |                 LIMIT ?2
+515 | |                 "#,
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+503 ~                 r"
+504 |                 SELECT
+...
+514 |                 LIMIT ?2
+515 ~                 ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:519:5
+    |
+519 | /                 r#"
+520 | |                 SELECT
+521 | |                     i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
+522 | |                     i.size_bytes, i.mime, i.sha256_hex,
+...   |
+530 | |                 LIMIT ?2
+531 | |                 "#,
+    | |__________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+519 ~                 r"
+520 |                 SELECT
+...
+530 |                 LIMIT ?2
+531 ~                 ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:565:4
+    |
+565 | /             r#"
+566 | |             UPDATE history
+567 | |             SET is_deleted=1
+568 | |             WHERE history_id IN (
+...   |
+575 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+565 ~             r"
+566 |             UPDATE history
+...
+574 |             )
+575 ~             ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:594:4
+    |
+594 | /             r#"
+595 | |             SELECT sha256_hex, total_bytes
+596 | |             FROM content_cache
+597 | |             WHERE present=1
+598 | |             ORDER BY last_access_ts_ms ASC, sha256_hex ASC
+599 | |             LIMIT ?1
+600 | |             "#,
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+594 ~             r"
+595 |             SELECT sha256_hex, total_bytes
+...
+599 |             LIMIT ?1
+600 ~             ",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:768:4
+    |
+768 | /             r#"INSERT OR IGNORE INTO content_cache
+769 | |                (sha256_hex, total_bytes, present, last_access_ts_ms, created_ts_ms)
+770 | |                VALUES (?1, ?2, 0, ?3, ?4)"#,
+    | |___________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+768 ~             r"INSERT OR IGNORE INTO content_cache
+769 |                (sha256_hex, total_bytes, present, last_access_ts_ms, created_ts_ms)
+770 ~                VALUES (?1, ?2, 0, ?3, ?4)",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:784:13
+    |
+784 | /             r#"INSERT OR IGNORE INTO items
+785 | |                (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, files_json, expires_ts_ms)
+786 | |                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+    | |_________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+784 ~             r"INSERT OR IGNORE INTO items
+785 |                (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, files_json, expires_ts_ms)
+786 ~                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+    |
+
+error: unnecessary hashes around raw string literal
+   --> cb_core\src\store.rs:804:4
+    |
+804 | /             r#"INSERT OR IGNORE INTO history(account_uid, item_id, sort_ts_ms, source_device_id)
+805 | |                VALUES (?1, ?2, ?3, ?4)"#,
+    | |________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_raw_string_hashes
+help: remove all the hashes around the string literal
+    |
+804 ~             r"INSERT OR IGNORE INTO history(account_uid, item_id, sort_ts_ms, source_device_id)
+805 ~                VALUES (?1, ?2, ?3, ?4)",
+    |
+
+error: this `continue` expression is redundant
+  --> cb_core\src\testsupport\dirs.rs:83:5
+   |
+83 |                 continue;
+   |                 ^^^^^^^^
+   |
+   = help: consider dropping the `continue` expression
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_continue
+   = note: `-D clippy::needless-continue` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::needless_continue)]`
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:125:7
+    |
+125 |                     &format!("Failed to initialize Store: {}", e),
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+    = note: `-D clippy::uninlined-format-args` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::uninlined_format_args)]`
+help: change this to
+    |
+125 -                     &format!("Failed to initialize Store: {}", e),
+125 +                     &format!("Failed to initialize Store: {e}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:126:12
+    |
+126 |                     Some(&format!("存储初始化失败: {}", e)),
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+126 -                     Some(&format!("存储初始化失败: {}", e)),
+126 +                     Some(&format!("存储初始化失败: {e}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:129:5
+    |
+129 |                 panic!("Failed to open store: {}", e);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+129 -                 panic!("Failed to open store: {}", e);
+129 +                 panic!("Failed to open store: {e}");
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:148:7
+    |
+148 |                     &format!("Failed to initialize StatsStore: {}", e),
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+148 -                     &format!("Failed to initialize StatsStore: {}", e),
+148 +                     &format!("Failed to initialize StatsStore: {e}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:149:12
+    |
+149 |                     Some(&format!("统计存储初始化失败: {}", e)),
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+149 -                     Some(&format!("统计存储初始化失败: {}", e)),
+149 +                     Some(&format!("统计存储初始化失败: {e}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:152:5
+    |
+152 |                 panic!("Failed to open stats store: {}", e);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+152 -                 panic!("Failed to open stats store: {}", e);
+152 +                 panic!("Failed to open stats store: {e}");
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:171:7
+    |
+171 |                     &format!("Failed to initialize CAS: {}", e),
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+171 -                     &format!("Failed to initialize CAS: {}", e),
+171 +                     &format!("Failed to initialize CAS: {e}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:172:12
+    |
+172 |                     Some(&format!("CAS 初始化失败: {}", e)),
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+172 -                     Some(&format!("CAS 初始化失败: {}", e)),
+172 +                     Some(&format!("CAS 初始化失败: {e}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:175:5
+    |
+175 |                 panic!("Failed to init cas: {}", e);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+175 -                 panic!("Failed to init cas: {}", e);
+175 +                 panic!("Failed to init cas: {e}");
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:202:7
+    |
+202 |                       &format!(
+    |  ______________________^
+203 | |                         "NetManager failed to start: {} (continuing without network)",
+204 | |                         e
+205 | |                     ),
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:206:12
+    |
+206 |                       Some(&format!(
+    |  ___________________________^
+207 | |                         "网络管理器启动失败: {}（将在无网络模式下继续）",
+208 | |                         e
+209 | |                     )),
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: this argument is passed by value, but not consumed in the function body
+   --> cb_core\src\api.rs:240:44
+    |
+240 |     pub fn ingest_local_copy(&self, snapshot: ClipboardSnapshot) -> anyhow::Result<ItemMeta> {
+    |                                               ^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_pass_by_value
+    = note: `-D clippy::needless-pass-by-value` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_pass_by_value)]`
+help: consider taking a reference instead
+    |
+240 |     pub fn ingest_local_copy(&self, snapshot: &ClipboardSnapshot) -> anyhow::Result<ItemMeta> {
+    |                                               +
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:248:8
+    |
+248 |                         &format!("Ingest planning failed: {}", e),
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+248 -                         &format!("Ingest planning failed: {}", e),
+248 +                         &format!("Ingest planning failed: {e}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:249:13
+    |
+249 |                         Some(&format!("内容摄入规划失败: {}", e)),
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+249 -                         Some(&format!("内容摄入规划失败: {}", e)),
+249 +                         Some(&format!("内容摄入规划失败: {e}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:263:8
+    |
+263 |                         &format!("Ingest failed: {}", e),
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+263 -                         &format!("Ingest failed: {}", e),
+263 +                         &format!("Ingest failed: {e}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:264:13
+    |
+264 |                         Some(&format!("内容摄入失败: {}", e)),
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+264 -                         Some(&format!("内容摄入失败: {}", e)),
+264 +                         Some(&format!("内容摄入失败: {e}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:320:6
+    |
+320 |                   &format!(
+    |  __________________^
+321 | |                     "Planning ingest for clipboard content, type: {}, size: {} bytes",
+322 | |                     content_type, size_bytes
+323 | |                 ),
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:324:11
+    |
+324 |                   Some(&format!(
+    |  _______________________^
+325 | |                     "正在规划剪贴板内容摄入，类型: {}，大小: {} 字节",
+326 | |                     content_type, size_bytes
+327 | |                 )),
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: this argument is passed by value, but not consumed in the function body
+   --> cb_core\src\api.rs:342:35
+    |
+342 |     pub fn apply_ingest(&self, plan: IngestPlan) -> anyhow::Result<ItemMeta> {
+    |                                      ^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_pass_by_value
+help: consider taking a reference instead
+    |
+342 |     pub fn apply_ingest(&self, plan: &IngestPlan) -> anyhow::Result<ItemMeta> {
+    |                                      +
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:374:7
+    |
+374 |                     &format!("CAS blob written successfully: {}", sha),
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+374 -                     &format!("CAS blob written successfully: {}", sha),
+374 +                     &format!("CAS blob written successfully: {sha}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:375:12
+    |
+375 |                     Some(&format!("CAS 对象写入成功: {}", sha)),
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+375 -                     Some(&format!("CAS 对象写入成功: {}", sha)),
+375 +                     Some(&format!("CAS 对象写入成功: {sha}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:395:6
+    |
+395 |                 &format!("CAS blob already exists, skipping write: {}", sha),
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+395 -                 &format!("CAS blob already exists, skipping write: {}", sha),
+395 +                 &format!("CAS blob already exists, skipping write: {sha}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:396:11
+    |
+396 |                 Some(&format!("CAS 对象已存在，跳过写入: {}", sha)),
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+396 -                 Some(&format!("CAS 对象已存在，跳过写入: {}", sha)),
+396 +                 Some(&format!("CAS 对象已存在，跳过写入: {sha}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:416:6
+    |
+416 |                 &format!("Ingest applied successfully, item_id: {}", item_id),
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+416 -                 &format!("Ingest applied successfully, item_id: {}", item_id),
+416 +                 &format!("Ingest applied successfully, item_id: {item_id}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api.rs:417:11
+    |
+417 |                 Some(&format!("内容摄入成功，项目 ID: {}", item_id)),
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+417 -                 Some(&format!("内容摄入成功，项目 ID: {}", item_id)),
+417 +                 Some(&format!("内容摄入成功，项目 ID: {item_id}")),
+    |
+
+error: this argument is passed by value, but not consumed in the function body
+   --> cb_core\src\api.rs:496:13
+    |
+496 |         snapshot: crate::clipboard::ClipboardSnapshot,
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_pass_by_value
+help: consider taking a reference instead
+    |
+496 |         snapshot: &crate::clipboard::ClipboardSnapshot,
+    |                   +
+
+error: redundant closure
+   --> cb_core\src\api.rs:743:26
+    |
+743 |                 file_id: file_id.map(|s| s.to_string()),
+    |                                      ^^^^^^^^^^^^^^^^^ help: replace the closure with the method itself: `std::string::ToString::to_string`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#redundant_closure_for_method_calls
+    = note: `-D clippy::redundant-closure-for-method-calls` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::redundant_closure_for_method_calls)]`
+
+error: this argument is passed by value, but not consumed in the function body
+   --> cb_core\src\api.rs:857:36
+    |
+857 |     pub(crate) fn emit_json(&self, v: serde_json::Value) {
+    |                                       ^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_pass_by_value
+help: consider taking a reference instead
+    |
+857 |     pub(crate) fn emit_json(&self, v: &serde_json::Value) {
+    |                                       +
+
+error: unnecessary `Debug` formatting in `println!` args
+  --> cb_core\src\cas.rs:19:38
+   |
+19 |         println!("[cas] blobs_dir = {:?}", blobs_dir);
+   |                                            ^^^^^^^^^
+   |
+   = help: use `Display` formatting and change this to `blobs_dir.display()`
+   = note: switching to `Display` formatting will change how the value is shown; escaped characters will no longer be escaped and surrounding quotes will be removed
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#unnecessary_debug_formatting
+   = note: `-D clippy::unnecessary-debug-formatting` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::unnecessary_debug_formatting)]`
+
+error: variables can be used directly in the `format!` string
+  --> cb_core\src\cas.rs:19:3
+   |
+19 |         println!("[cas] blobs_dir = {:?}", blobs_dir);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+   |
+19 -         println!("[cas] blobs_dir = {:?}", blobs_dir);
+19 +         println!("[cas] blobs_dir = {blobs_dir:?}");
+   |
+
+error: matching over `()` is more explicit
+   --> cb_core\src\cas.rs:141:7
+    |
+141 |             Ok(_) => Ok(dst),
+    |                ^ help: use `()` instead of `_`: `()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#ignored_unit_patterns
+    = note: `-D clippy::ignored-unit-patterns` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::ignored_unit_patterns)]`
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\cas.rs:167:18
+    |
+167 |         let filename = format!("{}.{}", sha256, safe_ext);
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+167 -         let filename = format!("{}.{}", sha256, safe_ext);
+167 +         let filename = format!("{sha256}.{safe_ext}");
+    |
+
+error: variables can be used directly in the `format!` string
+  --> cb_core\src\discovery.rs:71:5
+   |
+71 |                 format!("[{}]:{}", ip_str, port)
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+   |
+71 -                 format!("[{}]:{}", ip_str, port)
+71 +                 format!("[{ip_str}]:{port}")
+   |
+
+error: variables can be used directly in the `format!` string
+  --> cb_core\src\discovery.rs:75:5
+   |
+75 |                 format!("{}:{}", ip_str, port)
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+   |
+75 -                 format!("{}:{}", ip_str, port)
+75 +                 format!("{ip_str}:{port}")
+   |
+
+error: this argument is passed by value, but not consumed in the function body
+   --> cb_core\src\discovery.rs:104:8
+    |
+104 |         cfg: crate::api::CoreConfig,
+    |              ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_pass_by_value
+help: consider taking a reference instead
+    |
+104 |         cfg: &crate::api::CoreConfig,
+    |              +
+
+error: calling `to_string` on `&&str`
+   --> cb_core\src\discovery.rs:161:64
+    |
+161 |                                          let _ = event_tx.send(DiscoveryEvent::CandidateLost(instance.to_string())).await;
+    |                                                                                              ^^^^^^^^^^^^^^^^^^^^ help: try dereferencing the receiver: `(*instance).to_string()`
+    |
+    = help: `&str` implements `ToString` through a slower blanket impl, but `str` has a fast specialization of `ToString`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#inefficient_to_string
+    = note: `-D clippy::inefficient-to-string` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::inefficient_to_string)]`
+
+error: this could be rewritten as `let...else`
+  --> cb_core\src\logs.rs:41:3
+   |
+41 | /         let lang = match lang {
+42 | |             Some(l) => l,
+43 | |             None => return self.message.clone(),
+44 | |         };
+   | |__________^ help: consider writing: `let Some(lang) = lang else { return self.message.clone() };`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#manual_let_else
+   = note: `-D clippy::manual-let-else` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::manual_let_else)]`
+
+error: redundant closure
+   --> cb_core\src\logs.rs:180:29
+    |
+180 |             zh_cn: message_zh_cn.map(|s| s.to_string()),
+    |                                      ^^^^^^^^^^^^^^^^^ help: replace the closure with the method itself: `std::string::ToString::to_string`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#redundant_closure_for_method_calls
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\logs.rs:289:23
+    |
+289 |             let like_pattern = format!("%{}%", like_str);
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+289 -             let like_pattern = format!("%{}%", like_str);
+289 +             let like_pattern = format!("%{like_str}%");
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\logs.rs:365:23
+    |
+365 |             let like_pattern = format!("%{}%", like_str);
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+365 -             let like_pattern = format!("%{}%", like_str);
+365 +             let like_pattern = format!("%{like_str}%");
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\logs.rs:484:59
+    |
+484 |         let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
+    |                                                                 ^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+484 -         let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
+484 +         let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\logs.rs:515:23
+    |
+515 |             let like_pattern = format!("%{}%", like_str);
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+515 -             let like_pattern = format!("%{}%", like_str);
+515 +             let like_pattern = format!("%{like_str}%");
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\logs.rs:621:23
+    |
+621 |             let like_pattern = format!("%{}%", like_str);
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+621 -             let like_pattern = format!("%{}%", like_str);
+621 +             let like_pattern = format!("%{like_str}%");
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:104:38
+    |
+104 | ...                   &format!("Transport initialized, local port: {}, IPv4: {}", port, is_ipv4),
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+104 -                                     &format!("Transport initialized, local port: {}, IPv4: {}", port, is_ipv4),
+104 +                                     &format!("Transport initialized, local port: {port}, IPv4: {is_ipv4}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:105:43
+    |
+105 | ...                   Some(&format!("传输层已初始化，本地端口: {}，IPv4: {}", port, is_ipv4)),
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+105 -                                     Some(&format!("传输层已初始化，本地端口: {}，IPv4: {}", port, is_ipv4)),
+105 +                                     Some(&format!("传输层已初始化，本地端口: {port}，IPv4: {is_ipv4}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:118:46
+    |
+118 | ...                   &format!("mDNS discovery service started, listening on port: {}", port),
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+118 -                                             &format!("mDNS discovery service started, listening on port: {}", port),
+118 +                                             &format!("mDNS discovery service started, listening on port: {port}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:119:51
+    |
+119 | ...                   Some(&format!("mDNS 发现服务已启动，监听端口: {}", port)),
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+119 -                                             Some(&format!("mDNS 发现服务已启动，监听端口: {}", port)),
+119 +                                             Some(&format!("mDNS 发现服务已启动，监听端口: {port}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:145:42
+    |
+145 | ...                   &format!("mDNS discovery service failed to start: {}", e),
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+145 -                                         &format!("mDNS discovery service failed to start: {}", e),
+145 +                                         &format!("mDNS discovery service failed to start: {e}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:146:47
+    |
+146 | ...                   Some(&format!("mDNS 发现服务启动失败: {}", e)),
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+146 -                                         Some(&format!("mDNS 发现服务启动失败: {}", e)),
+146 +                                         Some(&format!("mDNS 发现服务启动失败: {e}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:156:34
+    |
+156 | ...                   &format!("Transport initialization failed: {}", e),
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+156 -                                 &format!("Transport initialization failed: {}", e),
+156 +                                 &format!("Transport initialization failed: {e}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:157:39
+    |
+157 | ...                   Some(&format!("传输层初始化失败: {}", e)),
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+157 -                                 Some(&format!("传输层初始化失败: {}", e)),
+157 +                                 Some(&format!("传输层初始化失败: {e}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:244:9
+    |
+244 |                             &format!("Incoming connection accepted from: {}, spawning server session", addr),
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+244 -                             &format!("Incoming connection accepted from: {}, spawning server session", addr),
+244 +                             &format!("Incoming connection accepted from: {addr}, spawning server session"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:245:14
+    |
+245 |                             Some(&format!("已接受入站连接: {}，正在创建服务器会话", addr)),
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+245 -                             Some(&format!("已接受入站连接: {}，正在创建服务器会话", addr)),
+245 +                             Some(&format!("已接受入站连接: {addr}，正在创建服务器会话")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:525:6
+    |
+525 |                   &format!(
+    |  __________________^
+526 | |                     "Broadcasting delete to {} online peers: item_id={}",
+527 | |                     online_count, item_id
+528 | |                 ),
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:529:11
+    |
+529 |                   Some(&format!(
+    |  _______________________^
+530 | |                     "正在向 {} 个在线对等设备广播删除: 项目ID={}",
+531 | |                     online_count, item_id
+532 | |                 )),
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\net.rs:599:6
+    |
+599 |                     println!("[Net] Failed to connect to {}: {}", addr, e);
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+599 -                     println!("[Net] Failed to connect to {}: {}", addr, e);
+599 +                     println!("[Net] Failed to connect to {addr}: {e}");
+    |
+
+error: this argument is passed by value, but not consumed in the function body
+   --> cb_core\src\policy.rs:100:21
+    |
+100 | pub fn decide(kind: ItemKind, size_bytes: i64, force: bool, limits: &SizeLimits) -> PolicyOutcome {
+    |                     ^^^^^^^^
+    |
+help: or consider marking this type as `Copy`
+   --> cb_core\src\model.rs:5:1
+    |
+  5 | pub enum ItemKind {
+    | ^^^^^^^^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_pass_by_value
+help: consider taking a reference instead
+    |
+100 | pub fn decide(kind: &ItemKind, size_bytes: i64, force: bool, limits: &SizeLimits) -> PolicyOutcome {
+    |                     +
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:215:5
+    |
+215 |                 eprintln!("[Session] Actor {} error: {:?}", actor_log_id, e);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+215 -                 eprintln!("[Session] Actor {} error: {:?}", actor_log_id, e);
+215 +                 eprintln!("[Session] Actor {actor_log_id} error: {e:?}");
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:250:6
+    |
+250 |                   &format!(
+    |  __________________^
+251 | |                     "Session actor spawned: role={:?}, fingerprint={}",
+252 | |                     role, fingerprint
+253 | |                 ),
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:254:11
+    |
+254 |                   Some(&format!(
+    |  _______________________^
+255 | |                     "会话执行器已创建: 角色={:?}，指纹={}",
+256 | |                     role, fingerprint
+257 | |                 )),
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:298:11
+    |
+298 |                                      eprintln!("[Session] Frame error: {:?}", e);
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+298 -                                      eprintln!("[Session] Frame error: {:?}", e);
+298 +                                      eprintln!("[Session] Frame error: {e:?}");
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:326:13
+    |
+326 |                                               &format!("Metadata sent to peer: device_id={}, item_id={}, msg_id={}",
+    |  ______________________________________________^
+327 | |                                                     device_id, item_id, msg_id),
+    | |_______________________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:328:18
+    |
+328 |                                               Some(&format!("元数据已发送至对等设备: 设备ID={}，项目ID={}，消息ID={}",
+    |  ___________________________________________________^
+329 | |                                                     device_id, item_id, msg_id)),
+    | |_______________________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:377:9
+    |
+377 |                                 eprintln!("[Session] Upload error for {}: {}", transfer_id, err);
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+377 -                                 eprintln!("[Session] Upload error for {}: {}", transfer_id, err);
+377 +                                 eprintln!("[Session] Upload error for {transfer_id}: {err}");
+    |
+
+error: matching over `()` is more explicit
+   --> cb_core\src\session\actor.rs:395:8
+    |
+395 |                 Ok(_) => "Connection closed".to_string(),
+    |                    ^ help: use `()` instead of `_`: `()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#ignored_unit_patterns
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:396:15
+    |
+396 |                 Err(e) => format!("Error: {}", e),
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+396 -                 Err(e) => format!("Error: {}", e),
+396 +                 Err(e) => format!("Error: {e}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:404:8
+    |
+404 |                         &format!("Session terminated: device_id={}, reason={}", did, reason),
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+404 -                         &format!("Session terminated: device_id={}, reason={}", did, reason),
+404 +                         &format!("Session terminated: device_id={did}, reason={reason}"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:405:13
+    |
+405 |                         Some(&format!("会话已终止: 设备ID={}，原因={}", did, reason)),
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+405 -                         Some(&format!("会话已终止: 设备ID={}，原因={}", did, reason)),
+405 +                         Some(&format!("会话已终止: 设备ID={did}，原因={reason}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:410:8
+    |
+410 |                           &format!(
+    |  __________________________^
+411 | |                             "Session terminated due to error: device_id={}, error={}",
+412 | |                             did, reason
+413 | |                         ),
+    | |_________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:414:13
+    |
+414 |                         Some(&format!("会话因错误终止: 设备ID={}，错误={}", did, reason)),
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+414 -                         Some(&format!("会话因错误终止: 设备ID={}，错误={}", did, reason)),
+414 +                         Some(&format!("会话因错误终止: 设备ID={did}，错误={reason}")),
+    |
+
+error: this argument is passed by value, but not consumed in the function body
+   --> cb_core\src\session\actor.rs:429:40
+    |
+429 |     fn update_state(&mut self, new_state: SessionState) {
+    |                                           ^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#needless_pass_by_value
+help: consider taking a reference instead
+    |
+429 |     fn update_state(&mut self, new_state: &SessionState) {
+    |                                           +
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:440:6
+    |
+440 |                   &format!(
+    |  __________________^
+441 | |                     "Session state changed: device_id={}, old_state={:?}, new_state={:?}",
+442 | |                     device_id, old_state, new_state
+443 | |                 ),
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:444:11
+    |
+444 |                   Some(&format!(
+    |  _______________________^
+445 | |                     "会话状态已变化: 设备ID={}，旧状态={:?}，新状态={:?}",
+446 | |                     device_id, old_state, new_state
+447 | |                 )),
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: matching over `()` is more explicit
+   --> cb_core\src\session\actor.rs:474:10
+    |
+474 |             Ok(Ok(_)) => {
+    |                   ^ help: use `()` instead of `_`: `()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#ignored_unit_patterns
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:479:7
+    |
+479 |                       &format!(
+    |  ______________________^
+480 | |                         "Data chunk sent: transfer_id={}, size={} bytes",
+481 | |                         transfer_id, data_size
+482 | |                     ),
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:483:12
+    |
+483 |                       Some(&format!(
+    |  ___________________________^
+484 | |                         "数据块已发送: 传输ID={}，大小={} 字节",
+485 | |                         transfer_id, data_size
+486 | |                     )),
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:500:8
+    |
+500 |                         &format!("Data chunk send timeout (network congestion): transfer_id={}, cancelling transfer", transfer_id),
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+500 -                         &format!("Data chunk send timeout (network congestion): transfer_id={}, cancelling transfer", transfer_id),
+500 +                         &format!("Data chunk send timeout (network congestion): transfer_id={transfer_id}, cancelling transfer"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:501:13
+    |
+501 |                         Some(&format!("数据块发送超时（网络拥塞）: 传输ID={}，正在取消传输", transfer_id)),
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+501 -                         Some(&format!("数据块发送超时（网络拥塞）: 传输ID={}，正在取消传输", transfer_id)),
+501 +                         Some(&format!("数据块发送超时（网络拥塞）: 传输ID={transfer_id}，正在取消传输")),
+    |
+
+error: variables can be used directly in the `format!` string
+  --> cb_core\src\api\tests\m1_net.rs:45:12
+   |
+45 |         .prefix(&format!("cb_{}_{}", device_id, uid))
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+   |
+45 -         .prefix(&format!("cb_{}_{}", device_id, uid))
+45 +         .prefix(&format!("cb_{device_id}_{uid}"))
+   |
+
+error: variables can be used directly in the `format!` string
+  --> cb_core\src\api\tests\m1_net.rs:52:16
+   |
+52 |         device_name: format!("Test Device {}", device_id),
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+   |
+52 -         device_name: format!("Test Device {}", device_id),
+52 +         device_name: format!("Test Device {device_id}"),
+   |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:587:30
+    |
+587 |   ...                   &format!("Hello message received: remote_device_id={}, remote_account_uid={}",
+    |  ________________________^
+588 | | ...                           device_id, account_uid),
+    | |_____________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:589:35
+    |
+589 |   ...                   Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号={}",
+    |  _____________________________^
+590 | | ...                           device_id, account_uid)),
+    | |_____________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:624:30
+    |
+624 | ...                   &format!("Account verification completed: remote_device_id={}, verified=true", device_id),
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+624 -                             &format!("Account verification completed: remote_device_id={}, verified=true", device_id),
+624 +                             &format!("Account verification completed: remote_device_id={device_id}, verified=true"),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:625:35
+    |
+625 | ...                   Some(&format!("账号验证已完成: 远程设备ID={}，已验证=true", device_id)),
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+625 -                             Some(&format!("账号验证已完成: 远程设备ID={}，已验证=true", device_id)),
+625 +                             Some(&format!("账号验证已完成: 远程设备ID={device_id}，已验证=true")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:647:35
+    |
+647 |   ...                   Some(&format!("Hello 消息已接收: 远程设备ID={}，远程账号=N/A",
+    |  _____________________________^
+648 | | ...                           server_device_id)),
+    | |_______________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:787:8
+    |
+787 |                           &format!(
+    |  __________________________^
+788 | |                             "Transfer cancelled: transfer_id={}, reason={}",
+789 | |                             req_id, reason
+790 | |                         ),
+    | |_________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:791:13
+    |
+791 |                         Some(&format!("传输已取消: 传输ID={}，原因={}", req_id, reason)),
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+791 -                         Some(&format!("传输已取消: 传输ID={}，原因={}", req_id, reason)),
+791 +                         Some(&format!("传输已取消: 传输ID={req_id}，原因={reason}")),
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:854:6
+    |
+854 |                   &format!(
+    |  __________________^
+855 | |                     "Transfer request received: transfer_id={}, item_id={}, file_id={:?}",
+856 | |                     req_id, item_id, file_id
+857 | |                 ),
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:858:11
+    |
+858 |                   Some(&format!(
+    |  _______________________^
+859 | |                     "传输请求已接收: 传输ID={}，项目ID={}，文件ID={:?}",
+860 | |                     req_id, item_id, file_id
+861 | |                 )),
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:907:5
+    |
+907 |                 eprintln!("[Session] Writer open failed: {}", e);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+907 -                 eprintln!("[Session] Writer open failed: {}", e);
+907 +                 eprintln!("[Session] Writer open failed: {e}");
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\actor.rs:917:8
+    |
+917 |                             eprintln!("[Session] Write failed: {}", e);
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+917 -                             eprintln!("[Session] Write failed: {}", e);
+917 +                             eprintln!("[Session] Write failed: {e}");
+    |
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1106:10
+     |
+1106 |                                   &format!("Transfer completed successfully: transfer_id={}, total_bytes={}, sha256={}",
+     |  __________________________________^
+1107 | |                                         transfer_id, total_bytes, expected_sha256),
+     | |__________________________________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1108:15
+     |
+1108 |                                   Some(&format!("传输成功完成: 传输ID={}，总字节数={}，SHA256={}",
+     |  _______________________________________^
+1109 | |                                         transfer_id, total_bytes, expected_sha256)),
+     | |__________________________________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1197:6
+     |
+1197 |                 &format!("Transfer failed: transfer_id={}, error={}", tid, msg),
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+     |
+1197 -                 &format!("Transfer failed: transfer_id={}, error={}", tid, msg),
+1197 +                 &format!("Transfer failed: transfer_id={tid}, error={msg}"),
+     |
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1198:11
+     |
+1198 |                 Some(&format!("传输失败: 传输ID={}，错误={}", tid, msg)),
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+     |
+1198 -                 Some(&format!("传输失败: 传输ID={}，错误={}", tid, msg)),
+1198 +                 Some(&format!("传输失败: 传输ID={tid}，错误={msg}")),
+     |
+
+error: these match arms have identical bodies
+    --> cb_core\src\session\actor.rs:1205:4
+     |
+1205 |             "PERMISSION_DENIED" | "ITEM_NOT_FOUND" => (false, false),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1206 |             "CONN_TIMEOUT" => (true, true),
+1207 |             _ => (false, false),
+     |             ^^^^^^^^^^^^^^^^^^^ the wildcard arm
+     |
+     = help: if this is unintentional make the arms return different values
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#match_same_arms
+     = note: `-D clippy::match-same-arms` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::match_same_arms)]`
+help: otherwise remove the non-wildcard arm
+     |
+1205 -             "PERMISSION_DENIED" | "ITEM_NOT_FOUND" => (false, false),
+     |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api\tests\m2_meta.rs:212:4
+    |
+212 |             println!("Fail: Received duplicate event: {}", evt_json);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+212 -             println!("Fail: Received duplicate event: {}", evt_json);
+212 +             println!("Fail: Received duplicate event: {evt_json}");
+    |
+
+error: these match arms have identical bodies
+    --> cb_core\src\session\actor.rs:1335:7
+     |
+1335 |                         Ok(0) => break, // EOF
+     |                         ^^^^^^^^^^^^^^
+...
+1354 |                         Err(_) => break,
+     |                         ^^^^^^^^^^^^^^^
+     |
+     = help: if this is unintentional make the arms return different values
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#match_same_arms
+help: otherwise merge the patterns into a single arm
+     |
+1335 ~                         Ok(0) | Err(_) => break, // EOF
+1336 |                         Ok(n) => {
+ ...
+1353 |                         }
+1354 ~                         }
+     |
+
+error: variables can be used directly in the `format!` string
+  --> cb_core\src\api\tests\m3_content.rs:88:2
+   |
+88 |     println!("Transfer initiated: {}", transfer_id);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+   |
+88 -     println!("Transfer initiated: {}", transfer_id);
+88 +     println!("Transfer initiated: {transfer_id}");
+   |
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1394:6
+     |
+1394 |                   &format!(
+     |  __________________^
+1395 | |                     "Transfer request initiated: transfer_id={}, item_id={}, file_id={:?}",
+1396 | |                     transfer_id, item_id, file_id
+1397 | |                 ),
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1398:11
+     |
+1398 |                   Some(&format!(
+     |  _______________________^
+1399 | |                     "传输请求已发起: 传输ID={}，项目ID={}，文件ID={:?}",
+1400 | |                     transfer_id, item_id, file_id
+1401 | |                 )),
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1428:7
+     |
+1428 |                       &format!(
+     |  ______________________^
+1429 | |                         "Transfer cancelled: transfer_id={}, reason=User cancelled",
+1430 | |                         transfer_id
+1431 | |                     ),
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1432:12
+     |
+1432 |                       Some(&format!(
+     |  ___________________________^
+1433 | |                         "传输已取消: 传输ID={}，原因=用户取消",
+1434 | |                         transfer_id
+1435 | |                     )),
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1452:7
+     |
+1452 |                       &format!(
+     |  ______________________^
+1453 | |                         "Transfer cancelled: transfer_id={}, reason=User cancelled",
+1454 | |                         transfer_id
+1455 | |                     ),
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1456:12
+     |
+1456 |                       Some(&format!(
+     |  ___________________________^
+1457 | |                         "传输已取消: 传输ID={}，原因=用户取消",
+1458 | |                         transfer_id
+1459 | |                     )),
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api\tests\m3_content.rs:207:2
+    |
+207 | /     assert!(
+208 | |         local_path_str.ends_with(".png"),
+209 | |         "Local path must have .png extension: {}",
+210 | |         local_path_str
+211 | |     );
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: case-sensitive file extension comparison
+   --> cb_core\src\api\tests\m3_content.rs:208:3
+    |
+208 |         local_path_str.ends_with(".png"),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a case-insensitive comparison instead
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#case_sensitive_file_extension_comparisons
+    = note: `-D clippy::case-sensitive-file-extension-comparisons` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::case_sensitive_file_extension_comparisons)]`
+help: use std::path::Path
+    |
+208 ~         std::path::Path::new(&local_path_str)
+209 +       .extension()
+210 ~       .is_some_and(|ext| ext.eq_ignore_ascii_case("png")),
+    |
+
+error: calling `ItemPreview::default()` is more clear than this expression
+   --> cb_core\src\api\tests\m3_content.rs:250:12
+    |
+250 |         preview: Default::default(),
+    |                  ^^^^^^^^^^^^^^^^^^ help: try: `ItemPreview::default()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#default_trait_access
+    = note: `-D clippy::default-trait-access` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::default_trait_access)]`
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\api\tests\m3_content.rs:345:2
+    |
+345 | /     assert!(
+346 | |         local_path_str.ends_with("report.pdf"),
+347 | |         "Filename mismatch: {}",
+348 | |         local_path_str
+349 | |     );
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+    --> cb_core\src\session\actor.rs:1573:4
+     |
+1573 | /             match store.get_peer_fingerprint(&uid, &did)? {
+1574 | |                 Some(saved_fp) => {
+1575 | |                     if saved_fp != rfp {
+1576 | |                         anyhow::bail!("TLS_PIN_MISMATCH: saved={}, got={}", saved_fp, rfp);
+...    |
+1584 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#single_match_else
+     = note: `-D clippy::single-match-else` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::single_match_else)]`
+help: try
+     |
+1573 ~             if let Some(saved_fp) = store.get_peer_fingerprint(&uid, &did)? {
+1574 ~                        if saved_fp != rfp {
+1575 ~                            anyhow::bail!("TLS_PIN_MISMATCH: saved={}, got={}", saved_fp, rfp);
+1576 ~                        }
+1577 ~                    } else {
+1578 ~                        let mut store_mut = Store::open(&data_dir)?;
+1579 ~                        store_mut.save_peer_fingerprint(&uid, &did, &rfp, now_ms())?;
+1580 ~                        println!("[Session] TOFU pinned device {} with fp {}", did, rfp);
+1581 ~                    }
+     |
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1582:6
+     |
+1582 |                     println!("[Session] TOFU pinned device {} with fp {}", did, rfp);
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+     |
+1582 -                     println!("[Session] TOFU pinned device {} with fp {}", did, rfp);
+1582 +                     println!("[Session] TOFU pinned device {did} with fp {rfp}");
+     |
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1596:6
+     |
+1596 |                   &format!(
+     |  __________________^
+1597 | |                     "Handshake completed, session online: remote_device_id={}",
+1598 | |                     did
+1599 | |                 ),
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1600:11
+     |
+1600 |                 Some(&format!("握手已完成，会话在线: 远程设备ID={}", did)),
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+     |
+1600 -                 Some(&format!("握手已完成，会话在线: 远程设备ID={}", did)),
+1600 +                 Some(&format!("握手已完成，会话在线: 远程设备ID={did}")),
+     |
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1643:7
+     |
+1643 |                     &format!("Heartbeat sent: device_id={}", did),
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+     |
+1643 -                     &format!("Heartbeat sent: device_id={}", did),
+1643 +                     &format!("Heartbeat sent: device_id={did}"),
+     |
+
+error: variables can be used directly in the `format!` string
+    --> cb_core\src\session\actor.rs:1644:12
+     |
+1644 |                     Some(&format!("心跳已发送: 设备ID={}", did)),
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+     |
+1644 -                     Some(&format!("心跳已发送: 设备ID={}", did)),
+1644 +                     Some(&format!("心跳已发送: 设备ID={did}")),
+     |
+
+error: these match arms have identical bodies
+   --> cb_core\src\store.rs:339:4
+    |
+339 |             "text" => ItemKind::Text,
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+342 |             _ => ItemKind::Text,
+    |             ^^^^^^^^^^^^^^^^^^^ the wildcard arm
+    |
+    = help: if this is unintentional make the arms return different values
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#match_same_arms
+help: otherwise remove the non-wildcard arm
+    |
+339 -             "text" => ItemKind::Text,
+    |
+
+error: boolean to int conversion using if
+   --> cb_core\src\store.rs:704:17
+    |
+704 |                 if rule.share_to_peer { 1 } else { 0 },
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with from: `i32::from(rule.share_to_peer)`
+    |
+    = note: `rule.share_to_peer as i32` or `rule.share_to_peer.into()` can also be valid options
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#bool_to_int_with_if
+    = note: `-D clippy::bool-to-int-with-if` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::bool_to_int_with_if)]`
+
+error: boolean to int conversion using if
+   --> cb_core\src\store.rs:705:17
+    |
+705 |                 if rule.accept_from_peer { 1 } else { 0 },
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with from: `i32::from(rule.accept_from_peer)`
+    |
+    = note: `rule.accept_from_peer as i32` or `rule.accept_from_peer.into()` can also be valid options
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#bool_to_int_with_if
+
+error: assigning the result of `Clone::clone()` may be inefficient
+  --> cb_core\src\testsupport\core.rs:19:3
+   |
+19 |         cfg.data_dir = dirs.data_dir.clone();
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use `clone_from()`: `cfg.data_dir.clone_from(&dirs.data_dir)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#assigning_clones
+   = note: `-D clippy::assigning-clones` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::assigning_clones)]`
+
+error: assigning the result of `Clone::clone()` may be inefficient
+  --> cb_core\src\testsupport\core.rs:20:3
+   |
+20 |         cfg.cache_dir = dirs.cache_dir.clone();
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use `clone_from()`: `cfg.cache_dir.clone_from(&dirs.cache_dir)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#assigning_clones
+
+error: called `map(<f>).unwrap_or_else(<g>)` on an `Option` value
+  --> cb_core\src\testsupport\dirs.rs:18:16
+   |
+18 |           let target = std::env::var_os("CARGO_TARGET_DIR")
+   |  ______________________^
+19 | |             .map(PathBuf::from)
+20 | |             .unwrap_or_else(|| find_target_dir(&manifest));
+   | |__________________________________________________________^ help: try: `std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| find_target_dir(&manifest), PathBuf::from)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#map_unwrap_or
+   = note: `-D clippy::map-unwrap-or` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::map_unwrap_or)]`
+
+error: unnecessary `Debug` formatting in `eprintln!` args
+  --> cb_core\src\testsupport\dirs.rs:49:48
+   |
+49 |             eprintln!("[test] keeping test dirs: {:?}", self.root);
+   |                                                         ^^^^^^^^^
+   |
+   = help: use `Display` formatting and change this to `self.root.display()`
+   = note: switching to `Display` formatting will change how the value is shown; escaped characters will no longer be escaped and surrounding quotes will be removed
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#unnecessary_debug_formatting
+
+error: variables can be used directly in the `format!` string
+  --> cb_core\src\transport\cert.rs:30:17
+   |
+30 |     let password = format!("{}{}", device_id, account_uid);
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+   |
+30 -     let password = format!("{}{}", device_id, account_uid);
+30 +     let password = format!("{device_id}{account_uid}");
+   |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\transport\cert.rs:227:3
+    |
+227 |         eprintln!("[Transport] Warning: failed to save cert and key: {}", e);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+227 -         eprintln!("[Transport] Warning: failed to save cert and key: {}", e);
+227 +         eprintln!("[Transport] Warning: failed to save cert and key: {e}");
+    |
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\transport.rs:170:5
+    |
+170 |                 eprintln!("[Transport] Handshake failed: {}", e);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+170 -                 eprintln!("[Transport] Handshake failed: {}", e);
+170 +                 eprintln!("[Transport] Handshake failed: {e}");
+    |
+
+error: unused `async` for function with no await statements
+    --> cb_core\src\session\actor.rs:1549:2
+     |
+1549 | /     async fn handle_opaque_finish(&mut self, finish_bytes: &[u8]) -> anyhow::Result<()> {
+1550 | |         let server_state = self
+1551 | |             .opaque_server_state
+1552 | |             .take()
+...    |
+1560 | |         Ok(())
+1561 | |     }
+     | |_____^
+     |
+     = help: consider removing the `async` from this function
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#unused_async
+     = note: `-D clippy::unused-async` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::unused_async)]`
+
+error: unused `async` for function with no await statements
+    --> cb_core\src\session\actor.rs:1590:2
+     |
+1590 | /     async fn transition_to_online(&mut self) -> Result<()> {
+1591 | |         self.update_state(SessionState::Online);
+1592 | |         if let Some(did) = &self.remote_device_id {
+1593 | |             let mut log_store = self.log_store.lock().unwrap();
+...    |
+1609 | |         Ok(())
+1610 | |     }
+     | |_____^
+     |
+     = help: consider removing the `async` from this function
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#unused_async
+
+error: could not compile `cb_core` (lib) due to 155 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: variables can be used directly in the `format!` string
+  --> cb_core\src\session\tests.rs:53:3
+   |
+53 | /         assert!(
+54 | |             events.iter().all(|e| e["type"] != event_type),
+55 | |             "Should NOT receive {}",
+56 | |             event_type
+57 | |         );
+   | |_________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+
+error: calling `AppConfig::default()` is more clear than this expression
+  --> cb_core\src\session\tests.rs:96:15
+   |
+96 |         app_config: Default::default(),
+   |                     ^^^^^^^^^^^^^^^^^^ help: try: `AppConfig::default()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#default_trait_access
+
+error: variables can be used directly in the `format!` string
+   --> cb_core\src\session\tests.rs:125:13
+    |
+125 |     let addr = format!("127.0.0.1:{}", server_port);
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#uninlined_format_args
+help: change this to
+    |
+125 -     let addr = format!("127.0.0.1:{}", server_port);
+125 +     let addr = format!("127.0.0.1:{server_port}");
+    |
+
+error: unused `async` for function with no await statements
+   --> cb_core\src\session\tests.rs:80:1
+    |
+ 80 | / async fn setup(name: &str, password: &str) -> TestContext {
+ 81 | |     let mut path = std::env::temp_dir();
+ 82 | |     path.push("cb_test_session");
+ 83 | |     path.push(name);
+...   |
+120 | | }
+    | |_^
+    |
+    = help: consider removing the `async` from this function
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#unused_async
+
+error: could not compile `cb_core` (lib test) due to 167 previous errors

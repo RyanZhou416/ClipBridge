@@ -1,10 +1,10 @@
 use super::super::*;
 use std::ffi::{CStr, CString};
-use std::{fs, thread};
 use std::os::raw::{c_char, c_void};
 use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{fs, thread};
 
 fn test_target_dir() -> PathBuf {
 	if let Some(p) = std::env::var_os("CARGO_TARGET_DIR") {
@@ -136,7 +136,7 @@ fn ffi_plan_text_ok() {
               "text":{{"mime":"text/plain","utf8":"hello"}}
             }}"#
 		))
-			.unwrap();
+		.unwrap();
 
 		let out = cb_plan_local_ingest(h, snap.as_ptr());
 		let json = take_json(out);
@@ -175,7 +175,7 @@ fn ffi_plan_text_over_soft_needs_confirm_then_force() {
             }}"#,
 			serde_json::to_string(&big).unwrap()
 		))
-			.unwrap();
+		.unwrap();
 
 		let out1 = cb_plan_local_ingest(h, snap1.as_ptr());
 		let v1: serde_json::Value = serde_json::from_str(&take_json(out1)).unwrap();
@@ -201,7 +201,7 @@ fn ffi_plan_text_over_soft_needs_confirm_then_force() {
             }}"#,
 			serde_json::to_string(&big).unwrap()
 		))
-			.unwrap();
+		.unwrap();
 
 		let out2 = cb_plan_local_ingest(h, snap2.as_ptr());
 		let v2: serde_json::Value = serde_json::from_str(&take_json(out2)).unwrap();
@@ -238,7 +238,7 @@ fn ffi_plan_file_list_ok() {
               ]
             }}"#
 		))
-			.unwrap();
+		.unwrap();
 
 		let out = cb_plan_local_ingest(h, snap.as_ptr());
 		let v: serde_json::Value = serde_json::from_str(&take_json(out)).unwrap();
@@ -247,10 +247,18 @@ fn ffi_plan_file_list_ok() {
 			panic!("plan file list failed: {}", v["error"]);
 		}
 
-		assert_eq!(v["data"]["plan"]["meta"]["kind"].as_str().unwrap(), "file_list");
-		assert_eq!(v["data"]["plan"]["meta"]["size_bytes"].as_i64().unwrap(), 300);
 		assert_eq!(
-			v["data"]["plan"]["meta"]["preview"]["file_count"].as_u64().unwrap(),
+			v["data"]["plan"]["meta"]["kind"].as_str().unwrap(),
+			"file_list"
+		);
+		assert_eq!(
+			v["data"]["plan"]["meta"]["size_bytes"].as_i64().unwrap(),
+			300
+		);
+		assert_eq!(
+			v["data"]["plan"]["meta"]["preview"]["file_count"]
+				.as_u64()
+				.unwrap(),
 			2
 		);
 
@@ -273,7 +281,7 @@ fn ffi_ingest_text_smoke() {
               "text":{{"mime":"text/plain","utf8":"hello"}}
             }}"#
 		))
-			.unwrap();
+		.unwrap();
 
 		let out = cb_ingest_local_copy(h, snap.as_ptr());
 		let v: serde_json::Value = serde_json::from_str(&take_json(out)).unwrap();
@@ -304,12 +312,16 @@ fn ffi_list_history_and_get_item() {
               "share_mode":"default",
               "text":{{"utf8":"history_test_item"}}
             }}"#
-		)).unwrap();
+		))
+		.unwrap();
 
 		let out_ingest = cb_ingest_local_copy(h, snap.as_ptr());
 		let v_ingest: serde_json::Value = serde_json::from_str(&take_json(out_ingest)).unwrap();
 		assert!(v_ingest["ok"].as_bool().unwrap());
-		let item_id = v_ingest["data"]["meta"]["item_id"].as_str().unwrap().to_string();
+		let item_id = v_ingest["data"]["meta"]["item_id"]
+			.as_str()
+			.unwrap()
+			.to_string();
 
 		// 2. 测试 list_history
 		// 构造查询参数：limit=10
