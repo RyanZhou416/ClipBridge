@@ -49,6 +49,56 @@ fn opaque_decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// 认证前（尚未进入 Online）允许处理的消息白名单。
+///
+/// 只放行握手、OPAQUE、心跳与会话控制消息；业务消息（内容读写、元数据、删除等）
+/// 必须等 OPAQUE 完成且设备指纹校验通过后才能处理。
+///
+/// 注意：`AuthOk` / `AuthFail` 是 OPAQUE 的最后一步（客户端收到 `AuthOk` 才转为
+/// Online），`Pong` 是对白名单中 `Ping` 的应答，三者同样属于协议控制消息。
+fn ctrl_is_pre_auth_allowed(msg: &CtrlMsg) -> bool {
+	matches!(
+		msg,
+		CtrlMsg::Hello { .. }
+			| CtrlMsg::HelloAck { .. }
+			| CtrlMsg::OpaqueStart { .. }
+			| CtrlMsg::OpaqueResponse { .. }
+			| CtrlMsg::OpaqueFinish { .. }
+			| CtrlMsg::AuthOk { .. }
+			| CtrlMsg::AuthFail { .. }
+			| CtrlMsg::Ping { .. }
+			| CtrlMsg::Pong { .. }
+			| CtrlMsg::Error { .. }
+			| CtrlMsg::Close { .. }
+	)
+}
+
+/// 消息类型名，仅用于拒绝日志与错误信息。
+///
+/// 这里是穷举 match：以后新增 `CtrlMsg` 变体必须在此命名，从而提醒实现者
+/// 判断它是否应加入认证前白名单。
+fn ctrl_msg_kind(msg: &CtrlMsg) -> &'static str {
+	match msg {
+		CtrlMsg::Hello { .. } => "Hello",
+		CtrlMsg::HelloAck { .. } => "HelloAck",
+		CtrlMsg::AuthFail { .. } => "AuthFail",
+		CtrlMsg::OpaqueStart { .. } => "OpaqueStart",
+		CtrlMsg::OpaqueResponse { .. } => "OpaqueResponse",
+		CtrlMsg::OpaqueFinish { .. } => "OpaqueFinish",
+		CtrlMsg::AuthOk { .. } => "AuthOk",
+		CtrlMsg::Ping { .. } => "Ping",
+		CtrlMsg::Pong { .. } => "Pong",
+		CtrlMsg::ItemMeta { .. } => "ItemMeta",
+		CtrlMsg::ItemDelete { .. } => "ItemDelete",
+		CtrlMsg::Error { .. } => "Error",
+		CtrlMsg::Close { .. } => "Close",
+		CtrlMsg::ContentGet { .. } => "ContentGet",
+		CtrlMsg::ContentBegin { .. } => "ContentBegin",
+		CtrlMsg::ContentEnd { .. } => "ContentEnd",
+		CtrlMsg::ContentCancel { .. } => "ContentCancel",
+	}
+}
+
 /// 定义接收状态
 #[allow(dead_code)]
 enum ReceiverState {
@@ -591,7 +641,36 @@ impl SessionActor {
 		}
 	}
 
+	/// 鉴权闸门：未进入 Online 状态时，拒绝任何业务消息并终止会话。
+	///
+	/// 只允许在 `handle_control_msg` 顶部调用一次：白名单之外的消息即使将来新增，
+	/// 也一定会在唯一入口被拦截，不会散落到各个分支里遗漏。
+	async fn require_online(&mut self, what: &str) -> Result<()> {
+		if self.state == SessionState::Online {
+			return Ok(());
+		}
+		let _ = self
+			.send_ctrl(CtrlMsg::Error {
+				reply_to: None,
+				code: "NOT_AUTHENTICATED".into(),
+				message: Some(format!(
+					"{what} rejected: session is not authenticated (state={:?})",
+					self.state
+				)),
+			})
+			.await;
+		anyhow::bail!(
+			"Rejected {what} before authentication: state={:?}",
+			self.state
+		)
+	}
+
 	async fn handle_control_msg(&mut self, msg: CtrlMsg) -> Result<()> {
+		// 唯一鉴权入口：未认证前只放行白名单消息（握手/协议控制），
+		// 其余业务消息统一在这里拒绝并终止会话。
+		if !ctrl_is_pre_auth_allowed(&msg) {
+			self.require_online(ctrl_msg_kind(&msg)).await?;
+		}
 		match msg {
 			CtrlMsg::Hello {
 				device_id,
@@ -736,33 +815,32 @@ impl SessionActor {
 						)),
 					);
 				}
-				if self.state == SessionState::Online {
-					let store = self.store.clone();
-					let account_uid = self.config.account_uid.clone();
-					let item_clone = item.clone();
-					let is_new = tokio::task::spawn_blocking(move || {
-						let mut guard = store.lock().unwrap();
-						guard.insert_remote_item(&account_uid, &item_clone, now_ms())
-					})
-					.await??;
-					if is_new {
-						let json = serde_json::json!({
-							"type": "ITEM_META_ADDED",
-							"ts_ms": now_ms(),
-							"payload": { "meta": item }
-						});
-						self.sink.emit(json.to_string());
-						// 禁用核心的文字自动预取，而是在外壳实现。
-						/*
-						if item.kind == crate::model::ItemKind::Text {
-							if item.size_bytes <= self.config.app_config.size_limits.text_auto_prefetch_bytes {
-								println!("[Session] Auto-prefetching text item: {}", item.item_id);
-								let (tx, _) = tokio::sync::oneshot::channel();
-								let _ = self.start_pull_request(item.item_id.clone(), None, tx).await;
-							}
+				// 认证闸门已在 handle_control_msg 顶部保证此时必然 Online，无需重复判断。
+				let store = self.store.clone();
+				let account_uid = self.config.account_uid.clone();
+				let item_clone = item.clone();
+				let is_new = tokio::task::spawn_blocking(move || {
+					let mut guard = store.lock().unwrap();
+					guard.insert_remote_item(&account_uid, &item_clone, now_ms())
+				})
+				.await??;
+				if is_new {
+					let json = serde_json::json!({
+						"type": "ITEM_META_ADDED",
+						"ts_ms": now_ms(),
+						"payload": { "meta": item }
+					});
+					self.sink.emit(json.to_string());
+					// 禁用核心的文字自动预取，而是在外壳实现。
+					/*
+					if item.kind == crate::model::ItemKind::Text {
+						if item.size_bytes <= self.config.app_config.size_limits.text_auto_prefetch_bytes {
+							println!("[Session] Auto-prefetching text item: {}", item.item_id);
+							let (tx, _) = tokio::sync::oneshot::channel();
+							let _ = self.start_pull_request(item.item_id.clone(), None, tx).await;
 						}
-						*/
 					}
+					*/
 				}
 			}
 			CtrlMsg::Error { code, message, .. } => {
@@ -814,36 +892,35 @@ impl SessionActor {
 			}
 
 			CtrlMsg::ItemDelete { item_id, .. } => {
-				if self.state == SessionState::Online {
-					let account_uid = self.config.account_uid.clone();
-					let store = self.store.clone();
-					let cas = self.cas.clone();
-					let sink = self.sink.clone();
-					let item_id_emit = item_id.clone();
-					let deleted = tokio::task::spawn_blocking(move || {
-						let mut guard = store.lock().unwrap();
-						let ok = guard
-							.soft_delete_item(&account_uid, &item_id)
-							.ok()
-							.unwrap_or(false);
-						let sha = guard.get_item_sha256(&item_id).ok().flatten();
-						(ok, sha)
-					})
-					.await?;
-					let (ok, sha_opt) = deleted;
-					if ok {
-						if let Some(sha) = &sha_opt {
-							let _ = cas.remove_blob(sha);
-							let now = now_ms();
-							let mut guard = self.store.lock().unwrap();
-							let _ = guard.mark_cache_missing(sha, now);
-						}
-						let evt = serde_json::json!({
-							"type": "ITEM_DELETED",
-							"item_id": item_id_emit,
-						});
-						sink.emit(evt.to_string());
+				// 认证闸门已在 handle_control_msg 顶部保证此时必然 Online，无需重复判断。
+				let account_uid = self.config.account_uid.clone();
+				let store = self.store.clone();
+				let cas = self.cas.clone();
+				let sink = self.sink.clone();
+				let item_id_emit = item_id.clone();
+				let deleted = tokio::task::spawn_blocking(move || {
+					let mut guard = store.lock().unwrap();
+					let ok = guard
+						.soft_delete_item(&account_uid, &item_id)
+						.ok()
+						.unwrap_or(false);
+					let sha = guard.get_item_sha256(&item_id).ok().flatten();
+					(ok, sha)
+				})
+				.await?;
+				let (ok, sha_opt) = deleted;
+				if ok {
+					if let Some(sha) = &sha_opt {
+						let _ = cas.remove_blob(sha);
+						let now = now_ms();
+						let mut guard = self.store.lock().unwrap();
+						let _ = guard.mark_cache_missing(sha, now);
 					}
+					let evt = serde_json::json!({
+						"type": "ITEM_DELETED",
+						"item_id": item_id_emit,
+					});
+					sink.emit(evt.to_string());
 				}
 			}
 		}
@@ -1728,5 +1805,119 @@ mod opaque_wire_tests {
 			)
 			.unwrap()
 		);
+	}
+}
+
+#[cfg(test)]
+mod auth_gate_tests {
+	use super::{ctrl_is_pre_auth_allowed, ctrl_msg_kind};
+	use crate::proto::{AuthSessionFlags, CtrlMsg, PROTOCOL_VERSION};
+
+	/// 未完成 OPAQUE 之前，任何业务消息都必须被认证闸门拒绝。
+	#[test]
+	fn business_messages_are_not_allowed_before_auth() {
+		let business = [
+			CtrlMsg::ItemDelete {
+				msg_id: None,
+				item_id: "item-1".into(),
+			},
+			CtrlMsg::ContentGet {
+				msg_id: Some("t-1".into()),
+				item_id: "item-1".into(),
+				file_id: None,
+				offset: None,
+			},
+			CtrlMsg::ContentBegin {
+				req_id: "t-1".into(),
+				item_id: "item-1".into(),
+				file_id: None,
+				total_bytes: 1,
+				sha256: "00".into(),
+				mime: "text/plain".into(),
+			},
+			CtrlMsg::ContentEnd {
+				req_id: "t-1".into(),
+			},
+			CtrlMsg::ContentCancel {
+				req_id: "t-1".into(),
+				reason: "test".into(),
+			},
+		];
+		for msg in business {
+			assert!(
+				!ctrl_is_pre_auth_allowed(&msg),
+				"{} 必须在认证前被拒绝",
+				ctrl_msg_kind(&msg)
+			);
+		}
+	}
+
+	/// 握手/协议控制消息在认证前必须放行，否则 OPAQUE 流程无法完成。
+	#[test]
+	fn handshake_messages_are_allowed_before_auth() {
+		let handshake = [
+			CtrlMsg::Hello {
+				msg_id: None,
+				protocol_version: PROTOCOL_VERSION,
+				device_id: "dev".into(),
+				account_uid: "uid".into(),
+				capabilities: Vec::new(),
+				client_nonce: None,
+			},
+			CtrlMsg::HelloAck {
+				reply_to: None,
+				server_device_id: "srv".into(),
+				protocol_version: PROTOCOL_VERSION,
+			},
+			CtrlMsg::OpaqueStart {
+				msg_id: None,
+				reply_to: None,
+				opaque: Vec::new(),
+			},
+			CtrlMsg::OpaqueResponse {
+				msg_id: None,
+				reply_to: None,
+				opaque: Vec::new(),
+			},
+			CtrlMsg::OpaqueFinish {
+				msg_id: None,
+				reply_to: None,
+				opaque: Vec::new(),
+			},
+			CtrlMsg::AuthOk {
+				reply_to: None,
+				session_flags: AuthSessionFlags {
+					account_verified: true,
+				},
+			},
+			CtrlMsg::AuthFail {
+				reply_to: None,
+				code: "test".into(),
+			},
+			CtrlMsg::Ping {
+				msg_id: None,
+				ts: 0,
+			},
+			CtrlMsg::Pong {
+				reply_to: None,
+				ts: 0,
+			},
+			CtrlMsg::Error {
+				reply_to: None,
+				code: "test".into(),
+				message: None,
+			},
+			CtrlMsg::Close {
+				msg_id: None,
+				reason: "test".into(),
+			},
+		];
+		for msg in handshake {
+			assert!(
+				ctrl_is_pre_auth_allowed(&msg),
+				"{} 必须允许在认证前处理",
+				ctrl_msg_kind(&msg)
+			);
+		}
 	}
 }
