@@ -10,6 +10,13 @@ use sha2::{Digest, Sha512};
 use std::convert::TryInto;
 
 // --- 1. 定义加密套件 (v4.0 标准) ---
+//
+// ⚠ 安全约束（改动前必读，依据 docs/adr/001-auth-opaque-removal.md §3）：
+// 必须保持 Ristretto255 + Sha512。opaque-ke 无条件依赖 elliptic-curve，而
+// crypto-bigint 0.5.5 有一条时序可变性告警（RUSTSEC-2026-0387）—— 受影响的正是
+// NIST 曲线（p256/p384/p521）的字段算术。我们从不实例化 NIST 曲线，所以该路径不可达，
+// deny.toml 据此对告警做了范围收窄。
+// 一旦把 OprfCs / KeyExchange 换成 NIST 曲线，上述豁免立即失效，必须重新评估。
 pub struct DefaultCipherSuite;
 
 impl CipherSuite for DefaultCipherSuite {

@@ -8,8 +8,18 @@
 version = 2
 # Warn if a crate is yanked
 yanked = "warn"
-# Do not ignore any advisories
-ignore = []
+# 带理由的收窄豁免（依据见 docs/adr/001-auth-opaque-removal.md §3）
+ignore = [
+    # RUSTSEC-2026-0387：crypto-bigint 0.5.5 的常数时间实现存在时序可变性。
+    # 引入链：opaque-ke（非可选依赖）→ elliptic-curve 0.13.8 → crypto-bigint 0.5.5。
+    # elliptic-curve 只服务于 NIST 曲线选项（p256/p384/p521），而我们的 DefaultCipherSuite 是：
+    #   OprfCs      = Ristretto255（curve25519-dalek）
+    #   KeyExchange = TripleDh<Ristretto255, Sha512>
+    # 从不实例化 NIST 曲线，因此 crypto-bigint 的字段算术（受影响路径）在本配置下不可达。
+    # 约束：若将来把 cipher suite 换成 NIST 曲线，必须重新评估此豁免（crypto.rs 有同样的注释）。
+    # 真正的解法在上游：opaque-ke 迁到 RustCrypto 0.11 一代（crypto-bigint ≥0.7.6）后即可删除本条。
+    "RUSTSEC-2026-0387",
+]
 
 # ---- License checking ----
 [licenses]
