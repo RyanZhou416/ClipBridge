@@ -70,6 +70,7 @@ public partial class App : Application
     }
     public App()
     {
+        StartupTrace.Mark("app-ctor-enter");
         // 确保使用硬件加速（WinUI 3 默认启用，但某些情况下可能回退到软件渲染）
         // 检查并设置环境变量，强制使用硬件加速
         try
@@ -87,6 +88,7 @@ public partial class App : Application
         }
         
         InitializeComponent();
+        StartupTrace.Mark("app-initcomponent-done");
 
         Host = Microsoft.Extensions.Hosting.Host.
         CreateDefaultBuilder().
@@ -228,29 +230,14 @@ public partial class App : Application
             services.AddTransient<HistoryPage>();
         }).
         Build();
+        StartupTrace.Mark("app-host-built");
 
-        try
-        {
-            App.GetService<IAppNotificationService>().Initialize();
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[App] Notification init failed: {ex.Message}");
-        }
-
-        // 测试日志系统 - 验证日志提供者是否工作
-        try
-        {
-            var loggerFactory = Host.Services.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>();
-            var testLogger = loggerFactory.CreateLogger("App");
-            testLogger.LogInformation("App started - testing log system");
-        }
-        catch (Exception)
-        {
-            // 日志系统初始化失败，但不影响应用启动
-        }
+        // 注意：通知注册与启动日志自检已移到 OnLaunched 的窗口显示之后。
+        // 实测（Release 冷启动 6 次）：AppNotification.Initialize ≈103ms，
+        // 一次 ILogger 落盘 ≈30ms，合计约 133ms 且都不影响首帧。
 
         UnhandledException += App_UnhandledException;
+        StartupTrace.Mark("app-ctor-exit");
     }
 
     private void App_UnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
@@ -270,6 +257,7 @@ public partial class App : Application
     protected async override void OnLaunched(LaunchActivatedEventArgs args)
     {
         base.OnLaunched(args);
+        StartupTrace.Mark("onlaunched-enter");
 
         //App.GetService<IAppNotificationService>().Show(string.Format("AppNotificationSamplePayload".GetLocalized(), AppContext.BaseDirectory));
 
@@ -282,9 +270,24 @@ public partial class App : Application
 
         // ① 初始化 Localizer（打包应用版）
         await InitializeLocalizer();
+        StartupTrace.Mark("localizer-done");
 
         // ② 再走 Template Studio 原有流程（里面会调用 ActivationService）
         await App.GetService<IActivationService>().ActivateAsync(args);
+        StartupTrace.Mark("activate-async-done");
+
+        // 与首帧无关的初始化必须真正排到首帧之后：
+        // 直接 inline 调用仍然占住 UI 线程，只是把阻塞从 Activate() 之前挪到之后，
+        // 首帧要等 UI 线程回到消息泵才画得出来（实测：inline 反而更慢）。
+        App.MainWindow?.DispatcherQueue.TryEnqueue(
+            Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () =>
+            {
+                StartupTrace.Mark("deferred-init-start");
+                InitializeNotifications();
+                RunStartupLogSmokeTest();
+                StartupTrace.Mark("deferred-init-done");
+            });
 
 
 #if DEBUG
@@ -401,6 +404,39 @@ public partial class App : Application
             }
             window.Activate();
         });
+    }
+
+    /// <summary>
+    /// 注册应用通知。原先在 App 构造里执行，实测占 Release 冷启动约 103ms，
+    /// 而通知不可能在首帧之前到达，故移动到窗口显示之后。
+    /// </summary>
+    private void InitializeNotifications()
+    {
+        try
+        {
+            App.GetService<IAppNotificationService>().Initialize();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Notification init failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 启动日志自检。原先在 App 构造里执行，会经过 CoreLogDispatcher → StashLogManager
+    /// 同步落盘（实测约 30ms）；移动到窗口显示之后，避免占用启动关键路径。
+    /// </summary>
+    private void RunStartupLogSmokeTest()
+    {
+        try
+        {
+            var loggerFactory = Host.Services.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>();
+            loggerFactory.CreateLogger("App").LogInformation("App started - testing log system");
+        }
+        catch
+        {
+            // 日志系统初始化失败，但不影响应用启动
+        }
     }
 
     private void InitializeTray()
@@ -679,21 +715,14 @@ public partial class App : Application
                     $"创建: {rustInfo!.CreationTime}\n" +
                     $"修改: {rustInfo.LastWriteTime}\n" : "");
 
-            var builder = new AppNotificationBuilder()
-                .AddText(header)
-                .AddText(body);
-
-            App.GetService<IAppNotificationService>()
-               .Show(builder.BuildNotification().Payload);
+            // 开发诊断：写 Debug 输出而不是弹系统通知。
+            // 原因：① 每次调试启动都弹通知是纯噪声；② 通知注册已移到首帧之后，
+            // 这里若提前 Show 会因尚未 Initialize 而失效。
+            System.Diagnostics.Debug.WriteLine($"[CoreDll] {header}\n{body}");
         }
         catch (Exception ex)
         {
-            var builder = new AppNotificationBuilder()
-                .AddText("读取 DLL 信息失败")
-                .AddText(ex.Message);
-
-            App.GetService<IAppNotificationService>()
-               .Show(builder.BuildNotification().Payload);
+            System.Diagnostics.Debug.WriteLine($"[CoreDll] 读取 DLL 信息失败: {ex.Message}");
         }
     }
 

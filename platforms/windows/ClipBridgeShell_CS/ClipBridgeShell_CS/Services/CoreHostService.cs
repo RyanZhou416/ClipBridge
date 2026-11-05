@@ -237,6 +237,7 @@ public sealed class CoreHostService : ICoreHostService
             _logger?.LogInformation("Core initialized successfully, handle: {Handle}", _coreHandle);
             Diagnostics.LastInitSummary = "Init OK";
             SetState(CoreState.Ready);
+            StartupTrace.Mark("core-ready");
             
             // 写入"核心开"日志到核心（使用较早的时间戳，使其出现在核心初始化日志之前）
             try

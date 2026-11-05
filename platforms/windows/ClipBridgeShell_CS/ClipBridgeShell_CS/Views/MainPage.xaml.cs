@@ -105,6 +105,7 @@ public sealed partial class MainPage : Page
 
     private void OnPageLoaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
+        StartupTrace.Mark("mainpage-loaded");
         try
         {
             // 设置 BorderBrushConverter 的 Page 引用

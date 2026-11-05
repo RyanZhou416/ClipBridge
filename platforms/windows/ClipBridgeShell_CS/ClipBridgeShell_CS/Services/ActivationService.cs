@@ -1,5 +1,6 @@
 using ClipBridgeShell_CS.Activation;
 using ClipBridgeShell_CS.Contracts.Services;
+using ClipBridgeShell_CS.Helpers;
 using ClipBridgeShell_CS.Views;
 
 using Microsoft.UI.Xaml;
@@ -30,11 +31,13 @@ public class ActivationService : IActivationService
         // 只初始化主题（读取设置），不在此处启动 Core：
         // Core 初始化会打开 SQLite、生成 TLS 证书、启动 mDNS，不能阻塞窗口创建与激活路径。
         await InitializeThemeAsync();
+        StartupTrace.Mark("theme-init-done");
 
         if (App.MainWindow == null)
         {
             App.MainWindow = new MainWindow();
         }
+        StartupTrace.Mark("mainwindow-created");
 
         // Set the MainWindow Content.
         if (App.MainWindow.Content == null)
@@ -42,9 +45,11 @@ public class ActivationService : IActivationService
             _shell = App.GetService<ShellPage>();
             App.MainWindow.Content = _shell ?? new Frame();
         }
+        StartupTrace.Mark("shellpage-created");
 
         // Handle activation via ActivationHandlers.
         await HandleActivationAsync(activationArgs);
+        StartupTrace.Mark("activation-handlers-done");
 
         // 自启到托盘：若由注册表/计划任务传入 --startup-to-tray，不激活主窗口，直接隐藏到托盘
         if (StartupService.IsStartupToTrayRequested())
@@ -55,12 +60,15 @@ public class ActivationService : IActivationService
         {
             App.MainWindow.Activate();
         }
+        StartupTrace.Mark("window-activated");
 
         // Execute tasks after activation.
         await StartupAsync();
+        StartupTrace.Mark("startup-await-done");
 
         // 窗口已经可见，再异步启动 Core 初始化（不阻塞激活路径）
         StartCoreInitialization();
+        StartupTrace.Mark("core-init-kicked-off");
     }
 
     private async Task HandleActivationAsync(object activationArgs)
