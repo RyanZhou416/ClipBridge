@@ -176,16 +176,27 @@ repo-root/
 │       ├── util/                    # 小工具（时间、uuid、大小限制、hex 等）
 │       └── testsupport/             # 测试辅助：fake transport、inproc peers
 │
+├── crates/
+│   └── cb_core_ffi/                 # ★共享 C ABI 实现（rlib；不产 cdylib、不单独发布、不新增边界）
+│       ├── Cargo.toml               # package 名 cb-core-ffi
+│       └── src/
+│           ├── lib.rs               # 模块聚合 + 共享实现说明
+│           ├── envelope.rs          # 统一 envelope、ret()、catch_unwind 隔离、字符串释放
+│           ├── handle.rs            # cb_handle 生命周期（alive/busy/core take）与幂等 shutdown
+│           ├── marshal.rs           # JSON DTO ↔ cb_core::api、回调封送（原 bridge.rs 内容）
+│           ├── errors.rs            # FFI 错误码映射（原 error.rs 内容）
+│           └── exports.rs           # 唯一的 #[no_mangle] extern "C" 全量导出表（三平台同源）
+│
 ├── platforms/
 │   └── windows/
-│       ├── core-ffi/                # Windows FFI（Rust）：C ABI 边界层
-│       │   ├── Cargo.toml           # package 名可为 core-ffi-windows（与编译命令一致）
+│       ├── core-ffi/                # Windows FFI（Rust）：C ABI 边界 package（仍是独立 cdylib）
+│       │   ├── Cargo.toml           # package 名 core-ffi-windows（与编译命令一致）
 │       │   ├── include/
-│       │   │   └── clipbridge_core.h# 4.8：对外 C 头文件（壳侧直接包含）
+│       │   │   └── clipbridge_core.h# 4.8：对外 C 头文件（由 cb_core_ffi 的导出表生成，三平台一致）
 │       │   └── src/
-│       │       ├── lib.rs           # #[no_mangle] extern "C" 导出
-│       │       ├── bridge.rs        # JSON 入参/出参、回调封送、内存释放策略
-│       │       └── error.rs         # FFI 错误码映射（对齐 4.7）
+│       │       ├── lib.rs           # 平台入口：pub use cb_core_ffi::exports::*（+ 链接保活）
+│       │       ├── bridge.rs        # 兼容壳：pub use cb_core_ffi::marshal::*（不再是实现）
+│       │       └── error.rs         # 兼容壳：pub use cb_core_ffi::errors::*（不再是实现）
 │       │
 │       └── ClipBridgeShell_CS/      # Windows Shell（C#）
 │
@@ -215,6 +226,25 @@ repo-root/
 - **禁止**：
   - 把“业务逻辑”写进 FFI（比如会话状态机、入库、去重、重试策略）
   - 在 FFI 里自行维护一份“Core 状态”（避免双权威）
+- **实现来源**：这三件事的实现**只写一次**，位于 `crates/cb_core_ffi`；三平台 crate 只做
+  `pub use` 把符号带进各自的 cdylib。同一段实现不得在平台 crate 里复制。
+
+#### C. crates/cb_core_ffi（共享 C ABI 实现；不是新的平台边界）
+- **定位**：`rlib` 依赖，**不产 cdylib、不导出符号给链接器、不单独发布**。它是 B 的实现体，
+  不是第四个平台边界；三个 `platforms/*/core-ffi` 依然是唯一的 ABI 边界。
+- **允许依赖**：`cb_core`、serde/serde_json、anyhow；**禁止**依赖任何 `platforms/*` crate
+  （依赖方向必须单向：`platforms/*/core-ffi → cb_core_ffi → cb_core`）。
+- **职责**（与 B 的三件事一一对应，不得扩张）：
+  - `envelope.rs`：统一 envelope、`ret()`、`catch_unwind` 隔离、字符串所有权
+  - `handle.rs`：`cb_handle` 生命周期（alive/busy/core take）与幂等 shutdown
+  - `marshal.rs`：JSON DTO ↔ `cb_core::api`、回调封送
+  - `errors.rs`：错误码映射
+  - `exports.rs`：**唯一的** `#[no_mangle] extern "C"` 全量导出表
+- **硬约束**：
+  - 三平台导出集必须相同（`clipbridge_core.h` 因此只有一份内容）；平台差异一律走显式开关，
+    不得靠“少抄几个函数”实现。CI 会断言三份导出集一致，并断言都覆盖 4.8 的最小集合。
+  - 修改导出签名/envelope = 修改 ABI，必须同时更新 `include/clipbridge_core.h` 与
+    macOS 文档 4.2.1 的冻结口径。
 
 ---
 

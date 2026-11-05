@@ -141,6 +141,14 @@ macOS FFI 函数语义与 Windows/Android 保持一致，至少覆盖：
 * 历史查询：`cb_list_history` / `cb_get_item_meta`
 * 诊断日志：日志查询与统计接口（与 Windows 语义一致）
 
+**执行口径（2026-11 起，硬约束）**
+
+* 三个平台（Windows / macOS / Android）导出**完全相同**的函数集，不再存在“某个平台少一批”的情况；
+  实现只有一份，位于 `crates/cb_core_ffi/src/exports.rs`（见核心文档 4.3.2 C）。
+* 平台差异（如有）必须写成显式开关并在本文件登记，**不得**通过“少抄函数”实现。
+* CI 会断言：三平台导出集一致，且覆盖本 4.1 的最小集合；`include/clipbridge_core.h`
+  与导出集不一致即失败。
+
 ### 4.2 Envelope 与错误模型
 
 统一 envelope：
@@ -169,10 +177,13 @@ macOS 端协议冻结为与 Windows 当前实现一致：
 
 权威来源以代码为准：
 
-* `platforms/macos/core-ffi/src/lib.rs`
-* `platforms/windows/core-ffi/src/lib.rs`
+* `crates/cb_core_ffi/src/exports.rs`（唯一实现；三平台签名与 envelope 的事实来源）
+* `crates/cb_core_ffi/src/{envelope,handle,marshal,errors}.rs`
+* `platforms/macos/core-ffi/src/lib.rs`（仅 `pub use` + 链接保活）
+* `platforms/windows/core-ffi/src/lib.rs`（同上）
 * `platforms/macos/include/clipbridge_core.h`
 * `platforms/windows/include/clipbridge_core.h`
+* `platforms/android/include/clipbridge_core.h`（三份头文件内容一致）
 
 ### 4.3 内存管理约束
 
