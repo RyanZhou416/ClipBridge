@@ -10,6 +10,10 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "CB.JNI", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "CB.JNI", __VA_ARGS__)
 
+// 壳侧期望的 FFI ABI 主版本：必须与 Rust 导出 cb_get_ffi_version 返回的 major 一致。
+// 依据：crates/cb_core_ffi/src/exports.rs 返回 1，macOS 壳同样期望 1。
+static constexpr uint32_t kExpectedFfiAbiMajor = 1;
+
 // -----------------------------
 // UTF-8 <-> UTF-16 转换
 // JNI 的 GetStringUTFChars / NewStringUTF 使用「modified UTF-8」：非 BMP 字符（emoji 等）
@@ -218,6 +222,24 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_ryan416_clipbridgeshellandroid_core_CoreInterop_nativeInit(
         JNIEnv* env, jclass /*cls*/, jstring cfg_json, jobject listener) {
+
+    // FFI ABI 探针：cb_get_ffi_version 不需要 handle，先校验再 init。
+    // 主版本不匹配直接返回错误 envelope（Java 侧 init() 会保存 code/message 并拒绝进入 Ready）。
+    {
+        uint32_t ffi_major = 0;
+        uint32_t ffi_minor = 0;
+        cb_get_ffi_version(&ffi_major, &ffi_minor);
+        if (ffi_major != kExpectedFfiAbiMajor) {
+            LOGE("FFI ABI mismatch: core reports %u.%u, shell requires major %u",
+                 ffi_major, ffi_minor, kExpectedFfiAbiMajor);
+            std::string err =
+                "{\"ok\":false,\"error\":{\"code\":\"FFI_ABI_MISMATCH\",\"message\":\"FFI ABI mismatch: core reports "
+                + std::to_string(ffi_major) + "." + std::to_string(ffi_minor)
+                + ", shell requires major " + std::to_string(kExpectedFfiAbiMajor) + "\"}}";
+            return make_jstring(env, err.data(), err.size());
+        }
+        LOGI("FFI ABI: %u.%u", ffi_major, ffi_minor);
+    }
 
     std::string cfg = jstr(env, cfg_json);
 

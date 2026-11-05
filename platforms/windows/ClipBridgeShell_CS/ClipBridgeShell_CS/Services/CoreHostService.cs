@@ -21,6 +21,10 @@ namespace ClipBridgeShell_CS.Services;
 
 public sealed class CoreHostService : ICoreHostService
 {
+    // 壳侧期望的 FFI ABI 主版本：必须与 Rust 导出 cb_get_ffi_version 返回的 major 一致。
+    // 依据：crates/cb_core_ffi/src/exports.rs 中 cb_get_ffi_version 返回 1，macOS 壳同样期望 1。
+    private const uint ExpectedFfiAbiMajor = 1;
+
     private readonly CoreConfigBuilder _cfgBuilder = new();
     private CoreInterop.CbOnEventFn? _onEventThunk;
     private GCHandle _selfHandle;
@@ -187,6 +191,19 @@ public sealed class CoreHostService : ICoreHostService
             CoreInterop.cb_get_ffi_version(out var major, out var minor);
             Diagnostics.FfiAbiMajor = major;
             Diagnostics.FfiAbiMinor = minor;
+
+            // ABI 主版本不匹配是硬失败：继续初始化会在不兼容的 ABI 上调用 FFI，只会静默错乱。
+            // 与 init 失败保持一致的对外表现：State=Degraded、LastError、LastInitSummary 都会被设置。
+            if (major != ExpectedFfiAbiMajor)
+            {
+                _logger?.LogError(
+                    "FFI ABI mismatch: core reports {CoreMajor}.{CoreMinor}, shell requires major {ExpectedMajor}",
+                    major, minor, ExpectedFfiAbiMajor);
+                LastError = $"FFI ABI 不兼容：core 返回 {major}.{minor}，壳侧要求 major {ExpectedFfiAbiMajor}。";
+                Diagnostics.LastInitSummary = $"Core degraded: FFI ABI mismatch (core {major}.{minor}, shell {ExpectedFfiAbiMajor}.x).";
+                SetState(CoreState.Degraded);
+                return;
+            }
 
             // 5. 准备回调
             _onEventThunk = (eventJsonPtr, userData) =>
