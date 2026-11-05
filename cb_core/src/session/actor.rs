@@ -25,6 +25,8 @@ use opaque_ke::{ClientLoginFinishParameters, ServerLoginParameters};
 use rand::rngs::OsRng;
 
 use super::{HandshakeStep, SessionCmd, SessionHandle, SessionRole, SessionState};
+use crate::model::ItemKind;
+use crate::policy::SizeLimits;
 use crate::proto::{AuthSessionFlags, CBFrame, CBFrameCodec, CtrlMsg, PROTOCOL_VERSION};
 use crate::store::Store;
 use crate::transport::{Connection, RecvStream, SendStream};
@@ -48,6 +50,18 @@ fn opaque_decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// 单个会话允许同时存在的入站传输数量。
+///
+/// 每个 receiver 都会占用一个 32 槽 channel、一个 writer Task 和一个 tmp 文件 fd，
+/// 对端可以无限发 `ContentBegin`，因此必须设硬上限（超出的 Begin 直接用
+/// `ContentCancel` 拒绝，不分配任何资源）。
+const MAX_CONCURRENT_RECEIVERS: usize = 8;
+
+/// 接收方空闲超时：超过该时长没有收到任何数据块就取消传输并清理 tmp 文件。
+///
+/// 对端可以打开传输后保持心跳但不发数据；若不清理，tmp 文件与 fd 会一直泄漏。
+const RECEIVER_IDLE_TIMEOUT_MS: i64 = 30_000;
 
 /// 认证前（尚未进入 Online）允许处理的消息白名单。
 ///
@@ -99,6 +113,59 @@ fn ctrl_msg_kind(msg: &CtrlMsg) -> &'static str {
 	}
 }
 
+/// 按 MIME 归类入站内容（`file_id` 非空时由调用方直接判为 FileList）。
+fn kind_from_mime(mime: &str) -> ItemKind {
+	if mime.starts_with("text/") {
+		ItemKind::Text
+	} else if mime.starts_with("image/") {
+		ItemKind::Image
+	} else {
+		ItemKind::FileList
+	}
+}
+
+/// 取出该类内容的硬上限（字节）。
+///
+/// 硬上限来自 `AppConfig.size_limits`（policy.rs）；配置为负值时按 0 处理，
+/// 即拒绝一切传输 —— 保守优先于放行。
+fn hard_cap_bytes(kind: &ItemKind, limits: &SizeLimits) -> u64 {
+	let hard = match kind {
+		ItemKind::Text => limits.hard_text_bytes,
+		ItemKind::Image => limits.hard_image_bytes,
+		ItemKind::FileList => limits.hard_file_total_bytes,
+	};
+	u64::try_from(hard).unwrap_or(0)
+}
+
+/// 并发 receiver 上限判定：第 9 个（已存在 8 个时）必须被拒绝。
+fn receiver_slot_available(current_receivers: usize) -> bool {
+	current_receivers < MAX_CONCURRENT_RECEIVERS
+}
+
+/// 接收空闲超时判定。
+fn receiver_idle_expired(now: i64, last_activity_ms: i64) -> bool {
+	now - last_activity_ms > RECEIVER_IDLE_TIMEOUT_MS
+}
+
+/// 数据块越界判定：绝不允许对端写出其声明的 `total_bytes`，也不允许超过硬上限。
+///
+/// 返回 `Some(code)` 表示本块必须让整个传输失败（code 用于 TRANSFER_FAILED 事件）。
+fn chunk_overrun(
+	received: u64,
+	chunk: u64,
+	declared_total: u64,
+	hard_cap: u64,
+) -> Option<&'static str> {
+	let next = received.saturating_add(chunk);
+	if next > declared_total {
+		Some("TRANSFER_OVERRUN")
+	} else if next > hard_cap {
+		Some("ITEM_TOO_LARGE")
+	} else {
+		None
+	}
+}
+
 /// 定义接收状态
 #[allow(dead_code)]
 enum ReceiverState {
@@ -111,6 +178,12 @@ enum ReceiverState {
 		tx: mpsc::Sender<ReceiverTaskMsg>,
 		received_bytes: u64,
 		total_bytes: u64,
+		/// 本次传输适用的硬上限（来自 size_limits，按 item 类型选定）
+		hard_cap_bytes: u64,
+		/// 传输开始时间（用于结束时只写一条汇总日志，含耗时）
+		started_ts_ms: i64,
+		/// 最后一次收到数据块的时间（用于空闲超时回收）
+		last_activity_ms: i64,
 		last_progress_emit: i64, // 用于节流 progress 事件
 	},
 	// 已触发 Finish，等待落地结果（避免重复 Finish / 重复 End）
@@ -470,6 +543,8 @@ impl SessionActor {
 					// 3. 心跳
 					_ = heartbeat_ticker.tick() => {
 						actor.tick_heartbeat().await?;
+						// 每 2s 顺带回收空闲超时的入站传输（避免 tmp 文件 / fd 泄漏）
+						actor.sweep_idle_receivers().await;
 					}
 				}
 			}
@@ -718,6 +793,27 @@ impl SessionActor {
 			Some(rule) => Ok(rule.accept_from_peer),
 			None => Ok(true),
 		}
+	}
+
+	/// 归类入站传输的类型，用于选择 size_limits 中的硬上限。
+	///
+	/// - `file_id` 非空：FileList 的子文件传输，按 file 上限处理；
+	/// - 否则优先用本地 item 的 mime（本地元数据比对端声明更可信），
+	///   查不到才回退到 `ContentBegin.mime`。
+	fn inbound_item_kind(
+		&self,
+		item_id: &str,
+		file_id: Option<&str>,
+		declared_mime: &str,
+	) -> ItemKind {
+		if file_id.is_some() {
+			return ItemKind::FileList;
+		}
+		let local_mime = {
+			let store = self.store.lock().unwrap();
+			store.get_item_mime(item_id).ok().flatten()
+		};
+		kind_from_mime(local_mime.as_deref().unwrap_or(declared_mime))
 	}
 
 	async fn handle_control_msg(&mut self, msg: CtrlMsg) -> Result<()> {
@@ -1106,6 +1202,73 @@ impl SessionActor {
 			return Ok(());
 		}
 
+		// 1) 并发上限：已存在 MAX_CONCURRENT_RECEIVERS 个接收时直接拒绝，
+		//    不分配 channel / Task / tmp 文件，避免对端刷 ContentBegin 撑爆资源。
+		if !receiver_slot_available(self.receivers.len()) {
+			{
+				let mut log_store = self.log_store.lock().unwrap();
+				let _ = log_store.log_warn(
+					"Session",
+					&format!(
+						"Too many concurrent transfers, rejected ContentBegin: transfer_id={req_id}, item_id={item_id}, active={}",
+						self.receivers.len()
+					),
+					Some(&format!(
+						"并发传输过多，已拒绝该传输请求: 传输ID={req_id}，项目ID={item_id}，当前并发={}",
+						self.receivers.len()
+					)),
+				);
+			}
+			self.emit_transfer_failed(
+				&req_id,
+				"TOO_MANY_TRANSFERS",
+				&format!(
+					"rejecting ContentBegin: {MAX_CONCURRENT_RECEIVERS} concurrent transfers already active"
+				),
+			);
+			self.send_ctrl(CtrlMsg::ContentCancel {
+				req_id,
+				reason: "too many concurrent transfers".into(),
+			})
+			.await?;
+			return Ok(());
+		}
+
+		// 2) 硬上限：对端声明的 total_bytes 超过 size_limits 中对应类型的硬上限时，
+		//    在落盘前就拒绝（按 item 实际类型选 text/image/file；FileList 单文件用 file 上限）。
+		let item_kind = self.inbound_item_kind(&item_id, file_id.as_deref(), &mime);
+		let hard_cap = hard_cap_bytes(&item_kind, &self.config.app_config.size_limits);
+		if total_bytes > hard_cap {
+			{
+				let mut log_store = self.log_store.lock().unwrap();
+				let _ = log_store.log_warn(
+					"Session",
+					&format!(
+						"Transfer rejected by hard size limit: transfer_id={req_id}, item_id={item_id}, kind={item_kind:?}, declared_bytes={total_bytes}, hard_cap={hard_cap}"
+					),
+					Some(&format!(
+						"传输因超出硬上限被拒绝: 传输ID={req_id}，项目ID={item_id}，类型={item_kind:?}，声明字节={total_bytes}，硬上限={hard_cap}"
+					)),
+				);
+			}
+			self.emit_transfer_failed(
+				&req_id,
+				"ITEM_TOO_LARGE",
+				&format!(
+					"declared total_bytes={total_bytes} exceeds hard cap {hard_cap} for {item_kind:?}"
+				),
+			);
+			self.send_ctrl(CtrlMsg::ContentCancel {
+				req_id,
+				reason: format!("hard size limit exceeded: {total_bytes} > {hard_cap}"),
+			})
+			.await?;
+			return Ok(());
+		}
+
+		// 注：磁盘剩余空间检查需要平台无关的 statvfs 封装（当前工作区没有 fs2/sysinfo 依赖），
+		// 因此这一子项按任务说明跳过；写入失败仍会由 writer Task 以 COMMIT_FAILED 上报。
+
 		let tmp_path = match self.cas.get_tmp_path(&req_id) {
 			Ok(p) => p,
 			Err(e) => {
@@ -1249,6 +1412,9 @@ impl SessionActor {
 			}
 		});
 
+		// 注意：如果是 Resume，这里的 total_bytes 可能是剩余量或总量，
+		// 取决于协议约定；无论如何它都是本端允许写入的上限。
+		let started_ts_ms = now_ms();
 		let receiver_state = ReceiverState::Receiving {
 			transfer_id: req_id.clone(),
 			item_id,
@@ -1257,7 +1423,10 @@ impl SessionActor {
 			mime,
 			tx, // 保存 Sender
 			received_bytes: 0,
-			total_bytes, // 注意：如果是 Resume，这里的 total_bytes 可能是剩余量或总量，取决于协议约定，此处仅做显示
+			total_bytes,
+			hard_cap_bytes: hard_cap,
+			started_ts_ms,
+			last_activity_ms: started_ts_ms,
 			last_progress_emit: 0,
 		};
 		self.receivers.insert(req_id, receiver_state);
@@ -1265,39 +1434,69 @@ impl SessionActor {
 	}
 
 	async fn handle_data_chunk(&mut self, transfer_id: String, data: bytes::Bytes) -> Result<()> {
+		let chunk_size = data.len() as u64;
+
+		// 越界闸门：先做只读检查；一旦命中，整条传输失败（writer Task 退出并删除 tmp），
+		// 绝不允许对端写出其声明的 total_bytes，也不允许越过 size_limits 的硬上限。
+		let overrun: Option<(&'static str, String)> = match self.receivers.get(&transfer_id) {
+			Some(ReceiverState::Receiving {
+				received_bytes,
+				total_bytes,
+				hard_cap_bytes,
+				..
+			}) => chunk_overrun(*received_bytes, chunk_size, *total_bytes, *hard_cap_bytes).map(
+				|code| {
+					(
+						code,
+						format!(
+							"received={received_bytes}+{chunk_size}, declared_total={total_bytes}, hard_cap={hard_cap_bytes}"
+						),
+					)
+				},
+			),
+			_ => None,
+		};
+		if let Some((code, detail)) = overrun {
+			{
+				let mut log_store = self.log_store.lock().unwrap();
+				let _ = log_store.log_error(
+					"Session",
+					&format!(
+						"Transfer aborted for exceeding declared size: transfer_id={transfer_id}, code={code}, {detail}"
+					),
+					Some(&format!(
+						"传输写出声明大小之外的数据，已终止: 传输ID={transfer_id}，错误码={code}，{detail}"
+					)),
+					Some(&detail),
+				);
+			}
+			self.abort_receiver(&transfer_id, code, &detail, "size limit exceeded")
+				.await;
+			return Ok(());
+		}
+
 		if let Some(ReceiverState::Receiving {
 			tx,
 			item_id,
 			received_bytes,
 			total_bytes,
+			last_activity_ms,
 			last_progress_emit,
 			..
 		}) = self.receivers.get_mut(&transfer_id)
 		{
-			let chunk_size = data.len();
-			*received_bytes += chunk_size as u64;
+			*received_bytes = received_bytes.saturating_add(chunk_size);
+			let now = now_ms();
+			*last_activity_ms = now;
 
 			if tx.send(ReceiverTaskMsg::Chunk(data)).await.is_err() {
 				self.receivers.remove(&transfer_id);
 				return Ok(());
 			}
 
-			{
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_debug(
-					"Session",
-					&format!(
-						"Data chunk received: transfer_id={transfer_id}, size={chunk_size} bytes, total_received={}",
-						*received_bytes
-					),
-					Some(&format!(
-						"数据块已接收: 传输ID={transfer_id}，大小={chunk_size} 字节，已接收总计={}",
-						*received_bytes
-					)),
-				);
-			}
-
-			let now = now_ms();
+			// 注意：这里绝不逐块写日志 —— 每 64KB 一条 SQLite 插入会在
+			// 1GB 传输中产生约 1.6 万行，且占用 actor 主循环的 std Mutex。
+			// 每个传输只在成功/失败/超时结束时写一条汇总。
 			if now - *last_progress_emit > 200 {
 				let progress_evt = serde_json::json!({
 					"type": "TRANSFER_PROGRESS",
@@ -1314,6 +1513,57 @@ impl SessionActor {
 			}
 		}
 		Ok(())
+	}
+
+	/// 立即终止一条接收中的传输：通知 writer Task 退出（RAII 删除 tmp 文件），
+	/// 上报 TRANSFER_FAILED，并尽力通知对端停止发送（ContentCancel 是非致命的）。
+	async fn abort_receiver(&mut self, req_id: &str, code: &str, detail: &str, peer_reason: &str) {
+		let Some(ReceiverState::Receiving { tx, .. }) = self.receivers.remove(req_id) else {
+			return;
+		};
+		let _ = tx.send(ReceiverTaskMsg::Cancel).await;
+		self.emit_transfer_failed(req_id, code, detail);
+		let _ = self
+			.send_ctrl(CtrlMsg::ContentCancel {
+				req_id: req_id.to_string(),
+				reason: peer_reason.to_string(),
+			})
+			.await;
+	}
+
+	/// 回收空闲超时的 receiver：对端开传输后保持心跳却不发数据时，
+	/// 不能让它永久占着 tmp 文件与 fd。
+	async fn sweep_idle_receivers(&mut self) {
+		let now = now_ms();
+		let idle: Vec<String> = self
+			.receivers
+			.iter()
+			.filter_map(|(id, st)| match st {
+				ReceiverState::Receiving {
+					last_activity_ms, ..
+				} if receiver_idle_expired(now, *last_activity_ms) => Some(id.clone()),
+				_ => None,
+			})
+			.collect();
+		for id in idle {
+			{
+				let mut log_store = self.log_store.lock().unwrap();
+				let _ = log_store.log_warn(
+					"Session",
+					&format!("Receiver idle timeout, cancelling transfer: transfer_id={id}"),
+					Some(&format!(
+						"接收方空闲超时，正在取消传输: 传输ID={id}，超时={RECEIVER_IDLE_TIMEOUT_MS}ms"
+					)),
+				);
+			}
+			self.abort_receiver(
+				&id,
+				"TRANSFER_IDLE_TIMEOUT",
+				"no data chunk received before idle timeout",
+				"receiver idle timeout",
+			)
+			.await;
+		}
 	}
 
 	async fn handle_content_end(&mut self, req_id: String) -> Result<()> {
