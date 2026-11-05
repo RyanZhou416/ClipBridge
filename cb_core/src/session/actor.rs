@@ -110,6 +110,7 @@ fn ctrl_msg_kind(msg: &CtrlMsg) -> &'static str {
 		CtrlMsg::ContentBegin { .. } => "ContentBegin",
 		CtrlMsg::ContentEnd { .. } => "ContentEnd",
 		CtrlMsg::ContentCancel { .. } => "ContentCancel",
+		CtrlMsg::ContentDenied { .. } => "ContentDenied",
 	}
 }
 
@@ -1213,6 +1214,34 @@ impl SessionActor {
 				// 2. 如果我是接收者：调用 handle_content_cancel
 				self.handle_content_cancel(req_id, reason).await?;
 			}
+			CtrlMsg::ContentDenied {
+				req_id,
+				code,
+				message,
+			} => {
+				// 非致命：对端拒绝提供内容只影响本次传输。绝不能像 CtrlMsg::Error 那样 bail，
+				// 否则用户切换一次共享开关会导致会话反复断开/重连。
+				let detail =
+					message.unwrap_or_else(|| format!("peer denied content request ({code})"));
+				{
+					let mut log_store = self.log_store.lock().unwrap();
+					let _ = log_store.log_warn(
+						"Session",
+						&format!(
+							"Content request denied by peer: transfer_id={req_id}, code={code}, message={detail}"
+						),
+						Some(&format!(
+							"对端拒绝内容请求: 传输ID={req_id}，错误码={code}，信息={detail}"
+						)),
+					);
+				}
+				// 清理可能残留的同 req_id 发送任务（正常路径下此时还没有 Sender）
+				if let Some(state) = self.senders.remove(&req_id) {
+					state.handle.abort();
+				}
+				// 让发起方看到本次传输失败，而不是会话级错误
+				self.emit_transfer_failed(&req_id, &code, &detail);
+			}
 
 			CtrlMsg::ItemDelete { item_id, .. } => {
 				// 认证闸门已在 handle_control_msg 顶部保证此时必然 Online，无需重复判断。
@@ -1857,9 +1886,11 @@ impl SessionActor {
 		// 出站策略：share_to_peer=false（或对端身份未知）时拒绝提供任何内容。
 		// 这是内容外泄的最后一道闸门 —— 即使对端绕过 UI 直接发 ContentGet 也拿不到字节。
 		if !self.outbound_share_allowed().await? {
+			// 用 ContentDenied（非致命）而不是 Error：对端把任何 Error 都当作致命错误并断开
+			// 会话，用户切换一次共享开关就会引发断连/退避/重连的连环抖动。
 			let _ = self
-				.send_ctrl(CtrlMsg::Error {
-					reply_to: Some(transfer_id),
+				.send_ctrl(CtrlMsg::ContentDenied {
+					req_id: transfer_id,
 					code: "PEER_POLICY_DENIED".into(),
 					message: Some("share_to_peer is disabled for this peer".into()),
 				})
@@ -2384,6 +2415,12 @@ mod auth_gate_tests {
 			CtrlMsg::ContentCancel {
 				req_id: "t-1".into(),
 				reason: "test".into(),
+			},
+			// 策略拒绝属于业务面：未认证时同样必须被认证闸门拦下
+			CtrlMsg::ContentDenied {
+				req_id: "t-1".into(),
+				code: "PEER_POLICY_DENIED".into(),
+				message: None,
 			},
 		];
 		for msg in business {
