@@ -4,8 +4,8 @@
 
 # ---- Security advisories ----
 [advisories]
-# Fail CI if there are known vulnerabilities
-severity-threshold = "low"
+# cargo-deny 0.19+ 的配置版本；旧键 severity-threshold 已被移除
+version = 2
 # Warn if a crate is yanked
 yanked = "warn"
 # Do not ignore any advisories
@@ -13,8 +13,7 @@ ignore = []
 
 # ---- License checking ----
 [licenses]
-# We want to know about licenses, but not block development yet
-unlicensed = "deny"
+version = 2
 
 # Common permissive licenses
 allow = [
@@ -23,14 +22,19 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Zlib"
+    "Zlib",
+    # unicode-ident >= 1.0.27 bundles Unicode tables under Unicode-3.0 (OSI approved)
+    "Unicode-3.0"
 ]
 
-# Weak copyleft: warn (review later)
-copyleft = "warn"
-
+# Weak copyleft: 不在 allow 列表内的许可证会被拒绝（比原来的 warn 更严格，但配置更简单）
 # Confidence level for license detection
 confidence-threshold = 0.8
+
+# 工作区内的私有 crate 不强制 license 元数据（第三方 crate 仍然强制）
+# 后续建议：给四个 crate 的 manifest 加 `license.workspace = true`
+[licenses.private]
+ignore = true
 
 # ---- Dependency bans ----
 [bans]
@@ -49,4 +53,6 @@ deny = []
 unknown-registry = "deny"
 
 # Git dependencies are allowed but should be reviewed
-git = "warn"
+# 注意：cargo-deny 0.19+ 把该键从 `git` 改名为 `unknown-git`；
+# 旧键会让整个配置反序列化失败（gate 直接崩，而不是报告问题），所以必须用新键。
+unknown-git = "warn"

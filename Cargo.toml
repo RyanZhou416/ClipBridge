@@ -17,3 +17,10 @@ authors = ["Ryan Zhou <zxr1269335000@gmail.com>"]
 description = "A cross-platform clipboard sync tool."
 license = "MIT"
 repository = "https://github.com/RyanZhou416/ClipBridge"
+
+# 发布构建：薄 LTO + 单 codegen unit + 剥离符号，减小 cdylib 体积
+# 注意：不要加 panic = "abort"，FFI 边界依赖 std::panic::catch_unwind
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
