@@ -35,6 +35,14 @@ public class ActivationService : IActivationService
     /// <summary>SW_SHOWNOACTIVATE：显示窗口但不激活它。</summary>
     private const int SW_SHOWNOACTIVATE = 4;
 
+    /// <summary>
+    /// 主题初始化 A/B 对照开关（默认关闭）：
+    /// <c>CB_SYNC_THEME=1</c> → 旧路径：窗口创建前就 await 主题设置读取（对照臂）；
+    /// 未设置              → 新路径：主题读取与窗口构造重叠，首帧之后再套用（满足视觉规则时）。
+    /// </summary>
+    private static readonly bool SyncThemeForAb =
+        string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_THEME"), "1", StringComparison.Ordinal);
+
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
@@ -49,11 +57,23 @@ public class ActivationService : IActivationService
 
     public async Task ActivateAsync(object activationArgs)
     {
-        // Execute tasks before activation.
-        // 只初始化主题（读取设置），不在此处启动 Core：
-        // Core 初始化会打开 SQLite、生成 TLS 证书、启动 mDNS，不能阻塞窗口创建与激活路径。
-        await InitializeThemeAsync();
-        StartupTrace.Mark("theme-init-done");
+        // ① 主题设置读取（LEVER 2）
+        // 默认：只启动、不等待，让它与下面的窗口构造重叠（实测主题初始化约 68ms）。
+        // 窗口显示之前再根据“视觉正确性规则”决定：能安全推迟就推迟到首帧之后套用，
+        // 不能就回退到同步路径。CB_SYNC_THEME=1 时完全保持改动前的顺序。
+        Task? themeReadTask;
+        if (SyncThemeForAb)
+        {
+            StartupTrace.Mark("ab-mode-theme-sync");
+            themeReadTask = StartThemeRead();
+            await themeReadTask;
+            StartupTrace.Mark("theme-init-done");
+        }
+        else
+        {
+            StartupTrace.Mark("ab-mode-theme-deferred");
+            themeReadTask = StartThemeRead();
+        }
 
         if (App.MainWindow == null)
         {
@@ -62,6 +82,32 @@ public class ActivationService : IActivationService
         StartupTrace.Mark("mainwindow-created");
 
         var mainWindow = App.MainWindow!;
+
+        // 主题是否允许推迟到首帧之后套用（只有“推迟不会造成可见闪烁”时才为 true）。
+        var themeApplyDeferred = false;
+        if (!SyncThemeForAb)
+        {
+            // 视觉正确性规则（不可妥协）：
+            // 窗口首帧一定用“当前系统主题”绘制。若保存的主题与它不同，把套用推迟到首帧之后
+            // 就会先看到系统主题、再跳成保存主题——一次可见的闪烁。
+            // 因此必须在窗口可见（Activate）之前拿到保存值，并做一次廉价判定：
+            //   ① 保存值 = Default      → 它本来就等于系统主题，之后套用是无操作，安全；
+            //   ② 保存值 = 当前系统主题 → 之后套用同样无视觉变化，安全；
+            //   ③ 其它                  → 本次启动回退同步路径（主题留在关键路径上），宁可慢也不闪。
+            // 判定只是枚举比较；保存值来自上面同一次设置读取。正常情况该读取已与窗口构造
+            // 重叠完成，await 一个已完成任务不占关键路径。
+            var readWasInFlightWhenWindowReady = !themeReadTask!.IsCompleted;
+            await themeReadTask;
+            if (readWasInFlightWhenWindowReady)
+            {
+                // 读取比窗口构造慢：只能在窗口可见前等它，这属于回退，不是默认路径。
+                StartupTrace.Mark("theme-read-waited");
+            }
+            StartupTrace.Mark("theme-init-done");
+
+            themeApplyDeferred = CanApplyThemeAfterFirstFrame();
+            StartupTrace.Mark(themeApplyDeferred ? "theme-apply-deferred" : "theme-sync-fallback");
+        }
 
         // 关键改动：先让窗口可见，Shell 排到首帧之后构建。
         // 旧顺序里 ShellPage 的 XAML（实测约 164ms）发生在 Activate() 之前，直接抬高“到窗口可见”。
@@ -129,12 +175,50 @@ public class ActivationService : IActivationService
         }
 
         // Execute tasks after activation.
-        await StartupAsync();
+        // 主题若可安全推迟、且 Shell 确实排在首帧之后构建，那么让那次构建去套用主题
+        // （BuildShellAndHandleActivationAsync 本来就会重新套用一次）。
+        // 其余情况（同步模式 / 视觉规则不允许 / 没有延迟构建）保持改动前的关键路径套用。
+        await StartupAsync(applyThemeOnCriticalPath: !(themeApplyDeferred && buildShellDeferred));
         StartupTrace.Mark("startup-await-done");
 
         // 窗口已经可见，再异步启动 Core 初始化（不阻塞激活路径）
         StartCoreInitialization();
         StartupTrace.Mark("core-init-kicked-off");
+    }
+
+    /// <summary>
+    /// 启动主题设置读取（LEVER 2）：只启动、不等待。
+    /// 读取完成时刻用 continuation 打点：窗口构造期间 UI 线程被占住，
+    /// 若等到 await 之后再打点，theme-read-done 会失真成“窗口构造之后”。
+    /// </summary>
+    private Task StartThemeRead()
+    {
+        StartupTrace.Mark("theme-init-enter");
+        var task = InitializeThemeAsync();
+        _ = task.ContinueWith(_ => StartupTrace.Mark("theme-read-done"), TaskScheduler.Default);
+        return task;
+    }
+
+    /// <summary>
+    /// 视觉正确性规则（不可妥协）：只有保存的主题与窗口首帧将要绘制的主题一致时，
+    /// 才允许把“套用主题”推迟到首帧之后；否则必须让主题留在关键路径上，宁可慢也不闪。
+    /// 该判定只做枚举比较，没有额外 IO。
+    /// </summary>
+    private bool CanApplyThemeAfterFirstFrame()
+    {
+        var theme = _themeSelectorService.Theme;
+
+        // Default = 跟随系统，本身就是首帧的主题；之后再套用是无操作。
+        if (theme == ElementTheme.Default)
+        {
+            return true;
+        }
+
+        var systemTheme = Application.Current.RequestedTheme == ApplicationTheme.Dark
+            ? ElementTheme.Dark
+            : ElementTheme.Light;
+
+        return theme == systemTheme;
     }
 
     private async Task HandleActivationAsync(object activationArgs)
@@ -157,9 +241,13 @@ public class ActivationService : IActivationService
         await _themeSelectorService.InitializeAsync();
     }
 
-    private async Task StartupAsync()
+    private async Task StartupAsync(bool applyThemeOnCriticalPath)
     {
-        await _themeSelectorService.SetRequestedThemeAsync();
+        if (applyThemeOnCriticalPath)
+        {
+            await _themeSelectorService.SetRequestedThemeAsync();
+        }
+
         await Task.CompletedTask;
     }
 
