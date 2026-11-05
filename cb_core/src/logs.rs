@@ -1,6 +1,37 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// 日志保留天数：打开数据库时删除早于该天数的记录。
+const LOG_RETENTION_DAYS: i64 = 7;
+
+/// `logs` 表允许的最大行数：超出部分按时间从最旧的开始删除。
+const LOG_MAX_ROWS: i64 = 200_000;
+
+/// 单次清理删除超过该行数时才执行 VACUUM。
+///
+/// VACUUM 会重写整个数据库文件（可能数百 MB），期间持有独占锁，代价远高于普通
+/// DELETE；只有释放的页足够多时才值得做，避免每次打开都拖慢启动。
+const LOG_VACUUM_MIN_DELETED: i64 = 10_000;
+
+const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
+
+/// 日志保留策略的执行结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PruneStats {
+	/// 因超过保留天数而删除的行数
+	pub deleted_by_age: i64,
+	/// 因超过行数上限而删除的行数
+	pub deleted_by_count: i64,
+	/// 是否执行了 VACUUM
+	pub vacuumed: bool,
+}
+
+impl PruneStats {
+	pub fn total_deleted(&self) -> i64 {
+		self.deleted_by_age + self.deleted_by_count
+	}
+}
 
 /// 多语言消息结构
 /// 设计为可扩展：可以轻松添加新语言字段
@@ -103,7 +134,12 @@ impl LogStore {
 		let conn = Connection::open(db_path)?;
 		Self::init_pragmas(&conn)?;
 		Self::init_schema(&conn)?;
-		Ok(Self { conn })
+		let mut store = Self { conn };
+		// 启动时执行一次保留策略：日志维护失败不应让核心无法启动，只记录错误。
+		if let Err(e) = store.prune(crate::util::now_ms()) {
+			eprintln!("[logs] prune on open failed: {e}");
+		}
+		Ok(store)
 	}
 
 	fn init_pragmas(conn: &Connection) -> anyhow::Result<()> {
@@ -436,15 +472,14 @@ impl LogStore {
 			.conn
 			.query_row("SELECT COUNT(*) FROM logs", [], |r| r.get(0))?;
 
-		let first_ms: Option<i64> = self
-			.conn
-			.query_row("SELECT MIN(ts_utc) FROM logs", [], |r| r.get(0))
-			.optional()?;
+		// 空表时 MIN/MAX 返回 NULL：按可空 i64 读取，不能假设一定有一行非空值。
+		let first_ms: Option<i64> =
+			self.conn
+				.query_row("SELECT MIN(ts_utc) FROM logs", [], |r| r.get(0))?;
 
-		let last_ms: Option<i64> = self
-			.conn
-			.query_row("SELECT MAX(ts_utc) FROM logs", [], |r| r.get(0))
-			.optional()?;
+		let last_ms: Option<i64> =
+			self.conn
+				.query_row("SELECT MAX(ts_utc) FROM logs", [], |r| r.get(0))?;
 
 		let mut by_level = [0i64; 7];
 		for level in 0..7 {
@@ -465,6 +500,60 @@ impl LogStore {
 			last_ms,
 			by_level,
 		})
+	}
+
+	/// 按保留策略清理日志：先删早于 [`LOG_RETENTION_DAYS`] 天的记录，再把总行数
+	/// 压到 [`LOG_MAX_ROWS`] 以内（从最旧的开始）；删除量达到
+	/// [`LOG_VACUUM_MIN_DELETED`] 时执行一次 VACUUM 归还磁盘页。
+	pub fn prune(&mut self, now_ms: i64) -> anyhow::Result<PruneStats> {
+		self.prune_with_limits(
+			now_ms,
+			LOG_RETENTION_DAYS,
+			LOG_MAX_ROWS,
+			LOG_VACUUM_MIN_DELETED,
+		)
+	}
+
+	/// 保留策略的实际实现，参数化边界便于单元测试。
+	fn prune_with_limits(
+		&mut self,
+		now_ms: i64,
+		retention_days: i64,
+		max_rows: i64,
+		vacuum_min_deleted: i64,
+	) -> anyhow::Result<PruneStats> {
+		let cutoff_ms = now_ms.saturating_sub(retention_days.saturating_mul(MS_PER_DAY));
+		let deleted_by_age =
+			self.conn
+				.execute("DELETE FROM logs WHERE ts_utc < ?1", params![cutoff_ms])? as i64;
+
+		let total: i64 = self
+			.conn
+			.query_row("SELECT COUNT(*) FROM logs", [], |r| r.get(0))?;
+		let deleted_by_count = if total > max_rows {
+			let excess = total - max_rows;
+			self.conn.execute(
+				r"DELETE FROM logs WHERE id IN (
+                    SELECT id FROM logs ORDER BY ts_utc ASC, id ASC LIMIT ?1
+                )",
+				params![excess],
+			)? as i64
+		} else {
+			0
+		};
+
+		let mut stats = PruneStats {
+			deleted_by_age,
+			deleted_by_count,
+			vacuumed: false,
+		};
+		// VACUUM 是重操作（重写整库 + 独占锁）：只有删除量足够大才值得做。
+		// 这里都是自动提交的独立语句，不会在事务中执行 VACUUM。
+		if vacuum_min_deleted > 0 && stats.total_deleted() >= vacuum_min_deleted {
+			self.conn.execute_batch("VACUUM")?;
+			stats.vacuumed = true;
+		}
+		Ok(stats)
 	}
 
 	/// 删除指定时间之前的日志
@@ -698,4 +787,79 @@ pub struct LogStats {
 pub struct SourceStats {
 	pub components: std::collections::HashMap<String, i64>,
 	pub categories: std::collections::HashMap<String, i64>,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn write_at(store: &mut LogStore, ts_utc: i64) {
+		store
+			.write(ts_utc, 2, "Test", "Retention", "message", None, None)
+			.unwrap();
+	}
+
+	#[test]
+	fn prune_enforces_age_and_row_limits() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = LogStore::open(dir.path()).unwrap();
+		let now = 1_700_000_000_000i64;
+		let expired = now - (LOG_RETENTION_DAYS + 1) * MS_PER_DAY;
+		let fresh = now - 1_000;
+
+		for _ in 0..5 {
+			write_at(&mut store, expired);
+		}
+		for _ in 0..20 {
+			write_at(&mut store, fresh);
+		}
+
+		// 保留 7 天 / 只留 10 条；15 条删除量低于 VACUUM 阈值，不应触发 VACUUM。
+		let stats = store
+			.prune_with_limits(now, LOG_RETENTION_DAYS, 10, 10_000)
+			.unwrap();
+		assert_eq!(stats.deleted_by_age, 5);
+		assert_eq!(stats.deleted_by_count, 10);
+		assert_eq!(stats.total_deleted(), 15);
+		assert!(!stats.vacuumed);
+
+		let remaining = store.stats().unwrap();
+		assert_eq!(remaining.count, 10);
+		assert!(remaining.first_ms.unwrap() >= fresh - 1);
+		assert!(remaining.last_ms.unwrap() >= fresh - 1);
+	}
+
+	#[test]
+	fn prune_vacuums_only_above_threshold() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = LogStore::open(dir.path()).unwrap();
+		let now = crate::util::now_ms();
+		for _ in 0..6 {
+			write_at(&mut store, now - MS_PER_DAY);
+		}
+
+		// 行数上限设为 0（删掉全部 6 条），阈值 5：删除量达到阈值应触发 VACUUM。
+		let stats = store
+			.prune_with_limits(now, LOG_RETENTION_DAYS, 0, 5)
+			.unwrap();
+		assert_eq!(stats.deleted_by_age, 0);
+		assert_eq!(stats.total_deleted(), 6);
+		assert!(stats.vacuumed);
+		assert_eq!(store.stats().unwrap().count, 0);
+	}
+
+	#[test]
+	fn open_prunes_expired_rows() {
+		let dir = tempfile::tempdir().unwrap();
+		let now = crate::util::now_ms();
+		{
+			let mut store = LogStore::open(dir.path()).unwrap();
+			write_at(&mut store, now - (LOG_RETENTION_DAYS + 1) * MS_PER_DAY);
+			write_at(&mut store, now);
+		}
+
+		// 重新打开时应自动清理过期记录，仅保留新鲜记录。
+		let reopened = LogStore::open(dir.path()).unwrap();
+		assert_eq!(reopened.stats().unwrap().count, 1);
+	}
 }
