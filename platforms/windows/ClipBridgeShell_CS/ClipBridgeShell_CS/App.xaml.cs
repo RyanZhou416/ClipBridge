@@ -71,8 +71,7 @@ public partial class App : Application
     /// 并抑制启动期的登录提醒弹窗。用于连续测量启动耗时，避免把用户正在用的窗口反复抢掉。
     /// 未设置时行为与原先完全一致。
     /// </summary>
-    internal static readonly bool SuppressForeground =
-        string.Equals(Environment.GetEnvironmentVariable("CB_STARTUP_NO_FOREGROUND"), "1", StringComparison.Ordinal);
+    internal static readonly bool SuppressForeground = MeasurementWindow.SuppressForeground;
 
     /// <summary>
     /// 启动耗时 A/B 对照开关（默认关闭，只用于同一份二进制内交替实测）：
@@ -552,9 +551,9 @@ public partial class App : Application
             StartupTrace.Mark("warm-show-begin");
             if (SuppressForeground)
             {
-                // 测量模式：让窗口可见但不抢焦点（否则连测多次会反复打断用户）
+                // 测量模式：可见但不抢焦点；CB_STARTUP_OFFSCREEN=1 时移到屏幕外，屏幕上完全看不到。
                 var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
-                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                StartupTrace.Mark(MeasurementWindow.ShowWithoutFocus(hwnd));
             }
             else
             {

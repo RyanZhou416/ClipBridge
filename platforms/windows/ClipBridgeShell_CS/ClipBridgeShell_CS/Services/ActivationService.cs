@@ -160,10 +160,9 @@ public class ActivationService : IActivationService
         }
         else if (SuppressForeground)
         {
-            // 测量模式：可见但不抢焦点。不能调用 Activate()（它内部会 SetForegroundWindow）。
+            // 测量模式：可见但不抢焦点；CB_STARTUP_OFFSCREEN=1 时移到屏幕外，屏幕上完全看不到。
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
-            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            StartupTrace.Mark("window-shown-noactivate");
+            StartupTrace.Mark(MeasurementWindow.ShowWithoutFocus(hwnd));
         }
         else
         {

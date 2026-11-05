@@ -372,6 +372,9 @@ function Measure-OneLaunch {
     $childEnvironment = @{}
     if ($NoForeground) {
         $childEnvironment['CB_STARTUP_NO_FOREGROUND'] = '1'
+        # 光"不抢焦点"还不够：窗口仍会出现在屏幕上，连续测几十次会让用户看到反复闪烁。
+        # CB_STARTUP_OFFSCREEN=1 把窗口显示到虚拟桌面之外（渲染照常，测量语义不变）。
+        $childEnvironment['CB_STARTUP_OFFSCREEN'] = '1'
     }
     foreach ($key in $VariantEnv.Keys) {
         $childEnvironment[$key] = $VariantEnv[$key]
