@@ -26,8 +26,10 @@ public sealed partial class ShellPage : Page
 
     public ShellPage(ShellViewModel viewModel)
     {
+        StartupTrace.Mark("shellpage-ctor-enter");
         ViewModel = viewModel;
         InitializeComponent();
+        StartupTrace.Mark("shellpage-xaml-done");
 
         ViewModel.NavigationService.Frame = NavigationFrame;
         ViewModel.NavigationViewService.Initialize(NavigationViewControl);
@@ -41,6 +43,7 @@ public sealed partial class ShellPage : Page
             mainWindow.SetTitleBar(AppTitleBar);
             mainWindow.Activated += MainWindow_Activated;
         }
+        StartupTrace.Mark("shellpage-ctor-exit");
         // 注意：构造函数里不要调用 Localizer.Get()。
         // 首次调用会触发本地化资源文件的读取/构建；ShellPage 现在虽然已推迟到首帧之后构建，
         // 但这条调用仍会把它拉回启动路径（TASK 2），所以本地化标题统一改到 OnLoaded 里设置。

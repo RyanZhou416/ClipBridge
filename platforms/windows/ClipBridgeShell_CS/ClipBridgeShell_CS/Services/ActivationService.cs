@@ -43,6 +43,14 @@ public class ActivationService : IActivationService
         string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_TITLEBAR_FIRST"), "1", StringComparison.Ordinal);
 
     /// <summary>
+    /// 实测记录（勿重复试验）：
+    /// 1) "Theme == Default 时跳过 Shell 重建后的重套主题" —— 无效，反而 +23.4ms。那 89ms 是
+    ///    Content 赋值后的首次布局，不是 RequestedTheme 赋值本身，跳过赋值救不了布局。
+    /// 2) "延迟构建改用 Normal 优先级" —— 可见 +11.5ms、可用 +44.7ms，两项都更差。
+    /// 结论：这两条都不做，保持"Low 优先级 + 始终重套主题"。
+    /// </summary>
+
+    /// <summary>
     /// 主题初始化 A/B 对照开关（默认关闭）：
     /// <c>CB_SYNC_THEME=1</c> → 旧路径：窗口创建前就 await 主题设置读取（对照臂）；
     /// 未设置              → 新路径：主题读取与窗口构造重叠，首帧之后再套用（满足视觉规则时）。
@@ -287,6 +295,8 @@ public class ActivationService : IActivationService
         }
 
         // DispatcherQueueHandler 是 async void 语义，异常必须在回调内部兜住，不能逸出到消息循环。
+        // 固定使用 Low：实测改用 Normal 会让"窗口可见"恶化约 +11.5ms、"可交互"恶化约 +44.7ms
+        // （8 对交替，Normal 只在 4/8 对的可用时间上更快），说明抢占 UI 线程反而拖慢首帧。
         mainWindow.DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, async () =>
         {
             try
@@ -325,11 +335,14 @@ public class ActivationService : IActivationService
 
         if (_shell == null)
         {
+            StartupTrace.Mark("deferred-build-enter");
             // 本地化器（LEVER 1）可能还在后台构建：ShellPage 的 XAML l:Uids 需要它先就绪。
             // 这里在首帧之后，等待不占关键路径；任务内部吞掉异常，不会让构建失败。
             await App.WaitLocalizerReadyAsync();
+            StartupTrace.Mark("deferred-localizer-waited");
 
             _shell = App.GetService<ShellPage>();
+            StartupTrace.Mark("deferred-shell-resolved");
         }
 
         // 重试时 Content 可能已经就是这个 Shell，重复赋值会抛“元素已有父级”。
@@ -337,12 +350,19 @@ public class ActivationService : IActivationService
         {
             mainWindow.Content = _shell;
         }
+        StartupTrace.Mark("deferred-content-set");
 
         // Shell 替换占位层后重新套用已保存的主题（新根元素不会继承占位层的 RequestedTheme），
         // 顺带按新主题刷新标题栏按钮颜色。
+        //
+        // 曾试过"Theme == Default 时跳过这次重套"：交替 A/B 实测无效（配对 Δ 中位数 +23.4ms，
+        // 仅 2/8 更快）。原因是这段 89ms 并非赋值本身，而是 Content 赋值后首次布局/渲染
+        // 落在 await 让出期间；跳过赋值救不了布局。已回滚。
         await _themeSelectorService.SetRequestedThemeAsync();
+        StartupTrace.Mark("deferred-theme-applied");
 
         await HandleActivationAsync(activationArgs);
+        StartupTrace.Mark("deferred-navigation-done");
     }
 
     /// <summary>
