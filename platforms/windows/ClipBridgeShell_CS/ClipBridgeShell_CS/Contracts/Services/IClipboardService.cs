@@ -9,7 +9,13 @@ namespace ClipBridgeShell_CS.Contracts.Services;
 
 public interface IClipboardService
 {
-    event EventHandler ContentChanged;
+    /// <summary>
+    /// 剪贴板内容变化。事件携带变化发生时的快照：
+    /// 由 <see cref="ClipboardService"/> 在“写回锁定内容”之前捕获，
+    /// 因此订阅者拿到的是用户真正复制的那份内容，而不是回填后的锁定内容。
+    /// 这也让订阅者不必再次读取系统剪贴板（省掉一次 GetContent + 全文哈希）。
+    /// </summary>
+    event EventHandler<ClipboardSnapshot> ContentChanged;
     string? LastWriteFingerprint { get; }
 
     Task<bool> SetTextAsync(string text);

@@ -124,6 +124,15 @@ public class EventPumpService
 
         switch (type)
         {
+            // 说明：type 已统一 ToUpperInvariant()，因此下列每个值都同时接受大小写混写形式。
+            // 目前 Core 实际发出的 type 字符串（混用大小写，外壳统一归一化）：
+            //   ITEM_META_ADDED（api.rs:400 本地 ingest 顶层 meta / actor.rs:715 远端 payload.meta）
+            //   peer_changed（api.rs:630） / TRANSFER_PROGRESS（actor.rs:1028）
+            //   CONTENT_CACHED（actor.rs:1124、api.rs:716）
+            //   TRANSFER_CANCELLED（actor.rs:1153） / TRANSFER_FAILED（actor.rs:1190）
+            //   ITEM_DELETED（api.rs:793） / LOG_WRITTEN / LOGS_BATCH_WRITTEN
+            // 兼容旧拼写：ITEM_ADDED / ITEM_UPDATED / PEER_FOUND / PEER_ONLINE / PEER_OFFLINE。
+
             // --- History meta
             case "ITEM_META_ADDED":
             case "ITEM_ADDED":
@@ -144,10 +153,19 @@ public class EventPumpService
             case "PEER_ONLINE":
             case "PEER_OFFLINE":
                 {
-                    if (payload.ValueKind != JsonValueKind.Object)
+                    // Core 的 peer_changed 把字段直接放在顶层（cb_core/src/api.rs:629-634：
+                    // type/device_id/share_to_peer/accept_from_peer），没有 payload；
+                    // 其它 peer 事件历史上用 payload，两种形态都兼容。
+                    JsonElement peerEl = default;
+                    if (payload.ValueKind == JsonValueKind.Object)
+                        peerEl = payload;
+                    else if (root.TryGetProperty("device_id", out _))
+                        peerEl = root;
+
+                    if (peerEl.ValueKind != JsonValueKind.Object)
                         return;
 
-                    var peer = payload.Deserialize<PeerMetaPayload>();
+                    var peer = peerEl.Deserialize<PeerMetaPayload>();
                     if (peer != null)
                     {
                         // 如果 core 的 peer payload 没带 is_online，这里按事件类型补上
@@ -200,6 +218,44 @@ public class EventPumpService
                     break;
                 }
 
+            // --- 传输进度（关键：否则 TransferStore 永远为空、仪表盘活动传输恒为 0）
+            case "TRANSFER_PROGRESS":
+                {
+                    // Core 实际载荷（cb_core/src/session/actor.rs:1027-1035）只有：
+                    //   { "transfer_id": string, "received": number, "total": number }
+                    // 不含 state / item_id；外壳为 UI 契约补默认状态 "downloading"。
+                    if (payload.ValueKind != JsonValueKind.Object)
+                        return;
+
+                    var progress = payload.Deserialize<TransferUpdatePayload>();
+                    if (progress == null || string.IsNullOrWhiteSpace(progress.TransferId))
+                        return;
+
+                    if (string.IsNullOrWhiteSpace(progress.State))
+                        progress.State = "downloading";
+
+                    _transferStore.Upsert(progress);
+                    break;
+                }
+
+            // --- 传输取消（入口点被取消时发出）
+            case "TRANSFER_CANCELLED":
+                {
+                    // Core 载荷（cb_core/src/session/actor.rs:1152-1156）：{ "transfer_id": string }
+                    if (payload.ValueKind != JsonValueKind.Object)
+                        return;
+
+                    var cancelled = payload.Deserialize<TransferUpdatePayload>();
+                    if (cancelled == null || string.IsNullOrWhiteSpace(cancelled.TransferId))
+                        return;
+
+                    if (string.IsNullOrWhiteSpace(cancelled.State))
+                        cancelled.State = "cancelled";
+
+                    _transferStore.Upsert(cancelled);
+                    break;
+                }
+
             // --- Lazy fetch failed (关键)
             case "TRANSFER_FAILED":
                 {
@@ -234,6 +290,16 @@ public class EventPumpService
 
                     if (string.IsNullOrWhiteSpace(transferId))
                         return;
+
+                    // Core 的 TRANSFER_FAILED 使用 CoreErrorPayload（actor.rs:1179-1193）：
+                    // code/message/scope/retryable/affects_session/detail{transfer_id}。
+                    // 先落库为终态失败行，再通知 awaiter（两者都要）。
+                    var failed = payloadObj.Deserialize<TransferUpdatePayload>() ?? new TransferUpdatePayload();
+                    failed.TransferId = transferId!;
+                    failed.State = "failed";
+                    if (string.IsNullOrWhiteSpace(failed.Message))
+                        failed.Message = reason;
+                    _transferStore.Upsert(failed);
 
                     var ex = new Exception(string.IsNullOrWhiteSpace(reason)
                         ? "TRANSFER_FAILED"

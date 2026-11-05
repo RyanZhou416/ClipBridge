@@ -14,7 +14,7 @@ public class IngestPolicyTests
     private class FakeClipboardService : IClipboardService
     {
 #pragma warning disable CS0067
-        public event EventHandler? ContentChanged;
+        public event EventHandler<ClipboardSnapshot>? ContentChanged;
         public event EventHandler<bool>? ClipboardLockChanged;
 #pragma warning restore CS0067
 

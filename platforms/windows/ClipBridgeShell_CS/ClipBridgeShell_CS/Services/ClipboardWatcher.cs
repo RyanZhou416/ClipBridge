@@ -16,7 +16,13 @@ public class ClipboardWatcher
 
     private bool _isListening = false;
     private bool _isInitialized = false;
+    // 采集开关的权威状态：剪贴板采集只由本类作为唯一入口，开关必须在这里生效
+    private bool _isCaptureEnabled = false;
     private CancellationTokenSource? _debounceCts;
+
+    // 最近一次剪贴板变化的快照。由 ClipboardService 在写回锁定内容之前捕获并通过事件传入，
+    // 防抖结束后直接使用它，避免再次读取系统剪贴板（一次 GetContent + 全文哈希）。
+    private ClipboardSnapshot? _pendingSnapshot;
 
     // 配置：防抖时间 (ms)
     private const int DebounceMs = 200;
@@ -42,6 +48,8 @@ public class ClipboardWatcher
 
     public void SetCaptureState(bool isEnabled)
     {
+        // 先记录开关状态，再切换订阅：即使有防抖中的事件在飞，ProcessClipboardChange 也会据此提前返回
+        _isCaptureEnabled = isEnabled;
         if (isEnabled) Start();
         else Stop();
     }
@@ -84,8 +92,14 @@ public class ClipboardWatcher
     }
 
 
-    private async void OnClipboardContentChanged(object? sender, EventArgs e)
+    private async void OnClipboardContentChanged(object? sender, ClipboardSnapshot snapshot)
     {
+        // 采集关闭时直接忽略（即使在 Stop 之前已进入本方法）
+        if (!_isCaptureEnabled)
+            return;
+
+        // 记录本次快照；防抖期间若又来新事件，后者会覆盖前者（保留最新）
+        _pendingSnapshot = snapshot;
 
         // 1. 防抖 (Debounce)
         _debounceCts?.Cancel();
@@ -109,6 +123,10 @@ public class ClipboardWatcher
 
     private async Task ProcessClipboardChange()
     {
+        // 采集开关是最终权威：关闭时绝不 ingest（即便事件已排队或订阅尚未摘除）
+        if (!_isCaptureEnabled)
+            return;
+
         // 确保 Core 准备好了
         if (_coreHostService.State != CoreState.Ready)
             return;
@@ -117,8 +135,10 @@ public class ClipboardWatcher
         {
             _logger?.LogInformation("Clipboard content changed, processing...");
 
-            // A. 获取快照
-            var snapshot = await _clipboardService.GetSnapshotAsync();
+            // A. 取事件随附的快照（在写回锁定内容之前捕获），不再二次读取系统剪贴板。
+            //    这样锁定剪贴板时的“复制内容不丢失”语义得以保留，同时省掉一次 GetContent + 全文哈希。
+            var snapshot = _pendingSnapshot;
+            _pendingSnapshot = null;
             if (snapshot == null)
                 return;
 

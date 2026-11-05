@@ -10,9 +10,8 @@ namespace ClipBridgeShell_CS.Services;
 
 public sealed class ClipboardService : IClipboardService
 {
-    public event EventHandler? ContentChanged;
+    public event EventHandler<ClipboardSnapshot>? ContentChanged;
     public event EventHandler<bool>? ClipboardLockChanged;
-    private readonly ICoreHostService _coreHostService;
     public string? LastWriteFingerprint { get; private set; }
 
     private string? _lockedText;
@@ -20,10 +19,9 @@ public sealed class ClipboardService : IClipboardService
     public bool IsClipboardLocked => _lockedText != null;
     public string? LockedItemId { get; private set; }
 
-    public ClipboardService(ICoreHostService coreHostService)
+    public ClipboardService()
     {
         Clipboard.ContentChanged += OnClipboardContentChanged;
-        _coreHostService = coreHostService;
     }
 
     public void LockClipboard(string text, string itemId)
@@ -55,11 +53,12 @@ public sealed class ClipboardService : IClipboardService
                 return;
             }
 
-            // Ingest to core regardless of lock state (record & share new content)
-            await _coreHostService.IngestLocalCopyAsync(snapshot);
-            ContentChanged?.Invoke(this, EventArgs.Empty);
+            // 只通知；采集统一由 ClipboardWatcher（唯一入口）根据策略与开关决定是否 Ingest。
+            // 注意：这里传入的是「写回锁定内容之前」捕获的快照，
+            // 因此锁定状态下用户新复制的内容依然会被记录（保持既有语义）。
+            ContentChanged?.Invoke(this, snapshot);
 
-            // If locked, restore locked content after ingestion
+            // If locked, restore locked content（采集已统一交给 ClipboardWatcher）
             if (_lockedText != null)
             {
                 var lockedFingerprint = ComputeHash(_lockedText);
