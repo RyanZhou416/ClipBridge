@@ -352,6 +352,22 @@ public class ActivationService : IActivationService
         }
         StartupTrace.Mark("deferred-content-set");
 
+        // 诊断（CB_STARTUP_DIAG=1）：排查"半透明效果消失"。把窗口背景类型、Shell 根节点背景、
+        // Mica 是否受支持直接写进 trace —— Mica(Light) 与不透明白底肉眼难以区分，必须看数值。
+        if (Environment.GetEnvironmentVariable("CB_STARTUP_DIAG") == "1")
+        {
+            var backdrop = mainWindow.SystemBackdrop?.GetType().Name ?? "null";
+            var shellBg = (_shell as Panel)?.Background;
+            var shellBgDesc = shellBg switch
+            {
+                null => "null",
+                Microsoft.UI.Xaml.Media.SolidColorBrush s => $"solid A={s.Color.A} R={s.Color.R} G={s.Color.G} B={s.Color.B}",
+                _ => shellBg.GetType().Name
+            };
+            var micaSupported = Microsoft.UI.Composition.SystemBackdrops.MicaController.IsSupported();
+            StartupTrace.Mark($"diag backdrop={backdrop} shellBg={shellBgDesc} micaSupported={micaSupported}");
+        }
+
         // Shell 替换占位层后重新套用已保存的主题（新根元素不会继承占位层的 RequestedTheme），
         // 顺带按新主题刷新标题栏按钮颜色。
         //
