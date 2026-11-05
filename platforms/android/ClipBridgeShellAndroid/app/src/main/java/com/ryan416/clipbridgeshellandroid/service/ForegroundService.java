@@ -72,6 +72,16 @@ public class ForegroundService extends Service {
 			String resultJson = core.init(configJson, listener);
 			Log.i(TAG, "Core init result: " + resultJson);
 
+			if (!core.isReady()) {
+				// init 返回 ok:false（例如缺少凭据 / 路径不可写）：必须显式失败，不能假装核心已就绪。
+				// 不创建 applyService，这样下一次 onStartCommand 会重新尝试 init。
+				String code = core.getLastInitErrorCode();
+				String message = core.getLastInitErrorMessage();
+				Log.e(TAG, "Core init FAILED: code=" + code + " message=" + message);
+				updateNotification("ClipBridge 初始化失败", code + ": " + message);
+				return START_STICKY;
+			}
+
 			// Apply Service
 			applyService = new ClipboardApplyService(getApplicationContext(), clipboardWatcher, core, awaiter);
 		}
@@ -117,6 +127,12 @@ public class ForegroundService extends Service {
 		NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "ClipBridge", NotificationManager.IMPORTANCE_LOW);
 		NotificationManager nm = getSystemService(NotificationManager.class);
 		if (nm != null) nm.createNotificationChannel(channel);
+	}
+
+	/** 前台通知已由 onCreate 的 startForeground 建立，这里只更新文案（用于暴露 init 失败）。 */
+	private void updateNotification(String title, String text) {
+		NotificationManager nm = getSystemService(NotificationManager.class);
+		if (nm != null) nm.notify(NOTIF_ID, buildNotification(title, text));
 	}
 
 	private Notification buildNotification(String title, String text) {

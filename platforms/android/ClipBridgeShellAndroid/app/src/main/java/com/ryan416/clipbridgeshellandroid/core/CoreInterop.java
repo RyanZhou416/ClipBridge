@@ -5,6 +5,8 @@ import android.util.Log;
 import org.json.JSONObject;
 
 public class CoreInterop {
+	private static final String TAG = "CB.Interop";
+
 	static {
 		// 先 load Rust 的 core-ffi，再 load JNI shim
 		System.loadLibrary("core_ffi_android");
@@ -17,40 +19,71 @@ public class CoreInterop {
 
 	// Core handle（与 Windows 类似）
 	private long handlePtr = 0;
+	// 最近一次 init 失败的 code/message（供 ForegroundService/logcat 定位；成功时清空）
+	private String lastInitErrorCode = "";
+	private String lastInitErrorMessage = "";
 
 	public synchronized String init(String cfgJson, CoreEventListener listener) {
 		String env = nativeInit(cfgJson, listener);
+		lastInitErrorCode = "";
+		lastInitErrorMessage = "";
 
 		try {
 			JSONObject root = new JSONObject(env);
-			if (!root.optBoolean("ok", false)) return env;
+			if (!root.optBoolean("ok", false)) {
+				// 初始化失败必须显式暴露：保留错误码与信息，禁止把 handlePtr 留在 0 之外的状态
+				JSONObject error = root.optJSONObject("error");
+				String code = error != null ? error.optString("code", "UNKNOWN") : "UNKNOWN";
+				String message = error != null ? error.optString("message", env) : env;
+				lastInitErrorCode = code;
+				lastInitErrorMessage = message;
+				this.handlePtr = 0;
+				Log.e(TAG, "core init failed: code=" + code + " message=" + message);
+				return env;
+			}
 
 			// data 应该是一个对象 {"handle": 123...}
 			JSONObject data = root.optJSONObject("data");
-			if (data != null) {
-				// 获取 handle 的字符串形式，防止 JSON 库自动转成截断的 Long
-				// 注意：如果 org.json 已经在内部解析成了 Number，toString 可能会拿到科学计数法或截断值
-				// 最稳妥的方法是让 Rust 返回 String 类型的 handle，但在不改 Rust 的情况下：
-				// 我们尝试读取 String，如果读不到再尝试读 Long
+			if (data == null) throw new IllegalStateException("ok envelope without data object");
 
-				long h = 0;
-				Object rawHandle = data.opt("handle");
+			// 获取 handle 的字符串形式，防止 JSON 库自动转成截断的 Long
+			// 注意：如果 org.json 已经在内部解析成了 Number，toString 可能会拿到科学计数法或截断值
+			// 最稳妥的方法是让 Rust 返回 String 类型的 handle，但在不改 Rust 的情况下：
+			// 我们尝试读取 String，如果读不到再尝试读 Long
 
-				if (rawHandle instanceof String) {
-					h = Long.parseUnsignedLong((String) rawHandle);
-				} else if (rawHandle instanceof Number) {
-					// 如果已经是 Number，直接强转可能会溢出，但通常 JSON 库会存为 BigInteger 或 Long
-					// 我们这里做一个特殊的处理：利用 String 转换
-					h = Long.parseUnsignedLong(String.valueOf(rawHandle));
-				}
+			long h = 0;
+			Object rawHandle = data.opt("handle");
 
-				this.handlePtr = h;
-				android.util.Log.i("CB.Interop", "Handle parsed successfully: " + Long.toUnsignedString(h));
+			if (rawHandle instanceof String) {
+				h = Long.parseUnsignedLong((String) rawHandle);
+			} else if (rawHandle instanceof Number) {
+				// 如果已经是 Number，直接强转可能会溢出，但通常 JSON 库会存为 BigInteger 或 Long
+				// 我们这里做一个特殊的处理：利用 String 转换
+				h = Long.parseUnsignedLong(String.valueOf(rawHandle));
 			}
+
+			if (h == 0) throw new IllegalStateException("ok envelope without usable handle");
+
+			this.handlePtr = h;
+			Log.i(TAG, "Handle parsed successfully: " + Long.toUnsignedString(h));
 		} catch (Exception e) {
-			android.util.Log.e("CB.Interop", "Failed to parse handle", e);
+			// 解析失败同样是硬失败：handle 必须保持 0，避免后续调用用错指针
+			this.handlePtr = 0;
+			if (lastInitErrorCode.isEmpty()) {
+				lastInitErrorCode = "INIT_PARSE_FAILED";
+				lastInitErrorMessage = String.valueOf(e);
+			}
+			Log.e(TAG, "Failed to parse init envelope: " + env, e);
 		}
 		return env;
+	}
+
+	public synchronized String getLastInitErrorCode() {
+		return lastInitErrorCode;
+	}
+
+	public synchronized String getLastInitErrorMessage() {
+		return lastInitErrorMessage;
 	}
 
 	public synchronized String shutdown() {
