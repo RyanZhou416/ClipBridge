@@ -2566,8 +2566,10 @@ mod transfer_guard_tests {
 		);
 
 		// 负值配置按 0 处理（拒绝一切），绝不因为配置错误而放行
-		let mut negative = SizeLimits::default();
-		negative.hard_text_bytes = -1;
+		let negative = SizeLimits {
+			hard_text_bytes: -1,
+			..SizeLimits::default()
+		};
 		assert_eq!(hard_cap_bytes(&ItemKind::Text, &negative), 0);
 	}
 
@@ -2586,7 +2588,8 @@ mod transfer_guard_tests {
 	/// 守护必须把状态写成 Terminated，否则该会话句柄永远不会被回收。
 	async fn simulate_start_failure(state_ref: Arc<Mutex<SessionState>>) -> anyhow::Result<()> {
 		let _guard = TerminatedGuard::new(state_ref);
-		// 等价于 conn.open_bi().await? 失败
+		// 模拟真实路径上的第一个 await 点（conn.open_bi() / start_handshake()）
+		tokio::task::yield_now().await;
 		Err(anyhow::anyhow!("simulated open_bi/start_handshake failure"))
 	}
 
@@ -2661,7 +2664,7 @@ mod transfer_guard_tests {
 			source_device_id: "peer-1".to_string(),
 			source_device_name: None,
 			size_bytes: 16,
-			preview: Default::default(),
+			preview: crate::model::ItemPreview::default(),
 			content: ItemContent {
 				mime: "application/x-clipbridge-files".to_string(),
 				sha256: item_sha.clone(),
