@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -43,6 +44,74 @@ fn validate_component(name: &str) -> anyhow::Result<()> {
 		anyhow::bail!("invalid path component: {name:?}");
 	}
 	Ok(())
+}
+
+/// 文件身份（卷号, inode / file index）。
+///
+/// 硬链接共享同一个 inode，因此统计“真实磁盘占用”时必须按身份去重，
+/// 否则 `blobs/` 与 `files/`、`downloads/` 指向同一份数据时会被重复累加。
+type FileId = (u64, u64);
+
+/// 获取文件身份。
+///
+/// - Windows：`(VolumeSerialNumber, FileIndex)`，来自 `GetFileInformationByHandle`。
+/// - Unix（含 Android / macOS）：`(dev, ino)`。
+/// - 取不到时返回 `None`，调用方按“每个路径各计一次”统计（宁可高估，不可低估）。
+#[cfg(windows)]
+fn file_id(path: &Path, _meta: &fs::Metadata) -> Option<FileId> {
+	use std::os::windows::io::AsRawHandle;
+
+	/// `BY_HANDLE_FILE_INFORMATION`（15 个 DWORD）。
+	#[repr(C)]
+	#[derive(Default)]
+	struct ByHandleFileInformation {
+		file_attributes: u32,
+		creation_time_low: u32,
+		creation_time_high: u32,
+		last_access_time_low: u32,
+		last_access_time_high: u32,
+		last_write_time_low: u32,
+		last_write_time_high: u32,
+		volume_serial_number: u32,
+		file_size_high: u32,
+		file_size_low: u32,
+		number_of_links: u32,
+		file_index_high: u32,
+		file_index_low: u32,
+	}
+
+	#[link(name = "kernel32")]
+	extern "system" {
+		fn GetFileInformationByHandle(
+			file: *mut std::ffi::c_void,
+			info: *mut ByHandleFileInformation,
+		) -> i32;
+	}
+
+	// 只读句柄查询索引；std 的 File::open 以共享方式打开，一般不会阻塞或失败。
+	let file = fs::File::open(path).ok()?;
+	let mut info = ByHandleFileInformation::default();
+	// SAFETY: `file` 持有有效句柄，`info` 是合法的可写结构体指针；
+	// 返回 0 表示失败，此时不读取 `info`。
+	let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &raw mut info) };
+	if ok == 0 {
+		return None;
+	}
+	Some((
+		u64::from(info.volume_serial_number),
+		(u64::from(info.file_index_high) << 32) | u64::from(info.file_index_low),
+	))
+}
+
+#[cfg(unix)]
+fn file_id(_path: &Path, meta: &fs::Metadata) -> Option<FileId> {
+	use std::os::unix::fs::MetadataExt;
+	Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn file_id(_path: &Path, _meta: &fs::Metadata) -> Option<FileId> {
+	None
 }
 
 #[derive(Clone, Debug)]
@@ -133,27 +202,182 @@ impl Cas {
 		}
 	}
 
-	pub fn total_size_bytes(&self) -> anyhow::Result<i64> {
-		fn dir_size(p: &Path) -> std::io::Result<u64> {
-			let mut sum = 0u64;
-			for e in fs::read_dir(p)? {
-				let e = e?;
-				let m = e.metadata()?;
-				if m.is_dir() {
-					sum += dir_size(&e.path())?;
-				} else {
-					sum += m.len();
-				}
-			}
-			Ok(sum)
-		}
-		let s = dir_size(&self.blobs_dir)?;
-		Ok(s as i64)
+	/// `<cache_dir>/files`：`materialize_blob` 创建的带后缀视图。
+	fn files_dir(&self) -> PathBuf {
+		self.cache_dir.join("files")
 	}
 
-	/// 删除 blob，返回释放的字节数（若不存在返回 0）
+	/// `<cache_dir>/downloads`：`materialize_file` 创建的按传输隔离的视图。
+	fn downloads_dir(&self) -> PathBuf {
+		self.cache_dir.join("downloads")
+	}
+
+	/// 递归统计目录的“真实”字节数：同一个 inode 只计一次（硬链接不重复计数）。
+	///
+	/// 无法取得文件身份时退化为按路径计数（宁可高估，避免 GC 低估占用后不回收）。
+	fn dir_size(dir: &Path, seen: &mut HashSet<FileId>) -> anyhow::Result<u64> {
+		let entries = match fs::read_dir(dir) {
+			Ok(entries) => entries,
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+			Err(e) => return Err(e.into()),
+		};
+		let mut sum = 0u64;
+		for entry in entries {
+			let entry = match entry {
+				Ok(entry) => entry,
+				// 并发删除（GC / 传输结束）时目录项可能消失，跳过即可
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+				Err(e) => return Err(e.into()),
+			};
+			let path = entry.path();
+			let meta = match fs::symlink_metadata(&path) {
+				Ok(meta) => meta,
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+				Err(e) => return Err(e.into()),
+			};
+			let ft = meta.file_type();
+			if ft.is_dir() {
+				sum += Self::dir_size(&path, seen)?;
+			} else if ft.is_file() {
+				// 硬链接共享 inode：只统计第一次出现的路径，避免 blobs/ 与视图重复累加
+				let already_counted = file_id(&path, &meta).is_some_and(|id| !seen.insert(id));
+				if !already_counted {
+					sum += meta.len();
+				}
+			}
+		}
+		Ok(sum)
+	}
+
+	/// 统计缓存真实磁盘占用：`blobs/` + `files/` + `downloads/`。
+	///
+	/// 三个目录里的同一份数据可能是硬链接（共享 inode），因此按文件身份去重，
+	/// 每个 inode 只累加一次；复制回退产生的独立副本是真实占用，会被分别计入。
+	/// `tmp/` 是瞬态目录，不计入（传输中断后由调用方清理）。
+	pub fn total_size_bytes(&self) -> anyhow::Result<i64> {
+		let mut seen = HashSet::new();
+		let mut total = 0u64;
+		total += Self::dir_size(&self.blobs_dir, &mut seen)?;
+		total += Self::dir_size(&self.files_dir(), &mut seen)?;
+		total += Self::dir_size(&self.downloads_dir(), &mut seen)?;
+		Ok(total as i64)
+	}
+
+	/// 删除 `files/` 下名字为 `<sha>.<ext>`（或 Windows 归一化后的 `<sha>`）的视图链接。
+	fn remove_files_views(&self, sha256_hex: &str) -> anyhow::Result<()> {
+		let entries = match fs::read_dir(self.files_dir()) {
+			Ok(entries) => entries,
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+			Err(e) => return Err(e.into()),
+		};
+		let prefix = format!("{sha256_hex}.");
+		for entry in entries {
+			let entry = match entry {
+				Ok(entry) => entry,
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+				Err(e) => return Err(e.into()),
+			};
+			let path = entry.path();
+			if !path.is_file() {
+				continue;
+			}
+			let name = entry.file_name();
+			let name = name.to_string_lossy();
+			if name == sha256_hex || name.starts_with(&prefix) {
+				match fs::remove_file(&path) {
+					Ok(()) => {}
+					Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+					Err(e) => {
+						return Err(anyhow::Error::new(e)
+							.context(format!("failed to remove view link: {}", path.display())))
+					}
+				}
+			}
+		}
+		Ok(())
+	}
+
+	/// 删除 `downloads/` 下与 blob 指向同一 inode 的硬链接视图。
+	///
+	/// 目录结构是 `downloads/<transfer_id>/<filename>`，没有持久化 sha 映射，
+	/// 因此用文件身份（inode）匹配；复制回退产生的独立副本无法匹配（见 [`Cas::remove_blob`]）。
+	fn remove_download_views_with_id(&self, id: FileId) -> anyhow::Result<()> {
+		fn walk(dir: &Path, id: FileId) -> anyhow::Result<()> {
+			let entries = match fs::read_dir(dir) {
+				Ok(entries) => entries,
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+				Err(e) => return Err(e.into()),
+			};
+			for entry in entries {
+				let entry = match entry {
+					Ok(entry) => entry,
+					Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+					Err(e) => return Err(e.into()),
+				};
+				let path = entry.path();
+				let meta = match fs::symlink_metadata(&path) {
+					Ok(meta) => meta,
+					Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+					Err(e) => return Err(e.into()),
+				};
+				let ft = meta.file_type();
+				if ft.is_dir() {
+					walk(&path, id)?;
+				} else if ft.is_file() && file_id(&path, &meta) == Some(id) {
+					match fs::remove_file(&path) {
+						Ok(()) => {}
+						Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+						Err(e) => {
+							return Err(anyhow::Error::new(e).context(format!(
+								"failed to remove download view link: {}",
+								path.display()
+							)))
+						}
+					}
+				}
+			}
+			Ok(())
+		}
+		walk(&self.downloads_dir(), id)
+	}
+
+	/// 删除 blob，并同步删除引用它的视图链接（`files/<sha>.<ext>` 与
+	/// `downloads/<tid>/<name>` 中指向同一 inode 的硬链接），返回被删 blob 自身的字节数。
+	///
+	/// 硬链接共享 inode：只删 blob 不会真正释放磁盘（视图还持有该 inode），
+	/// 所以必须先删视图、再删 blob。调用方也不能把返回值当作“已释放字节数”，
+	/// GC 会在删除后用 [`Cas::total_size_bytes`] 重新核算。
+	///
+	/// 视图删除失败（例如 Windows 上目标文件仍被外壳打开）时返回错误且**不删除 blob**，
+	/// 避免出现“blob 没了、视图还在、空间仍被占用”的半完成状态。
+	///
+	/// 已知限制：`downloads/` 视图没有持久化 sha 映射，只能按 inode 识别硬链接；
+	/// 若创建时因文件系统不支持硬链接而退化成了复制，该副本无法被追踪，只能等
+	/// `clear_all()` 清理。
 	pub fn remove_blob(&self, sha256_hex: &str) -> anyhow::Result<i64> {
 		let p = self.blob_path(sha256_hex)?;
+		let id = match fs::symlink_metadata(&p) {
+			Ok(meta) => match file_id(&p, &meta) {
+				Some(id) => Some(id),
+				// 取不到身份就无法确认 downloads/ 里是否还有硬链接视图，
+				// 拒绝删除，避免“账面释放、实际未释放”。
+				None => anyhow::bail!(
+					"cannot determine file identity for blob {sha256_hex}; refusing to evict"
+				),
+			},
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+			Err(e) => return Err(e.into()),
+		};
+
+		// 1) files/ 视图按名字精确匹配
+		self.remove_files_views(sha256_hex)?;
+
+		// 2) downloads/ 视图按同一 inode 识别
+		if let Some(id) = id {
+			self.remove_download_views_with_id(id)?;
+		}
+
+		// 3) 最后删 blob 本身
 		if !p.exists() {
 			return Ok(0);
 		}
@@ -471,5 +695,42 @@ mod tests {
 		let target = cas.materialize_file(&sha, "tid-1", "a.txt").unwrap();
 		let cache_root = cas.cache_dir().canonicalize().unwrap();
 		assert!(target.canonicalize().unwrap().starts_with(&cache_root));
+	}
+
+	#[test]
+	fn total_size_counts_hard_linked_views_once() {
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path()).unwrap();
+		let data = [7u8; 128];
+		let sha = cas.put_blob(&data).unwrap();
+
+		let blob_view = cas.materialize_blob(&sha, "bin").unwrap();
+		let download_view = cas.materialize_file(&sha, "tid-1", "a.bin").unwrap();
+		assert!(blob_view.exists());
+		assert!(download_view.exists());
+
+		// blob + files/ 视图 + downloads/ 视图 是同一个 inode（硬链接），
+		// 真实占用只应计算一次 128 字节。
+		assert_eq!(cas.total_size_bytes().unwrap(), 128);
+	}
+
+	#[test]
+	fn remove_blob_removes_view_links_and_frees_bytes() {
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path()).unwrap();
+		let data = [9u8; 256];
+		let sha = cas.put_blob(&data).unwrap();
+
+		let blob_view = cas.materialize_blob(&sha, "png").unwrap();
+		let download_view = cas.materialize_file(&sha, "tid-2", "b.png").unwrap();
+		assert_eq!(cas.total_size_bytes().unwrap(), 256);
+
+		cas.remove_blob(&sha).unwrap();
+
+		// blob 与两个视图链接都必须消失，占用归零（否则 GC 会认为已释放而实际没有）
+		assert!(!cas.blob_exists(&sha));
+		assert!(!blob_view.exists());
+		assert!(!download_view.exists());
+		assert_eq!(cas.total_size_bytes().unwrap(), 0);
 	}
 }

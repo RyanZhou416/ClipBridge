@@ -477,26 +477,33 @@ impl Core {
 		// 2) Cache GC（LRU）
 		let max_cas = self.inner.core_config.app_config.gc_cas_max_bytes;
 		if max_cas > 0 {
+			// 真实占用 = blobs + files/ 视图 + downloads/ 视图（按 inode 去重，硬链接只计一次）
 			let mut cur = self.inner.cas.total_size_bytes()?;
 			while cur > max_cas {
-				let (sha, _expect_bytes) = {
+				let sha = {
 					let store = self.inner.store.lock().unwrap();
-					let cands = store.select_lru_present(1)?;
-					if cands.is_empty() {
+					let mut cands = store.select_lru_present(1)?;
+					let Some((sha, _bytes)) = cands.pop() else {
 						break;
-					}
-					cands[0].clone()
+					};
+					sha
 				};
-				let freed = self.inner.cas.remove_blob(&sha)?;
+				// 删除 blob 时同步删除引用它的视图链接；视图被占用而删不掉时
+				// remove_blob 会报错并保留 blob，本轮直接放弃，避免死循环。
+				if self.inner.cas.remove_blob(&sha).is_err() {
+					break;
+				}
 				{
 					let mut store = self.inner.store.lock().unwrap();
 					store.mark_cache_missing(&sha, now)?;
 				}
-				if freed > 0 {
-					cur -= freed;
-				} else {
-					cur = self.inner.cas.total_size_bytes()?;
+				// 删除后重新核算真实占用，而不是相信一个“已释放字节数”的预估值：
+				// 硬链接共享 inode，只有最后一个链接消失时磁盘空间才真正下降。
+				let after = self.inner.cas.total_size_bytes()?;
+				if after >= cur {
+					break;
 				}
+				cur = after;
 			}
 		}
 		Ok(())
