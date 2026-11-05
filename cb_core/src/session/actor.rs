@@ -2464,3 +2464,246 @@ mod auth_gate_tests {
 		}
 	}
 }
+
+#[cfg(test)]
+mod transfer_guard_tests {
+	//! 入站限额 / 会话终止守护的单元测试。
+	//!
+	//! 这些用例都不需要真实 socket：限额判定与终止守护都是纯函数 / RAII，
+	//! 可以独立于 QUIC 连接断言；需要真实连接的行为仍由 `session::tests` 里的
+	//! `#[ignore]` 网络用例覆盖。
+	use super::{
+		chunk_overrun, hard_cap_bytes, kind_from_mime, mark_item_content_cached,
+		receiver_idle_expired, receiver_slot_available, TerminatedGuard, MAX_CONCURRENT_RECEIVERS,
+		RECEIVER_IDLE_TIMEOUT_MS,
+	};
+	use crate::model::{FileMeta, ItemContent, ItemKind, ItemMeta};
+	use crate::policy::SizeLimits;
+	use crate::session::{HandshakeStep, SessionHandle, SessionState};
+	use crate::store::Store;
+	use crate::util::now_ms;
+	use std::sync::{Arc, Mutex};
+	use tokio::sync::mpsc;
+
+	/// 接收方可写字节的上限 = min(声明值, 硬上限)：多出 1 字节就必须整条传输失败。
+	#[test]
+	fn receiver_rejects_chunk_beyond_declared_size() {
+		let declared = 100 * 1024u64;
+		let hard = 10 * 1024 * 1024u64;
+
+		// 刚好等于声明值是允许的
+		assert_eq!(chunk_overrun(0, 64 * 1024, declared, hard), None);
+		assert_eq!(chunk_overrun(64 * 1024, 36 * 1024, declared, hard), None);
+
+		// 越界 1 字节即失败
+		assert_eq!(
+			chunk_overrun(64 * 1024, 36 * 1024 + 1, declared, hard),
+			Some("TRANSFER_OVERRUN")
+		);
+		// 已经收满后继续发也要失败
+		assert_eq!(
+			chunk_overrun(declared, 1, declared, hard),
+			Some("TRANSFER_OVERRUN")
+		);
+	}
+
+	/// 即使对端在 Begin 里声明了超大 total_bytes（或配置在运行期变化），
+	/// 逐块累计也绝不能越过 size_limits 的硬上限。
+	#[test]
+	fn receiver_rejects_chunk_beyond_hard_cap() {
+		let declared = 1024 * 1024u64;
+		let hard = 200 * 1024u64;
+		assert_eq!(
+			chunk_overrun(0, 300 * 1024, declared, hard),
+			Some("ITEM_TOO_LARGE")
+		);
+	}
+
+	/// 第 9 个并发接收必须被拒绝（每个 receiver 会占 channel/task/fd）。
+	#[test]
+	fn concurrent_receiver_cap_rejects_ninth() {
+		assert_eq!(MAX_CONCURRENT_RECEIVERS, 8);
+		for i in 0..MAX_CONCURRENT_RECEIVERS {
+			assert!(
+				receiver_slot_available(i),
+				"已存在 {i} 个 receiver 时应允许新传输"
+			);
+		}
+		assert!(
+			!receiver_slot_available(MAX_CONCURRENT_RECEIVERS),
+			"第 9 个并发传输必须被拒绝"
+		);
+		assert!(!receiver_slot_available(MAX_CONCURRENT_RECEIVERS + 1));
+	}
+
+	/// 空闲超时：无数据超过 30s 才回收（边界上不误杀）。
+	#[test]
+	fn idle_receiver_expires_only_after_timeout() {
+		let now = 1_000_000i64;
+		assert!(!receiver_idle_expired(now, now));
+		assert!(!receiver_idle_expired(now, now - RECEIVER_IDLE_TIMEOUT_MS));
+		assert!(receiver_idle_expired(
+			now,
+			now - RECEIVER_IDLE_TIMEOUT_MS - 1
+		));
+	}
+
+	/// 硬上限取自 policy.rs 的 size_limits，按 item 类型选择。
+	#[test]
+	fn hard_cap_uses_size_limits_by_kind() {
+		let limits = SizeLimits::default();
+		assert_eq!(
+			hard_cap_bytes(&ItemKind::Text, &limits),
+			limits.hard_text_bytes as u64
+		);
+		assert_eq!(
+			hard_cap_bytes(&ItemKind::Image, &limits),
+			limits.hard_image_bytes as u64
+		);
+		assert_eq!(
+			hard_cap_bytes(&ItemKind::FileList, &limits),
+			limits.hard_file_total_bytes as u64
+		);
+
+		// 负值配置按 0 处理（拒绝一切），绝不因为配置错误而放行
+		let mut negative = SizeLimits::default();
+		negative.hard_text_bytes = -1;
+		assert_eq!(hard_cap_bytes(&ItemKind::Text, &negative), 0);
+	}
+
+	#[test]
+	fn mime_classification_matches_item_kind() {
+		assert_eq!(kind_from_mime("text/plain"), ItemKind::Text);
+		assert_eq!(kind_from_mime("image/png"), ItemKind::Image);
+		// 未知 MIME 按文件处理（file 上限最大，但不能因此绕过 text/image 的检查）
+		assert_eq!(
+			kind_from_mime("application/octet-stream"),
+			ItemKind::FileList
+		);
+	}
+
+	/// 模拟 `run_actor` 在 `open_bi` / `start_handshake` 处以 `?` 提前失败：
+	/// 守护必须把状态写成 Terminated，否则该会话句柄永远不会被回收。
+	async fn simulate_start_failure(state_ref: Arc<Mutex<SessionState>>) -> anyhow::Result<()> {
+		let _guard = TerminatedGuard::new(state_ref);
+		// 等价于 conn.open_bi().await? 失败
+		Err(anyhow::anyhow!("simulated open_bi/start_handshake failure"))
+	}
+
+	#[tokio::test]
+	async fn terminated_guard_sets_terminated_on_early_return() {
+		let state_ref = Arc::new(Mutex::new(SessionState::TransportReady));
+		let result = simulate_start_failure(state_ref.clone()).await;
+		assert!(result.is_err());
+		assert_eq!(*state_ref.lock().unwrap(), SessionState::Terminated);
+	}
+
+	#[tokio::test]
+	async fn terminated_guard_sets_terminated_on_normal_exit() {
+		let state_ref = Arc::new(Mutex::new(SessionState::Handshaking(
+			HandshakeStep::WaitingForHello,
+		)));
+		{
+			let _guard = TerminatedGuard::new(state_ref.clone());
+		}
+		assert_eq!(*state_ref.lock().unwrap(), SessionState::Terminated);
+	}
+
+	/// 任务 panic 同样必须落 Terminated（Drop 在 unwind 时执行）。
+	#[tokio::test]
+	async fn terminated_guard_sets_terminated_on_panic() {
+		let state_ref = Arc::new(Mutex::new(SessionState::Handshaking(
+			HandshakeStep::SendingHello,
+		)));
+		let guard_state = state_ref.clone();
+		let join = tokio::spawn(async move {
+			let _guard = TerminatedGuard::new(guard_state);
+			panic!("simulated actor panic");
+		});
+		assert!(join.await.is_err(), "任务应当以 panic 结束");
+		assert_eq!(*state_ref.lock().unwrap(), SessionState::Terminated);
+	}
+
+	/// net.rs 的防御网：actor 任务结束后 `cmd_tx.is_closed()` 必须为 true，
+	/// 即使状态没来得及写成 Terminated 也能被回收。
+	#[test]
+	fn closed_cmd_tx_identifies_dead_session() {
+		let (cmd_tx, cmd_rx) = mpsc::channel(1);
+		let handle = SessionHandle {
+			initial_id: "dev-1".to_string(),
+			peer_id: Arc::new(Mutex::new(Some("dev-1".to_string()))),
+			state: Arc::new(Mutex::new(SessionState::TransportReady)),
+			cmd_tx,
+		};
+
+		assert!(!handle.is_finished());
+		assert!(!handle.cmd_tx.is_closed());
+
+		// 模拟 actor 任务结束（持有 receiver 的任务被 drop）
+		drop(cmd_rx);
+		assert!(handle.cmd_tx.is_closed());
+	}
+
+	/// FileList 传输时必须按 item 自身的 content.sha256 标记缓存；
+	/// 用单文件的传输 hash 去 UPDATE 会命中 0 行（历史 bug）。
+	#[test]
+	fn content_end_marks_item_sha_not_transfer_sha() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+
+		let item_sha = "a".repeat(64);
+		let file_sha = "b".repeat(64);
+		let meta = ItemMeta {
+			ty: "ItemMeta".to_string(),
+			item_id: "item-filelist".to_string(),
+			kind: ItemKind::FileList,
+			created_ts_ms: now_ms(),
+			source_device_id: "peer-1".to_string(),
+			source_device_name: None,
+			size_bytes: 16,
+			preview: Default::default(),
+			content: ItemContent {
+				mime: "application/x-clipbridge-files".to_string(),
+				sha256: item_sha.clone(),
+				total_bytes: 16,
+			},
+			files: vec![FileMeta {
+				file_id: "file-1".to_string(),
+				rel_name: "a.bin".to_string(),
+				size_bytes: 16,
+				sha256: Some(file_sha.clone()),
+				local_path: None,
+			}],
+			expires_ts_ms: None,
+		};
+		store
+			.insert_remote_item("test_uid", &meta, now_ms())
+			.unwrap();
+		assert_eq!(store.cache_row_count_for_sha(&item_sha).unwrap(), 1);
+
+		// ContentEnd 侧传入的是「本次传输片段 hash」（FileList 里 = file_sha）
+		let (marked_sha, marked_rows) =
+			mark_item_content_cached(&mut store, &meta.item_id, &file_sha, now_ms()).unwrap();
+
+		assert_eq!(marked_sha, item_sha);
+		assert_eq!(marked_rows, 1, "必须命中 item content sha 对应的行");
+		assert!(store.get_cache_present(&item_sha).unwrap());
+		assert_eq!(
+			store.cache_row_count_for_sha(&file_sha).unwrap(),
+			0,
+			"文件 hash 不应被当作缓存键写入"
+		);
+	}
+
+	/// 无 item 行时回退到传输 hash，且 0 行不会让调用方报错（只记警告）。
+	#[test]
+	fn mark_item_content_cached_falls_back_and_reports_zero_rows() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+		let missing_sha = "c".repeat(64);
+		let (marked_sha, rows) =
+			mark_item_content_cached(&mut store, "item-missing", &missing_sha, now_ms()).unwrap();
+		assert_eq!(marked_sha, missing_sha);
+		assert_eq!(rows, 0);
+	}
+}
