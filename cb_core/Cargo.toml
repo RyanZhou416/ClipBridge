@@ -16,7 +16,7 @@ crate-type = ["rlib"]
 [dependencies]
 anyhow = "1"
 rusqlite = { version = "0.41", features = ["bundled"] }
-# ⚠ 不要升到 sha2 0.11：opaque-ke 4.0.1 经由 voprf 与这里共用 sha2 0.10，
+# ⚠ 不要升到 sha2 0.11：opaque-ke 4.x（含 4.1.0-pre.2）经由 voprf 与这里共用 sha2 0.10，
 # 升到 0.11 后其 DefaultCipherSuite 的 Sha512 与 opaque_ke::hash::Hash 不再匹配
 # （实测 57 个编译错误）。等 opaque-ke 升到 digest 0.11 生态后再一起升。
 sha2 = "0.10"
@@ -25,7 +25,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.8", features = ["v4", "fast-rng"] }
 # ⚠ 不要升到 rand 0.10 / rand_chacha 0.10：ChaCha20Rng 与 OsRng 直接传给 opaque-ke，
-# 而 opaque-ke 4.0.1 要求 rand_core 0.6 的 CryptoRngCore；rand 0.10 用 rand_core 0.9，
+# 而 opaque-ke 4.x 要求 rand_core 0.6 的 CryptoRngCore；rand 0.10 用 rand_core 0.9，
 # trait 不兼容（实测编译不过）。rand/rand_chacha 只在 OPAQUE 相关路径使用，
 # 因此与上游保持同一代更安全。
 rand = "0.8.5"
@@ -47,7 +47,7 @@ rcgen = "0.14.6"
 # --- 局域网发现 ---
 mdns-sd = "0.21"
 
-opaque-ke = { version = "4.0", features = ["std", "serde"] }
+opaque-ke = { version = "=4.1.0-pre.2", features = ["std", "serde"] }
 # ⚠ bincode 1.3.3 已被作者标记为"停止维护、完成版"（RUSTSEC-2025-0141）。
 # 升级到 3.x 会改变 OPAQUE 登录消息（actor.rs 里的 serialize/deserialize）的线格式，
 # 老对端将无法互通；要升必须先给协议加版本号并做迁移，属于产品决策，不是纯依赖升级。
