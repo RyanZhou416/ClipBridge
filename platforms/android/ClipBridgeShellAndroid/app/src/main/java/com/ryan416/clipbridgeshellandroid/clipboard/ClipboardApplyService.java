@@ -16,6 +16,7 @@ import java.io.FileInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeoutException;
 
 import com.ryan416.clipbridgeshellandroid.shizuku.ShizukuClipboardManager;
 
@@ -51,15 +52,36 @@ public class ClipboardApplyService {
 
 	private void applyItemToClipboard(String itemId) {
 		try {
-			// 关键：这里不构造 JSON 请求（避免我编造格式）
-			// 直接调用 core.ensureContentCached(itemId, null) 让 native 层按真实 core API 调用。
-			String transferId = core.ensureContentCached(itemId);
-			if (transferId == null || transferId.isEmpty()) {
-				Log.w(TAG, "ensureContentCached returned empty transferId");
+			// FFI 契约（crates/cb_core_ffi）：请求是 {"item_id":"..."}，
+			// 响应是 {"ok":true,"data":{"transfer_id":...}}；不能把裸 item_id 当请求，
+			// 也不能把整个 envelope 字符串当 transfer_id。
+			JSONObject req = new JSONObject();
+			req.put("item_id", itemId);
+			String reqJson = req.toString();
+			Log.d(TAG, "ensureContentCached request: " + reqJson);
+
+			String envJson = core.ensureContentCached(reqJson);
+			Log.d(TAG, "ensureContentCached response: " + envJson);
+
+			JSONObject env = new JSONObject(envJson);
+			if (!env.optBoolean("ok", false)) {
+				JSONObject error = env.optJSONObject("error");
+				String code = error != null ? error.optString("code", "UNKNOWN") : "UNKNOWN";
+				String message = error != null ? error.optString("message", envJson) : envJson;
+				Log.e(TAG, "ensureContentCached failed. itemId=" + itemId
+					+ " code=" + code + " message=" + message);
 				return;
 			}
 
-			ContentFetchAwaiter.Result r = awaiter.await(transferId).get(); // 阻塞等事件完成
+			JSONObject data = env.optJSONObject("data");
+			String transferId = data != null ? data.optString("transfer_id", null) : null;
+			if (transferId == null || transferId.isEmpty()) {
+				Log.w(TAG, "ensureContentCached returned no transfer_id. itemId=" + itemId + " env=" + envJson);
+				return;
+			}
+
+			// 带超时等待 CONTENT_CACHED / TRANSFER_FAILED，避免单线程 executor 被永久阻塞
+			ContentFetchAwaiter.Result r = awaiter.awaitResult(transferId);
 
 			String text = null;
 			if (r.textUtf8 != null && !r.textUtf8.isEmpty()) {
@@ -87,6 +109,12 @@ public class ClipboardApplyService {
 			} else {
 				Log.e(TAG, "Failed to apply via Shizuku (Binder Error?)");
 			}
+		} catch (TimeoutException te) {
+			// 超时是正常失败路径：记录后释放 executor，不再无限阻塞
+			Log.e(TAG, "等待内容超时，放弃本次应用. itemId=" + itemId + " detail=" + te.getMessage());
+		} catch (InterruptedException ie) {
+			Thread.currentThread().interrupt();
+			Log.e(TAG, "等待内容被中断，放弃本次应用. itemId=" + itemId, ie);
 		} catch (Throwable t) {
 			// 带上 itemId，便于在 logcat 里定位是哪一条内容失败
 			Log.e(TAG, "applyItemToClipboard failed. itemId=" + itemId, t);
