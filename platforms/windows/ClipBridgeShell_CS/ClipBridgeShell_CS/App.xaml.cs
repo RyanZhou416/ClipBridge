@@ -68,6 +68,22 @@ public partial class App : Application
     {
         get; set;
     }
+
+    /// <summary>
+    /// 测量模式：<c>CB_STARTUP_NO_FOREGROUND=1</c> 时窗口"可见但不抢焦点"，
+    /// 并抑制启动期的登录提醒弹窗。用于连续测量启动耗时，避免把用户正在用的窗口反复抢掉。
+    /// 未设置时行为与原先完全一致。
+    /// </summary>
+    internal static readonly bool SuppressForeground =
+        string.Equals(Environment.GetEnvironmentVariable("CB_STARTUP_NO_FOREGROUND"), "1", StringComparison.Ordinal);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    /// <summary>SW_SHOWNOACTIVATE：显示窗口但不激活它。</summary>
+    internal const int SW_SHOWNOACTIVATE = 4;
+
     public App()
     {
         StartupTrace.Mark("app-ctor-enter");
@@ -267,6 +283,7 @@ public partial class App : Application
             Exit();
             return;
         }
+        StartupTrace.Mark("single-instance-done");
 
         // ① 初始化 Localizer（打包应用版）
         await InitializeLocalizer();
@@ -299,7 +316,7 @@ public partial class App : Application
         // 核心初始化已统一放在 ActivationService（窗口可见后异步执行），这里只处理未登录提示
         var accountService = App.GetService<IAccountService>();
         var hasAccount = await accountService.HasAccountAsync();
-        if (!hasAccount)
+        if (!hasAccount && !SuppressForeground)
         {
             // 如果没有账号，弹出登录提醒弹窗（延迟一会确保 UI 已加载）
             _ = Task.Run(async () =>
@@ -392,17 +409,32 @@ public partial class App : Application
 
     private static void ActivateMainWindow()
     {
+        StartupTrace.Mark("warm-activate-request");
         var window = MainWindow;
         if (window == null) return;
 
         window.DispatcherQueue.TryEnqueue(() =>
         {
-            window.Show();
+            StartupTrace.Mark("warm-show-begin");
+            if (SuppressForeground)
+            {
+                // 测量模式：让窗口可见但不抢焦点（否则连测多次会反复打断用户）
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            else
+            {
+                window.Show();
+            }
             if (window.AppWindow.Presenter is OverlappedPresenter presenter)
             {
                 presenter.Restore();
             }
-            window.Activate();
+            if (!SuppressForeground)
+            {
+                window.Activate();
+            }
+            StartupTrace.Mark("warm-activate-done");
         });
     }
 

@@ -103,6 +103,31 @@ public sealed partial class MainPage : Page
     // 订阅状态：Transient 页面会多次 Loaded/Unloaded，必须成对订阅与解除订阅
     private bool _subscribed = false;
 
+    // 启动优化：背景图加载 / 标题颜色检测 / 图表首绘都推迟到首帧之后
+    private const string BackgroundImagePathSettingKey = "MainPage_BackgroundImagePath";
+    private const string TitleColorCacheSettingKey = "MainPage_TitleColorCache";
+    // 3840x2160 的原始背景图按 1600 宽解码（约 1/5 像素量）；hero 区约 600 高、通常 1200~1600 宽，
+    // 1600 可避免 UniformToFill 放大后出现明显糊化。
+    private const int BackgroundDecodePixelWidth = 1600;
+
+    /// <summary>对照开关：CB_SYNC_MAINPAGE_LOADED=1 时保持旧的“在 OnPageLoaded 里同步解码+首绘”行为。</summary>
+    private static readonly bool SyncLoadedForAb =
+        string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_MAINPAGE_LOADED"), "1", StringComparison.Ordinal);
+
+    // 首绘是否还挂在合并重绘队列里（用于只打一次 mainpage-charts-deferred 标记）
+    private bool _initialChartDrawPending;
+
+    // 背景图源版本：换图时自增，用于丢弃上一张图迟到的颜色检测结果
+    private int _backgroundImageGeneration;
+
+    // 当前通过 SetSourceAsync 设置的自定义图片路径（BitmapImage.UriSource 在流模式下为空）
+    private string? _lastBackgroundImagePath;
+
+    // 标题颜色检测去重：同一张图（路径+最后写入时间）每次启动最多解码一次
+    private string? _titleColorPendingKey;
+    private string? _titleColorResolvedKey;
+    private Color? _titleColorResolvedColor;
+
     private void OnPageLoaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         StartupTrace.Mark("mainpage-loaded");
@@ -129,14 +154,14 @@ public sealed partial class MainPage : Page
                 NetworkChartCanvas.SizeChanged += OnChartCanvasSizeChanged;
                 ActivityChartCanvas.SizeChanged += OnChartCanvasSizeChanged;
 
-                // 检测背景图片颜色并调整标题颜色
+                // 背景图片颜色检测：新路径在首帧之后由 ImageOpened / 延迟加载触发；
+                // A/B 对照模式保留旧的“Loaded 时立即检测”。
                 if (HeroImage != null)
                 {
                     HeroImage.ImageOpened += OnHeroImageOpened;
-                    // 如果图片已经加载，立即检测
-                    if (HeroImage.Source != null)
+                    if (SyncLoadedForAb && HeroImage.Source != null)
                     {
-                        _ = DetectBackgroundColorAndUpdateTitle();
+                        _ = DetectBackgroundColorAndUpdateTitleLegacyAsync();
                     }
                 }
 
@@ -150,13 +175,21 @@ public sealed partial class MainPage : Page
 
             StartRelativeTimeRefresh();
 
-            // 初始绘制
-            SafeDrawChart(DrawCacheChart, "Cache");
-            SafeDrawChart(DrawNetworkChart, "Network");
-            SafeDrawChart(DrawActivityChart, "Activity");
-
-            // 加载用户自定义背景图片
-            _ = LoadBackgroundImageAsync();
+            if (SyncLoadedForAb)
+            {
+                StartupTrace.Mark("ab-mode-loaded-sync");
+                // A/B 对照：保持旧的“OnPageLoaded 内同步解码 + 图表首绘”
+                SafeDrawChart(DrawCacheChart, "Cache");
+                SafeDrawChart(DrawNetworkChart, "Network");
+                SafeDrawChart(DrawActivityChart, "Activity");
+                _ = LoadBackgroundImageAsync(legacySync: true);
+            }
+            else
+            {
+                StartupTrace.Mark("ab-mode-loaded-deferred");
+                // 首帧之后再绘制图表、加载/检测背景图，避免和第一帧抢 UI 线程
+                DeferStartupWorkUntilAfterFirstFrame();
+            }
         }
         catch (Exception ex)
         {
@@ -261,6 +294,12 @@ public sealed partial class MainPage : Page
         {
             _redrawQueued = false;
 
+            if (_initialChartDrawPending)
+            {
+                _initialChartDrawPending = false;
+                StartupTrace.Mark("mainpage-charts-deferred");
+            }
+
             if (_cacheChartDirty)
             {
                 _cacheChartDirty = false;
@@ -280,21 +319,48 @@ public sealed partial class MainPage : Page
             }
         });
     }
-    
+
+    // 首帧之后再做的启动工作：图表首绘（复用合并重绘队列）与背景图加载/颜色检测。
+    // 注意：这里不能 Activate 窗口、不能弹对话框，避免在对照测量时抢焦点。
+    private void DeferStartupWorkUntilAfterFirstFrame()
+    {
+        // 图表首绘：只标记脏位，复用既有的 Low 优先级合并重绘队列（不新增定时器）
+        _initialChartDrawPending = true;
+        _cacheChartDirty = true;
+        _networkChartDirty = true;
+        _activityChartDirty = true;
+        QueueChartRedraw();
+
+        // 背景图片加载 + 标题颜色检测：等首帧提交后再执行，解码在后台线程
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+        {
+            StartupTrace.Mark("mainpage-images-deferred");
+            _ = LoadBackgroundImageAsync();
+        });
+    }
+
+    // ---- 旧行为（仅 A/B 对照使用）：解析与解码都在调用线程上完成，不读缓存 ----
     private async void OnHeroImageOpened(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
-        await DetectBackgroundColorAndUpdateTitle();
+        if (SyncLoadedForAb)
+        {
+            await DetectBackgroundColorAndUpdateTitleLegacyAsync();
+        }
+        else
+        {
+            await DetectBackgroundColorAndUpdateTitleAsync();
+        }
     }
-    
-    private async Task DetectBackgroundColorAndUpdateTitle()
+
+    private async Task DetectBackgroundColorAndUpdateTitleLegacyAsync()
     {
         try
         {
             if (HeroImage?.Source == null || TitleTextBlock == null)
                 return;
-            
+
             Windows.Storage.StorageFile? imageFile = null;
-            
+
             // 获取图片源
             var imageSource = HeroImage.Source;
             if (imageSource is Microsoft.UI.Xaml.Media.Imaging.BitmapImage bitmapImage)
@@ -313,12 +379,12 @@ public sealed partial class MainPage : Page
                     }
                 }
             }
-            
+
             // 如果 Uri 方式失败，尝试从设置中读取自定义图片路径
             if (imageFile == null)
             {
                 var settingsService = App.GetService<ClipBridgeShell_CS.Contracts.Services.ILocalSettingsService>();
-                var customImagePath = await settingsService.ReadSettingAsync<string?>("MainPage_BackgroundImagePath");
+                var customImagePath = await settingsService.ReadSettingAsync<string?>(BackgroundImagePathSettingKey);
                 if (!string.IsNullOrEmpty(customImagePath))
                 {
                     try
@@ -331,10 +397,10 @@ public sealed partial class MainPage : Page
                     }
                 }
             }
-            
+
             if (imageFile != null)
             {
-                await DetectImageColorAndUpdateTitle(imageFile);
+                await DetectImageColorAndUpdateTitleLegacyAsync(imageFile);
             }
         }
         catch (Exception ex)
@@ -343,14 +409,25 @@ public sealed partial class MainPage : Page
             System.Diagnostics.Debug.WriteLine($"检测背景颜色失败: {ex.Message}");
         }
     }
-    
-    private async Task DetectImageColorAndUpdateTitle(Windows.Storage.StorageFile file)
+
+    private async Task DetectImageColorAndUpdateTitleLegacyAsync(Windows.Storage.StorageFile file)
+    {
+        var color = await DecodeTitleColorFromFileAsync(file);
+        if (color.HasValue)
+        {
+            // 更新标题颜色（使用辅助方法，确保不受主题影响）
+            UpdateTitleColor(color.Value);
+        }
+    }
+
+    // 只负责解码 + 计算标题区域平均亮度，不碰 UI。（调用方决定放在 UI 线程还是后台线程）
+    private static async Task<Color?> DecodeTitleColorFromFileAsync(Windows.Storage.StorageFile file)
     {
         try
         {
             using var stream = await file.OpenAsync(Windows.Storage.FileAccessMode.Read);
             var decoder = await BitmapDecoder.CreateAsync(stream);
-            
+
             // 计算标题区域在图片中的位置（标题在图片的上方，大约在 48-100 像素的位置）
             // 采样标题区域的颜色（左上角 36, 48 到 200, 100 的区域）
             // 确保边界不超出图片范围
@@ -360,14 +437,14 @@ public sealed partial class MainPage : Page
             var maxHeight = decoder.PixelHeight > y ? decoder.PixelHeight - y : 1;
             var width = (uint)Math.Min(200, maxWidth);
             var height = (uint)Math.Min(100, maxHeight);
-            
+
             // 如果图片太小，跳过颜色检测
             if (width == 0 || height == 0 || decoder.PixelWidth == 0 || decoder.PixelHeight == 0)
             {
-                return;
+                return null;
             }
-            
-            // 读取像素数据
+
+            // 读取像素数据（只取标题区域，不整图解码到内存）
             var transform = new BitmapTransform
             {
                 Bounds = new BitmapBounds
@@ -380,57 +457,273 @@ public sealed partial class MainPage : Page
                 ScaledWidth = width,
                 ScaledHeight = height
             };
-            
+
             var pixelData = await decoder.GetPixelDataAsync(
                 BitmapPixelFormat.Rgba8,
                 BitmapAlphaMode.Premultiplied,
                 transform,
                 ExifOrientationMode.RespectExifOrientation,
                 ColorManagementMode.DoNotColorManage);
-            
+
             var bytes = pixelData.DetachPixelData();
-            
+
             // 计算平均亮度
             long totalR = 0, totalG = 0, totalB = 0;
             var pixelCount = 0;
-            
+
             for (var i = 0; i < bytes.Length; i += 4)
             {
                 var r = bytes[i];
                 var g = bytes[i + 1];
                 var b = bytes[i + 2];
                 // bytes[i + 3] 是 alpha，这里忽略
-                
+
                 totalR += r;
                 totalG += g;
                 totalB += b;
                 pixelCount++;
             }
-            
-            if (pixelCount > 0)
+
+            if (pixelCount == 0)
             {
-                var avgR = (int)(totalR / pixelCount);
-                var avgG = (int)(totalG / pixelCount);
-                var avgB = (int)(totalB / pixelCount);
-                
-                // 计算亮度（使用相对亮度公式：0.299*R + 0.587*G + 0.114*B）
-                var luminance = 0.299 * avgR + 0.587 * avgG + 0.114 * avgB;
-                
-                // 如果亮度小于 128（深色背景），使用白色文字；否则使用黑色文字
-                Color textColor = luminance < 128 ? Colors.White : Colors.Black;
-                
-                // 更新标题颜色（使用辅助方法，确保不受主题影响）
-                UpdateTitleColor(textColor);
+                return null;
             }
+
+            var avgR = (int)(totalR / pixelCount);
+            var avgG = (int)(totalG / pixelCount);
+            var avgB = (int)(totalB / pixelCount);
+
+            // 计算亮度（使用相对亮度公式：0.299*R + 0.587*G + 0.114*B）
+            var luminance = 0.299 * avgR + 0.587 * avgG + 0.114 * avgB;
+
+            // 如果亮度小于 128（深色背景），使用白色文字；否则使用黑色文字
+            return luminance < 128 ? Colors.White : Colors.Black;
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"检测图片颜色失败: {ex.Message}");
+            return null;
         }
     }
+
+    // ---- 新行为：元数据/解码全部在后台线程；按“路径+最后写入时间”缓存；同一张图每次启动最多解码一次 ----
+    private async Task DetectBackgroundColorAndUpdateTitleAsync()
+    {
+        try
+        {
+            if (HeroImage?.Source == null || TitleTextBlock == null)
+                return;
+
+            var generation = _backgroundImageGeneration;
+            var (appxUri, customPath) = CaptureBackgroundImageLocator();
+
+            var descriptor = await Task.Run(() => ResolveBackgroundImageDescriptorAsync(appxUri, customPath));
+            if (descriptor == null || generation != _backgroundImageGeneration)
+                return;
+
+            var cacheKey = descriptor.CacheKey;
+
+            // 本次启动内已经算过同一张图：只重新应用颜色，不再读缓存/解码
+            if (cacheKey == _titleColorResolvedKey && _titleColorResolvedColor is Color resolvedColor)
+            {
+                UpdateTitleColor(resolvedColor);
+                return;
+            }
+
+            // 同一张图已有检测在后台进行：合并为一次解码
+            if (cacheKey == _titleColorPendingKey)
+                return;
+
+            // 持久化缓存命中（跨启动）：整次解码都跳过
+            var cachedColor = await ReadCachedTitleColorAsync(cacheKey);
+            if (cachedColor.HasValue)
+            {
+                if (generation == _backgroundImageGeneration)
+                {
+                    _titleColorResolvedKey = cacheKey;
+                    _titleColorResolvedColor = cachedColor.Value;
+                    UpdateTitleColor(cachedColor.Value);
+                }
+                return;
+            }
+
+            if (generation != _backgroundImageGeneration)
+                return;
+
+            _titleColorPendingKey = cacheKey;
+            try
+            {
+                var detectedColor = await Task.Run(() => DecodeBackgroundTitleColorAsync(descriptor));
+                if (!detectedColor.HasValue || generation != _backgroundImageGeneration)
+                    return;
+
+                _titleColorResolvedKey = cacheKey;
+                _titleColorResolvedColor = detectedColor.Value;
+                UpdateTitleColor(detectedColor.Value);
+                await SaveCachedTitleColorAsync(cacheKey, detectedColor.Value);
+            }
+            finally
+            {
+                if (_titleColorPendingKey == cacheKey)
+                    _titleColorPendingKey = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            // 如果检测失败，使用默认颜色
+            System.Diagnostics.Debug.WriteLine($"检测背景颜色失败: {ex.Message}");
+        }
+    }
+
+    // 在 UI 线程上捕获“当前显示的是哪张图”（纯字符串，可安全带到后台线程）
+    private (string? AppxUri, string? CustomPath) CaptureBackgroundImageLocator()
+    {
+        string? appxUri = null;
+        string? customPath = null;
+
+        if (HeroImage?.Source is Microsoft.UI.Xaml.Media.Imaging.BitmapImage bitmapImage)
+        {
+            var uri = bitmapImage.UriSource;
+            if (uri != null && uri.IsAbsoluteUri)
+            {
+                if (uri.Scheme == "ms-appx")
+                {
+                    appxUri = uri.AbsoluteUri;
+                }
+                else if (uri.IsFile)
+                {
+                    customPath = uri.LocalPath;
+                }
+            }
+        }
+
+        if (appxUri == null && customPath == null)
+        {
+            // 通过 SetSourceAsync 设置的自定义图没有 UriSource，与旧逻辑一致回落到设置里记录的路径
+            customPath = _lastBackgroundImagePath;
+        }
+
+        return (appxUri, customPath);
+    }
+
+    private static async Task<BackgroundImageDescriptor?> ResolveBackgroundImageDescriptorAsync(string? appxUri, string? customPath)
+    {
+        var file = await TryOpenBackgroundImageFileAsync(appxUri, customPath);
+        if (file == null)
+            return null;
+
+        long lastWriteUtcTicks = 0;
+        try
+        {
+            var basicProperties = await file.GetBasicPropertiesAsync();
+            lastWriteUtcTicks = basicProperties.DateModified.UtcDateTime.Ticks;
+        }
+        catch
+        {
+            // 拿不到时间戳时退化为仅用路径做键（仍能在本次启动内去重）
+        }
+
+        var path = string.IsNullOrEmpty(file.Path) ? (customPath ?? appxUri ?? string.Empty) : file.Path;
+        return new BackgroundImageDescriptor(appxUri, customPath, $"{path}|{lastWriteUtcTicks}");
+    }
+
+    private static async Task<Color?> DecodeBackgroundTitleColorAsync(BackgroundImageDescriptor descriptor)
+    {
+        var file = await TryOpenBackgroundImageFileAsync(descriptor.AppxUri, descriptor.CustomPath);
+        return file == null ? null : await DecodeTitleColorFromFileAsync(file);
+    }
+
+    private static async Task<Windows.Storage.StorageFile?> TryOpenBackgroundImageFileAsync(string? appxUri, string? customPath)
+    {
+        if (!string.IsNullOrEmpty(customPath))
+        {
+            try
+            {
+                return await Windows.Storage.StorageFile.GetFileFromPathAsync(customPath);
+            }
+            catch
+            {
+                // 自定义文件可能已被移动/删除，回落到默认图
+            }
+        }
+
+        if (!string.IsNullOrEmpty(appxUri))
+        {
+            try
+            {
+                return await Windows.Storage.StorageFile.GetFileFromApplicationUriAsync(new Uri(appxUri));
+            }
+            catch
+            {
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<Color?> ReadCachedTitleColorAsync(string cacheKey)
+    {
+        try
+        {
+            var settingsService = App.GetService<ClipBridgeShell_CS.Contracts.Services.ILocalSettingsService>();
+            var raw = await settingsService.ReadSettingAsync<string>(TitleColorCacheSettingKey);
+            if (string.IsNullOrEmpty(raw))
+                return null;
+
+            var separator = raw.IndexOf('\t');
+            if (separator < 0)
+                return null;
+
+            if (!string.Equals(raw.Substring(0, separator), cacheKey, StringComparison.Ordinal))
+                return null;
+
+            return raw.Substring(separator + 1) switch
+            {
+                "white" => Colors.White,
+                "black" => Colors.Black,
+                _ => null
+            };
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"读取标题颜色缓存失败: {ex.Message}");
+            return null;
+        }
+    }
+
+    private async Task SaveCachedTitleColorAsync(string cacheKey, Color color)
+    {
+        try
+        {
+            var settingsService = App.GetService<ClipBridgeShell_CS.Contracts.Services.ILocalSettingsService>();
+            var value = cacheKey + "\t" + (color == Colors.White ? "white" : "black");
+            await settingsService.SaveSettingAsync(TitleColorCacheSettingKey, value);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"写入标题颜色缓存失败: {ex.Message}");
+        }
+    }
+
+    private sealed class BackgroundImageDescriptor
+    {
+        public BackgroundImageDescriptor(string? appxUri, string? customPath, string cacheKey)
+        {
+            AppxUri = appxUri;
+            CustomPath = customPath;
+            CacheKey = cacheKey;
+        }
+
+        public string? AppxUri { get; }
+
+        public string? CustomPath { get; }
+
+        public string CacheKey { get; }
+    }
     
-    // 加载背景图片（用户自定义或默认）
-    private async Task LoadBackgroundImageAsync()
+    // 加载背景图片（用户自定义或默认）。
+    // legacySync = true 仅用于 A/B 对照，复现旧的“在 OnPageLoaded 调用链里同步解码检测”行为。
+    private async Task LoadBackgroundImageAsync(bool legacySync = false)
     {
         try
         {
@@ -438,7 +731,7 @@ public sealed partial class MainPage : Page
                 return;
 
             var settingsService = App.GetService<ClipBridgeShell_CS.Contracts.Services.ILocalSettingsService>();
-            var customImagePath = await settingsService.ReadSettingAsync<string?>("MainPage_BackgroundImagePath");
+            var customImagePath = await settingsService.ReadSettingAsync<string?>(BackgroundImagePathSettingKey);
 
             Windows.Storage.StorageFile? imageFile = null;
 
@@ -448,16 +741,6 @@ public sealed partial class MainPage : Page
                 {
                     // 检查文件是否存在
                     imageFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(customImagePath);
-                    if (imageFile != null)
-                    {
-                        var bitmapImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
-                        await bitmapImage.SetSourceAsync(await imageFile.OpenAsync(Windows.Storage.FileAccessMode.Read));
-                        HeroImage.Source = bitmapImage;
-                        
-                        // 加载自定义图片后，检测颜色并更新标题
-                        await DetectImageColorAndUpdateTitle(imageFile);
-                        return;
-                    }
                 }
                 catch
                 {
@@ -466,17 +749,99 @@ public sealed partial class MainPage : Page
                 }
             }
 
-            // 使用默认图片
-            var defaultUri = new Uri("ms-appx:///Assets/background.jpg");
-            HeroImage.Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(defaultUri);
-            
+            if (imageFile != null)
+            {
+                _lastBackgroundImagePath = string.IsNullOrEmpty(imageFile.Path) ? customImagePath : imageFile.Path;
+                await ApplyLoadedBackgroundImageAsync(imageFile, legacySync);
+                return;
+            }
+
+            _lastBackgroundImagePath = null;
+            await ApplyDefaultBackgroundImageAsync(legacySync);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"加载背景图片失败: {ex.Message}");
+            // 失败时使用默认图片
+            if (HeroImage != null)
+            {
+                var fallbackBitmap = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
+                if (!legacySync)
+                {
+                    fallbackBitmap.DecodePixelWidth = BackgroundDecodePixelWidth;
+                }
+                fallbackBitmap.UriSource = new Uri("ms-appx:///Assets/background.jpg");
+
+                _backgroundImageGeneration++;
+                HeroImage.Source = fallbackBitmap;
+
+                if (!legacySync)
+                {
+                    _ = DetectBackgroundColorAndUpdateTitleAsync();
+                }
+            }
+        }
+    }
+
+    private async Task ApplyLoadedBackgroundImageAsync(Windows.Storage.StorageFile imageFile, bool legacySync)
+    {
+        var bitmapImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
+        if (!legacySync)
+        {
+            // 下采样解码：按显示所需宽度解码，避免整张 3840x2160 背景图占用 UI 线程时间与内存
+            bitmapImage.DecodePixelWidth = BackgroundDecodePixelWidth;
+        }
+
+        using (var stream = await imageFile.OpenAsync(Windows.Storage.FileAccessMode.Read))
+        {
+            await bitmapImage.SetSourceAsync(stream);
+        }
+
+        _backgroundImageGeneration++;
+        HeroImage!.Source = bitmapImage;
+
+        if (legacySync)
+        {
+            // A/B 对照：与旧实现一致，在同一调用链里直接解码检测
+            await DetectImageColorAndUpdateTitleLegacyAsync(imageFile);
+        }
+        else
+        {
+            // 首帧之后异步检测；解码在后台线程，ImageOpened 触发的检测会被去重
+            _ = DetectBackgroundColorAndUpdateTitleAsync();
+        }
+    }
+
+    private async Task ApplyDefaultBackgroundImageAsync(bool legacySync)
+    {
+        var defaultUri = new Uri("ms-appx:///Assets/background.jpg");
+
+        // 新路径：XAML 已经声明了同一张默认图时不再重复解码，只补一次首帧后的颜色检测
+        if (!legacySync && IsSourceTheDefaultBackground(defaultUri))
+        {
+            _ = DetectBackgroundColorAndUpdateTitleAsync();
+            return;
+        }
+
+        var bitmapImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
+        if (!legacySync)
+        {
+            bitmapImage.DecodePixelWidth = BackgroundDecodePixelWidth;
+        }
+        bitmapImage.UriSource = defaultUri;
+
+        _backgroundImageGeneration++;
+        HeroImage!.Source = bitmapImage;
+
+        if (legacySync)
+        {
             // 加载默认图片后，检测颜色并更新标题
             try
             {
-                imageFile = await Windows.Storage.StorageFile.GetFileFromApplicationUriAsync(defaultUri);
+                var imageFile = await Windows.Storage.StorageFile.GetFileFromApplicationUriAsync(defaultUri);
                 if (imageFile != null)
                 {
-                    await DetectImageColorAndUpdateTitle(imageFile);
+                    await DetectImageColorAndUpdateTitleLegacyAsync(imageFile);
                 }
             }
             catch
@@ -485,21 +850,24 @@ public sealed partial class MainPage : Page
                 System.Diagnostics.Debug.WriteLine("无法检测默认背景图片颜色");
             }
         }
-        catch (Exception ex)
+        else
         {
-            System.Diagnostics.Debug.WriteLine($"加载背景图片失败: {ex.Message}");
-            // 失败时使用默认图片
-            if (HeroImage != null)
-            {
-                HeroImage.Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri("ms-appx:///Assets/background.jpg"));
-            }
+            _ = DetectBackgroundColorAndUpdateTitleAsync();
         }
+    }
+
+    private bool IsSourceTheDefaultBackground(Uri defaultUri)
+    {
+        return HeroImage?.Source is Microsoft.UI.Xaml.Media.Imaging.BitmapImage bitmapImage
+            && bitmapImage.UriSource is Uri currentUri
+            && currentUri.IsAbsoluteUri
+            && string.Equals(currentUri.AbsoluteUri, defaultUri.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
     }
 
     private async void OnSettingChanged(object? sender, string key)
     {
         // 当背景图片设置改变时，重新加载
-        if (key == "MainPage_BackgroundImagePath")
+        if (key == BackgroundImagePathSettingKey)
         {
             await LoadBackgroundImageAsync();
         }
@@ -513,7 +881,14 @@ public sealed partial class MainPage : Page
         // 主题变化时，重新检测背景颜色并更新标题
         // 延迟一下，确保主题切换完成后再更新
         await Task.Delay(50);
-        await DetectBackgroundColorAndUpdateTitle();
+        if (SyncLoadedForAb)
+        {
+            await DetectBackgroundColorAndUpdateTitleLegacyAsync();
+        }
+        else
+        {
+            await DetectBackgroundColorAndUpdateTitleAsync();
+        }
     }
 
     // 更新标题颜色的辅助方法：直接设置 TextBlock 前景色，完全不受主题影响

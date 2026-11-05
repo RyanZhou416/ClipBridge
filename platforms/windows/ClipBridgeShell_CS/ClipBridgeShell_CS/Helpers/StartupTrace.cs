@@ -62,7 +62,9 @@ public static class StartupTrace
             var sinceProcessStartMs = (DateTime.Now - Process.GetCurrentProcess().StartTime).TotalMilliseconds;
             lock (Gate)
             {
-                _writer?.WriteLine($"{sinceProcessStartMs,9:F1}\t{phase}");
+                // 同时写入绝对时间戳：跨进程测量（例如第二实例重定向到主实例、
+                // 主实例把窗口带前台）必须靠绝对时间才对得齐。
+                _writer?.WriteLine($"{sinceProcessStartMs,9:F1}\t{DateTime.Now:HH:mm:ss.fff}\t{phase}");
             }
         }
         catch

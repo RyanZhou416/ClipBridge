@@ -41,12 +41,21 @@ public sealed partial class ShellPage : Page
             mainWindow.SetTitleBar(AppTitleBar);
             mainWindow.Activated += MainWindow_Activated;
         }
-        AppTitleBarText.Text = WinUI3Localizer.Localizer.Get().GetLocalizedString("AppDisplayName");
+        // 注意：构造函数里不要调用 Localizer.Get()。
+        // 首次调用会触发本地化资源文件的读取/构建；ShellPage 现在虽然已推迟到首帧之后构建，
+        // 但这条调用仍会把它拉回启动路径（TASK 2），所以本地化标题统一改到 OnLoaded 里设置。
     }
 
     private void OnLoaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         TitleBarHelper.UpdateTitleBar(RequestedTheme);
+
+        // 首帧之后才取本地化字符串（原来在构造函数里，会强制 Localizer 在首帧前构建）。
+        AppTitleBarText.Text = Localizer.Get().GetLocalizedString("AppDisplayName");
+
+        // Shell 是在窗口第一次 Activate 之后才构建的，那次 Activated 事件已经错过；
+        // 这里补上静态引用，保证系统主题变化时标题栏颜色仍能跟随。
+        App.AppTitlebar = AppTitleBarText;
 
         KeyboardAccelerators.Add(BuildKeyboardAccelerator(VirtualKey.Left, VirtualKeyModifiers.Menu));
         KeyboardAccelerators.Add(BuildKeyboardAccelerator(VirtualKey.GoBack));
@@ -56,7 +65,12 @@ public sealed partial class ShellPage : Page
 
     private void MainWindow_Activated(object sender, WindowActivatedEventArgs args)
     {
-        App.AppTitlebar = AppTitleBarText as UIElement;
+        // 每次窗口激活都会触发；OnLoaded 已经设过同一个引用，
+        // 这里只在引用变化时写入，省掉暖路径上每次激活的无谓赋值。
+        if (!ReferenceEquals(App.AppTitlebar, AppTitleBarText))
+        {
+            App.AppTitlebar = AppTitleBarText;
+        }
     }
 
     private void NavigationViewControl_DisplayModeChanged(NavigationView sender, NavigationViewDisplayModeChangedEventArgs args)
