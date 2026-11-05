@@ -1,5 +1,8 @@
 use serde::Serialize;
 
+/// JSON error envelope mirroring the protocol shape emitted by [`err_json`].
+/// Kept as the typed counterpart of the hand-built `json!` envelope above.
+#[allow(dead_code)]
 #[derive(Serialize)]
 pub struct ErrObj<'a> {
 	pub code: &'a str,

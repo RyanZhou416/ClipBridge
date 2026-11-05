@@ -25,21 +25,21 @@ struct LimitsDto {
 	text_auto_prefetch_bytes: Option<i64>,
 }
 
-impl Into<SizeLimits> for LimitsDto {
-	fn into(self) -> SizeLimits {
+impl From<LimitsDto> for SizeLimits {
+	fn from(val: LimitsDto) -> Self {
 		let def = SizeLimits::default();
 		SizeLimits {
-			soft_text_bytes: self.soft_text_bytes.unwrap_or(def.soft_text_bytes),
-			soft_image_bytes: self.soft_image_bytes.unwrap_or(def.soft_image_bytes),
-			soft_file_total_bytes: self
+			soft_text_bytes: val.soft_text_bytes.unwrap_or(def.soft_text_bytes),
+			soft_image_bytes: val.soft_image_bytes.unwrap_or(def.soft_image_bytes),
+			soft_file_total_bytes: val
 				.soft_file_total_bytes
 				.unwrap_or(def.soft_file_total_bytes),
-			hard_text_bytes: self.hard_text_bytes.unwrap_or(def.hard_text_bytes),
-			hard_image_bytes: self.hard_image_bytes.unwrap_or(def.hard_image_bytes),
-			hard_file_total_bytes: self
+			hard_text_bytes: val.hard_text_bytes.unwrap_or(def.hard_text_bytes),
+			hard_image_bytes: val.hard_image_bytes.unwrap_or(def.hard_image_bytes),
+			hard_file_total_bytes: val
 				.hard_file_total_bytes
 				.unwrap_or(def.hard_file_total_bytes),
-			text_auto_prefetch_bytes: self
+			text_auto_prefetch_bytes: val
 				.text_auto_prefetch_bytes
 				.unwrap_or(def.text_auto_prefetch_bytes),
 		}
@@ -67,6 +67,11 @@ struct InitConfigDto {
 	data_dir: String,
 	cache_dir: String,
 
+	/// 可选：true 时完全跳过 NetManager（不 bind socket、不启动 mDNS）。
+	/// 缺省 false，保持正式应用网络开启。
+	#[serde(default)]
+	disable_network: bool,
+
 	// [修改] 接受嵌套的 app_config
 	#[serde(default)]
 	app_config: Option<AppConfigDto>,
@@ -74,15 +79,12 @@ struct InitConfigDto {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ShareMode {
+	#[default]
 	Default,
 	LocalOnly,
 	Force,
-}
-impl Default for ShareMode {
-	fn default() -> Self {
-		ShareMode::Default
-	}
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -160,6 +162,7 @@ pub fn parse_cfg(json: &str) -> anyhow::Result<cb_core::api::CoreConfig> {
 		data_dir: dto.data_dir,
 		cache_dir: dto.cache_dir,
 		app_config,
+		disable_network: dto.disable_network,
 	})
 }
 

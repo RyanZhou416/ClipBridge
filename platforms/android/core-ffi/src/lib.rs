@@ -1,3 +1,8 @@
+// C ABI 入口必须接收裸指针，且不能声明成 `unsafe fn`（否则头文件语义与 C/JNI 侧调用约定都要改）。
+// 空指针检查由各入口自行完成，因此在本 crate 统一关闭该 lint。
+// 说明：这条 lint 在 clippy 里是 deny-by-default，不关掉会让 `cargo clippy` 直接编译失败。
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 mod bridge;
 mod error;
 
@@ -8,7 +13,7 @@ use std::os::raw::{c_char, c_void};
 use std::panic::{self, AssertUnwindSafe}; // 必须引入这个
 use std::sync::Arc;
 
-use crate::error::{err_json, ok_json};
+use crate::error::ok_json;
 
 // --- 辅助宏：全自动捕获 Panic 和 Result ---
 // 这段代码是防止崩溃的核心

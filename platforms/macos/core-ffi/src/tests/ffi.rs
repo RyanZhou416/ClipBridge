@@ -79,6 +79,7 @@ fn mk_cfg_json() -> (CString, PathBuf) {
           "device_name":"dev1",
           "account_uid":"acct-1",
           "account_password":"test_password",
+          "disable_network":true,
           "data_dir":"{}",
           "cache_dir":"{}",
           "app_config": {{
@@ -146,10 +147,7 @@ fn ffi_plan_text_ok() {
 			panic!("plan failed: {}", v["error"]);
 		}
 
-		assert_eq!(
-			v["data"]["plan"]["needs_user_confirm"].as_bool().unwrap(),
-			false
-		);
+		assert!(!v["data"]["plan"]["needs_user_confirm"].as_bool().unwrap());
 
 		let _ = take_json(cb_shutdown(h));
 		cleanup_dir(&root);
@@ -162,7 +160,7 @@ fn ffi_plan_text_over_soft_needs_confirm_then_force() {
 		let (h, root) = init_handle();
 		let ts = now_ms();
 		// soft_text_bytes 默认 1MB：构造一个稍微更大的文本 (1MB + 10 bytes)
-		let big = "a".repeat(1 * 1024 * 1024 + 10);
+		let big = "a".repeat(1024 * 1024 + 10);
 
 		// 1. share_mode: default -> 应该触发 needs_user_confirm
 		let snap1 = CString::new(format!(
@@ -184,9 +182,8 @@ fn ffi_plan_text_over_soft_needs_confirm_then_force() {
 			panic!("plan1 failed: {}", v1["error"]);
 		}
 
-		assert_eq!(
+		assert!(
 			v1["data"]["plan"]["needs_user_confirm"].as_bool().unwrap(),
-			true,
 			"Should require confirmation for >1MB text"
 		);
 
@@ -210,9 +207,8 @@ fn ffi_plan_text_over_soft_needs_confirm_then_force() {
 			panic!("plan2 failed: {}", v2["error"]);
 		}
 
-		assert_eq!(
-			v2["data"]["plan"]["needs_user_confirm"].as_bool().unwrap(),
-			false,
+		assert!(
+			!v2["data"]["plan"]["needs_user_confirm"].as_bool().unwrap(),
 			"Should NOT require confirmation when forced"
 		);
 
@@ -330,9 +326,17 @@ fn ffi_list_history_and_get_item() {
 		let v_list: serde_json::Value = serde_json::from_str(&take_json(out_list)).unwrap();
 
 		assert!(v_list["ok"].as_bool().unwrap(), "list_history failed");
-		let items = v_list["data"].as_array().unwrap();
+		// cb_list_history 返回分页结构 {"items": [...], "next_cursor": ...}（对齐 C# 的 HistoryPage），
+		// 不是裸数组。这里过去按数组断言，属于陈述过时的测试 bug。
+		let items = v_list["data"]["items"]
+			.as_array()
+			.expect("data.items should be an array");
 		assert!(!items.is_empty(), "history should not be empty");
 		assert_eq!(items[0]["item_id"], item_id, "first item should match");
+		assert!(
+			v_list["data"].get("next_cursor").is_some(),
+			"paged result must carry next_cursor"
+		);
 
 		// 3. 测试 get_item_meta
 		// 构造查询参数：直接传 item_id 的 JSON 字符串
