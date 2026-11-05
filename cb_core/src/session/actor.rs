@@ -676,9 +676,41 @@ impl SessionActor {
 				device_id,
 				account_uid,
 				msg_id,
+				protocol_version,
 				..
 			} => {
 				if self.role == SessionRole::Server {
+					// 协议版本闸门：bincode→postcard 迁移后线格式不兼容，
+					// 版本不一致必须立刻回错并断开，不能继续握手。
+					if protocol_version != PROTOCOL_VERSION {
+						let _ = self
+							.send_ctrl(CtrlMsg::Error {
+								reply_to: msg_id,
+								code: "PROTOCOL_VERSION_MISMATCH".into(),
+								message: Some(format!(
+									"local protocol_version={PROTOCOL_VERSION}, remote={protocol_version}"
+								)),
+							})
+							.await;
+						anyhow::bail!(
+							"Protocol version mismatch: local={PROTOCOL_VERSION}, remote={protocol_version}"
+						);
+					}
+					// Hello 只允许在握手初始状态接收一次：已认证会话上再次收到 Hello
+					// 属于协议违规，绝不能借此重置状态机或覆盖 remote_device_id。
+					if self.state != SessionState::Handshaking(HandshakeStep::WaitingForHello) {
+						let _ = self
+							.send_ctrl(CtrlMsg::Error {
+								reply_to: msg_id,
+								code: "UNEXPECTED_HELLO".into(),
+								message: Some(format!(
+									"Hello not allowed in state {:?}",
+									self.state
+								)),
+							})
+							.await;
+						anyhow::bail!("Unexpected Hello in state {:?}", self.state);
+					}
 					{
 						let mut log_store = self.log_store.lock().unwrap();
 						let _ = log_store.log_info(
@@ -732,9 +764,26 @@ impl SessionActor {
 				}
 			}
 			CtrlMsg::HelloAck {
-				server_device_id, ..
+				server_device_id,
+				protocol_version,
+				..
 			} => {
 				if self.role == SessionRole::Client {
+					// 客户端侧同样校验线格式版本，版本不一致直接终止。
+					if protocol_version != PROTOCOL_VERSION {
+						let _ = self
+							.send_ctrl(CtrlMsg::Error {
+								reply_to: None,
+								code: "PROTOCOL_VERSION_MISMATCH".into(),
+								message: Some(format!(
+									"local protocol_version={PROTOCOL_VERSION}, remote={protocol_version}"
+								)),
+							})
+							.await;
+						anyhow::bail!(
+							"Protocol version mismatch: local={PROTOCOL_VERSION}, remote={protocol_version}"
+						);
+					}
 					{
 						let mut log_store = self.log_store.lock().unwrap();
 						let _ = log_store.log_info(
