@@ -44,7 +44,8 @@ namespace ClipBridgeShell_CS.Helpers;
 /// - <c>uiops-&lt;scenario&gt;-&lt;timestamp&gt;.csv</c>：<c>wallcloack_us,duration_us,label,scenario</c>；
 /// - <c>cost-&lt;scenario&gt;-&lt;timestamp&gt;.csv</c>：每秒成本时间序列
 ///   <c>wallcloack_us,ui_cpu_ms_delta,proc_cpu_ms_delta,gpu_util_pct,frames</c>；
-/// - <c>summary-&lt;scenario&gt;-&lt;timestamp&gt;.txt</c>：统计汇总 + <c>[cost]</c> 成本块（同时写 stdout，需要调用方重定向）。
+/// - <c>summary-&lt;scenario&gt;-&lt;timestamp&gt;.txt</c>：统计汇总 + <c>[cost]</c> 成本块
+///   + 1%/0.1% low 帧时间与超预算帧分布 + 停顿探针的 1%/0.1% low（同时写 stdout，需要调用方重定向）。
 /// 落盘并 flush 之后，经 UI 线程调用 <see cref="Application.Exit"/> 让进程自行结束。
 ///
 /// 注意：本类刻意不依赖任何 UI 类型以外的壳内部结构；滚动驱动由 MainPage 注册，
@@ -934,6 +935,27 @@ internal static class FrameTrace
         }
 
         sb.AppendLine();
+        sb.AppendLine("--- frame tail / over-budget metrics (6.25ms budget at 160Hz) ---");
+        sb.AppendLine("note: p1_low_ms = mean of the slowest ceil(n*1%) frame deltas (not a percentile); p01_low_ms = mean of slowest ceil(n*0.1%); worst_ms = worst single delta; over_* = count (share) of frames slower than 2/3/4 frames or 50ms");
+        sb.AppendLine("note: tail sample counts are shown as k1/k01; with ~800 frames in a 5s scenario 1% is only 8 frames and 0.1% is 1 frame, so treat these numbers as indicative, not precise");
+        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Ended })
+        {
+            var deltas = new List<double>();
+            foreach (var sample in snapshot.FrameSamples)
+            {
+                if (sample.Phase == phase)
+                {
+                    deltas.Add(sample.DeltaUs);
+                }
+            }
+
+            if (deltas.Count > 0)
+            {
+                sb.AppendLine(FrameTailLine($"scenario={PhaseName(phase)}", deltas));
+            }
+        }
+
+        sb.AppendLine();
         sb.AppendLine("--- ui-thread stall latency (ms; time from DispatcherQueue post to execution) ---");
         foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Ended })
         {
@@ -954,6 +976,26 @@ internal static class FrameTrace
             if (latencies.Count > 0)
             {
                 sb.AppendLine(StatsLine($"scenario={PhaseName(phase)}", latencies) + FormattableString.Invariant($" max_queue_depth={maxDepth}"));
+            }
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("--- ui-thread stall tail metrics (slowest 1% / 0.1% of post-to-execution latencies) ---");
+        sb.AppendLine("note: same tail definition as frame p1_low/p01_low; k1/k01 are the number of samples averaged");
+        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Ended })
+        {
+            var latencies = new List<double>();
+            foreach (var sample in snapshot.StallSamples)
+            {
+                if (sample.Phase == phase)
+                {
+                    latencies.Add(sample.LatencyUs);
+                }
+            }
+
+            if (latencies.Count > 0)
+            {
+                sb.AppendLine(StallTailLine($"scenario={PhaseName(phase)}", latencies));
             }
         }
 
@@ -1040,6 +1082,99 @@ internal static class FrameTrace
         }
 
         return sorted[rank - 1];
+    }
+
+    /// <summary>
+    /// 帧时间的尾部指标：p1_low / p01_low 分别是“最慢 ceil(n*1%) / ceil(n*0.1%) 帧”的均值
+    /// （按需求用均值而不是中位数），另给 worst 与超过 2/3/4 帧、50ms 的帧数与占比。
+    /// </summary>
+    private static string FrameTailLine(string prefix, List<double> samplesUs)
+    {
+        var n = samplesUs.Count;
+        if (n == 0)
+        {
+            return prefix + " n=0";
+        }
+
+        var sorted = samplesUs.ToArray();
+        Array.Sort(sorted);
+        var sortedDescending = (double[])sorted.Clone();
+        Array.Reverse(sortedDescending);
+
+        var k1 = TailCount(n, 0.01);
+        var k01 = TailCount(n, 0.001);
+        var over2Frames = 0;
+        var over3Frames = 0;
+        var over4Frames = 0;
+        var over50Ms = 0;
+        foreach (var value in sorted)
+        {
+            if (value > FrameBudgetMs * 2.0 * 1000.0)
+            {
+                over2Frames++;
+            }
+
+            if (value > FrameBudgetMs * 3.0 * 1000.0)
+            {
+                over3Frames++;
+            }
+
+            if (value > FrameBudgetMs * 4.0 * 1000.0)
+            {
+                over4Frames++;
+            }
+
+            if (value > 50_000.0)
+            {
+                over50Ms++;
+            }
+        }
+
+        return FormattableString.Invariant(
+            $"{prefix} n={n} p50={Ms(Percentile(sorted, 50))} p99={Ms(Percentile(sorted, 99))} p1_low={Ms(MeanTop(sortedDescending, k1))} (k1={k1}) p01_low={Ms(MeanTop(sortedDescending, k01))} (k01={k01}) worst={Ms(sorted[^1])} over_12.5ms={over2Frames}({Pct(over2Frames, n)}) over_18.75ms={over3Frames}({Pct(over3Frames, n)}) over_25ms={over4Frames}({Pct(over4Frames, n)}) over_50ms={over50Ms}({Pct(over50Ms, n)})");
+    }
+
+    /// <summary>停顿探针的尾部指标：最慢 ceil(n*1%) / ceil(n*0.1%) 个 post-to-execution 延迟的均值 + worst。</summary>
+    private static string StallTailLine(string prefix, List<double> samplesUs)
+    {
+        var n = samplesUs.Count;
+        if (n == 0)
+        {
+            return prefix + " n=0";
+        }
+
+        var sorted = samplesUs.ToArray();
+        Array.Sort(sorted);
+        var sortedDescending = (double[])sorted.Clone();
+        Array.Reverse(sortedDescending);
+        var k1 = TailCount(n, 0.01);
+        var k01 = TailCount(n, 0.001);
+        return FormattableString.Invariant(
+            $"{prefix} n={n} p1_low={Ms(MeanTop(sortedDescending, k1))} (k1={k1}) p01_low={Ms(MeanTop(sortedDescending, k01))} (k01={k01}) worst={Ms(sorted[^1])}");
+    }
+
+    /// <summary>“最慢的百分之一”要平均多少个样本：ceil(n*fraction)，至少 1 个。</summary>
+    private static int TailCount(int n, double fraction)
+    {
+        return Math.Max(1, (int)Math.Ceiling(n * fraction));
+    }
+
+    /// <summary>对降序数组的前 count 个值取均值（count 已保证 ≥ 1 且 ≤ 数组长度）。</summary>
+    private static double MeanTop(double[] sortedDescending, int count)
+    {
+        var take = Math.Min(count, sortedDescending.Length);
+        var sum = 0.0;
+        for (var i = 0; i < take; i++)
+        {
+            sum += sortedDescending[i];
+        }
+
+        return take == 0 ? double.NaN : sum / take;
+    }
+
+    private static string Pct(int part, int total)
+    {
+        return total <= 0 ? "n/a" : (part * 100.0 / total).ToString("F2", CultureInfo.InvariantCulture) + "%";
     }
 
     private static string Ms(double us)
