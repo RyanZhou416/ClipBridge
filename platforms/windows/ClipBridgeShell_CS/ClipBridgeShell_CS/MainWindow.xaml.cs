@@ -5,6 +5,7 @@ using ClipBridgeShell_CS.Helpers;
 using ClipBridgeShell_CS.Services;
 
 using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 
 using Windows.UI.ViewManagement;
@@ -13,7 +14,7 @@ using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS;
 
-public sealed partial class MainWindow : WindowEx
+public sealed partial class MainWindow : Window
 {
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -23,20 +24,19 @@ public sealed partial class MainWindow : WindowEx
 
     // === 启动测量开关（仅用于 A/B 对比，测量完成后应连同这里一起删除） ===
     // 背景：MainWindow 构造在冷启动里约占 94.5ms，但无法从一次运行看出 Mica 背景、
-    // 窗口图标、WinUIEx 位置恢复各自占多少。这里用环境变量在同一份构建产物上
-    // 逐项关闭候选开销，方便集成方 A/B 后决定去留；变量未设置时默认全开，
-    // 行为与改动前逐字节等价。
+    // 窗口图标各自占多少。这里用环境变量在同一份构建产物上逐项关闭候选开销，
+    // 方便集成方 A/B 后决定去留；变量未设置时默认全开，行为与改动前逐字节等价。
     //
     // 用 static readonly 只在类型初始化时读一次环境变量，
     // 未设置开关时每个开关的成本仅为一次环境变量查找的纳秒级开销。
+    //
+    // 注意：CB_WIN_NO_PERSIST 已随 WinUIEx.WindowEx 一起删除 —— 普通 Window 没有
+    // PersistenceId，而那条恢复路径在非打包应用里本来就是空操作。
     private static readonly bool NoMica =
         string.Equals(Environment.GetEnvironmentVariable("CB_WIN_NO_MICA"), "1", StringComparison.Ordinal);
 
     private static readonly bool NoIcon =
         string.Equals(Environment.GetEnvironmentVariable("CB_WIN_NO_ICON"), "1", StringComparison.Ordinal);
-
-    private static readonly bool NoPersist =
-        string.Equals(Environment.GetEnvironmentVariable("CB_WIN_NO_PERSIST"), "1", StringComparison.Ordinal);
 
     private Microsoft.UI.Dispatching.DispatcherQueue dispatcherQueue;
     private UISettings settings;
@@ -65,18 +65,9 @@ public sealed partial class MainWindow : WindowEx
 
         StartupTrace.Mark("mainwindow-backdrop-done");
 
-        // WinUIEx 的 WindowEx.PersistenceId 只是对 WindowManager.PersistenceId 的透传，
-        // 它本身不做任何事：真正的位置恢复发生在窗口第一次收到 WM_SHOWWINDOW
-        // （即 App.ActivationService 里的 Activate()）时的 LoadPersistence()，
-        // 而该函数只是在读取 PersistenceId 处判断是否为空。因此只要在 Activate 之前
-        // 把构造期由 XAML 设置的 PersistenceId 清空，就能零成本关闭恢复；
-        // 同时窗口关闭时的 SavePersistence() 也会跳过（测量期间不再写入新位置）。
-        // 注意：WindowEx 基类在构造函数里无条件创建 WindowManager / 消息监视器，
-        // 那部分（可能产生的额外窗口句柄）不在 PersistenceId 控制范围内。
-        if (NoPersist)
-        {
-            PersistenceId = null;
-        }
+        // 位置/尺寸持久化（WinUIEx WindowEx.PersistenceId）已随 WindowEx 一并移除：
+        // 非打包应用没有包标识，WindowManager.LoadPersistence() 本来就什么都不做，
+        // 因此不再保留对应的 CB_WIN_NO_PERSIST 开关，也没有任何行为变化。
 
         if (!NoIcon)
         {
@@ -105,6 +96,10 @@ public sealed partial class MainWindow : WindowEx
         catch
         {
         }
+
+        // 替代 XAML 里 WindowEx 的 MinWidth="500" / MinHeight="500"：
+        // 用与 WinUIEx 相同的 WM_GETMINMAXINFO 子类化机制，按下当前 DPI 换算成物理像素。
+        this.SetMinimumSize(500, 500);
 
         dispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         settings = new UISettings();

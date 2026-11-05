@@ -54,8 +54,8 @@ public partial class App : Application
         return service;
     }
 
-    //public static WindowEx MainWindow { get; } = new MainWindow();
-    public static WindowEx? MainWindow
+    //public static Window MainWindow { get; } = new MainWindow();
+    public static Window? MainWindow
     {
         get; set;
     }
@@ -711,7 +711,7 @@ public partial class App : Application
             }
 
             // 必须回到 UI 线程才能改 Window.Title。
-            // App.MainWindow 的静态类型是 WindowEx，先转成 MainWindow 再调用标题方法。
+            // App.MainWindow 的静态类型是 Window，先转成 MainWindow 再调用标题方法。
             window.DispatcherQueue.TryEnqueue(() => (window as MainWindow)?.ApplyLocalizedTitle());
         }
         catch (Exception ex)

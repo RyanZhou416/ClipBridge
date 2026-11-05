@@ -2,6 +2,7 @@ using System.Collections.Specialized;
 using System.Web;
 
 using ClipBridgeShell_CS.Contracts.Services;
+using ClipBridgeShell_CS.Helpers;
 using ClipBridgeShell_CS.ViewModels;
 
 using Microsoft.Windows.AppNotifications;
