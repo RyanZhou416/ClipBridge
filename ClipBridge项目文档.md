@@ -2058,7 +2058,7 @@ repo-root/
 - **只做三件事**（不掺业务）：
   1) 把 C ABI 入参转成 cb_core::api 需要的 Rust 类型（建议统一 JSON）
   2) 把 cb_core 事件回调封送回 C 回调（同样建议 JSON）
-  3) 负责跨语言内存释放（cb_free 等）
+  3) 负责跨语言内存释放（`cb_free_string` 等）
 - **禁止**：
   - 把“业务逻辑”写进 FFI（比如会话状态机、入库、去重、重试策略）
   - 在 FFI 里自行维护一份“Core 状态”（避免双权威）
@@ -2365,19 +2365,21 @@ C ABI 只做“薄镜像”：
 - `cb_list_peers(handle) -> peers_json`
 - `cb_get_status(handle) -> status_json`
 
-- `cb_set_global_policy(handle, policy_json)`（v1 必须：用于“停止/继续分享”、allowlist 等策略下发）
+- `cb_set_peer_policy(handle, policy_json)`（v1 必须：逐设备下发 `share_to_peer` / `accept_from_peer`；“停止/继续分享”与 allowlist 语义由逐设备策略表达；全局策略入口当前未导出，见 §4.8.8.3）
 
-- `cb_delete_local(handle, delete_req_json) -> ok_json`（v1 必须：本机隐藏/删除元数据）
-- `cb_cache_control(handle, cache_req_json) -> ok_json`（v1 必须：清空/修剪缓存）
+- `cb_delete_item_local(handle, item_id_json) -> ok_json`（v1 必须：本机隐藏/删除元数据；广播删除用 `cb_delete_item_global`）
+- `cb_clear_cache(handle) -> ok_json`（v1 必须：清空缓存；无按动作分派的参数）
 - `cb_query_cache_stats(handle, stats_query_json) -> stats_json`（v1 必须：主页 Cache 图表）
 - `cb_query_net_stats(handle, stats_query_json) -> stats_json`（v1 必须：主页 Network 图表）
 
-- `cb_free(ptr)`（释放 Core 分配的字符串）
+- `cb_free_string(ptr)`（释放 Core 分配的字符串）
+
+> 说明：以上为早期设计草案；实际导出名与签名以 §4.8.7 与 `platforms/*/include/clipbridge_core.h` 为准（如 `cb_set_peer_policy`、`cb_delete_item_local/global`、`cb_clear_cache`）。
 
 > 说明：哪些函数同步/异步，以“不阻塞 UI”为准；
 > - `list_history/get_item_meta/list_peers/get_status/query_*` 可同步返回（Shell 建议后台线程调用）
 > - `ensure_content_cached` 必须异步（传输 + 落盘 + 进度）
-> - `cache_control/delete_local/set_global_policy` 可同步返回，但可能触发后台任务（例如 GC），Shell 应按“触发后轮询 stats 刷新”实现 UI。
+> - `cb_clear_cache / cb_delete_item_local / cb_set_peer_policy` 可同步返回，但可能触发后台任务（例如 GC），Shell 应按“触发后轮询 stats 刷新”实现 UI。
 
 
 ---
@@ -2986,7 +2988,7 @@ FFI 所有字符串都用 UTF-8 `char*`。
 
 ### 4.8.4 句柄（handle）与生命周期
 
-- `cb_handle_t`：不透明指针（Core 内部实例）
+- `cb_handle`：不透明类型（Core 内部实例；头文件声明为 `typedef struct cb_handle cb_handle;`，壳侧始终以 `cb_handle*` 传递）
 - 规则：
   - 只能通过 `cb_init` 创建
   - 必须通过 `cb_shutdown` 销毁（幂等：重复调用只生效一次）
@@ -3144,11 +3146,11 @@ v1 使用 **单一事件回调**：
 { "ok": true, "data": { "transfer_id": "uuid" } }
 ```
 
-#### 4.8.8.3 GlobalPolicy（v1：停止/继续分享 + allowlist 下发）
+#### 4.8.8.3 GlobalPolicy（设计草案：停止/继续分享 + allowlist 下发；当前 ABI 未导出）
 
-`cb_set_global_policy(handle, policy_json) -> ok_json`
+> 说明：本节是早期设计草案。当前 C ABI 没有全局策略设置入口（`cb_set_global_policy` 不存在）：全局策略只能在 `cb_init` 时通过 `app_config.global_policy` 指定（`AllowAll` / `DenyAll`），逐设备策略则用 `cb_set_peer_policy(handle, policy_json)`（`peer_id` / `share_to_peer` / `accept_from_peer`，见 §4.8.7）。下面的 `sharing` JSON 是规划中的全局策略形态，落地前必须先在 `exports.rs` 与三份头文件中定义并导出。
 
-入参（示例）：
+入参（示例，规划）：
 ```json
 {
   "sharing": {
@@ -3165,7 +3167,7 @@ v1 使用 **单一事件回调**：
 }
 ````
 
-语义（v1 必须实现）：
+语义（规划；当前未实现）：
 
 * `sharing.enabled=false`：等价于 inbound/outbound 全关（不接收、不广播）
 * `inbound_enabled=false`：Core 忽略/丢弃来自对端的元数据（不落库、不产生事件）
@@ -3189,7 +3191,9 @@ vNext 伏笔（不实现，仅定义）：
 
 #### 4.8.8.4 DeleteLocal（v1：本机隐藏/删除元数据）
 
-`cb_delete_local(handle, delete_req_json) -> ok_json`
+`cb_delete_item_local(handle, item_id_json) -> ok_json`
+
+> 说明：如需删除并广播给所有已连接设备，使用 `cb_delete_item_global(handle, item_id_json)`；两者入参相同，均接受 `{"item_id": "..."}` 或直接传 item_id 字符串。
 
 入参（示例）：
 
@@ -3199,10 +3203,11 @@ vNext 伏笔（不实现，仅定义）：
 }
 ```
 
-语义：
+语义（`cb_delete_item_local`）：
 
-* v1 仅做本机删除（不广播），建议实现为 DB 软删/隐藏标记，以保证 list_history 默认不返回已删除条目。
+* v1 仅做本机删除（不广播），实现为 DB 软删/隐藏标记 + 移除本地 CAS blob，并发出 `ITEM_DELETED` 事件，以保证 list_history 默认不返回已删除条目。
 * 若该 item 正在 transfer：允许继续完成落盘，但 UI 侧不可见（可选：实现时可取消）。
+* `cb_delete_item_global`：与本地删除相同，并广播删除给所有已连接设备。
 
 返回：
 
@@ -3212,19 +3217,15 @@ vNext 伏笔（不实现，仅定义）：
 
 ---
 
-#### 4.8.8.5 CacheControl（v1：清空/修剪缓存）
+#### 4.8.8.5 CacheControl（v1：清空缓存；按上限修剪为设计草案）
 
-`cb_cache_control(handle, cache_req_json) -> ok_json`
+实际导出：
 
-入参（示例）：
+`cb_clear_cache(handle) -> ok_json`（无入参；清空本机 CAS 内容并把 content_cache 的 `present` 置 0，不影响历史元数据）
 
-```json
-{
-  "action": "CLEAR_ALL"
-}
-```
+> 说明：当前 ABI 没有按动作分派的缓存控制入口（`cb_cache_control` 不存在）。`CLEAR_ALL` 等价于当前的 `cb_clear_cache`；`PRUNE_TO_LIMITS` 是早期设计草案中“按 4.9.7 的 LRU/容量策略执行一次 GC”的规划动作，尚未导出（当前由 Core 内部 GC 在启动与摄入后执行）。
 
-或：
+规划中的入参形态（尚未实现；落地时须同步更新 `exports.rs` 与三份头文件）：
 
 ```json
 {
@@ -3232,9 +3233,9 @@ vNext 伏笔（不实现，仅定义）：
 }
 ```
 
-语义：
+语义（规划）：
 
-* `CLEAR_ALL`：清空本机 CAS/content_cache（不影响历史元数据）
+* `CLEAR_ALL`：等同当前的 `cb_clear_cache`：清空本机 CAS/content_cache（不影响历史元数据）
 * `PRUNE_TO_LIMITS`：按 4.9.7 的 LRU/容量策略执行一次 GC
 
 返回：
@@ -3545,7 +3546,7 @@ Lazy Fetch 的执行结果，Core 仅通过事件形式向 Shell 交付 `LocalCo
 - 每删除一个 CAS 文件：`UPDATE content_cache SET present=0`
 - 注意：即使 items/history 仍引用该 sha256，也允许删（因为 CAS 是缓存层，可回源）。
 
-> 约束：`cb_cache_control(PRUNE_TO_LIMITS/CLEAR_ALL)` 必须复用本节清理实现；`cb_query_cache_stats` 的 `current_cache_bytes` 与时间序列必须与实际 CAS/content_cache 一致，作为 Shell 主页展示的权威数据源。
+> 约束：`cb_clear_cache` 与 Core 内部 GC（按 4.9.7 的 LRU/容量策略）必须复用本节清理实现；若后续导出“按上限修剪”入口，同样必须复用本节实现。`cb_query_cache_stats` 的 `current_cache_bytes` 与时间序列必须与实际 CAS/content_cache 一致，作为 Shell 主页展示的权威数据源。
 
 ---
 
@@ -5752,7 +5753,7 @@ ClipBridge 使用 **cargo-deny** 进行供应链检查：
   * `fix(core): handle offline device`
 * 改 win-ffi：
 
-  * `fix(win-ffi): export cb_free`
+  * `fix(win-ffi): export cb_free_string`
 * 改 win-shell：
 
   * `feat(win-shell): add tray menu`
