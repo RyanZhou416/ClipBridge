@@ -4,7 +4,12 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 // 协议版本号
-pub const PROTOCOL_VERSION: u32 = 2;
+//
+// 变更历史：
+// - 2：bincode → postcard 之后的首个版本
+// - 3：新增 `CtrlMsg::ContentDenied`（策略拒绝改为非致命）。握手会强制比对版本，
+//      老对端在 Hello/HelloAck 阶段即被拒绝，而不是卡在解码失败。
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug)]
 pub enum CBFrame {
@@ -138,6 +143,16 @@ pub enum CtrlMsg {
 	ContentCancel {
 		req_id: String,
 		reason: String,
+	},
+	/// 内容请求被策略拒绝（**非致命**：只影响本次传输，不断开会话）。
+	///
+	/// 与 `Error` 的区别：`Error` 在对端被视为致命并终止整个会话。用户切换
+	/// `share_to_peer` 这类策略不应导致连接反复重建，所以单独用这个变体表达
+	/// "这次拉取不允许"；对端应把它转成该 `req_id` 的 TRANSFER_FAILED。
+	ContentDenied {
+		req_id: String,
+		code: String,
+		message: Option<String>,
 	},
 }
 
