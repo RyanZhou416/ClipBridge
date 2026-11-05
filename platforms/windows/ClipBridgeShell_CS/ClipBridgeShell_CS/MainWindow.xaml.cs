@@ -30,13 +30,10 @@ public sealed partial class MainWindow : Window
     // 用 static readonly 只在类型初始化时读一次环境变量，
     // 未设置开关时每个开关的成本仅为一次环境变量查找的纳秒级开销。
     //
-    // 注意：CB_WIN_NO_PERSIST 已随 WinUIEx.WindowEx 一起删除 —— 普通 Window 没有
-    // PersistenceId，而那条恢复路径在非打包应用里本来就是空操作。
-    private static readonly bool NoMica =
-        string.Equals(Environment.GetEnvironmentVariable("CB_WIN_NO_MICA"), "1", StringComparison.Ordinal);
-
-    private static readonly bool NoIcon =
-        string.Equals(Environment.GetEnvironmentVariable("CB_WIN_NO_ICON"), "1", StringComparison.Ordinal);
+    // 注意：CB_WIN_NO_PERSIST / CB_WIN_NO_MICA / CB_WIN_NO_ICON 三个测量开关已删除。
+    // 前者随 WinUIEx.WindowEx 一起去掉（普通 Window 没有 PersistenceId，且非打包应用里
+    // 那条恢复路径本来就是空操作）；后两者经交替 A/B 实测为噪声（+21ms / -2ms，同向对数
+    // 不足），按"不留看起来更快但没有实测支撑的代码"的原则移除，只保留打点。
 
     private Microsoft.UI.Dispatching.DispatcherQueue dispatcherQueue;
     private UISettings settings;
@@ -55,24 +52,16 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
 
         // 原来在 XAML 里的 <Window.SystemBackdrop><MicaBackdrop/></Window.SystemBackdrop>
-        // 必须挪到代码里才能被 CB_WIN_NO_MICA=1 跳过。new MicaBackdrop() 的默认
-        // Kind=Base，与 XAML 空元素写法完全等价；这里紧接 InitializeComponent 赋值，
-        // 仍在窗口首次显示（Activate）之前，视觉效果与改动前一致。
-        if (!NoMica)
-        {
-            this.SystemBackdrop = new MicaBackdrop();
-        }
+        // 现在放在代码里设置。new MicaBackdrop() 的默认 Kind=Base，与 XAML 空元素写法等价；
+        // 这里紧接 InitializeComponent 赋值，仍在窗口首次显示之前，视觉与改动前一致。
+        this.SystemBackdrop = new MicaBackdrop();
 
         StartupTrace.Mark("mainwindow-backdrop-done");
 
         // 位置/尺寸持久化（WinUIEx WindowEx.PersistenceId）已随 WindowEx 一并移除：
-        // 非打包应用没有包标识，WindowManager.LoadPersistence() 本来就什么都不做，
-        // 因此不再保留对应的 CB_WIN_NO_PERSIST 开关，也没有任何行为变化。
+        // 非打包应用没有包标识，WindowManager.LoadPersistence() 本来就什么都不做。
 
-        if (!NoIcon)
-        {
-            AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets/WindowIcon.ico"));
-        }
+        AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets/WindowIcon.ico"));
 
         StartupTrace.Mark("mainwindow-icon-done");
 
