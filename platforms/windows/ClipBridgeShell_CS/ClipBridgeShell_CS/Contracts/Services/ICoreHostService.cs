@@ -27,7 +27,11 @@ public interface ICoreHostService
 
     Task InitializeAsync(CancellationToken ct = default);
     Task ShutdownAsync(CancellationToken ct = default);
-    Task IngestLocalCopy(string snapshotJson);
+    /// <summary>
+    /// 本地采集。返回 Core 是否接受（envelope 的 <c>ok</c>）；
+    /// 失败时已记录 Core 返回的 code/message，调用方不得推进去重状态。
+    /// </summary>
+    Task<bool> IngestLocalCopy(string snapshotJson);
     string GetDiagnosticsText();
     Task<HistoryPage> ListHistoryAsync(HistoryQuery query);
 

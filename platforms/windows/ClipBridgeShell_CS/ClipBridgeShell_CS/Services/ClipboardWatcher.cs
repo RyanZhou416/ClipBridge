@@ -147,14 +147,24 @@ public class ClipboardWatcher
 
             if (decision.Type == IngestDecisionType.Allow)
             {
-                // C. 调用 Core
+                // C. 调用 Core；只有 Core 接受（envelope ok=true）才算真正 ingest 成功
                 var json = snapshot.ToJson();
-                await _coreHostService.IngestLocalCopy(json);
+                var ingested = await _coreHostService.IngestLocalCopy(json);
 
-                // D. 更新策略状态 (用于连续去重)
-                _policy.OnIngestSuccess(snapshot);
+                if (ingested)
+                {
+                    // D. 更新策略状态 (用于连续去重)
+                    _policy.OnIngestSuccess(snapshot);
 
-                _logger?.LogInformation("Clipboard ingest allowed, type: {Type}", snapshot.MimeType);
+                    _logger?.LogInformation("Clipboard ingest allowed, type: {Type}", snapshot.MimeType);
+                }
+                else
+                {
+                    // 失败时不得推进去重指纹，否则同一内容永远无法重试直到重启
+                    _logger?.LogWarning(
+                        "Clipboard ingest rejected by core, dedup state not advanced, type: {Type}",
+                        snapshot.MimeType);
+                }
             }
             else
             {

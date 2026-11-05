@@ -610,35 +610,46 @@ public sealed class CoreHostService : ICoreHostService
         return Diagnostics.ToClipboardText();
     }
 
-    public async Task IngestLocalCopy(string snapshotJson)
+    public async Task<bool> IngestLocalCopy(string snapshotJson)
     {
         if (State != CoreState.Ready)
-            return;
+            return false;
 
-        await Task.Run(() =>
+        return await Task.Run(() =>
         {
             try
             {
                 var ptr = IntPtr.Zero;
                 if (!TryUseHandle(h =>
                     {
-                        // 调用 Core FFI；返回指针在锁外释放
+                        // 调用 Core FFI；返回指针在锁外读取并释放
                         ptr = CoreInterop.cb_ingest_local_copy(h, snapshotJson);
                         return true;
                     }))
                 {
-                    return;
+                    return false;
                 }
 
-                // 释放返回值内存（Core返回通常是确认信息或空，这里暂不处理返回值内容，但必须释放）
-                if (ptr != IntPtr.Zero)
+                // Core 返回值是 {"ok":true,"data":{"meta":...}} 或
+                // {"ok":false,"error":{"code":...,"message":...}}；之前直接释放导致拒绝被静默吞掉。
+                var envelopeJson = CoreInterop.PtrToStringAndFree(ptr);
+                if (!TryParseEnvelope<JsonElement>(envelopeJson, out _, out var errorCode, out var errorMessage))
                 {
-                    CoreInterop.cb_free_string(ptr);
+                    _logger?.LogWarning(
+                        "IngestLocalCopy rejected by core: {Code} - {Message}",
+                        errorCode ?? "UNKNOWN",
+                        errorMessage ?? "Unknown error");
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[CoreHostService] IngestLocalCopy rejected: {errorCode} - {errorMessage}");
+                    return false;
                 }
+
+                return true;
             } catch (Exception ex)
             {
+                _logger?.LogWarning(ex, "IngestLocalCopy failed");
                 System.Diagnostics.Debug.WriteLine($"IngestLocalCopy failed: {ex}");
-                // 可以在这里通过 EventPump 发送一个 error 事件给 UI，或者记录日志
+                return false;
             }
         });
     }
