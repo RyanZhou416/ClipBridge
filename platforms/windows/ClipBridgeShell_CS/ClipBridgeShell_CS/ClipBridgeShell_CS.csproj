@@ -15,6 +15,19 @@
 	<UseWinUI>true</UseWinUI>
     <EnableMsixTooling>true</EnableMsixTooling>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+
+    <!-- 发布时默认做 ReadyToRun 预编译（Release）。实测收益：交替 A/B 9 对，
+         配对差值中位数 -37.5ms，8/9 对同向（无 R2R 369.9ms → 有 R2R 326.2ms）。
+         代价是发布体积增大（232.9MB → 285.5MB）与发布耗时，只作用于 publish，不影响
+         日常 dotnet build 的内循环。已有 pubxml 里显式设置的 PublishReadyToRun 会覆盖这里。
+
+         关于 WindowsAppSDKSelfContained=false（framework-dependent）的实测结论：
+         在本机无法运行 —— 项目引用 WindowsAppSDK 2.0.1，而该版本要求的
+         WindowsAppRuntime 2.0.x 未安装（机器上只有 2.3~2.6），启动即抛
+         COMException 0x80040154 (REG_CALSSNOTREG) 于 DeploymentManager 自动初始化。
+         即：换成 framework-dependent 不是免费加速，而是给用户增加一个运行时前置条件，
+         且收益未经验证，因此保持 self-contained。 -->
+    <PublishReadyToRun Condition="'$(Configuration)' == 'Release'">true</PublishReadyToRun>
     <GenerateAppInstallerFile>False</GenerateAppInstallerFile>
     <AppxPackageSigningEnabled>False</AppxPackageSigningEnabled>
     <PackageCertificateThumbprint>2394034BFA5A743FA9A4320E10E6475D2A516719</PackageCertificateThumbprint>
