@@ -147,6 +147,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "cb-core-ffi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "cb_core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cb_core"
 version = "0.1.0"
 dependencies = [
@@ -224,11 +235,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 name = "core-ffi-android"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "base64",
- "cb_core",
- "env",
- "serde",
+ "cb-core-ffi",
  "serde_json",
 ]
 
@@ -236,11 +243,7 @@ dependencies = [
 name = "core-ffi-macos"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "base64",
- "cb_core",
- "env",
- "serde",
+ "cb-core-ffi",
  "serde_json",
 ]
 
@@ -248,11 +251,7 @@ dependencies = [
 name = "core-ffi-windows"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "base64",
- "cb_core",
- "env",
- "serde",
+ "cb-core-ffi",
  "serde_json",
 ]
 
@@ -476,15 +475,6 @@ dependencies = [
  "serdect",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "env"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc95de49ad098572c02d3fbf368c9a020bfff5ae78483685b77f51d8a7e9486d"
-dependencies = [
- "num_threads",
 ]
 
 [[package]]
@@ -910,15 +900,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "num_threads"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cabcc654086861f9e1bc5115258de62ef92c79b20f4615a1b0cc57c4e82027d4"
-dependencies = [
- "libc",
 ]
 
 [[package]]

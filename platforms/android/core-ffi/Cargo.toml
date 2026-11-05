@@ -9,11 +9,8 @@ license.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-cb_core = { path = "../../../cb_core" }
-anyhow = "1"
-serde = { version = "1.0", features = ["derive"] }
+cb-core-ffi = { path = "../../../crates/cb_core_ffi" }
+
+[dev-dependencies]
+# 与 windows/macos 保持一致：src/tests/ffi.rs 需要它，且三份测试文件要求字节一致
 serde_json = "1.0"
-base64 = "0.23"
-env = "1.0.1"
-
-

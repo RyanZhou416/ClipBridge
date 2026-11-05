@@ -1,0 +1,18 @@
+[package]
+name = "cb-core-ffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license.workspace = true
+
+# 只提供 rlib：三个平台仍然是各自独立的 cdylib / ABI 边界包，
+# 这里只是被它们共同依赖的“唯一实现”。
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+cb_core = { path = "../../cb_core" }
+anyhow = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.23"

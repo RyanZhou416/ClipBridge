@@ -70,6 +70,14 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # 三平台的 C ABI 表面必须一致：唯一导出定义在 crates/cb_core_ffi/src/exports.rs，
+      # 三份 include/clipbridge_core.h 是它的投影。历史上 Android 曾悄无声息地少掉 21 个导出、
+      # 头文件也缺 cb_get_ffi_version —— 这个门禁就是为了让那种漂移不可能再合入。
+      # 另外断言源文件不再重复定义导出（防止有人把实现又抄回平台 crate）。
+      - name: FFI surface consistency (exports vs headers, 3 platforms)
+        shell: pwsh
+        run: ./scripts/verify-ffi-surface.ps1
+
       # Pinned on purpose: an unpinned `cargo install cargo-deny --locked` lets a new upstream
       # release break (or silently change) the supply-chain gate without a reviewable diff.
       - name: Install cargo-deny

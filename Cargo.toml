@@ -4,6 +4,7 @@ resolver = "2"
 
 members = [
     "cb_core",
+    "crates/cb_core_ffi",
     "platforms/windows/core-ffi",
     "platforms/android/core-ffi",
     "platforms/macos/core-ffi",

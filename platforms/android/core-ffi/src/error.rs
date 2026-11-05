@@ -1,26 +1,5 @@
-use serde::Serialize;
+//! 兼容 shim：错误码映射与 JSON envelope 已统一到 `cb_core_ffi::errors` / `envelope`。
+//! 保留本文件是为了维持文档中的 `core-ffi/src/error.rs` 目录布局（实现只写一份）。
 
-/// JSON error envelope mirroring the protocol shape emitted by [`err_json`].
-/// Kept as the typed counterpart of the hand-built `json!` envelope above.
-#[allow(dead_code)]
-#[derive(Serialize)]
-pub struct ErrObj<'a> {
-	pub code: &'a str,
-	pub message: &'a str,
-}
-
-pub fn err_json(code: &str, message: &str) -> String {
-	serde_json::json!({
-		"ok": false,
-		"error": { "code": code, "message": message }
-	})
-	.to_string()
-}
-
-pub fn ok_json<T: serde::Serialize>(data: T) -> String {
-	serde_json::json!({
-		"ok": true,
-		"data": data
-	})
-	.to_string()
-}
+#![allow(unused_imports)]
+pub use cb_core_ffi::errors::*;
