@@ -6,6 +6,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Navigation;
 using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS.Views;
@@ -16,6 +17,7 @@ public sealed partial class HistoryPage : Page
 
     private ItemMetaPayload? _contextMenuItem;
     private MenuFlyout? _historyItemContextMenu;
+    private bool _detached; // 防止 OnNavigatedFrom 与 Unloaded 重复释放
 
     public HistoryPage()
     {
@@ -60,7 +62,25 @@ public sealed partial class HistoryPage : Page
 
     private void OnPageUnloaded(object sender, RoutedEventArgs e)
     {
+        DetachViewModel();
+    }
+
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        base.OnNavigatedFrom(e);
+        DetachViewModel();
+    }
+
+    /// <summary>
+    /// 页面离开后释放 HistoryViewModel（Transient），取消它对 Store / 剪贴板 / MainViewModel 的事件订阅。
+    /// </summary>
+    private void DetachViewModel()
+    {
+        if (_detached) return;
+        _detached = true;
+
         ViewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        ViewModel.Dispose();
     }
 
     private static DependencyObject? FindChildByTag(DependencyObject parent, object tag)

@@ -1,3 +1,4 @@
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
 
@@ -12,46 +13,71 @@ public sealed class AcrylicBrushConverter : IValueConverter
     private const string AcrylicKey = "AcrylicBackgroundFillColorDefaultBrush";
     private const string SolidKey = "CardSolidBackgroundBrush";
 
+    // 缓存已解析的画刷，避免每次绑定求值都查找资源字典并分配新画刷
+    private static readonly Dictionary<(ApplicationTheme Theme, bool DisableAcrylic), Brush> s_brushCache = new();
+    private static readonly object s_cacheLock = new();
+
+    // 兜底画刷只创建一次，后续重复使用
+    private static readonly Brush s_lightSolidFallback =
+        new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(0xFF, 0xF6, 0xF1, 0xF6));
+    private static readonly Brush s_darkSolidFallback =
+        new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(0xFF, 0x2A, 0x2A, 0x2A));
+
     public object Convert(object value, Type targetType, object parameter, string language)
     {
-        if (value is not bool disableAcrylic)
-            return GetSolidFallback();
+        var theme = Application.Current?.RequestedTheme ?? ApplicationTheme.Dark;
 
+        if (value is not bool disableAcrylic)
+            return GetSolidFallback(theme);
+
+        var key = (theme, disableAcrylic);
+        lock (s_cacheLock)
+        {
+            if (s_brushCache.TryGetValue(key, out var cached))
+                return cached;
+        }
+
+        Brush result;
         try
         {
-            var app = Microsoft.UI.Xaml.Application.Current;
-            var res = app?.Resources as Microsoft.UI.Xaml.ResourceDictionary;
-            if (res == null) return GetSolidFallback();
+            var res = Application.Current?.Resources;
+            if (res == null) return GetSolidFallback(theme);
 
             // 关闭亚克力：从当前主题字典取 CardSolidBackgroundBrush（与首页/统计卡片一致灰底）
             if (disableAcrylic)
             {
-                var solid = GetThemeBrush(res, SolidKey);
-                if (solid != null) return solid;
-                return GetSolidFallback();
+                result = GetThemeBrush(res, SolidKey, theme) ?? GetSolidFallback(theme);
             }
-
             // 开启亚克力：先尝试系统亚克力画刷，没有则用灰色打底避免透明
-            if (res.TryGetValue(AcrylicKey, out var acrylic) && acrylic is Brush acrylicBrush)
-                return acrylicBrush;
-            var fallbackSolid = GetThemeBrush(res, SolidKey);
-            if (fallbackSolid != null) return fallbackSolid;
-            return GetSolidFallback();
+            else if (res.TryGetValue(AcrylicKey, out var acrylic) && acrylic is Brush acrylicBrush)
+            {
+                result = acrylicBrush;
+            }
+            else
+            {
+                result = GetThemeBrush(res, SolidKey, theme) ?? GetSolidFallback(theme);
+            }
         }
         catch
         {
-            return GetSolidFallback();
+            return GetSolidFallback(theme);
         }
+
+        lock (s_cacheLock)
+        {
+            s_brushCache[key] = result;
+        }
+
+        return result;
     }
 
-    private static Brush? GetThemeBrush(Microsoft.UI.Xaml.ResourceDictionary res, string key)
+    private static Brush? GetThemeBrush(ResourceDictionary res, string key, ApplicationTheme theme)
     {
         try
         {
-            var theme = Microsoft.UI.Xaml.Application.Current?.RequestedTheme ?? Microsoft.UI.Xaml.ApplicationTheme.Dark;
-            var themeKey = theme == Microsoft.UI.Xaml.ApplicationTheme.Light ? "Light" : "Dark";
+            var themeKey = theme == ApplicationTheme.Light ? "Light" : "Dark";
             if (res.ThemeDictionaries?.TryGetValue(themeKey, out var themeDict) == true
-                && themeDict is Microsoft.UI.Xaml.ResourceDictionary td
+                && themeDict is ResourceDictionary td
                 && td.TryGetValue(key, out var brush)
                 && brush is Brush b)
                 return b;
@@ -60,13 +86,9 @@ public sealed class AcrylicBrushConverter : IValueConverter
         return null;
     }
 
-    private static Brush GetSolidFallback()
+    private static Brush GetSolidFallback(ApplicationTheme theme)
     {
-        var theme = Microsoft.UI.Xaml.Application.Current?.RequestedTheme ?? Microsoft.UI.Xaml.ApplicationTheme.Dark;
-        var color = theme == Microsoft.UI.Xaml.ApplicationTheme.Light
-            ? Microsoft.UI.ColorHelper.FromArgb(0xFF, 0xF6, 0xF1, 0xF6)
-            : Microsoft.UI.ColorHelper.FromArgb(0xFF, 0x2A, 0x2A, 0x2A);
-        return new SolidColorBrush(color);
+        return theme == ApplicationTheme.Light ? s_lightSolidFallback : s_darkSolidFallback;
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, string language)

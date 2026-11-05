@@ -1,9 +1,6 @@
 using System;
 using System.Collections.ObjectModel;
-// #region agent log
-using System.IO;
-using System.Text.Json;
-// #endregion agent log
+using System.Collections.Specialized;
 using System.Linq;
 using System.Threading.Tasks;
 using ClipBridgeShell_CS.Contracts.Services;
@@ -32,28 +29,6 @@ public partial class MainViewModel : ObservableRecipient
     private string? _localDeviceId;
     private bool _enableAcrylicOnCards = true;
     private bool _enableAcrylicOnStatsCards = true;
-
-    // #region agent log
-    private async Task LogAsync(string hypothesisId, string location, string message, object data)
-    {
-        try
-        {
-            var logEntry = new
-            {
-                sessionId = "debug-session",
-                runId = "run1",
-                hypothesisId = hypothesisId,
-                location = location,
-                message = message,
-                data = data,
-                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-            };
-            var jsonLine = JsonSerializer.Serialize(logEntry);
-            await File.AppendAllTextAsync("c:\\Project\\ClipBridge\\.cursor\\debug.log", jsonLine + Environment.NewLine);
-        }
-        catch { /* Ignore logging errors */ }
-    }
-    // #endregion agent log
 
     // 直接暴露 Store 的集合供 UI 绑定
     // 这样当 Store 更新时，UI 会自动刷新
@@ -181,58 +156,50 @@ public partial class MainViewModel : ObservableRecipient
     /// </summary>
     public string GetItemState(ItemMetaPayload item)
     {
-        // #region agent log
-        _ = LogAsync("B,C", "MainViewModel.cs:GetItemState", "Entering GetItemState", new { ItemId = item?.ItemId, SourceDeviceId = item?.SourceDeviceId, LocalDeviceId = _localDeviceId });
-        // #endregion agent log
         if (item == null) return "Unknown";
 
-        // 检查是否有正在进行的传输
-        var transfer = _transferStore.Transfers.FirstOrDefault(t => 
-            t.ItemId == item.ItemId && 
-            (t.State == "downloading" || t.State == "uploading"));
-        
+        // 单次遍历传输列表：进行中的传输优先于失败传输，避免每张卡片两次线性扫描
+        TransferUpdatePayload? transfer = null;
+        TransferUpdatePayload? failedTransfer = null;
+        foreach (var t in _transferStore.Transfers)
+        {
+            if (t.ItemId != item.ItemId) continue;
+
+            if (t.State == "downloading" || t.State == "uploading")
+            {
+                transfer = t;
+                break;
+            }
+
+            if (failedTransfer == null && t.State == "failed")
+            {
+                failedTransfer = t;
+            }
+        }
+
         if (transfer != null)
         {
             var progress = transfer.Progress;
-            var state = progress > 0 ? $"Downloading {(int)(progress * 100)}%" : "Downloading";
-            // #region agent log
-            _ = LogAsync("B,C", "MainViewModel.cs:GetItemState", "Transfer in progress", new { ItemId = item.ItemId, State = state });
-            // #endregion agent log
-            return state;
+            return progress > 0 ? $"Downloading {(int)(progress * 100)}%" : "Downloading";
         }
 
-        // 检查是否有失败的传输
-        var failedTransfer = _transferStore.Transfers.FirstOrDefault(t => 
-            t.ItemId == item.ItemId && 
-            t.State == "failed");
-        
         if (failedTransfer != null)
         {
             var errorMsg = failedTransfer.Message ?? "Unknown error";
             if (errorMsg.Length > 20) errorMsg = errorMsg.Substring(0, 20) + "...";
-            var state = $"Failed: {errorMsg}";
-            // #region agent log
-            _ = LogAsync("B,C", "MainViewModel.cs:GetItemState", "Transfer failed", new { ItemId = item.ItemId, State = state });
-            // #endregion agent log
-            return state;
+            return $"Failed: {errorMsg}";
         }
 
         // 判断是否来自本机
         // 如果source_device_id为空，可能是本机内容（旧数据或特殊情况）
         if (string.IsNullOrEmpty(item.SourceDeviceId))
         {
-            // #region agent log
-            _ = LogAsync("B", "MainViewModel.cs:GetItemState", "SourceDeviceId is empty, returning Ready", new { ItemId = item.ItemId, State = "Ready" });
-            // #endregion agent log
             return "Ready"; // 假设是本机内容
         }
 
         // 如果source_device_id等于本机device_id，可能是Ready（本机内容）
         if (!string.IsNullOrEmpty(_localDeviceId) && item.SourceDeviceId == _localDeviceId)
         {
-            // #region agent log
-            _ = LogAsync("C", "MainViewModel.cs:GetItemState", "Item from local device, returning Ready", new { ItemId = item.ItemId, SourceDeviceId = item.SourceDeviceId, LocalDeviceId = _localDeviceId, State = "Ready" });
-            // #endregion agent log
             return "Ready"; // 本机内容，假设已经在CAS中
         }
 
@@ -240,9 +207,6 @@ public partial class MainViewModel : ObservableRecipient
         // 默认应该是NeedsDownload（除非已经有CONTENT_CACHED事件，但我们在UI层面无法直接检查）
         // 为了简化，暂时假设来自其他设备的都是NeedsDownload
         // TODO: 可以通过检查HistoryStore中是否有对应的CONTENT_CACHED事件来判断是否已下载
-        // #region agent log
-        _ = LogAsync("A,C", "MainViewModel.cs:GetItemState", "Item from remote device, returning NeedsDownload", new { ItemId = item.ItemId, SourceDeviceId = item.SourceDeviceId, LocalDeviceId = _localDeviceId, State = "NeedsDownload" });
-        // #endregion agent log
         return "NeedsDownload";
     }
 
@@ -408,15 +372,8 @@ public partial class MainViewModel : ObservableRecipient
         // 监听设置变化
         _localSettings.SettingChanged += OnSettingChanged;
 
-        // 监听历史变化，当有新项目添加时重新查询RecentItems
-        _historyStore.Items.CollectionChanged += (s, e) =>
-        {
-            // 如果有新项目添加，重新查询RecentItems（确保显示最新的）
-            if (e.NewItems != null && e.NewItems.Count > 0)
-            {
-                _ = LoadRecentItemsFromCoreAsync();
-            }
-        };
+        // 监听历史变化：只做增量插入/移除，不再每次都向 Core 重查并重建整个列表
+        _historyStore.Items.CollectionChanged += OnHistoryItemsChanged;
 
         // 加载设置并初始化RecentItems
         _ = LoadRecentItemsCountAndRefreshAsync();
@@ -435,16 +392,10 @@ public partial class MainViewModel : ObservableRecipient
             // 从LocalSettings读取本机device_id
             const string Key = "Core_DeviceId";
             _localDeviceId = await _localSettings.ReadSettingAsync<string>(Key);
-            // #region agent log
-            _ = LogAsync("A", "MainViewModel.cs:LoadLocalDeviceIdAsync", "Local Device ID loaded", new { LocalDeviceId = _localDeviceId, IsEmpty = string.IsNullOrEmpty(_localDeviceId) });
-            // #endregion agent log
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             // 忽略错误
-            // #region agent log
-            _ = LogAsync("A", "MainViewModel.cs:LoadLocalDeviceIdAsync", "Failed to load Local Device ID", new { Error = ex.Message });
-            // #endregion agent log
         }
     }
 
@@ -531,16 +482,156 @@ public partial class MainViewModel : ObservableRecipient
         }
     }
 
+    /// <summary>
+    /// 历史集合变化：只做增量插入/移除/原地替换，避免每次新增都向 Core 重查并重建整个列表。
+    /// 首次加载、锁定态变化等需要权威数据的场景仍走 LoadRecentItemsFromCoreAsync。
+    /// </summary>
+    private void OnHistoryItemsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        switch (e.Action)
+        {
+            case NotifyCollectionChangedAction.Add when e.NewItems != null:
+                foreach (ItemMetaPayload item in e.NewItems)
+                {
+                    InsertRecentItem(item);
+                }
+                break;
+
+            case NotifyCollectionChangedAction.Remove when e.OldItems != null:
+                foreach (ItemMetaPayload item in e.OldItems)
+                {
+                    RemoveRecentItemById(item.ItemId);
+                }
+                break;
+
+            case NotifyCollectionChangedAction.Replace when e.NewItems != null:
+                foreach (ItemMetaPayload item in e.NewItems)
+                {
+                    var index = IndexOfRecentItem(item.ItemId);
+                    if (index >= 0)
+                    {
+                        _recentItems[index] = item;
+                    }
+                }
+                break;
+
+            default:
+                // Reset / Move 等少见操作：只做一次本地重排，不触发 FFI 查询
+                RelayoutRecentItemsFromStore();
+                break;
+        }
+    }
+
+    private int IndexOfRecentItem(string? itemId)
+    {
+        if (string.IsNullOrEmpty(itemId)) return -1;
+        for (var i = 0; i < _recentItems.Count; i++)
+        {
+            if (_recentItems[i].ItemId == itemId) return i;
+        }
+        return -1;
+    }
+
+    // 锁定项额外占用第 0 位，与 LoadRecentItemsFromCoreAsync 的“锁定项置顶”容量一致
+    private int RecentItemsCapacity => _recentItemsCount + (_lockedItemMeta != null ? 1 : 0);
+
+    private void TrimRecentItems()
+    {
+        var capacity = Math.Max(1, RecentItemsCapacity);
+        while (_recentItems.Count > capacity)
+        {
+            _recentItems.RemoveAt(_recentItems.Count - 1);
+        }
+    }
+
+    /// <summary>
+    /// 按 CreatedTsMs 降序插入单条历史项；锁定项固定在第 0 位且不重复。
+    /// </summary>
+    private void InsertRecentItem(ItemMetaPayload? item)
+    {
+        if (item == null || string.IsNullOrEmpty(item.ItemId)) return;
+
+        // 已存在则原地更新，保持现有位置
+        var existingIndex = IndexOfRecentItem(item.ItemId);
+        if (existingIndex >= 0)
+        {
+            _recentItems[existingIndex] = item;
+            return;
+        }
+
+        var lockedId = _lockedItemMeta?.ItemId;
+        if (!string.IsNullOrEmpty(lockedId) && item.ItemId == lockedId)
+        {
+            // 锁定项固定在索引 0
+            _lockedItemMeta = item;
+            _recentItems.Insert(0, item);
+        }
+        else
+        {
+            var startIndex = !string.IsNullOrEmpty(lockedId)
+                             && _recentItems.Count > 0
+                             && _recentItems[0].ItemId == lockedId
+                ? 1
+                : 0;
+
+            var insertIndex = _recentItems.Count;
+            for (var i = startIndex; i < _recentItems.Count; i++)
+            {
+                if (_recentItems[i].CreatedTsMs < item.CreatedTsMs)
+                {
+                    insertIndex = i;
+                    break;
+                }
+            }
+
+            _recentItems.Insert(insertIndex, item);
+        }
+
+        TrimRecentItems();
+    }
+
+    private void RemoveRecentItemById(string? itemId)
+    {
+        var index = IndexOfRecentItem(itemId);
+        if (index >= 0)
+        {
+            _recentItems.RemoveAt(index);
+        }
+    }
+
+    /// <summary>
+    /// Reset/Move 场景下按内存中的 HistoryStore 做一次本地重排（不触发 FFI 查询）。
+    /// </summary>
+    private void RelayoutRecentItemsFromStore()
+    {
+        var capacity = Math.Max(1, RecentItemsCapacity);
+        var ordered = _historyStore.Items
+            .OrderByDescending(i => i.CreatedTsMs)
+            .Take(capacity)
+            .ToList();
+
+        _recentItems.Clear();
+
+        // Pin locked item to top
+        if (_lockedItemMeta != null)
+        {
+            var freshLocked = ordered.FirstOrDefault(i => i.ItemId == _lockedItemMeta.ItemId);
+            _recentItems.Add(freshLocked ?? _lockedItemMeta);
+        }
+
+        foreach (var item in ordered)
+        {
+            if (_recentItems.Count >= capacity) break;
+            if (_lockedItemMeta != null && item.ItemId == _lockedItemMeta.ItemId)
+                continue;
+            _recentItems.Add(item);
+        }
+    }
+
     private async Task ClearCacheAsync()
     {
         if (_coreHost.State != CoreState.Ready) return;
-        var handle = _coreHost.GetHandle();
-        if (handle == IntPtr.Zero) return;
-
-        await Task.Run(() =>
-        {
-            ClipBridgeShell_CS.Interop.CoreInterop.ClearCache(handle);
-        });
+        await _coreHost.ClearCacheAsync();
     }
 
     private void OnCoreStateChanged(CoreState state)
@@ -584,15 +675,12 @@ public partial class MainViewModel : ObservableRecipient
     {
         if (_coreHost.State != CoreState.Ready) return;
 
-        var handle = _coreHost.GetHandle();
-        if (handle == IntPtr.Zero) return;
-
-        await Task.Run(() =>
+        await Task.Run(async () =>
         {
             try
             {
                 // 更新缓存统计
-                var cacheStats = CoreInterop.QueryCacheStats(handle);
+                var cacheStats = await _coreHost.QueryCacheStatsAsync();
                 App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
                 {
                     CurrentCacheBytes = cacheStats.CurrentCacheBytes;
@@ -607,7 +695,7 @@ public partial class MainViewModel : ObservableRecipient
                 });
 
                 // 更新网络统计
-                var netStats = CoreInterop.QueryNetStats(handle);
+                var netStats = await _coreHost.QueryNetStatsAsync();
                 App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
                 {
                     NetworkSeries.Clear();
@@ -618,7 +706,7 @@ public partial class MainViewModel : ObservableRecipient
                 });
 
                 // 更新活动统计
-                var activityStats = CoreInterop.QueryActivityStats(handle);
+                var activityStats = await _coreHost.QueryActivityStatsAsync();
                 App.MainWindow?.DispatcherQueue?.TryEnqueue(() =>
                 {
                     ActivitySeries.Clear();

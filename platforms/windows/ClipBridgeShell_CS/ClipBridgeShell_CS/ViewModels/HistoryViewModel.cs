@@ -11,13 +11,14 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 namespace ClipBridgeShell_CS.ViewModels;
 
-public partial class HistoryViewModel : ObservableRecipient
+public partial class HistoryViewModel : ObservableRecipient, IDisposable
 {
     private readonly ICoreHostService _coreService;
     private readonly ClipboardApplyService _clipboardApply;
     private readonly HistoryStore _historyStore;
     private readonly IClipboardService _clipboardService;
     private readonly MainViewModel _mainViewModel;
+    private bool _disposed;
 
     public IAsyncRelayCommand<ItemMetaPayload> CopyCommand { get; }
     public IAsyncRelayCommand<ItemMetaPayload> DeleteItemCommand { get; }
@@ -102,14 +103,17 @@ public partial class HistoryViewModel : ObservableRecipient
 
     private void OnMainViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
+        if (_disposed) return;
         if (e.PropertyName == nameof(MainViewModel.SelectedItemId))
             OnPropertyChanged(nameof(SelectedItemId));
     }
 
     private void OnClipboardLockChanged(object? sender, bool isLocked)
     {
+        if (_disposed) return;
         App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
         {
+            if (_disposed) return;
             OnPropertyChanged(nameof(LockedItemId));
             SyncPinnedItem();
             ApplyFilters();
@@ -139,7 +143,9 @@ public partial class HistoryViewModel : ObservableRecipient
 
     private void OnHistoryStoreItemsChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
-        // 当有新项添加时，检查是否需要刷新列表
+        if (_disposed) return;
+
+        // 新项只做单条增量插入，避免整表 Refresh（Refresh 会 Clear 并重新拉取第一页）
         if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Add && e.NewItems != null)
         {
             foreach (ItemMetaPayload newItem in e.NewItems)
@@ -147,25 +153,40 @@ public partial class HistoryViewModel : ObservableRecipient
                 // 检查新项是否匹配当前的过滤条件
                 if (MatchesFilter(newItem))
                 {
-                    // 如果匹配，刷新列表以显示新项
-                    // 注意：这里使用 Refresh 会清空列表并重新加载，确保新项出现在正确位置
-                    ApplyFilters();
-                    break; // 只需要刷新一次
+                    // 锁定项固定在 index 0，由 InsertItem 负责去重与排序
+                    Source.InsertItem(newItem);
                 }
             }
         }
-        // 当有项更新时，也需要检查是否需要刷新
+        // 删除项直接从列表中移除，无需重查
+        else if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Remove && e.OldItems != null)
+        {
+            foreach (ItemMetaPayload removedItem in e.OldItems)
+            {
+                Source.RemoveItem(removedItem.ItemId);
+            }
+        }
+        // 更新项：已显示的原地替换，不再匹配过滤条件的移除
         else if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Replace && e.NewItems != null)
         {
             foreach (ItemMetaPayload updatedItem in e.NewItems)
             {
-                if (MatchesFilter(updatedItem))
+                if (!MatchesFilter(updatedItem))
                 {
-                    // 如果更新的项在当前过滤条件下，刷新列表
-                    ApplyFilters();
-                    break;
+                    Source.RemoveItem(updatedItem.ItemId);
+                    continue;
+                }
+
+                if (Source.FirstOrDefault(i => i.ItemId == updatedItem.ItemId) != null)
+                {
+                    Source.InsertItem(updatedItem);
                 }
             }
+        }
+        else
+        {
+            // Reset 等少见操作：走一次完整刷新，保证与 Store 一致
+            ApplyFilters();
         }
     }
 
@@ -315,5 +336,19 @@ public partial class HistoryViewModel : ObservableRecipient
             var msg = loc.GetLocalizedString("Main_DeleteFailed");
             ShowToast(string.IsNullOrEmpty(msg) || msg == "Main_DeleteFailed" ? "Delete failed" : msg, false);
         }
+    }
+
+    /// <summary>
+    /// 取消对 Store / Clipboard / MainViewModel 的事件订阅（幂等）。
+    /// HistoryViewModel 未实现 INavigationAware，导航不会自动调用，需要页面在 OnNavigatedFrom 中显式调用。
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        _historyStore.Items.CollectionChanged -= OnHistoryStoreItemsChanged;
+        _clipboardService.ClipboardLockChanged -= OnClipboardLockChanged;
+        _mainViewModel.PropertyChanged -= OnMainViewModelPropertyChanged;
     }
 }

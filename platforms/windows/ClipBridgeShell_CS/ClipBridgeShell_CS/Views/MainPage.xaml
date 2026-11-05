@@ -9,7 +9,6 @@
     xmlns:events="using:ClipBridgeShell_CS.Core.Models.Events"
     xmlns:helpers="using:ClipBridgeShell_CS.Helpers"
     xmlns:controls="using:ClipBridgeShell_CS.Controls"
-    xmlns:canvas="using:Microsoft.Graphics.Canvas.UI.Xaml"
     mc:Ignorable="d">
 
     <Page.Resources>
@@ -97,54 +96,45 @@
             <StackPanel x:Name="ContentStackPanel" Spacing="24">
                 
                 <!-- 背景头部区域（只包含背景图片和标题） -->
-                <!-- 优化：使用缓存模式提升静态内容渲染性能 -->
-                <Grid Height="600" Margin="0,0,0,0" CacheMode="BitmapCache">
-                    <controls:OpacityMaskView
-                        Height="600"
-                        VerticalAlignment="Stretch"
-                        CacheMode="BitmapCache">
-                        <controls:OpacityMaskView.OpacityMask>
-                            <Rectangle Fill="{ThemeResource OverlayRadialGradient}" />
-                        </controls:OpacityMaskView.OpacityMask>
-                        <Grid
-                            x:Name="ImageGrid"
-                            Margin="0,-100,0,0"
-                            Background="{ThemeResource BackgroundGradient}"
-                            HorizontalAlignment="Stretch"
-                            VerticalAlignment="Stretch">
-                            <Image
-                                x:Name="HeroImage"
-                                Source="ms-appx:///Assets/background.jpg"
-                                Opacity="{ThemeResource HeaderImageOpacity}"
-                                Stretch="UniformToFill"
-                                HorizontalAlignment="Center"
-                                VerticalAlignment="Center"
-                                CacheMode="BitmapCache"/>
-                        </Grid>
-                    </controls:OpacityMaskView>
+                <!-- 性能修复：移除 OpacityMaskView 离屏合成遮罩与多余的 BitmapCache -->
+                <Grid Height="600" Margin="0,0,0,0">
+                    <Grid
+                        x:Name="ImageGrid"
+                        Margin="0,-100,0,0"
+                        Background="{ThemeResource BackgroundGradient}"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Stretch">
+                        <Image
+                            x:Name="HeroImage"
+                            Source="ms-appx:///Assets/background.jpg"
+                            Opacity="{ThemeResource HeaderImageOpacity}"
+                            Stretch="UniformToFill"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"/>
+                        <!-- 渐变叠加层：用现有渐变资源保留原遮罩的“底部渐隐”效果（垂直翻转让透明端在上） -->
+                        <Rectangle Fill="{ThemeResource OverlayRadialGradient}"
+                                   IsHitTestVisible="False"
+                                   RenderTransformOrigin="0.5,0.5">
+                            <Rectangle.RenderTransform>
+                                <ScaleTransform ScaleY="-1"/>
+                            </Rectangle.RenderTransform>
+                        </Rectangle>
+                    </Grid>
                     
-                    <!-- 标题层 - 使用 Win2D Canvas 绘制，完全不受主题影响 -->
+                    <!-- 标题层 - 使用普通 TextBlock，颜色由代码设置，完全不受主题影响 -->
 					<Grid Margin="0,48,0,0" VerticalAlignment="Top" Height="60" Padding="36,0,36,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <!-- 使用 Win2D Canvas 绘制文本，完全控制颜色 -->
-                        <canvas:CanvasControl Grid.Column="0"
-                                                x:Name="TitleCanvas" 
-                                                Draw="OnTitleCanvasDraw"
-                                                HorizontalAlignment="Left"
-                                                VerticalAlignment="Top"
-                                                Width="400"
-                                                Height="60"
-                                                IsHitTestVisible="False"/>
-                        <!-- 隐藏的 TextBlock 用于获取本地化文本和测量大小 -->
+                        <!-- 标题文本（本地化文本由 Uid 提供，颜色由代码动态设置） -->
                         <TextBlock Grid.Column="0"
                                    x:Name="TitleTextBlock"
-                                   l:Uids.Uid="AppName.Text" 
-                                   Opacity="0"
-                                   Visibility="Collapsed"/>
+                                   l:Uids.Uid="AppName.Text"
+                                   Style="{StaticResource CustomTitleTextBlockStyle}"
+                                   Foreground="White"
+                                   VerticalAlignment="Top"/>
                         <!-- 头像图标 -->
                         <Border Grid.Column="2"
                                 x:Name="AvatarBorder"
@@ -165,11 +155,8 @@
                     </Grid>
                 </Grid>
                 
-                <!-- 卡片容器区域（使用视差滚动效果） -->
+                <!-- 卡片容器区域（已移除视差滚动：不再为整块内容设置 RenderTransform） -->
                 <Grid x:Name="ParallaxContentContainer" Margin="0,-298,0,0">
-                    <Grid.RenderTransform>
-                        <TranslateTransform x:Name="ParallaxTransform"/>
-                    </Grid.RenderTransform>
                     <StackPanel Spacing="12">
                         <!-- 横向滚动卡片容器 -->
                         <controls:HorizontalScrollContainer x:Name="RecentlyVisitedContainer" Margin="0,50,0,0">
@@ -400,7 +387,7 @@
                                     Background="{x:Bind ViewModel.DisableAcrylicOnStatsCards, Mode=OneWay, Converter={StaticResource AcrylicBrushConverter}}">
                                 <StackPanel Spacing="8">
                                     <TextBlock l:Uids.Uid="MainPage_ConnectedDevices" FontWeight="SemiBold"/>
-                                    <ListView ItemsSource="{x:Bind ViewModel.Peers, Mode=OneWay}" MaxHeight="300">
+                                    <ListView ItemsSource="{x:Bind ViewModel.Peers, Mode=OneWay}" Height="300">
                                         <ListView.ItemTemplate>
                                             <DataTemplate x:DataType="events:PeerMetaPayload">
                                                 <Grid Padding="8" ColumnDefinitions="Auto,*,Auto">

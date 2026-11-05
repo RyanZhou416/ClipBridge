@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Specialized;
 using System.Linq;
 using System.Threading.Tasks;
 using ClipBridgeShell_CS.Core.Models.Events;
@@ -21,11 +22,6 @@ using Windows.Graphics.Imaging;
 using Windows.Storage.Streams;
 using Windows.UI;
 using Microsoft.UI.Xaml;
-using Microsoft.Graphics.Canvas;
-using Microsoft.Graphics.Canvas.Text;
-using Microsoft.Graphics.Canvas.UI.Xaml;
-using System.Numerics;
-using Windows.UI.Text;
 using CommunityToolkit.WinUI;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml.Hosting;
@@ -40,11 +36,6 @@ public sealed partial class MainPage : Page
     } = null!;
 
     private Microsoft.UI.Xaml.Controls.InfoBar? _errorInfoBar;
-    
-    // Win2D Canvas 相关（仅用于标题绘制）
-    private CanvasTextLayout? _titleTextLayout;
-    private Color _titleTextColor = Colors.White; // 默认白色，确保在深色背景上可见
-    private string _titleText = string.Empty;
     
     // 卡片选中状态管理（性能优化：只更新变化的卡片，而不是遍历所有卡片）
     private Microsoft.UI.Xaml.Controls.Border? _selectedBorder;
@@ -103,10 +94,14 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private DispatcherTimer? _chartUpdateTimer;
+    // 图表重绘标记：数据变化时合并为一次低优先级重绘，不再定时轮询
     private bool _cacheChartDirty = false;
     private bool _networkChartDirty = false;
     private bool _activityChartDirty = false;
+    private bool _redrawQueued = false;
+
+    // 订阅状态：Transient 页面会多次 Loaded/Unloaded，必须成对订阅与解除订阅
+    private bool _subscribed = false;
 
     private void OnPageLoaded(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
@@ -114,90 +109,53 @@ public sealed partial class MainPage : Page
         {
             // 设置 BorderBrushConverter 的 Page 引用
             CardSelectionBorderBrushConverter.SetPageReference(this);
-            
-            // 使用节流机制优化图表绘制性能
-            _chartUpdateTimer = new DispatcherTimer
-            {
-                Interval = TimeSpan.FromMilliseconds(100) // 100ms 节流，避免频繁重绘
-            };
-            _chartUpdateTimer.Tick += (s, args) =>
-            {
-                if (_cacheChartDirty) { SafeDrawChart(DrawCacheChart, "Cache"); _cacheChartDirty = false; }
-                if (_networkChartDirty) { SafeDrawChart(DrawNetworkChart, "Network"); _networkChartDirty = false; }
-                if (_activityChartDirty) { SafeDrawChart(DrawActivityChart, "Activity"); _activityChartDirty = false; }
-            };
-            _chartUpdateTimer.Start();
-            
-            ViewModel.PropertyChanged += OnViewModelPropertyChanged;
 
-            // 监听数据变化，标记为脏（而不是立即绘制）
-            ViewModel.CacheSeries.CollectionChanged += (s, args) => _cacheChartDirty = true;
-            ViewModel.NetworkSeries.CollectionChanged += (s, args) => _networkChartDirty = true;
-            ViewModel.ActivitySeries.CollectionChanged += (s, args) => _activityChartDirty = true;
-            
+            if (!_subscribed)
+            {
+                _subscribed = true;
+
+                ViewModel.PropertyChanged += OnViewModelPropertyChanged;
+
+                // 图表数据变化时只标记并排队一次重绘（合并突发更新，避免重建可视树）
+                ViewModel.CacheSeries.CollectionChanged += OnCacheSeriesChanged;
+                ViewModel.NetworkSeries.CollectionChanged += OnNetworkSeriesChanged;
+                ViewModel.ActivitySeries.CollectionChanged += OnActivitySeriesChanged;
+
+                ViewModel.RecentItems.CollectionChanged += OnRecentItemsChanged;
+
+                // 监听Canvas大小变化（重绘交由合并队列处理）
+                CacheChartCanvas.SizeChanged += OnChartCanvasSizeChanged;
+                NetworkChartCanvas.SizeChanged += OnChartCanvasSizeChanged;
+                ActivityChartCanvas.SizeChanged += OnChartCanvasSizeChanged;
+
+                // 检测背景图片颜色并调整标题颜色
+                if (HeroImage != null)
+                {
+                    HeroImage.ImageOpened += OnHeroImageOpened;
+                    // 如果图片已经加载，立即检测
+                    if (HeroImage.Source != null)
+                    {
+                        _ = DetectBackgroundColorAndUpdateTitle();
+                    }
+                }
+
+                // 监听设置变化，当背景图片改变时重新加载
+                var settingsService = App.GetService<ClipBridgeShell_CS.Contracts.Services.ILocalSettingsService>();
+                settingsService.SettingChanged += OnSettingChanged;
+
+                // 监听主题变化，确保标题颜色不被主题覆盖
+                this.ActualThemeChanged += OnPageThemeChanged;
+            }
+
+            StartRelativeTimeRefresh();
+
             // 初始绘制
             SafeDrawChart(DrawCacheChart, "Cache");
             SafeDrawChart(DrawNetworkChart, "Network");
             SafeDrawChart(DrawActivityChart, "Activity");
 
-            // 监听Canvas大小变化（也需要节流，但可以立即更新）
-            CacheChartCanvas.SizeChanged += (s, args) => _cacheChartDirty = true;
-            NetworkChartCanvas.SizeChanged += (s, args) => _networkChartDirty = true;
-            ActivityChartCanvas.SizeChanged += (s, args) => _activityChartDirty = true;
-
-            ViewModel.RecentItems.CollectionChanged += (s, e) => 
-            {
-                if (ViewModel.LockedItemId != null)
-                {
-                    DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, 
-                        () => UpdateAllCardsLockIcon());
-                }
-            };
-            
-            // 监听选中状态变化，更新所有卡片的选中效果
-            ViewModel.PropertyChanged += (s, e) =>
-            {
-                if (e.PropertyName == nameof(ViewModel.SelectedItemId))
-                {
-                    UpdateAllCardsSelection();
-                }
-                else if (e.PropertyName == nameof(ViewModel.LockedItemId))
-                {
-                    UpdateAllCardsLockIcon();
-                }
-            };
-            
-            StartRelativeTimeRefresh();
-
-            // 设置视差滚动效果（使用 RenderTransform，不影响布局）
-            if (ContentScrollViewer != null && ParallaxContentContainer != null)
-            {
-                ContentScrollViewer.ViewChanged += OnScrollViewChanged;
-            }
-            
-            // 初始化 Win2D Canvas 标题绘制
-            InitializeCanvasTitle();
-
-            // 检测背景图片颜色并调整标题颜色
-            if (HeroImage != null)
-            {
-                HeroImage.ImageOpened += OnHeroImageOpened;
-                // 如果图片已经加载，立即检测
-                if (HeroImage.Source != null)
-                {
-                    _ = DetectBackgroundColorAndUpdateTitle();
-                }
-            }
-
             // 加载用户自定义背景图片
             _ = LoadBackgroundImageAsync();
-
-            // 监听设置变化，当背景图片改变时重新加载
-            var settingsService = App.GetService<ClipBridgeShell_CS.Contracts.Services.ILocalSettingsService>();
-            settingsService.SettingChanged += OnSettingChanged;
-
-            // 监听主题变化，确保标题颜色不被主题覆盖（Canvas 不受主题影响，但需要重新绘制）
-            this.ActualThemeChanged += OnPageThemeChanged;
         }
         catch (Exception ex)
         {
@@ -211,16 +169,115 @@ public sealed partial class MainPage : Page
         {
             _relativeTimeTimer?.Stop();
             _relativeTimeTimer = null;
-            _chartUpdateTimer?.Stop();
-            
-            // 清理标题文本布局
-            _titleTextLayout?.Dispose();
-            _titleTextLayout = null;
+
+            // 对称解除订阅，避免 Singleton ViewModel 上残留已卸载页面的 Handler（越用越慢）
+            if (_subscribed)
+            {
+                _subscribed = false;
+
+                ViewModel.PropertyChanged -= OnViewModelPropertyChanged;
+                ViewModel.CacheSeries.CollectionChanged -= OnCacheSeriesChanged;
+                ViewModel.NetworkSeries.CollectionChanged -= OnNetworkSeriesChanged;
+                ViewModel.ActivitySeries.CollectionChanged -= OnActivitySeriesChanged;
+                ViewModel.RecentItems.CollectionChanged -= OnRecentItemsChanged;
+
+                CacheChartCanvas.SizeChanged -= OnChartCanvasSizeChanged;
+                NetworkChartCanvas.SizeChanged -= OnChartCanvasSizeChanged;
+                ActivityChartCanvas.SizeChanged -= OnChartCanvasSizeChanged;
+
+                if (HeroImage != null)
+                {
+                    HeroImage.ImageOpened -= OnHeroImageOpened;
+                }
+
+                var settingsService = App.GetService<ClipBridgeShell_CS.Contracts.Services.ILocalSettingsService>();
+                settingsService.SettingChanged -= OnSettingChanged;
+
+                this.ActualThemeChanged -= OnPageThemeChanged;
+            }
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"页面卸载清理失败: {ex.Message}");
         }
+    }
+
+    private void OnRecentItemsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (ViewModel.LockedItemId != null)
+        {
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                () => UpdateAllCardsLockIcon());
+        }
+    }
+
+    private void OnCacheSeriesChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        _cacheChartDirty = true;
+        QueueChartRedraw();
+    }
+
+    private void OnNetworkSeriesChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        _networkChartDirty = true;
+        QueueChartRedraw();
+    }
+
+    private void OnActivitySeriesChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        _activityChartDirty = true;
+        QueueChartRedraw();
+    }
+
+    private void OnChartCanvasSizeChanged(object sender, Microsoft.UI.Xaml.SizeChangedEventArgs e)
+    {
+        if (ReferenceEquals(sender, CacheChartCanvas))
+        {
+            _cacheChartDirty = true;
+        }
+        else if (ReferenceEquals(sender, NetworkChartCanvas))
+        {
+            _networkChartDirty = true;
+        }
+        else if (ReferenceEquals(sender, ActivityChartCanvas))
+        {
+            _activityChartDirty = true;
+        }
+
+        QueueChartRedraw();
+    }
+
+    // 合并重绘：一次排队只重绘被标记的图表，突发变化折叠为一次重绘
+    private void QueueChartRedraw()
+    {
+        if (_redrawQueued)
+        {
+            return;
+        }
+
+        _redrawQueued = true;
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+        {
+            _redrawQueued = false;
+
+            if (_cacheChartDirty)
+            {
+                _cacheChartDirty = false;
+                SafeDrawChart(DrawCacheChart, "Cache");
+            }
+
+            if (_networkChartDirty)
+            {
+                _networkChartDirty = false;
+                SafeDrawChart(DrawNetworkChart, "Network");
+            }
+
+            if (_activityChartDirty)
+            {
+                _activityChartDirty = false;
+                SafeDrawChart(DrawActivityChart, "Activity");
+            }
+        });
     }
     
     private async void OnHeroImageOpened(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
@@ -371,9 +428,6 @@ public sealed partial class MainPage : Page
         }
     }
     
-    private const double ParallaxSpeed = 1.1;
-
-
     // 加载背景图片（用户自定义或默认）
     private async Task LoadBackgroundImageAsync()
     {
@@ -452,7 +506,7 @@ public sealed partial class MainPage : Page
 
 
     // 主题变化时，重新检测背景颜色并更新标题颜色
-    // Canvas 绘制不受主题影响，但需要重新检测背景颜色
+    // 标题由 TextBlock 显示，颜色始终由代码控制，这里只需要重新检测背景颜色
     private async void OnPageThemeChanged(FrameworkElement sender, object args)
     {
         // 主题变化时，重新检测背景颜色并更新标题
@@ -461,196 +515,21 @@ public sealed partial class MainPage : Page
         await DetectBackgroundColorAndUpdateTitle();
     }
 
-    // 初始化 Win2D Canvas 标题绘制
-    private void InitializeCanvasTitle()
-    {
-        try
-        {
-            if (TitleCanvas == null || TitleTextBlock == null)
-                return;
-
-            // 等待 Canvas 创建资源
-            TitleCanvas.CreateResources += (s, e) =>
-            {
-                // Canvas 资源创建后，更新文本
-                UpdateCanvasTitleText();
-            };
-
-            // 等待 TextBlock 加载完成，获取文本内容
-            TitleTextBlock.Loaded += (s, e) =>
-            {
-                // 延迟一下，确保 Canvas 设备已就绪
-                var dispatcherQueue = DispatcherQueue.GetForCurrentThread();
-                dispatcherQueue?.TryEnqueue(DispatcherQueuePriority.Normal, () =>
-                {
-                    UpdateCanvasTitleText();
-                });
-            };
-
-            // 如果已经加载，延迟更新
-            if (TitleTextBlock.IsLoaded)
-            {
-                var dispatcherQueue = DispatcherQueue.GetForCurrentThread();
-                dispatcherQueue?.TryEnqueue(DispatcherQueuePriority.Normal, () =>
-                {
-                    UpdateCanvasTitleText();
-                });
-            }
-
-            // 监听文本变化
-            TitleTextBlock.RegisterPropertyChangedCallback(TextBlock.TextProperty, (s, dp) =>
-            {
-                UpdateCanvasTitleText();
-            });
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"初始化 Canvas 标题失败: {ex.Message}");
-        }
-    }
-
-    // 更新 Canvas 标题文本
-    private void UpdateCanvasTitleText()
-    {
-        try
-        {
-            if (TitleCanvas == null || TitleTextBlock == null)
-                return;
-
-            // 等待 Canvas 设备就绪
-            if (TitleCanvas.Device == null)
-            {
-                // 如果设备未就绪，延迟重试
-                TitleCanvas.CreateResources += (s, e) =>
-                {
-                    UpdateCanvasTitleText();
-                };
-                return;
-            }
-
-            _titleText = TitleTextBlock.Text ?? string.Empty;
-            if (string.IsNullOrEmpty(_titleText))
-            {
-                // 如果文本为空，尝试使用默认文本
-                _titleText = "ClipBridge";
-            }
-
-            // 释放旧的布局
-            _titleTextLayout?.Dispose();
-
-            // 创建文本格式
-            var textFormat = new CanvasTextFormat
-            {
-                FontSize = 36,
-                FontWeight = new Windows.UI.Text.FontWeight { Weight = 400 }, // Regular，稍微细一点
-                WordWrapping = CanvasWordWrapping.NoWrap,
-                FontFamily = "Segoe UI"
-            };
-
-            // 创建文本布局（用于测量和绘制）
-            _titleTextLayout = new CanvasTextLayout(
-                TitleCanvas.Device,
-                _titleText,
-                textFormat,
-                float.MaxValue,
-                float.MaxValue
-            );
-
-            // 更新 Canvas 大小
-            TitleCanvas.Width = Math.Max((float)_titleTextLayout.LayoutBounds.Width + 20, 200);
-            TitleCanvas.Height = Math.Max((float)_titleTextLayout.LayoutBounds.Height + 10, 60);
-
-            // 触发重绘
-            TitleCanvas.Invalidate();
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"更新 Canvas 标题文本失败: {ex.Message}");
-        }
-    }
-
-    // Canvas 绘制事件
-    private void OnTitleCanvasDraw(CanvasControl sender, CanvasDrawEventArgs args)
-    {
-        try
-        {
-            // 如果文本布局未创建，尝试创建
-            if (_titleTextLayout == null)
-            {
-                UpdateCanvasTitleText();
-                // 如果仍然为空，直接绘制文本
-                if (_titleTextLayout == null && !string.IsNullOrEmpty(_titleText))
-                {
-                    var textFormat = new CanvasTextFormat
-                    {
-                FontSize = 36,
-                FontWeight = new Windows.UI.Text.FontWeight { Weight = 400 }, // Regular，稍微细一点
-                        WordWrapping = CanvasWordWrapping.NoWrap,
-                        FontFamily = "Segoe UI"
-                    };
-                    args.DrawingSession.DrawText(
-                        _titleText,
-                        new Vector2(0, 0),
-                        _titleTextColor,
-                        textFormat
-                    );
-                    return;
-                }
-            }
-
-            if (_titleTextLayout == null || string.IsNullOrEmpty(_titleText))
-                return;
-
-            // 绘制文本，使用固定颜色（完全不受主题影响）
-            args.DrawingSession.DrawTextLayout(
-                _titleTextLayout,
-                new Vector2(0, 0),
-                _titleTextColor
-            );
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"Canvas 绘制失败: {ex.Message}");
-            // 如果绘制失败，尝试直接绘制文本
-            if (!string.IsNullOrEmpty(_titleText))
-            {
-                try
-                {
-                    var textFormat = new CanvasTextFormat
-                    {
-                FontSize = 36,
-                FontWeight = new Windows.UI.Text.FontWeight { Weight = 400 }, // Regular，稍微细一点
-                        WordWrapping = CanvasWordWrapping.NoWrap,
-                        FontFamily = "Segoe UI"
-                    };
-                    args.DrawingSession.DrawText(
-                        _titleText,
-                        new Vector2(0, 0),
-                        _titleTextColor,
-                        textFormat
-                    );
-                }
-                catch { }
-            }
-        }
-    }
-
-    // 更新标题颜色的辅助方法，使用 Win2D Canvas 确保颜色固定，完全不受主题影响
+    // 更新标题颜色的辅助方法：直接设置 TextBlock 前景色，完全不受主题影响
     private void UpdateTitleColor(Color textColor)
     {
-        _titleTextColor = textColor;
-
-        if (TitleCanvas == null)
+        if (TitleTextBlock == null)
             return;
 
         var dispatcherQueue = DispatcherQueue.GetForCurrentThread();
-        
+
         // 使用 DispatcherQueueHandler 委托类型
         DispatcherQueueHandler updateHandler = () =>
         {
-            // Canvas 绘制完全由代码控制，不受主题影响
-            // 只需要触发重绘即可
-            TitleCanvas?.Invalidate();
+            if (TitleTextBlock != null)
+            {
+                TitleTextBlock.Foreground = new SolidColorBrush(textColor);
+            }
         };
 
         if (dispatcherQueue != null && !dispatcherQueue.HasThreadAccess)
@@ -661,21 +540,6 @@ public sealed partial class MainPage : Page
         {
             // 如果已经在 UI 线程，直接执行
             updateHandler();
-        }
-    }
-
-    private void OnScrollViewChanged(object? sender, Microsoft.UI.Xaml.Controls.ScrollViewerViewChangedEventArgs e)
-    {
-        if (ContentScrollViewer == null || ParallaxContentContainer == null)
-            return;
-
-        var scrollOffset = ContentScrollViewer.VerticalOffset;
-        var parallaxOffset = scrollOffset * ParallaxSpeed;
-
-        // 直接更新 Transform（RenderTransform 不影响布局，性能足够好）
-        if (ParallaxTransform != null)
-        {
-            ParallaxTransform.Y = -parallaxOffset;
         }
     }
 
@@ -695,6 +559,14 @@ public sealed partial class MainPage : Page
         else if (e.PropertyName == nameof(ViewModel.DisableAcrylicOnCards))
         {
             UpdateAllCopyCardsBackground();
+        }
+        else if (e.PropertyName == nameof(ViewModel.SelectedItemId))
+        {
+            UpdateAllCardsSelection();
+        }
+        else if (e.PropertyName == nameof(ViewModel.LockedItemId))
+        {
+            UpdateAllCardsLockIcon();
         }
     }
 
@@ -1189,12 +1061,6 @@ public sealed partial class MainPage : Page
     {
         try
         {
-            // 优化：临时禁用缓存，更新内容，然后重新启用
-            if (CacheChartCanvas.CacheMode != null)
-            {
-                CacheChartCanvas.CacheMode = null;
-            }
-            
             CacheChartCanvas.Children.Clear();
             
             var padding = 40.0;
@@ -1261,9 +1127,6 @@ public sealed partial class MainPage : Page
                 };
                 CacheChartCanvas.Children.Add(polyline);
             }
-            
-            // 重新启用缓存
-            CacheChartCanvas.CacheMode = new Microsoft.UI.Xaml.Media.BitmapCache();
         } catch (Exception)
         {
             throw;
@@ -1274,12 +1137,6 @@ public sealed partial class MainPage : Page
     {
         try
         {
-            // 优化：临时禁用缓存，更新内容，然后重新启用
-            if (NetworkChartCanvas.CacheMode != null)
-            {
-                NetworkChartCanvas.CacheMode = null;
-            }
-            
             NetworkChartCanvas.Children.Clear();
             
             var padding = 40.0;
@@ -1368,9 +1225,6 @@ public sealed partial class MainPage : Page
                 };
                 NetworkChartCanvas.Children.Add(recvLine);
             }
-            
-            // 重新启用缓存
-            NetworkChartCanvas.CacheMode = new Microsoft.UI.Xaml.Media.BitmapCache();
         } catch (Exception)
         {
             throw;
@@ -1381,12 +1235,6 @@ public sealed partial class MainPage : Page
     {
         try
         {
-            // 优化：临时禁用缓存，更新内容，然后重新启用
-            if (ActivityChartCanvas.CacheMode != null)
-            {
-                ActivityChartCanvas.CacheMode = null;
-            }
-            
             ActivityChartCanvas.Children.Clear();
             
             var padding = 40.0;
@@ -1499,9 +1347,6 @@ public sealed partial class MainPage : Page
                 };
                 ActivityChartCanvas.Children.Add(filesLine);
             }
-            
-            // 重新启用缓存
-            ActivityChartCanvas.CacheMode = new Microsoft.UI.Xaml.Media.BitmapCache();
         } catch (Exception)
         {
             throw;

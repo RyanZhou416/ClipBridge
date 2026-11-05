@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml.Hosting;
+using Microsoft.UI.Xaml.Navigation;
 using CommunityToolkit.WinUI.Animations;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using System.Threading.Tasks;
@@ -30,6 +31,7 @@ public sealed partial class LogsPage : Page
     private bool _isLoadingOlderLogs = false; // 防止重复加载
 
     private bool _isFirstLayout = true; // 标记是否是首次布局
+    private bool _detached; // 防止 OnNavigatedFrom 与 Unloaded 重复释放
 #pragma warning disable CS0414
     private readonly bool _hasScrolledToBottom = false; // 标记是否已经滚动到底部（防止重复滚动）
 #pragma warning restore CS0414
@@ -63,6 +65,37 @@ public sealed partial class LogsPage : Page
         
         // 监听 Items 集合变化，清空时重置动画记录
         VM.Items.CollectionChanged += OnItemsCollectionChanged;
+
+        // 页面离开/卸载时释放 ViewModel（Transient，每次导航都会新建）
+        Unloaded += OnPageUnloaded;
+    }
+
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        base.OnNavigatedFrom(e);
+        DetachViewModel();
+    }
+
+    private void OnPageUnloaded(object sender, RoutedEventArgs e)
+    {
+        DetachViewModel();
+    }
+
+    /// <summary>
+    /// 取消页面与 ViewModel 的事件订阅并释放 ViewModel，
+    /// 避免每次进入日志页都残留一个仍在查询日志的 tailer。
+    /// </summary>
+    private void DetachViewModel()
+    {
+        if (_detached) return;
+        _detached = true;
+
+        VM.TailRequested -= OnTailRequested;
+        VM.ScrollToBottomRequested -= OnScrollToBottomRequested;
+        VM.LoadOlderLogsRequested -= OnLoadOlderLogsRequested;
+        VM.Items.CollectionChanged -= OnItemsCollectionChanged;
+
+        VM.Dispose();
     }
     
     private void InitializeFilterFlyouts()
@@ -187,9 +220,10 @@ public sealed partial class LogsPage : Page
     
     private void OnScrollViewerLoaded(object sender, RoutedEventArgs e)
     {
-        // 订阅滚动事件
+        // 订阅滚动事件（先移除，避免重复订阅）
+        LogsScrollViewer.ViewChanged -= OnScrollViewChanged;
         LogsScrollViewer.ViewChanged += OnScrollViewChanged;
-        
+
         // 首次加载时滚动到底部
         if (_isFirstLayout && VM.Items.Count > 0)
         {
@@ -200,6 +234,7 @@ public sealed partial class LogsPage : Page
                 await Task.Delay(150);
                 App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
                 {
+                    if (_detached) return;
                     ScrollToBottom();
                     // 标记所有初始项已动画（避免初始加载时动画）
                     foreach (var item in VM.Items)

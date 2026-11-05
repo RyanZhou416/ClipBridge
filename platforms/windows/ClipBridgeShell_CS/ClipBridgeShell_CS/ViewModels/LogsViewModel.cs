@@ -9,7 +9,6 @@ using System.Threading.Tasks;
 using System.Windows.Input;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
-using ClipBridgeShell_CS.Interop;
 using ClipBridgeShell_CS.Models;
 using SourceStats = ClipBridgeShell_CS.Interop.SourceStats;
 using ClipBridgeShell_CS.Services.Logging;
@@ -25,70 +24,13 @@ using WinRT.Interop;
 
 namespace ClipBridgeShell_CS.ViewModels;
 
-public sealed class LogsViewModel : ObservableObject
+public sealed class LogsViewModel : ObservableObject, IDisposable
 {
     private static int _instanceCounter = 0;
     private readonly int _instanceId;
 
     // 可绑定到 ListView / ItemsRepeater（保留用于兼容）
     public ObservableCollection<LogRow> Items { get; } = new();
-    
-    // 格式化文本（用于文本流显示，类似 Logcat）
-    private readonly System.Text.StringBuilder _formattedText = new();
-    private string _formattedTextContent = "";
-    public string FormattedTextContent
-    {
-        get => _formattedTextContent;
-        private set => SetProperty(ref _formattedTextContent, value);
-    }
-    
-    // 列宽定义（用于格式化对齐）
-    private const int TimeWidth = 23;      // yyyy-MM-dd HH:mm:ss.fff
-    private const int LevelWidth = 8;      // Critical
-    private const int ComponentWidth = 18; // 组件名（增加宽度以容纳更长的组件名如 LogsViewModel）
-    private const int CategoryWidth = 20;  // 分类名
-    
-    /// <summary>
-    /// 计算字符串在等宽字体中的显示宽度（中文字符占2个字符宽度）
-    /// </summary>
-    private static int GetDisplayWidth(string str)
-    {
-        if (string.IsNullOrEmpty(str)) return 0;
-        int width = 0;
-        foreach (char c in str)
-        {
-            // 判断是否为全角字符（中文、日文、韩文等）
-            if (c >= 0x1100 && (c <= 0x115F || c >= 0x2E80 && c <= 0x9FFF || c >= 0xAC00 && c <= 0xD7AF || c >= 0xF900 && c <= 0xFAFF))
-            {
-                width += 2;
-            }
-            else
-            {
-                width += 1;
-            }
-        }
-        return width;
-    }
-    
-    /// <summary>
-    /// 在等宽字体中对齐字符串（考虑中文字符宽度）
-    /// </summary>
-    private static string PadRightForDisplay(string str, int targetWidth)
-    {
-        if (string.IsNullOrEmpty(str))
-        {
-            return new string(' ', targetWidth);
-        }
-        
-        int currentWidth = GetDisplayWidth(str);
-        if (currentWidth >= targetWidth)
-        {
-            return str;
-        }
-        
-        int paddingNeeded = targetWidth - currentWidth;
-        return str + new string(' ', paddingNeeded);
-    }
     
     private readonly ICoreHostService _coreHost;
     private readonly StashLogManager? _stashManager;
@@ -209,61 +151,53 @@ public sealed class LogsViewModel : ObservableObject
         }
     }
     
-    // 所有原始日志（未过滤）
-    private ObservableCollection<LogRow> _allItems = new();
-    
-    // 格式化单条日志为固定宽度文本行
-    private string FormatLogLine(LogRow item)
+    // 所有原始日志（未过滤）；_allItemIds 提供 O(1) 的存在性/去重判断
+    private readonly List<LogRow> _allItems = new();
+    private readonly HashSet<long> _allItemIds = new();
+
+    /// <summary>追加一条原始日志并维护 O(1) 去重集合；已存在时返回 false。</summary>
+    private bool AppendAllItem(LogRow row)
     {
-        var timeStr = PadRightForDisplay(item.TimeStrFull, TimeWidth);
-        var levelStr = PadRightForDisplay(item.LevelName, LevelWidth);
-        var componentStr = PadRightForDisplay(item.Component ?? "", ComponentWidth);
-        var categoryStr = PadRightForDisplay(item.CategoryDisplay ?? "", CategoryWidth);
-        var messageStr = item.DisplayMessage ?? "";
-        var exceptionStr = !string.IsNullOrEmpty(item.Exception) ? $"{"LogsPage_ExceptionPrefix".GetLocalized()}{item.Exception}" : "";
-        
-        return $"{timeStr} {levelStr} {componentStr} {categoryStr} {messageStr}{exceptionStr}";
+        if (!_allItemIds.Add(row.Id)) return false;
+        _allItems.Add(row);
+        return true;
+    }
+
+    /// <summary>清空原始日志及其去重集合。</summary>
+    private void ClearAllItems()
+    {
+        _allItems.Clear();
+        _allItemIds.Clear();
     }
     
     // 应用过滤条件（全量重建，用于初始加载或过滤条件变化时）
     private void ApplyFilters()
     {
-        var filtered = _allItems.Where(item => MatchesFilter(item)).ToList();
         Items.Clear();
-        _formattedText.Clear();
-        
-        foreach (var item in filtered)
+
+        foreach (var item in _allItems)
         {
-            Items.Add(item);
-            _formattedText.AppendLine(FormatLogLine(item));
+            if (MatchesFilter(item))
+            {
+                Items.Add(item);
+            }
         }
-        
-        FormattedTextContent = _formattedText.ToString();
     }
     
     // 增量应用过滤条件（只添加新项，用于新日志追加时）
     // 新日志已经按时间顺序排序，直接追加到底部即可
+    // 去重由调用方基于 _allItemIds 完成，这里不再为每个批次分配 HashSet
     private void ApplyFiltersIncremental(IEnumerable<LogRow> newItems)
     {
-        // 使用 HashSet 快速检查已存在的 ID，避免重复添加
-        var existingIds = new HashSet<long>(Items.Select(item => item.Id));
-        
         foreach (var item in newItems)
         {
-            // 检查是否匹配过滤条件且未添加过
-            if (MatchesFilter(item) && !existingIds.Contains(item.Id))
+            // 检查是否匹配过滤条件
+            if (MatchesFilter(item))
             {
                 // 新日志按时间顺序追加到底部（最新的在底部）
                 Items.Add(item);
-                existingIds.Add(item.Id); // 更新已存在的 ID 集合
-                
-                // 追加到格式化文本
-                _formattedText.AppendLine(FormatLogLine(item));
             }
         }
-        
-        // 更新格式化文本内容（触发 UI 更新）
-        FormattedTextContent = _formattedText.ToString();
     }
     
     // 检查日志项是否匹配过滤条件
@@ -536,10 +470,8 @@ public sealed class LogsViewModel : ObservableObject
         StopTailCmd = new RelayCommand(StopTail);
         ClearViewCmd = new RelayCommand(() => 
         { 
-            _allItems.Clear(); 
-            Items.Clear(); 
-            _formattedText.Clear();
-            FormattedTextContent = "";
+            ClearAllItems();
+            Items.Clear();
             System.Threading.Interlocked.Exchange(ref _lastId, 0); 
             _firstId = 0; 
             _processedInitLogIds.Clear(); 
@@ -553,12 +485,8 @@ public sealed class LogsViewModel : ObservableObject
             var cutoff = DateTimeOffset.Now.AddDays(-7).ToUnixTimeMilliseconds();
             try
             {
-                var handle = _coreHost.GetHandle();
-                if (handle != IntPtr.Zero)
-                {
-                    CoreInterop.LogsDeleteBefore(handle, cutoff);
-                    await RefreshStatsAsync();
-                }
+                await _coreHost.DeleteLogsBeforeAsync(cutoff);
+                await RefreshStatsAsync();
             }
             catch (Exception ex) { /* TODO: Show error */ System.Diagnostics.Debug.WriteLine(ex); }
         }, CanUseCore);
@@ -590,11 +518,11 @@ public sealed class LogsViewModel : ObservableObject
         RefreshLogsCmd = new RelayCommand(() =>
         {
             // 强制触发一次查询
-            _ = Task.Run(() => TickOnce());
+            _ = Task.Run(() => TickOnceAsync());
         }, CanUseCore);
         
         // 添加测试日志命令（用于验证动画效果）
-        // 注意：使用 ILogger 而不是直接调用 CoreInterop.LogsWrite，这样会经过完整的日志系统
+        // 注意：使用 ILogger 而不是直接调用底层日志写入 API，这样会经过完整的日志系统
         AddTestLogCmd = new RelayCommand(() =>
         {
             if (!CanUseCore()) return;
@@ -695,13 +623,14 @@ public sealed class LogsViewModel : ObservableObject
             }
             
             // 检查是否已存在（避免重复，如果暂存日志已经被回写到核心）
-            bool alreadyExists = _allItems.Any(item => item.Id == entry.Id || (item.Time_Unix == entry.TsUtc && item.Component == entry.Component && item.Category == entry.Category && item.Message == displayMessage));
+            bool alreadyExists = _allItemIds.Contains(entry.Id)
+                || _allItems.Any(item => item.Time_Unix == entry.TsUtc && item.Component == entry.Component && item.Category == entry.Category && item.Message == displayMessage);
             if (alreadyExists)
             {
                 continue;
             }
             
-            _allItems.Add(new LogRow
+            AppendAllItem(new LogRow
             {
                 Id = entry.Id,
                 Time_Unix = entry.TsUtc,
@@ -716,10 +645,10 @@ public sealed class LogsViewModel : ObservableObject
         
         // 按时间戳和ID从旧到新排序（ASC），确保最新日志在底部
         var sortedItems = _allItems.OrderBy(item => item.Time_Unix).ThenBy(item => item.Id).ToList();
-        _allItems.Clear();
+        ClearAllItems();
         foreach (var item in sortedItems)
         {
-            _allItems.Add(item);
+            AppendAllItem(item);
         }
         ApplyFilters();
         if (stashedLogs.Count > 0)
@@ -732,15 +661,13 @@ public sealed class LogsViewModel : ObservableObject
     private async Task RefreshStatsAsync()
     {
         if (!CanUseCore()) return;
-        var handle = _coreHost.GetHandle();
-        if (handle == IntPtr.Zero) return;
-        Stats = CoreInterop.LogsStats(handle);
-        await Task.CompletedTask;
+        Stats = await _coreHost.GetLogsStatsAsync();
     }
 
     // -------------------- Tail 回调 + 后备轮询 --------------------
     private async Task StartTailAsync()
     {
+        if (_disposed) return;
         StopTail();
         if (!CanUseCore())
         {
@@ -748,7 +675,7 @@ public sealed class LogsViewModel : ObservableObject
         }
 
         // 初始加载：查询最新的日志（从新到旧）
-        _ = Task.Run(() => LoadLatestLogs());
+        _ = Task.Run(() => LoadLatestLogsAsync());
 
         // 不再使用轮询定时器，完全依赖事件驱动
         // 事件通过 EventPumpService.LogWritten 触发 OnLogWritten -> TickOnce
@@ -759,8 +686,10 @@ public sealed class LogsViewModel : ObservableObject
     /// <summary>
     /// 加载最新的日志（从新到旧排序，用于初始加载）
     /// </summary>
-    private void LoadLatestLogs()
+    private async Task LoadLatestLogsAsync()
     {
+        if (_disposed) return;
+
         if (!CanUseCore())
         {
             return;
@@ -768,14 +697,8 @@ public sealed class LogsViewModel : ObservableObject
 
         try
         {
-            var handle = _coreHost.GetHandle();
-            if (handle == IntPtr.Zero)
-            {
-                return;
-            }
-
             // 查询最新的500条日志（从新到旧）
-            var batch = CoreInterop.LogsQueryLatest(handle, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, 500, CurrentLanguage);
+            var batch = await _coreHost.QueryLogsLatestAsync(LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, 500, CurrentLanguage);
             
             if (batch.Count == 0)
             {
@@ -785,9 +708,10 @@ public sealed class LogsViewModel : ObservableObject
             // 在UI线程更新集合
             App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
-                _allItems.Clear();
+                if (_disposed) return;
+
+                ClearAllItems();
                 Items.Clear();
-                _formattedText.Clear();
                 
                 // batch是从新到旧排序（DESC），但显示时需要从旧到新（最新的在底部）
                 // 所以需要反转顺序
@@ -796,7 +720,7 @@ public sealed class LogsViewModel : ObservableObject
                 
                 foreach (var row in reversedBatch)
                 {
-                    _allItems.Add(row);
+                    AppendAllItem(row);
                 }
                 
                 // 设置ID范围
@@ -824,6 +748,8 @@ public sealed class LogsViewModel : ObservableObject
     /// </summary>
     private void OnLogWritten(object? sender, EventArgs e)
     {
+        if (_disposed) return;
+
         // 事件驱动：当有新日志写入时，立即查询并更新UI
         lock (_tickLock)
         {
@@ -835,11 +761,11 @@ public sealed class LogsViewModel : ObservableObject
         }
         
         // 在后台线程执行查询，避免阻塞事件处理
-        _ = Task.Run(() =>
+        _ = Task.Run(async () =>
         {
             try
             {
-                TickOnce();
+                await TickOnceAsync();
             }
             finally
             {
@@ -859,15 +785,15 @@ public sealed class LogsViewModel : ObservableObject
     private void RestartTailNow()
     {
         System.Threading.Interlocked.Exchange(ref _lastId, 0); 
-        _allItems.Clear(); 
+        ClearAllItems();
         Items.Clear();
-        _formattedText.Clear();
-        FormattedTextContent = "";
         _processedInitLogIds.Clear(); // 清空已处理的日志ID，以便重新检测分隔符
     }
 
-    private void TickOnce()
+    private async Task TickOnceAsync()
     {
+        if (_disposed) return;
+
         // 使用线程安全的方式读取 _lastId
         var currentLastId = GetLastId();
         
@@ -880,13 +806,7 @@ public sealed class LogsViewModel : ObservableObject
 
         try
         {
-            var handle = _coreHost.GetHandle();
-            if (handle == IntPtr.Zero)
-            {
-                return;
-            }
-
-            var batch = CoreInterop.LogsQueryAfterId(handle, currentLastId, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, 500, CurrentLanguage);
+            var batch = await _coreHost.QueryLogsAfterIdAsync(currentLastId, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, 500, CurrentLanguage);
             
             if (batch.Count == 0)
             {
@@ -897,12 +817,14 @@ public sealed class LogsViewModel : ObservableObject
             // 在UI线程更新集合
             App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
+                if (_disposed) return;
+
                 // 新日志按ID从大到小排序（最新的在前），插入到列表顶部
                 var newLogs = new List<LogRow>();
                 foreach (var row in batch)
                 {
                     // 检查是否已存在（避免重复添加，特别是暂存日志可能已经被回写到核心）
-                    bool alreadyExists = _allItems.Any(item => item.Id == row.Id);
+                    bool alreadyExists = _allItemIds.Contains(row.Id);
                     if (alreadyExists)
                     {
                         // 更新_lastId，但不添加重复项
@@ -939,7 +861,7 @@ public sealed class LogsViewModel : ObservableObject
                     // 先添加到 _allItems
                     foreach (var row in newLogs)
                     {
-                        _allItems.Add(row); // 追加到底部
+                        AppendAllItem(row); // 追加到底部
                     }
                     
                     // 确保 _lastId 更新为批次中的最大ID（这是关键！）
@@ -982,14 +904,13 @@ public sealed class LogsViewModel : ObservableObject
     /// </summary>
     public async Task LoadOlderLogsAsync()
     {
+        if (_disposed) return;
+
         if (!CanUseCore() || _firstId == 0) return;
         
         try
         {
-            var handle = _coreHost.GetHandle();
-            if (handle == IntPtr.Zero) return;
-
-            var batch = CoreInterop.LogsQueryBeforeId(handle, _firstId, LevelMin, 
+            var batch = await _coreHost.QueryLogsBeforeIdAsync(_firstId, LevelMin, 
                 string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, 500, CurrentLanguage);
             
             if (batch.Count == 0) return; // 没有更早的日志了
@@ -997,6 +918,8 @@ public sealed class LogsViewModel : ObservableObject
             // 在 UI 线程插入到列表顶部（更早的日志在顶部）
             App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
+                if (_disposed) return;
+
                 // 记录当前第一个元素的 ID，用于保持滚动位置
                 long? oldFirstId = Items.Count > 0 ? Items[0].Id : null;
                 
@@ -1004,8 +927,8 @@ public sealed class LogsViewModel : ObservableObject
                 var newItems = new List<LogRow>();
                 foreach (var row in batch)
                 {
-                    // 检查是否已存在
-                    if (!_allItems.Any(item => item.Id == row.Id))
+                    // 检查是否已存在（O(1) 去重集合）
+                    if (_allItemIds.Add(row.Id))
                     {
                         _allItems.Insert(0, row); // 插入到顶部（更早的日志）
                         newItems.Add(row);
@@ -1018,7 +941,7 @@ public sealed class LogsViewModel : ObservableObject
                     _firstId = batch[0].Id; // batch是升序，第一个是最旧的
                 }
                 
-                // 重新构建格式化文本（因为顺序改变了，需要全量重建）
+                // 顺序改变，重建可见列表（O(n)，仅在加载更早日志时发生）
                 ApplyFilters();
                 
                 // 通知页面需要保持滚动位置
@@ -1061,14 +984,12 @@ public sealed class LogsViewModel : ObservableObject
             return;
         }
         StopTail(); // 停止实时，以免干扰
-        _allItems.Clear();
+        ClearAllItems();
         Items.Clear();
-        var handle = _coreHost.GetHandle();
-        if (handle == IntPtr.Zero) return;
 
         var startMs = RangeStart.ToUnixTimeMilliseconds();
         var endMs = RangeEnd.ToUnixTimeMilliseconds();
-        var list = CoreInterop.LogsQueryRange(handle, startMs, endMs, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, PageSize, PageIndex * PageSize, CurrentLanguage);
+        var list = await _coreHost.QueryLogsRangeAsync(startMs, endMs, LevelMin, string.IsNullOrWhiteSpace(FilterText) ? null : FilterText, PageSize, PageIndex * PageSize, CurrentLanguage);
 
         // 合并暂存日志（如果存在）
         if (_stashManager != null)
@@ -1089,7 +1010,7 @@ public sealed class LogsViewModel : ObservableObject
             list = list.Concat(stashedLogs).OrderBy(r => r.Time_Unix).ThenBy(r => r.Id).ToList();
         }
 
-        foreach (var row in list) _allItems.Add(row);
+        foreach (var row in list) AppendAllItem(row);
         ApplyFilters();
         await Task.CompletedTask;
     }
@@ -1172,11 +1093,8 @@ public sealed class LogsViewModel : ObservableObject
         
         try
         {
-            var handle = _coreHost.GetHandle();
-            if (handle == IntPtr.Zero) return;
-            
             var ids = SelectedLogIds.ToArray();
-            var deleted = CoreInterop.LogsDeleteByIds(handle, ids);
+            await _coreHost.DeleteLogsByIdsAsync(ids);
             
             // 从 Items 中移除已删除的项
             App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
@@ -1204,10 +1122,7 @@ public sealed class LogsViewModel : ObservableObject
         
         try
         {
-            var handle = _coreHost.GetHandle();
-            if (handle == IntPtr.Zero) return;
-            
-            CoreInterop.ClearLogsDb(handle);
+            await _coreHost.ClearLogsDbAsync();
             
             App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
@@ -1230,12 +1145,10 @@ public sealed class LogsViewModel : ObservableObject
     private async Task RefreshSourceStatsAsync()
     {
         if (!CanUseCore()) return;
-        var handle = _coreHost.GetHandle();
-        if (handle == IntPtr.Zero) return;
         
         try
         {
-            SourceStats = CoreInterop.LogsSourceStats(handle);
+            SourceStats = await _coreHost.GetLogsSourceStatsAsync();
         }
         catch (Exception ex)
         {
@@ -1248,9 +1161,13 @@ public sealed class LogsViewModel : ObservableObject
     // [新增] 状态变更处理
     private void OnCoreStateChanged(CoreState state)
     {
+        if (_disposed) return;
+
         // 确保在 UI 线程刷新命令状态
         App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
         {
+            if (_disposed) return;
+
             // 更新状态（分隔符现在从数据库读取，不需要在这里插入）
             if (_previousCoreState != state)
             {
@@ -1320,16 +1237,29 @@ public sealed class LogsViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 清理资源，取消事件订阅
+    /// 清理资源，取消事件订阅（幂等：OnNavigatedFrom 与 Unloaded 可能各触发一次）
     /// </summary>
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         if (_eventPump != null)
         {
             _eventPump.LogWritten -= OnLogWritten;
         }
+
+        _coreHost.StateChanged -= OnCoreStateChanged;
+
         StopTail();
+
+        // 丢弃页面订阅的委托，避免已释放的 VM 再被事件回调
+        TailRequested = null;
+        ScrollToBottomRequested = null;
+        LoadOlderLogsRequested = null;
     }
+
+    private bool _disposed;
 }
 
 /// <summary>

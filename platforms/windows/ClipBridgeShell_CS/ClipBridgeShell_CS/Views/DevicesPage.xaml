@@ -59,91 +59,90 @@
         </Border>
 
         <!-- 设备列表区域 -->
-        <ScrollViewer Grid.Row="1" Padding="36,24,36,36" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
-            <StackPanel Spacing="12">
-                <TextBlock l:Uids.Uid="DevicesPage_DevicesTitle" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold"/>
-                
-                <ListView ItemsSource="{x:Bind ViewModel.Devices, Mode=OneWay}" SelectionMode="Single">
-                    <ListView.ItemTemplate>
-                        <DataTemplate x:DataType="events:PeerMetaPayload">
-                            <Border Style="{StaticResource ItemCardStyle}" 
-                                    Tapped="OnDeviceTapped"
-                                    Tag="{x:Bind}">
-                                <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto" ColumnSpacing="12">
-                                    <!-- 状态指示器 -->
-                                    <Ellipse Grid.Column="0" 
-                                             Width="12" 
-                                             Height="12" 
-                                             VerticalAlignment="Center">
-                                        <Ellipse.Fill>
-                                            <SolidColorBrush Color="{Binding IsOnline, Converter={StaticResource BooleanToColorConverter}}"/>
-                                        </Ellipse.Fill>
-                                    </Ellipse>
+        <!-- 性能修复：ListView 直接放在 * 行，避免被 ScrollViewer 撑成无限高度导致虚拟化失效 -->
+        <Grid Grid.Row="1" Padding="36,24,36,36" RowDefinitions="Auto,*">
+            <TextBlock Grid.Row="0" l:Uids.Uid="DevicesPage_DevicesTitle" Style="{ThemeResource SubtitleTextBlockStyle}" FontWeight="SemiBold" Margin="0,0,0,12"/>
 
-                                    <!-- 设备信息 -->
-                                    <StackPanel Grid.Column="1" Spacing="4">
-                                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
-                                        <TextBlock Text="{Binding DeviceId}" FontSize="12" Opacity="0.6"/>
-                                        <TextBlock FontSize="12" Opacity="0.6">
-                                            <Run l:Uids.Uid="DevicesPage_State"/>
-                                            <Run Text="{Binding ConnectionState}"/>
-                                        </TextBlock>
-                                        <TextBlock FontSize="12" Opacity="0.6">
-                                            <Run l:Uids.Uid="DevicesPage_LastSeen"/>
-                                            <Run Text="{Binding LastSeen, Converter={StaticResource TimestampConverter}}"/>
-                                        </TextBlock>
-                                    </StackPanel>
+            <ListView Grid.Row="1" ItemsSource="{x:Bind ViewModel.Devices, Mode=OneWay}" SelectionMode="Single">
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="events:PeerMetaPayload">
+                        <Border Style="{StaticResource ItemCardStyle}" 
+                                Tapped="OnDeviceTapped"
+                                Tag="{x:Bind}">
+                            <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto" ColumnSpacing="12">
+                                <!-- 状态指示器 -->
+                                <Ellipse Grid.Column="0" 
+                                         Width="12" 
+                                         Height="12" 
+                                         VerticalAlignment="Center">
+                                    <Ellipse.Fill>
+                                        <SolidColorBrush Color="{Binding IsOnline, Converter={StaticResource BooleanToColorConverter}}"/>
+                                    </Ellipse.Fill>
+                                </Ellipse>
 
-                                    <!-- Outbound 开关 -->
-                                    <ToggleSwitch Grid.Column="2" 
-                                                  l:Uids.Uid="DevicesPage_ShareTo"
-                                                  IsOn="{Binding ShareToPeer, Mode=TwoWay}"
-                                                  Toggled="OnShareToToggled"
-                                                  Tag="{x:Bind}"/>
+                                <!-- 设备信息 -->
+                                <StackPanel Grid.Column="1" Spacing="4">
+                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                    <TextBlock Text="{Binding DeviceId}" FontSize="12" Opacity="0.6"/>
+                                    <TextBlock FontSize="12" Opacity="0.6">
+                                        <Run l:Uids.Uid="DevicesPage_State"/>
+                                        <Run Text="{Binding ConnectionState}"/>
+                                    </TextBlock>
+                                    <TextBlock FontSize="12" Opacity="0.6">
+                                        <Run l:Uids.Uid="DevicesPage_LastSeen"/>
+                                        <Run Text="{Binding LastSeen, Converter={StaticResource TimestampConverter}}"/>
+                                    </TextBlock>
+                                </StackPanel>
 
-                                    <!-- Inbound 开关 -->
-                                    <ToggleSwitch Grid.Column="3" 
-                                                  l:Uids.Uid="DevicesPage_AcceptFrom"
-                                                  IsOn="{Binding AcceptFromPeer, Mode=TwoWay}"
-                                                  Toggled="OnAcceptFromToggled"
-                                                  Tag="{x:Bind}"/>
+                                <!-- Outbound 开关 -->
+                                <ToggleSwitch Grid.Column="2" 
+                                              l:Uids.Uid="DevicesPage_ShareTo"
+                                              IsOn="{Binding ShareToPeer, Mode=TwoWay}"
+                                              Toggled="OnShareToToggled"
+                                              Tag="{x:Bind}"/>
 
-                                    <!-- 右键菜单按钮 -->
-                                    <Button Grid.Column="4" 
-                                            Content="⋯"
-                                            FontSize="16"
-                                            Click="OnDeviceMenuClick"
-                                            Tag="{x:Bind}">
-                                        <Button.Flyout>
-                                            <MenuFlyout>
-                                                <ToggleMenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_ShareTo" 
-                                                                      IsChecked="{Binding ShareToPeer, Mode=TwoWay}"
-                                                                      Click="OnShareToMenuClick"
-                                                                      Tag="{x:Bind}"/>
-                                                <ToggleMenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_AcceptFrom" 
-                                                                      IsChecked="{Binding AcceptFromPeer, Mode=TwoWay}"
-                                                                      Click="OnAcceptFromMenuClick"
-                                                                      Tag="{x:Bind}"/>
-                                                <MenuFlyoutSeparator/>
-                                                <MenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_CopyInfo" 
-                                                               Click="OnCopyDeviceInfoClick"
-                                                               Tag="{x:Bind}"/>
-                                                <MenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_SetAlias" 
-                                                               Click="OnSetAliasClick"
-                                                               Tag="{x:Bind}"/>
-                                                <MenuFlyoutSeparator/>
-                                                <MenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_ClearFingerprint" 
-                                                               Click="OnClearFingerprintClick"
-                                                               Tag="{x:Bind}"/>
-                                            </MenuFlyout>
-                                        </Button.Flyout>
-                                    </Button>
-                                </Grid>
-                            </Border>
-                        </DataTemplate>
-                    </ListView.ItemTemplate>
-                </ListView>
-            </StackPanel>
-        </ScrollViewer>
+                                <!-- Inbound 开关 -->
+                                <ToggleSwitch Grid.Column="3" 
+                                              l:Uids.Uid="DevicesPage_AcceptFrom"
+                                              IsOn="{Binding AcceptFromPeer, Mode=TwoWay}"
+                                              Toggled="OnAcceptFromToggled"
+                                              Tag="{x:Bind}"/>
+
+                                <!-- 右键菜单按钮 -->
+                                <Button Grid.Column="4" 
+                                        Content="⋯"
+                                        FontSize="16"
+                                        Click="OnDeviceMenuClick"
+                                        Tag="{x:Bind}">
+                                    <Button.Flyout>
+                                        <MenuFlyout>
+                                            <ToggleMenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_ShareTo" 
+                                                                  IsChecked="{Binding ShareToPeer, Mode=TwoWay}"
+                                                                  Click="OnShareToMenuClick"
+                                                                  Tag="{x:Bind}"/>
+                                            <ToggleMenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_AcceptFrom" 
+                                                                  IsChecked="{Binding AcceptFromPeer, Mode=TwoWay}"
+                                                                  Click="OnAcceptFromMenuClick"
+                                                                  Tag="{x:Bind}"/>
+                                            <MenuFlyoutSeparator/>
+                                            <MenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_CopyInfo" 
+                                                           Click="OnCopyDeviceInfoClick"
+                                                           Tag="{x:Bind}"/>
+                                            <MenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_SetAlias" 
+                                                           Click="OnSetAliasClick"
+                                                           Tag="{x:Bind}"/>
+                                            <MenuFlyoutSeparator/>
+                                            <MenuFlyoutItem l:Uids.Uid="DevicesPage_Menu_ClearFingerprint" 
+                                                           Click="OnClearFingerprintClick"
+                                                           Tag="{x:Bind}"/>
+                                        </MenuFlyout>
+                                    </Button.Flyout>
+                                </Button>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Grid>
     </Grid>
 </Page>

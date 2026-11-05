@@ -22,6 +22,8 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
     private readonly ILocalSettingsService _localSettings;
     private readonly EventPumpService _eventPump;
     private DispatcherTimer? _refreshTimer;
+    private DispatcherTimer? _eventDebounceTimer;
+    private bool _isEventPumpSubscribed;
     private PeerMetaPayload? _selectedDevice;
 
     public ObservableCollection<PeerMetaPayload> Devices { get; } = new();
@@ -44,12 +46,21 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
         _localSettings = localSettings;
         _eventPump = eventPump;
 
-        // 监听设备相关事件
-        _eventPump.EventReceived += OnEventReceived;
+        // 监听设备相关事件（幂等订阅，避免导航来回时重复订阅）
+        SubscribeEventPump();
+
+        // 事件去抖：peer_found / peer_changed 可能短时间连续到达，合并为一次刷新
+        _eventDebounceTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(300)
+        };
+        _eventDebounceTimer.Tick += OnEventDebounceTick;
     }
 
     public async void OnNavigatedTo(object parameter)
     {
+        SubscribeEventPump();
+
         await RefreshDevicesAsync();
 
         // 启动定时刷新（每10秒）
@@ -65,6 +76,44 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
     {
         _refreshTimer?.Stop();
         _refreshTimer = null;
+
+        _eventDebounceTimer?.Stop();
+
+        UnsubscribeEventPump();
+    }
+
+    private void SubscribeEventPump()
+    {
+        if (_isEventPumpSubscribed) return;
+
+        _eventPump.EventReceived += OnEventReceived;
+        _isEventPumpSubscribed = true;
+    }
+
+    private void UnsubscribeEventPump()
+    {
+        if (!_isEventPumpSubscribed) return;
+
+        _eventPump.EventReceived -= OnEventReceived;
+        _isEventPumpSubscribed = false;
+    }
+
+    private void RequestDebouncedRefresh()
+    {
+        if (!_isEventPumpSubscribed) return;
+
+        var timer = _eventDebounceTimer;
+        if (timer == null) return;
+
+        // Stop + Start 重新计时，实现 300ms 去抖
+        timer.Stop();
+        timer.Start();
+    }
+
+    private void OnEventDebounceTick(object? sender, object e)
+    {
+        _eventDebounceTimer?.Stop();
+        _ = RefreshDevicesAsync();
     }
 
     private void OnEventReceived(string eventJson)
@@ -80,8 +129,16 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
 
                 if (type == "peer_found" || type == "peer_changed")
                 {
-                    // 设备状态变化，刷新列表
-                    _ = RefreshDevicesAsync();
+                    // 事件来自 EventPump 后台线程：DispatcherTimer 必须在 UI 线程操作
+                    var dispatcher = App.MainWindow?.DispatcherQueue;
+                    if (dispatcher == null || dispatcher.HasThreadAccess)
+                    {
+                        RequestDebouncedRefresh();
+                    }
+                    else
+                    {
+                        dispatcher.TryEnqueue(RequestDebouncedRefresh);
+                    }
                 }
             }
         }
