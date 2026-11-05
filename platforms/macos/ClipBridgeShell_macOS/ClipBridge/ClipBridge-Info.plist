@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- macOS 15+ 本地网络隐私：core 通过 mDNS 发现同账号设备，必须声明用途并获得用户授权 -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>ClipBridge 需要访问本地网络，以发现并同步同一账号下的其他设备。</string>
+	<!-- 声明 core（cb_core/src/discovery.rs）使用/浏览的 Bonjour 服务类型 -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_clipbridge._udp</string>
+	</array>
+</dict>
+</plist>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 与 ENABLE_APP_SANDBOX = YES 保持一致：显式声明沙盒，避免只依赖构建设置生成 -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- 出站网络：QUIC 客户端连接，以及 mDNS(Bonjour) 浏览/解析同账号设备 -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- 入站网络：QUIC 监听端口，以及 mDNS 发布 _clipbridge._udp 服务 -->
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>
