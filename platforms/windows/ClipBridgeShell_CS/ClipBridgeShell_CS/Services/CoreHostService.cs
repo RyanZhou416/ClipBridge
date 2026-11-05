@@ -479,7 +479,23 @@ public sealed class CoreHostService : ICoreHostService
                 return false;
             }
 
-            return action(handle);
+            // 帧时序诊断（默认关闭）：所有 cb_* 调用都经过这里，因此在这里统一计时即可覆盖
+            // “UI 线程上同步调用 FFI”的情况（超过 5ms 才落盘，标签取调用方方法名）。
+            // 未设置 CB_FRAME_TRACE 时 FrameTrace.Enabled 为 false，下面多出的只有一次字段读取。
+            if (!FrameTrace.Enabled)
+            {
+                return action(handle);
+            }
+
+            var ffiStart = FrameTrace.BeginFfiCall();
+            try
+            {
+                return action(handle);
+            }
+            finally
+            {
+                FrameTrace.EndFfiCall(ffiStart);
+            }
         }
     }
 

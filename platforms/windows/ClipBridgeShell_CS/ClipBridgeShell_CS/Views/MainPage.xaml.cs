@@ -170,6 +170,11 @@ public sealed partial class MainPage : Page
 
             StartRelativeTimeRefresh();
 
+            // 运行时帧时序诊断（默认完全关闭）：把“逐帧滚动一步”的驱动交给 FrameTrace，
+            // 并告知主页面已就绪（idle 场景会等它就绪后再开始）。未设置环境变量时两个调用立即返回。
+            FrameTrace.RegisterScrollDriver(FrameTraceScrollTick);
+            FrameTrace.NotifyMainPageLoaded();
+
             StartupTrace.Mark("ab-mode-loaded-deferred");
             // 首帧之后再绘制图表、加载/检测背景图，避免和第一帧抢 UI 线程
             DeferStartupWorkUntilAfterFirstFrame();
@@ -178,6 +183,77 @@ public sealed partial class MainPage : Page
         {
             ShowError($"加载主页内容失败: {ex.Message}");
         }
+    }
+
+    // 帧时序诊断的 scroll 场景驱动状态（仅 CB_FRAME_TRACE=1 时使用）：
+    // 优先横向滚动历史卡片条（ItemsRepeater 所在 ScrollViewer），它没有可滚动范围时退回整页纵向滚动。
+    private ScrollViewer? _frameHistoryScroller;
+    private double _frameScrollDirection = 1.0;
+    private bool _frameScrollTargetNoted;
+
+    /// <summary>
+    /// scroll 场景：每个渲染节拍滚动一步（两个方向往复）。由 FrameTrace 在 scroll 阶段逐帧调用；
+    /// 未开启诊断时本方法不会被注册，也不会被调用。
+    /// </summary>
+    private void FrameTraceScrollTick()
+    {
+        // 历史卡片条的 ScrollViewer 在 HorizontalScrollContainer 内部，首次调用时从可视树里取。
+        var historyScroller = _frameHistoryScroller;
+        if (historyScroller == null)
+        {
+            _frameHistoryScroller = historyScroller = FindVisualChild<ScrollViewer>(RecentlyVisitedContainer);
+        }
+
+        if (historyScroller != null && historyScroller.ScrollableWidth > 1)
+        {
+            if (!_frameScrollTargetNoted)
+            {
+                _frameScrollTargetNoted = true;
+                FrameTrace.NoteScrollTarget("history-strip");
+            }
+
+            var horizontal = historyScroller.HorizontalOffset + (18.0 * _frameScrollDirection);
+            if (horizontal <= 0)
+            {
+                horizontal = 0;
+                _frameScrollDirection = 1;
+            }
+            else if (horizontal >= historyScroller.ScrollableWidth)
+            {
+                horizontal = historyScroller.ScrollableWidth;
+                _frameScrollDirection = -1;
+            }
+
+            historyScroller.ChangeView(horizontal, null, null, true);
+            return;
+        }
+
+        // 兜底：历史卡片条为空/不可横向滚动时，滚动整页（页面内容始终高于视口，保证有真实滚动）。
+        var pageScroller = ContentScrollViewer;
+        if (pageScroller == null)
+        {
+            return;
+        }
+
+        if (!_frameScrollTargetNoted)
+        {
+            _frameScrollTargetNoted = true;
+            FrameTrace.NoteScrollTarget("page-vertical");
+        }
+
+        var vertical = pageScroller.VerticalOffset + (12.0 * _frameScrollDirection);
+        if (vertical <= 0)
+        {
+            vertical = 0;
+            _frameScrollDirection = 1;
+        }
+        else if (vertical >= pageScroller.ScrollableHeight)
+        {
+            vertical = pageScroller.ScrollableHeight;
+            _frameScrollDirection = -1;
+        }
+
+        pageScroller.ChangeView(null, vertical, null, true);
     }
 
     private void OnPageUnloaded(object sender, RoutedEventArgs e)
@@ -275,6 +351,9 @@ public sealed partial class MainPage : Page
         _redrawQueued = true;
         DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
         {
+            // 帧时序诊断（默认关闭）：给图表重绘打点，超过 5ms 的重绘会带标签记入 trace，
+            // 用来解释同一时刻 UI 线程停顿样本的成因。未开启时 BeginUiOp 返回 0，EndUiOp 立即返回。
+            var traceToken = FrameTrace.BeginUiOp();
             _redrawQueued = false;
 
             if (_initialChartDrawPending)
@@ -300,6 +379,8 @@ public sealed partial class MainPage : Page
                 _activityChartDirty = false;
                 SafeDrawChart(DrawActivityChart, "Activity");
             }
+
+            FrameTrace.EndUiOp("mainpage-chart-redraw", traceToken);
         });
     }
 

@@ -359,6 +359,17 @@ public partial class App : Application
         await App.GetService<IActivationService>().ActivateAsync(args);
         StartupTrace.Mark("activate-async-done");
 
+        // 运行时帧时序诊断（默认完全关闭）：CB_FRAME_TRACE=1 时，窗口此刻已经可见
+        // （CB_STARTUP_NO_FOREGROUND=1 走的是 SW_SHOWNOACTIVATE，可见但不抢焦点），
+        // 从这里开始采集帧间隔与 UI 线程停顿；场景跑完后由 FrameTrace 自行落盘并退出进程。
+        // 未设置环境变量时这里只是一次静态布尔判断，不订阅事件、不起线程、不建文件。
+        if (FrameTrace.Enabled && MainWindow is { } traceWindow)
+        {
+            FrameTrace.StartAfterWindowVisible(
+                traceWindow.DispatcherQueue,
+                WindowNative.GetWindowHandle(traceWindow));
+        }
+
         // 本地化器就绪后，在 UI 线程把窗口标题从字面量兜底值换成正式本地化文本。
         // 最终标题与改动前完全一致；只是可能在首帧之后的一两个帧内先显示兜底值。
         _ = ApplyLocalizedTitleWhenReadyAsync();
