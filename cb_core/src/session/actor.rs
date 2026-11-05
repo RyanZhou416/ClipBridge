@@ -30,6 +30,22 @@ use crate::store::Store;
 use crate::transport::{Connection, RecvStream, SendStream};
 use crate::util::{now_ms, sha256_hex};
 
+/// OPAQUE 登录消息的二进制编码（postcard + serde）。
+///
+/// 历史：早期用 bincode 1.3 的 `serialize`/`deserialize`。bincode 项目已永久停止开发
+/// （RUSTSEC-2025-0141 覆盖所有版本，2.0.1 同样触发；3.0.0 是只含一行 compile_error!
+/// 的"墓碑版本"），因此整体换成仍活跃维护、同样紧凑的 postcard。
+///
+/// **线格式与 bincode 1.x 不兼容**：这是有意的产品决定 —— 不保留与老对端的互通，
+/// 双方必须运行同一协议版本。将来若需兼容旧版本，必须引入显式的协议版本协商。
+fn opaque_encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
+	postcard::to_stdvec(value).map_err(|e| anyhow::anyhow!("OPAQUE 序列化失败: {e}"))
+}
+
+fn opaque_decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+	postcard::from_bytes(bytes).map_err(|e| anyhow::anyhow!("OPAQUE 反序列化失败: {e}"))
+}
+
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 
@@ -1468,7 +1484,7 @@ impl SessionActor {
 		let start_result = CbClientLogin::start(&mut rng, password)
 			.map_err(|e| anyhow::anyhow!("OPAQUE start failed: {e:?}"))?;
 		self.opaque_client_state = Some(start_result.state);
-		let payload = bincode::serialize(&start_result.message)?;
+		let payload = opaque_encode(&start_result.message)?;
 		self.send_ctrl(CtrlMsg::OpaqueStart {
 			msg_id: Some(uuid::Uuid::new_v4().to_string()),
 			reply_to: None,
@@ -1487,7 +1503,7 @@ impl SessionActor {
 		let password = self.config.account_password.as_bytes();
 		let mut rng = OsRng;
 		let server_response: opaque_ke::CredentialResponse<DefaultCipherSuite> =
-			bincode::deserialize(response_bytes)
+			opaque_decode(response_bytes)
 				.map_err(|_| anyhow::anyhow!("Invalid OpaqueResponse bytes"))?;
 		let finish_result = client_state
 			.finish(
@@ -1497,7 +1513,7 @@ impl SessionActor {
 				ClientLoginFinishParameters::default(),
 			)
 			.map_err(|e| anyhow::anyhow!("OPAQUE finish failed: {e:?}"))?;
-		let payload = bincode::serialize(&finish_result.message)?;
+		let payload = opaque_encode(&finish_result.message)?;
 		self.send_ctrl(CtrlMsg::OpaqueFinish {
 			msg_id: Some(uuid::Uuid::new_v4().to_string()),
 			reply_to: None,
@@ -1513,8 +1529,8 @@ impl SessionActor {
 		let identifier = b"clipbridge-user";
 		let (server_setup, server_rec) =
 			p2p_get_server_registration(&self.config.account_password)?;
-		let client_message = bincode::deserialize(start_bytes)
-			.map_err(|_| anyhow::anyhow!("Invalid OpaqueStart bytes"))?;
+		let client_message =
+			opaque_decode(start_bytes).map_err(|_| anyhow::anyhow!("Invalid OpaqueStart bytes"))?;
 		let start_result = CbServerLogin::start(
 			&mut rng,
 			&server_setup,
@@ -1525,7 +1541,7 @@ impl SessionActor {
 		)
 		.map_err(|e| anyhow::anyhow!("OPAQUE server start failed: {e:?}"))?;
 		self.opaque_server_state = Some(start_result.state);
-		let payload = bincode::serialize(&start_result.message)?;
+		let payload = opaque_encode(&start_result.message)?;
 		self.send_ctrl(CtrlMsg::OpaqueResponse {
 			msg_id: Some(uuid::Uuid::new_v4().to_string()),
 			reply_to: None,
@@ -1541,7 +1557,7 @@ impl SessionActor {
 			.opaque_server_state
 			.take()
 			.ok_or_else(|| anyhow::anyhow!("Protocol error: Missing server state"))?;
-		let client_message = bincode::deserialize(finish_bytes)
+		let client_message = opaque_decode(finish_bytes)
 			.map_err(|_| anyhow::anyhow!("Invalid OpaqueFinish bytes"))?;
 		let _session_key = server_state
 			.finish(client_message, ServerLoginParameters::default())
@@ -1637,5 +1653,80 @@ impl SessionActor {
 			.await?;
 		}
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod opaque_wire_tests {
+	use super::{opaque_decode, opaque_encode};
+	use crate::crypto::{
+		p2p_get_server_registration, CbClientLogin, CbServerLogin, DefaultCipherSuite,
+	};
+	use opaque_ke::{ClientLoginFinishParameters, ServerLoginParameters};
+	use rand::rngs::OsRng;
+
+	/// 走序列化往返跑完整 OPAQUE 握手（ke1/ke2/ke3 都编码成字节再解回来），
+	/// 证明新的 postcard 编码能正确承载 opaque-ke 的消息类型 —— 而不只是内存里传递。
+	/// 这是 bincode 1.3 → 2.0.1 → postcard 两次迁移后，唯一直接覆盖该线路径的测试。
+	#[test]
+	fn opaque_handshake_through_serialization() {
+		let password = "user_secret_key_123456";
+		let (server_setup, server_rec) = p2p_get_server_registration(password).unwrap();
+
+		let mut client_rng = OsRng;
+		let client_start = CbClientLogin::start(&mut client_rng, password.as_bytes()).unwrap();
+
+		// ke1: client → server
+		let ke1_bytes = opaque_encode(&client_start.message).unwrap();
+		let ke1: opaque_ke::CredentialRequest<DefaultCipherSuite> =
+			opaque_decode(&ke1_bytes).unwrap();
+
+		let mut server_rng = OsRng;
+		let server_start = CbServerLogin::start(
+			&mut server_rng,
+			&server_setup,
+			Some(server_rec),
+			ke1,
+			b"clipbridge-user",
+			ServerLoginParameters::default(),
+		)
+		.expect("Server failed to start session");
+
+		// ke2: server → client
+		let ke2_bytes = opaque_encode(&server_start.message).unwrap();
+		let ke2: opaque_ke::CredentialResponse<DefaultCipherSuite> =
+			opaque_decode(&ke2_bytes).unwrap();
+
+		let client_finish = client_start
+			.state
+			.finish(
+				&mut client_rng,
+				password.as_bytes(),
+				ke2,
+				ClientLoginFinishParameters::default(),
+			)
+			.expect("Client failed to finish session");
+
+		// ke3: client → server
+		let ke3_bytes = opaque_encode(&client_finish.message).unwrap();
+		let ke3: opaque_ke::CredentialFinalization<DefaultCipherSuite> =
+			opaque_decode(&ke3_bytes).unwrap();
+
+		let server_finish = server_start
+			.state
+			.finish(ke3, ServerLoginParameters::default())
+			.expect("Server failed to verify client");
+
+		assert_eq!(client_finish.session_key, server_finish.session_key);
+
+		// 同一消息重复编码必须字节稳定（否则对端校验/幂等会出问题）
+		assert_eq!(
+			ke1_bytes,
+			opaque_encode(
+				&opaque_decode::<opaque_ke::CredentialRequest<DefaultCipherSuite>>(&ke1_bytes)
+					.unwrap()
+			)
+			.unwrap()
+		);
 	}
 }

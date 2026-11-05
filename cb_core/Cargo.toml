@@ -48,10 +48,13 @@ rcgen = "0.14.6"
 mdns-sd = "0.21"
 
 opaque-ke = { version = "=4.1.0-pre.2", features = ["std", "serde"] }
-# ⚠ bincode 1.3.3 已被作者标记为"停止维护、完成版"（RUSTSEC-2025-0141）。
-# 升级到 3.x 会改变 OPAQUE 登录消息（actor.rs 里的 serialize/deserialize）的线格式，
-# 老对端将无法互通；要升必须先给协议加版本号并做迁移，属于产品决策，不是纯依赖升级。
-bincode = "1.3"
+# OPAQUE 登录消息（actor.rs）的二进制编码。
+# 历史：原本是 bincode 1.3。该项目已永久停止开发 —— RUSTSEC-2025-0141 覆盖**所有**版本
+# （实测 2.0.1 依旧触发告警），而 3.0.0 更是只含一行 compile_error! 的"墓碑版本"，
+# 因此整体换成 postcard：同样是紧凑二进制 + serde 派生、活跃维护、无已知 advisory。
+# **线格式与 bincode 1.x 不兼容**：这是有意的产品决定 —— 不保留与老对端的互通，
+# 双方必须运行同一协议版本；将来若需兼容旧版本，必须引入显式的协议版本协商。
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 rand_chacha = "0.3.1"
 
 # --- 加密与密钥派生 ---
