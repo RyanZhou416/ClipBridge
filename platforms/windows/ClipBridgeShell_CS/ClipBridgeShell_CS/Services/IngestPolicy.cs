@@ -31,8 +31,10 @@ public class IngestPolicy
 
     public IngestDecision Decide(ClipboardSnapshot snapshot)
     {
-        // 1. 空数据检查
-        if (string.IsNullOrEmpty(snapshot.Data))
+        // 1. 空数据检查（文本看 Data；图片看 ImageBytes；文件列表看 Files）
+        if (string.IsNullOrEmpty(snapshot.Data)
+            && snapshot.ImageBytes is not { Length: > 0 }
+            && snapshot.Files is not { Count: > 0 })
         {
             return new IngestDecision { Type = IngestDecisionType.Deny, Reason = "EmptyData" };
         }
