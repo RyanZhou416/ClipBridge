@@ -119,6 +119,10 @@ public class ActivationService : IActivationService
             StartupTrace.Mark("ab-mode-sync");
             if (mainWindow.Content == null)
             {
+                // 本地化器可能还在后台构建（LEVER 1）：ShellPage 的 XAML l:Uids 与 OnLoaded
+                // 都依赖本地化资源，必须在 GetService 之前等它就绪。
+                // App.LocalizerReady 内部已捕获异常，永远不会抛，不会把这里卡死。
+                await App.WaitLocalizerReadyAsync();
                 _shell = App.GetService<ShellPage>();
                 mainWindow.Content = _shell ?? new Frame();
             }
@@ -188,6 +192,8 @@ public class ActivationService : IActivationService
 
     /// <summary>
     /// 启动主题设置读取（LEVER 2）：只启动、不等待。
+    /// 同时登记到 <see cref="App.StartupThemeReadTask"/>，让后台本地化里的设置读取排在它之后，
+    /// 避免 LocalSettingsService 的并发首次初始化（内部字典会被整体替换）。
     /// 读取完成时刻用 continuation 打点：窗口构造期间 UI 线程被占住，
     /// 若等到 await 之后再打点，theme-read-done 会失真成“窗口构造之后”。
     /// </summary>
@@ -195,6 +201,7 @@ public class ActivationService : IActivationService
     {
         StartupTrace.Mark("theme-init-enter");
         var task = InitializeThemeAsync();
+        App.StartupThemeReadTask = task;
         _ = task.ContinueWith(_ => StartupTrace.Mark("theme-read-done"), TaskScheduler.Default);
         return task;
     }
@@ -302,6 +309,10 @@ public class ActivationService : IActivationService
 
         if (_shell == null)
         {
+            // 本地化器（LEVER 1）可能还在后台构建：ShellPage 的 XAML l:Uids 需要它先就绪。
+            // 这里在首帧之后，等待不占关键路径；任务内部吞掉异常，不会让构建失败。
+            await App.WaitLocalizerReadyAsync();
+
             _shell = App.GetService<ShellPage>();
         }
 

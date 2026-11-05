@@ -75,11 +75,48 @@ public partial class App : Application
         string.Equals(Environment.GetEnvironmentVariable("CB_STARTUP_NO_FOREGROUND"), "1", StringComparison.Ordinal);
 
     /// <summary>
+    /// 启动耗时 A/B 对照开关（默认关闭，只用于同一份二进制内交替实测）：
+    /// <c>CB_SYNC_LOCALIZER=1</c> → 旧路径：先 await 本地化器构建完成，再进入激活流程；
+    /// 未设置                    → 新路径：本地化器后台构建，启动期需要它的消费者各自 await。
+    /// </summary>
+    private static readonly bool SyncLocalizerForAb =
+        string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_LOCALIZER"), "1", StringComparison.Ordinal);
+
+    /// <summary>
     /// <c>CB_SYNC_HOSTBUILDER=1</c> → 旧路径：Host.CreateDefaultBuilder() 构建通用主机（对照臂）；
     /// 未设置                   → 新路径：ServiceCollection + BuildServiceProvider()。
     /// </summary>
     private static readonly bool LegacyHostBuilder =
         string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_HOSTBUILDER"), "1", StringComparison.Ordinal);
+
+    /// <summary>
+    /// 后台本地化初始化任务。默认模式下 <see cref="OnLaunched"/> 只启动它、不等待；
+    /// 启动期需要本地化的消费者（延迟 Shell 构建、托盘菜单、窗口标题、登录提醒）各自 await。
+    /// 任务内部已捕获全部异常，因此它永远以成功状态完成：await 它既不会抛异常，
+    /// 也不会把延迟 Shell 构建卡死（这一点是“能否安全延迟”的前提）。
+    /// </summary>
+    internal static Task? LocalizerReady
+    {
+        get;
+        private set;
+    }
+
+    /// <summary>
+    /// 启动期“主题设置读取”任务（由 ActivationService 在创建窗口之前启动）。
+    /// 本地化初始化里的设置读取会先等它完成：LocalSettingsService 的首次初始化
+    /// 会整体替换内部字典，两条并发首次读取会互相覆盖内存中的设置。
+    /// 两者都发生在首帧之外，串行等待不影响窗口可见耗时。
+    /// </summary>
+    internal static Task? StartupThemeReadTask
+    {
+        get; set;
+    }
+
+    /// <summary>
+    /// 等待本地化器就绪；若本地化器根本没启动（例如单实例重定向后提前 Exit），立即返回。
+    /// 用方法而不是直接 await 字段，避免 null 任务带来的空引用。
+    /// </summary>
+    internal static Task WaitLocalizerReadyAsync() => LocalizerReady ?? Task.CompletedTask;
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
@@ -355,12 +392,35 @@ public partial class App : Application
         StartupTrace.Mark("single-instance-done");
 
         // ① 初始化 Localizer（打包应用版）
-        await InitializeLocalizer();
-        StartupTrace.Mark("localizer-done");
+        // 默认为“后台构建、不等待”（LEVER 1）：本地化器构建（实测约 56ms）不再挡住窗口创建与激活。
+        // 安全前提：
+        //   - 首帧只画一个空占位层（不解析任何本地化资源）；
+        //   - ShellPage 已排到首帧之后的低优先级回调里，构建前会显式 await App.LocalizerReady；
+        //   - 窗口标题先用字面量兜底，就绪后再换成正式文本。
+        // CB_SYNC_LOCALIZER=1 时退回旧行为（先等本地化器，再激活），供同一二进制 A/B 对照。
+        if (SyncLocalizerForAb)
+        {
+            StartupTrace.Mark("ab-mode-localizer-sync");
+        }
+        else
+        {
+            StartupTrace.Mark("ab-mode-localizer-deferred");
+        }
+
+        LocalizerReady = RunLocalizerSafelyAsync();
+
+        if (SyncLocalizerForAb)
+        {
+            await WaitLocalizerReadyAsync();
+        }
 
         // ② 再走 Template Studio 原有流程（里面会调用 ActivationService）
         await App.GetService<IActivationService>().ActivateAsync(args);
         StartupTrace.Mark("activate-async-done");
+
+        // 本地化器就绪后，在 UI 线程把窗口标题从字面量兜底值换成正式本地化文本。
+        // 最终标题与改动前完全一致；只是可能在首帧之后的一两个帧内先显示兜底值。
+        _ = ApplyLocalizedTitleWhenReadyAsync();
 
         // 与首帧无关的初始化必须真正排到首帧之后：
         // 直接 inline 调用仍然占住 UI 线程，只是把阻塞从 Activate() 之前挪到之后，
@@ -394,6 +454,10 @@ public partial class App : Application
                 App.MainWindow?.DispatcherQueue.TryEnqueue(async () =>
                 {
                     if (App.MainWindow == null) return;
+
+                    // 登录提醒文案来自本地化器：等它就绪再取（延迟 1s 后通常早已完成，等待代价为 0）。
+                    // 不等待的话，延迟本地化模式下这里可能拿到空字符串 / 未就绪的 Localizer。
+                    await WaitLocalizerReadyAsync();
 
                     var loc = WinUI3Localizer.Localizer.Get();
                     var currentLang = loc.GetCurrentLanguage();
@@ -445,7 +509,8 @@ public partial class App : Application
         App.GetService<ClipboardWatcher>().Initialize();
 
         // 初始化托盘图标
-        InitializeTray();
+        // 托盘菜单文本来自 Localizer.Get()，必须等本地化器就绪；此时窗口已经可见，等待不影响首帧。
+        await InitializeTrayAsync();
     }
 
     /// <summary>
@@ -540,8 +605,13 @@ public partial class App : Application
         }
     }
 
-    private void InitializeTray()
+    private async Task InitializeTrayAsync()
     {
+        // TrayService.RebuildContextMenu() 在 Initialize() 内部就会调用 Localizer.Get()。
+        // 延迟本地化模式下必须显式等待，否则托盘菜单会拿到未就绪的本地化 key。
+        // 本方法在窗口激活之后才执行，等待不占用“到窗口可见”的时间。
+        await WaitLocalizerReadyAsync();
+
         try
         {
             var tray = App.GetService<TrayService>();
@@ -600,6 +670,57 @@ public partial class App : Application
         }
     }
 
+    /// <summary>
+    /// 本地化初始化的安全包装：任何异常都只写 Debug 输出，绝不让任务进入 faulted 状态。
+    ///
+    /// 为什么必须这样：延迟 Shell 构建、托盘初始化、标题补写都会 await 这个任务。
+    /// 任务一旦 faulted，每次 await 都会抛出异常 —— 延迟 Shell 构建会直接失败，
+    /// 窗口将永久停在空白占位层。这样包一层之后，await 它永远安全。
+    /// </summary>
+    private static async Task RunLocalizerSafelyAsync()
+    {
+        try
+        {
+            await ((App)Current).InitializeLocalizer();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Localizer initialization failed: {ex}");
+        }
+        finally
+        {
+            StartupTrace.Mark("localizer-done");
+        }
+    }
+
+    /// <summary>
+    /// 本地化器就绪后，在 UI 线程把窗口标题换成正式本地化文本。
+    ///
+    /// MainWindow 构造时本地化器可能还没建好（延迟本地化），所以构造期只设置固定字面量兜底；
+    /// 最终标题仍是 Localizer.Get().GetLocalizedString("AppDisplayName")，与改动前逐字一致。
+    /// </summary>
+    private static async Task ApplyLocalizedTitleWhenReadyAsync()
+    {
+        try
+        {
+            await WaitLocalizerReadyAsync();
+
+            var window = MainWindow;
+            if (window == null)
+            {
+                return;
+            }
+
+            // 必须回到 UI 线程才能改 Window.Title。
+            // App.MainWindow 的静态类型是 WindowEx，先转成 MainWindow 再调用标题方法。
+            window.DispatcherQueue.TryEnqueue(() => (window as MainWindow)?.ApplyLocalizedTitle());
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Apply localized title failed: {ex}");
+        }
+    }
+
     private async Task InitializeLocalizer()
     {
         StartupTrace.Mark("localizer-enter");
@@ -627,6 +748,23 @@ public partial class App : Application
         StartupTrace.Mark("localizer-resw-done");
 
         // 2) 读取已保存的语言
+        // 启动期串行化：LocalSettingsService 的首次 InitializeAsync 会整体替换内部设置字典，
+        // 不是线程安全的。LEVER 2 让“主题设置读取”与本地化并发启动，如果两条首次读取
+        // 同时进行，可能互相覆盖内存中的设置（例如语言偏好）。
+        // 主题读取一定先于本处启动（同一 UI 线程，本方法前面还有文件 IO），所以这里等它完成即可；
+        // 本地化本身已在首帧之外，这点等待不影响窗口可见耗时。
+        if (StartupThemeReadTask is { } themeRead)
+        {
+            try
+            {
+                await themeRead;
+            }
+            catch
+            {
+                // 主题读取失败由 ActivationService 自己处理，这里只是串行化，不能因此中断本地化。
+            }
+        }
+
         var settings = App.GetService<ILocalSettingsService>();
         var saved = await settings.ReadSettingAsync<string>("PreferredLanguage");
         string defaultLang = NormalizeLanguageTag(saved ?? CultureInfo.CurrentUICulture.Name);

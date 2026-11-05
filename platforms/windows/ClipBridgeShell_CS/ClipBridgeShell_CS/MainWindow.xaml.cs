@@ -42,6 +42,13 @@ public sealed partial class MainWindow : WindowEx
     private UISettings settings;
     private bool _closeHintShown;
 
+    /// <summary>
+    /// 本地化器尚未就绪时的标题兜底值。
+    /// 最终标题仍由 <see cref="ApplyLocalizedTitle"/> 从 "AppDisplayName" 资源里取，
+    /// 与改动前完全一致；这里只是避免在构造期调用 Localizer.Get()。
+    /// </summary>
+    private const string FallbackTitle = "ClipBridge";
+
     public MainWindow()
     {
         StartupTrace.Mark("mainwindow-ctor-enter");
@@ -79,8 +86,12 @@ public sealed partial class MainWindow : WindowEx
         StartupTrace.Mark("mainwindow-icon-done");
 
         Content = null;
-        var loc = Localizer.Get();
-        Title = loc.GetLocalizedString("AppDisplayName");
+
+        // 本地化器可能还在后台构建（见 App.OnLaunched 的延迟本地化，LEVER 1），
+        // 构造期不能调用 Localizer.Get()，否则会拿到未就绪的实例 / 空文本。
+        // 先用固定字面量兜底；App 会在 App.LocalizerReady 完成后于 UI 线程调用
+        // ApplyLocalizedTitle() 换成正式本地化标题，最终标题与改动前一致。
+        Title = FallbackTitle;
 
         try
         {
@@ -142,6 +153,22 @@ public sealed partial class MainWindow : WindowEx
                 tray.ShowBalloonTip(title, content);
                 await settingsService.SaveSettingAsync("ShowFirstCloseHint", false);
             }
+        }
+    }
+
+    /// <summary>
+    /// 本地化器就绪后由 App 在 UI 线程调用：把兜底标题换成正式本地化标题。
+    /// 与改动前构造函数里直接读取 "AppDisplayName" 的结果逐字相同。
+    /// </summary>
+    internal void ApplyLocalizedTitle()
+    {
+        try
+        {
+            Title = Localizer.Get().GetLocalizedString("AppDisplayName");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[MainWindow] Apply localized title failed: {ex}");
         }
     }
 
