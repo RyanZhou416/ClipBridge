@@ -3031,138 +3031,66 @@ v1 使用 **单一事件回调**：
 
 ### 4.8.7 头文件规范：clipbridge_core.h（v1）
 
-> 这是“规范级”头文件，实际代码可以按此落地（函数名/字段名尽量一致）。
+`clipbridge_core.h` 是 Core 暴露给壳侧的唯一 C ABI 契约。三平台各有一份内容一致的头文件：
 
-```c
-#pragma once
-#include <stdint.h>
-#include <stddef.h>
+* `platforms/windows/include/clipbridge_core.h`
+* `platforms/macos/include/clipbridge_core.h`
+* `platforms/android/include/clipbridge_core.h`
 
-#ifdef _WIN32
-  #define CB_CALL __cdecl
-  #ifdef CLIPBRIDGE_CORE_EXPORTS
-    #define CB_API __declspec(dllexport)
-  #else
-    #define CB_API __declspec(dllimport)
-  #endif
-#else
-  #define CB_CALL
-  #define CB_API
-#endif
+头文件是导出表的投影，不是另一份“规范草稿”：
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+* 唯一实现位于 `crates/cb_core_ffi/src/exports.rs`。
+* 三个平台的 `core-ffi` crate 只通过 `pub use cb_core_ffi::exports::*;` 复用同一份导出，不在平台 crate 内重复定义。
+* `scripts/verify-ffi-surface.ps1` 校验 `exports.rs` 的导出集合与三份头文件的声明集合完全一致，并在 CI 的 `FFI surface consistency (exports vs headers, 3 platforms)` 步骤中执行；不一致会直接失败。
 
-// -------- ABI version --------
-#define CB_FFI_ABI_MAJOR 1
-#define CB_FFI_ABI_MINOR 0
+基础约定（以头文件为准）：
 
-// -------- Opaque handle --------
-typedef struct cb_handle_t cb_handle_t;
+* 导出宏是 `CB_API`：Windows 下为 `__declspec(dllexport)`，其他平台为空。不存在旧文档中的 `CB_CALL`。
+* 句柄是不透明类型 `cb_handle`；不存在 `cb_handle_t` 或 `cb_callbacks_t`。
+* 事件回调为 `typedef void (*cb_on_event_fn)(const char* json, void* user_data);`，其中 `json` 仅在回调期间有效，壳侧必须立即拷贝。
+* 返回 `const char*` 的接口使用统一 JSON envelope，返回值必须用 `cb_free_string` 释放。
+* `cb_init` 的实际签名是 `cb_init(const char* cfg_json, cb_on_event_fn on_event, void* user_data)`；它不接收 `cb_callbacks_t`，也不通过出参交付句柄，成功时在 envelope 的 `data.handle` 中返回句柄。
+* `cb_logs_*` 返回 `int`，JSON 通过 `const char**` 出参返回；`cb_get_ffi_version` 通过 `uint32_t*` 出参返回 ABI 版本。
 
-// -------- Callback --------
-typedef void (CB_CALL *cb_on_event_fn)(const char* event_json_utf8, void* user_data);
+实际导出共 33 个函数：
 
-// 未来如果你要加更多回调，可扩展这个 struct；但 v1 先保持最小
-typedef struct cb_callbacks_t {
-  cb_on_event_fn on_event;   // required
-} cb_callbacks_t;
+| 序号 | 函数 | C 声明 |
+|---:|---|---|
+| 1 | `cb_init` | `const char* cb_init(const char* cfg_json, cb_on_event_fn on_event, void* user_data);` |
+| 2 | `cb_shutdown` | `const char* cb_shutdown(cb_handle* h);` |
+| 3 | `cb_plan_local_ingest` | `const char* cb_plan_local_ingest(cb_handle* h, const char* snapshot_json);` |
+| 4 | `cb_ingest_local_copy` | `const char* cb_ingest_local_copy(cb_handle* h, const char* snapshot_json);` |
+| 5 | `cb_free_string` | `void cb_free_string(const char* s);` |
+| 6 | `cb_list_peers` | `const char* cb_list_peers(cb_handle* h);` |
+| 7 | `cb_get_status` | `const char* cb_get_status(cb_handle* h);` |
+| 8 | `cb_set_peer_policy` | `const char* cb_set_peer_policy(cb_handle* h, const char* policy_json);` |
+| 9 | `cb_clear_peer_fingerprint` | `const char* cb_clear_peer_fingerprint(cb_handle* h, const char* peer_id_json);` |
+| 10 | `cb_clear_local_cert` | `const char* cb_clear_local_cert(cb_handle* h);` |
+| 11 | `cb_ensure_content_cached` | `const char* cb_ensure_content_cached(cb_handle* h, const char* req_json);` |
+| 12 | `cb_cancel_transfer` | `const char* cb_cancel_transfer(cb_handle* h, const char* transfer_id_json);` |
+| 13 | `cb_list_history` | `const char* cb_list_history(cb_handle* h, const char* query_json);` |
+| 14 | `cb_get_item_meta` | `const char* cb_get_item_meta(cb_handle* h, const char* item_id_json);` |
+| 15 | `cb_delete_item_local` | `const char* cb_delete_item_local(cb_handle* h, const char* item_id_json);` |
+| 16 | `cb_delete_item_global` | `const char* cb_delete_item_global(cb_handle* h, const char* item_id_json);` |
+| 17 | `cb_logs_write` | `int cb_logs_write(cb_handle* h, int level, const char* component, const char* category, const char* message_en, const char* message_zh_cn, const char* exception, const char* props_json, long long ts_utc, long long* out_id);` |
+| 18 | `cb_logs_query_latest` | `int cb_logs_query_latest(cb_handle* h, int level_min, const char* like, int limit, const char* lang, const char** out_json);` |
+| 19 | `cb_logs_query_after_id` | `int cb_logs_query_after_id(cb_handle* h, long long after_id, int level_min, const char* like, int limit, const char* lang, const char** out_json);` |
+| 20 | `cb_logs_query_before_id` | `int cb_logs_query_before_id(cb_handle* h, long long before_id, int level_min, const char* like, int limit, const char* lang, const char** out_json);` |
+| 21 | `cb_logs_query_range` | `int cb_logs_query_range(cb_handle* h, long long start_ms, long long end_ms, int level_min, const char* like, int limit, int offset, const char* lang, const char** out_json);` |
+| 22 | `cb_logs_stats` | `int cb_logs_stats(cb_handle* h, const char** out_json);` |
+| 23 | `cb_logs_delete_before` | `int cb_logs_delete_before(cb_handle* h, long long cutoff_ms, long long* out_deleted);` |
+| 24 | `cb_logs_delete_by_ids` | `int cb_logs_delete_by_ids(cb_handle* h, const char* ids_json, long long* out_deleted);` |
+| 25 | `cb_logs_source_stats` | `int cb_logs_source_stats(cb_handle* h, const char** out_json);` |
+| 26 | `cb_clear_core_db` | `const char* cb_clear_core_db(cb_handle* h);` |
+| 27 | `cb_clear_logs_db` | `const char* cb_clear_logs_db(cb_handle* h);` |
+| 28 | `cb_clear_stats_db` | `const char* cb_clear_stats_db(cb_handle* h);` |
+| 29 | `cb_clear_cache` | `const char* cb_clear_cache(cb_handle* h);` |
+| 30 | `cb_query_cache_stats` | `const char* cb_query_cache_stats(cb_handle* h, const char* query_json);` |
+| 31 | `cb_query_net_stats` | `const char* cb_query_net_stats(cb_handle* h, const char* query_json);` |
+| 32 | `cb_query_activity_stats` | `const char* cb_query_activity_stats(cb_handle* h, const char* query_json);` |
+| 33 | `cb_get_ffi_version` | `void cb_get_ffi_version(uint32_t* out_major, uint32_t* out_minor);` |
 
-// -------- Version / diag --------
-CB_API void CB_CALL cb_get_ffi_version(uint32_t* out_major, uint32_t* out_minor);
-
-// -------- Lifecycle --------
-// config_json: JSON（包含 data_dir、log_level、limits、device_name 等）
-// callbacks: 事件回调
-// user_data: 原样回传给回调
-CB_API const char* CB_CALL cb_init(
-  const char* config_json_utf8,
-  const cb_callbacks_t* callbacks,
-  void* user_data,
-  cb_handle_t** out_handle
-);
-
-// 幂等；调用后不再触发回调
-CB_API void CB_CALL cb_shutdown(cb_handle_t* handle);
-
-// -------- Memory --------
-CB_API void CB_CALL cb_free(const char* ptr);
-
-// -------- Commands / Queries (JSON in / JSON out) --------
-
-// 快照注入：本机剪贴板 -> Core
-CB_API const char* CB_CALL cb_ingest_local_copy(
-  cb_handle_t* handle,
-  const char* snapshot_json_utf8
-);
-
-// 历史分页查询
-CB_API const char* CB_CALL cb_list_history(
-  cb_handle_t* handle,
-  const char* query_json_utf8
-);
-
-// 查询单条 ItemMeta
-CB_API const char* CB_CALL cb_get_item_meta(
-  cb_handle_t* handle,
-  const char* item_id_json_utf8
-);
-
-// Lazy Fetch：确保 content/file 已缓存到本地；返回 transfer_id（或错误）
-CB_API const char* CB_CALL cb_ensure_content_cached(
-  cb_handle_t* handle,
-  const char* req_json_utf8
-);
-
-// 取消传输
-CB_API const char* CB_CALL cb_cancel_transfer(
-  cb_handle_t* handle,
-  const char* transfer_id_json_utf8
-);
-
-// peers / policy / status
-CB_API const char* CB_CALL cb_list_peers(cb_handle_t* handle);
-CB_API const char* CB_CALL cb_set_global_policy(cb_handle_t* handle, const char* policy_json_utf8);
-CB_API const char* CB_CALL cb_get_status(cb_handle_t* handle);
-
-// --- Policy / Status ---
-CB_API const char* CB_CALL cb_get_status(
-  cb_handle_t* handle
-);
-
-CB_API const char* CB_CALL cb_set_global_policy(
-  cb_handle_t* handle,
-  const char* policy_json_utf8
-);
-
-// --- Local delete (v1) ---
-CB_API const char* CB_CALL cb_delete_local(
-  cb_handle_t* handle,
-  const char* delete_req_json_utf8
-);
-
-// --- Cache control (v1) ---
-CB_API const char* CB_CALL cb_cache_control(
-  cb_handle_t* handle,
-  const char* cache_req_json_utf8
-);
-
-// --- Stats query (v1) ---
-CB_API const char* CB_CALL cb_query_cache_stats(
-  cb_handle_t* handle,
-  const char* stats_query_json_utf8
-);
-
-CB_API const char* CB_CALL cb_query_net_stats(
-  cb_handle_t* handle,
-  const char* stats_query_json_utf8
-);
-
-#ifdef __cplusplus
-} // extern "C"
-#endif
-```
+> 以上 33 个声明与三份头文件一致；旧的 `cb_callbacks_t`、`cb_free`、`cb_set_global_policy`、`cb_delete_local`、`cb_cache_control` 和 `CB_CALL` 在仓库中不存在。修改 ABI 时，必须同步更新 `exports.rs` 与三份头文件，并运行上面的校验脚本。
 
 ---
 

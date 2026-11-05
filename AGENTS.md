@@ -7,13 +7,15 @@ Primary components:
 - `cb_core`: Rust core library for clipboard ingest, storage, policy, networking, discovery, crypto, sessions, and runtime.
 - `platforms/windows/core-ffi`: Rust CDylib exposing the core through a Windows FFI layer.
 - `platforms/android/core-ffi`: Rust CDylib exposing the core through an Android FFI layer.
+- `platforms/macos/core-ffi`: Rust CDylib exposing the core through a macOS FFI layer.
 - `platforms/windows/ClipBridgeShell_CS`: WinUI/C# shell and MSTest test project.
 - `platforms/android/ClipBridgeShellAndroid`: Android shell project.
+- `platforms/macos/ClipBridgeShell_macOS`: macOS SwiftUI/Xcode shell; the Xcode target contains the `dlopen` bridge, while the SwiftPM package is a stub.
 
 Current status from `STATUS.md`:
-- Core v1 M0 is complete.
-- Windows FFI is complete.
-- The next planned step is the C# P/Invoke wrapper plus event dispatch.
+- One Rust core (`cb_core`) plus one shared C ABI implementation (`crates/cb_core_ffi`); the Windows, Android, and macOS `core-ffi` crates re-export the same 33-function surface.
+- The Windows shell is complete and its MSTest suite runs in CI.
+- The Android APK needs a cross-compiled `libcore_ffi_android.so`; the macOS Xcode target uses the `dlopen` bridge while the SwiftPM package remains a stub.
 
 ## Repository Layout
 - `Cargo.toml`: Rust workspace root.
@@ -22,9 +24,11 @@ Current status from `STATUS.md`:
 - `cb_core/src/bin/demo.rs`: Demo binary.
 - `platforms/windows/core-ffi/src`: Windows Rust FFI bridge.
 - `platforms/android/core-ffi/src`: Android Rust FFI bridge.
-- `platforms/windows/include` and `platforms/android/include`: Exported C headers.
+- `platforms/macos/core-ffi/src`: macOS Rust FFI bridge.
+- `platforms/windows/include`, `platforms/android/include`, and `platforms/macos/include`: Exported C headers.
 - `platforms/windows/ClipBridgeShell_CS`: Windows app, installer, and MSTest projects.
 - `platforms/android/ClipBridgeShellAndroid`: Android Gradle project.
+- `platforms/macos/ClipBridgeShell_macOS`: macOS Xcode app and SwiftPM scaffold.
 - `.github/workflows/ci.yml`: Canonical CI validation steps.
 
 ## Preferred Workflow
