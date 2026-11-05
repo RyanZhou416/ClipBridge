@@ -15,6 +15,7 @@ using ClipBridgeShell_CS.Services;
 using ClipBridgeShell_CS.ViewModels;
 using ClipBridgeShell_CS.Views;
 
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -36,20 +37,16 @@ namespace ClipBridgeShell_CS;
 // To learn more about WinUI 3, see https://docs.microsoft.com/windows/apps/winui/winui3/.
 public partial class App : Application
 {
-    // The .NET Generic Host provides dependency injection, configuration, logging, and other services.
-    // https://docs.microsoft.com/dotnet/core/extensions/generic-host
-    // https://docs.microsoft.com/dotnet/core/extensions/dependency-injection
-    // https://docs.microsoft.com/dotnet/core/extensions/configuration
-    // https://docs.microsoft.com/dotnet/core/extensions/logging
-    public IHost Host
-    {
-        get;
-    }
+    // 只保留 DI 容器本身：应用从未使用 IHost 的生命周期（Start/StopAsync）、
+    // IHostedService 或 IHostEnvironment，因此不需要通用主机的启动/停止语义。
+    private readonly IServiceProvider _services;
+
+    public IServiceProvider Services => _services;
 
     public static T GetService<T>()
         where T : class
     {
-        if ((App.Current as App)!.Host.Services.GetService(typeof(T)) is not T service)
+        if ((App.Current as App)!._services.GetService(typeof(T)) is not T service)
         {
             throw new ArgumentException($"{typeof(T)} needs to be registered in ConfigureServices within App.xaml.cs.");
         }
@@ -76,6 +73,13 @@ public partial class App : Application
     /// </summary>
     internal static readonly bool SuppressForeground =
         string.Equals(Environment.GetEnvironmentVariable("CB_STARTUP_NO_FOREGROUND"), "1", StringComparison.Ordinal);
+
+    /// <summary>
+    /// <c>CB_SYNC_HOSTBUILDER=1</c> → 旧路径：Host.CreateDefaultBuilder() 构建通用主机（对照臂）；
+    /// 未设置                   → 新路径：ServiceCollection + BuildServiceProvider()。
+    /// </summary>
+    private static readonly bool LegacyHostBuilder =
+        string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_HOSTBUILDER"), "1", StringComparison.Ordinal);
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
@@ -106,147 +110,7 @@ public partial class App : Application
         InitializeComponent();
         StartupTrace.Mark("app-initcomponent-done");
 
-        Host = Microsoft.Extensions.Hosting.Host.
-        CreateDefaultBuilder().
-        UseContentRoot(AppContext.BaseDirectory).
-        ConfigureLogging(logging =>
-        {
-            // 先配置日志系统，确保 ILoggerFactory 可用
-        }).
-        ConfigureServices((context, services) =>
-        {
-            // Default Activation Handler
-            services.AddTransient<ActivationHandler<LaunchActivatedEventArgs>, DefaultActivationHandler>();
-
-            // Other Activation Handlers
-            services.AddTransient<IActivationHandler, AppNotificationActivationHandler>();
-
-            // Services
-            services.AddSingleton<IAppNotificationService, AppNotificationService>();
-            services.AddSingleton<ILocalSettingsService, LocalSettingsService>();
-            services.AddSingleton<IThemeSelectorService, ThemeSelectorService>();
-            services.AddSingleton<IAccountService, AccountService>();
-            services.AddTransient<INavigationViewService, NavigationViewService>();
-
-            services.AddSingleton<IActivationService, ActivationService>();
-            services.AddSingleton<IPageService, PageService>();
-            services.AddSingleton<INavigationService, NavigationService>();
-
-            // Core Services
-            services.AddSingleton<ISampleDataService, SampleDataService>();
-            services.AddSingleton<IFileService, FileService>();
-
-            services.AddSingleton<Stores.HistoryStore>();
-            services.AddSingleton<Stores.PeerStore>();
-            services.AddSingleton<Stores.TransferStore>();
-            services.AddSingleton<ContentFetchAwaiter>();
-            services.AddSingleton<EventPumpService>();
-
-            // Logging - 先注册日志系统，避免循环依赖
-            services.AddSingleton<Services.Logging.StashLogManager>();
-            
-            // 先创建 CoreHostService（不使用 ILoggerFactory，避免循环依赖）
-            services.AddSingleton<CoreHostService>(sp =>
-            {
-                var eventPump = sp.GetRequiredService<EventPumpService>();
-                var localSettings = sp.GetRequiredService<ILocalSettingsService>();
-                var accountService = sp.GetRequiredService<IAccountService>();
-                // 暂时不传入 loggerFactory，避免循环依赖
-                return new CoreHostService(eventPump, localSettings, null, accountService);
-            });
-            services.AddSingleton<ICoreHostService>(sp => sp.GetRequiredService<CoreHostService>());
-            
-            // 现在注册日志提供者（需要 ICoreHostService）
-            services.AddSingleton<Services.Logging.CoreLogDispatcher>(sp =>
-            {
-                var coreHost = sp.GetRequiredService<ICoreHostService>();
-                var eventPump = sp.GetRequiredService<EventPumpService>();
-                return new Services.Logging.CoreLogDispatcher(coreHost, eventPump);
-            });
-            services.AddSingleton<Services.Logging.CoreLoggerProvider>(sp =>
-            {
-                var coreHost = sp.GetRequiredService<ICoreHostService>();
-                var dispatcher = sp.GetRequiredService<Services.Logging.CoreLogDispatcher>();
-                var stashManager = sp.GetRequiredService<Services.Logging.StashLogManager>();
-                return new Services.Logging.CoreLoggerProvider(coreHost, dispatcher, stashManager);
-            });
-            // 注册日志提供者
-            services.AddSingleton<Microsoft.Extensions.Logging.ILoggerProvider>(sp =>
-            {
-                var provider = sp.GetRequiredService<Services.Logging.CoreLoggerProvider>();
-                return provider;
-            });
-
-            services.AddSingleton<IClipboardService, ClipboardService>();
-            services.AddSingleton<ClipboardApplyService>();
-
-            // System integration services
-            services.AddSingleton<IStartupService, StartupService>();
-            services.AddSingleton<TrayService>();
-
-            // Views and ViewModels
-            services.AddTransient<SettingsViewModel>();
-            services.AddTransient<SettingsPage>();
-            services.AddTransient<LogsViewModel>(sp =>
-            {
-                var coreHost = sp.GetRequiredService<ICoreHostService>();
-                var stashManager = sp.GetService<Services.Logging.StashLogManager>();
-                var eventPump = sp.GetRequiredService<EventPumpService>();
-                var localSettings = sp.GetRequiredService<ILocalSettingsService>();
-                var loggerFactory = sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>();
-                return new LogsViewModel(coreHost, stashManager, eventPump, localSettings, loggerFactory);
-            });
-            services.AddTransient<LogsPage>();
-            services.AddTransient<DevicesViewModel>(sp =>
-            {
-                var coreHost = sp.GetRequiredService<ICoreHostService>();
-                var localSettings = sp.GetRequiredService<ILocalSettingsService>();
-                var eventPump = sp.GetRequiredService<EventPumpService>();
-                return new DevicesViewModel(coreHost, localSettings, eventPump);
-            });
-            services.AddTransient<DevicesPage>();
-            services.AddSingleton<MainViewModel>(sp =>
-            {
-                var historyStore = sp.GetRequiredService<Stores.HistoryStore>();
-                var pump = sp.GetRequiredService<EventPumpService>();
-                var coreHost = sp.GetRequiredService<ICoreHostService>();
-                var peerStore = sp.GetRequiredService<Stores.PeerStore>();
-                var transferStore = sp.GetRequiredService<Stores.TransferStore>();
-                var navigationService = sp.GetRequiredService<INavigationService>();
-                var localSettings = sp.GetRequiredService<ILocalSettingsService>();
-                var clipboardApply = sp.GetRequiredService<ClipboardApplyService>();
-                var clipboardService = sp.GetRequiredService<IClipboardService>();
-                return new MainViewModel(historyStore, pump, coreHost, peerStore, transferStore, navigationService, localSettings, clipboardApply, clipboardService);
-            });
-            services.AddTransient<MainPage>();
-            services.AddTransient<ShellPage>();
-            services.AddTransient<ShellViewModel>();
-
-            // Configuration
-            services.Configure<LocalSettingsOptions>(context.Configuration.GetSection(nameof(LocalSettingsOptions)));
-            services.AddSingleton<ClipboardWatcher>(sp =>
-            {
-                var clipboardService = sp.GetRequiredService<IClipboardService>();
-                var coreHostService = sp.GetRequiredService<ICoreHostService>();
-                var localSettings = sp.GetRequiredService<ILocalSettingsService>();
-                var loggerFactory = sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>();
-                return new ClipboardWatcher(clipboardService, coreHostService, localSettings, loggerFactory);
-            });
-
-            // History Service（注入 MainViewModel 以同步锁定与复制选中）
-            services.AddTransient<HistoryViewModel>(sp =>
-            {
-                var coreService = sp.GetRequiredService<ICoreHostService>();
-                var clipboardApply = sp.GetRequiredService<ClipboardApplyService>();
-                var historyStore = sp.GetRequiredService<Stores.HistoryStore>();
-                var clipboardService = sp.GetRequiredService<IClipboardService>();
-                var mainViewModel = sp.GetRequiredService<MainViewModel>();
-                return new HistoryViewModel(coreService, clipboardApply, historyStore, clipboardService, mainViewModel);
-            });
-            services.AddTransient<HistoryPage>();
-        }).
-        Build();
-        StartupTrace.Mark("app-host-built");
+        _services = BuildServices();
 
         // 注意：通知注册与启动日志自检已移到 OnLaunched 的窗口显示之后。
         // 实测（Release 冷启动 6 次）：AppNotification.Initialize ≈103ms，
@@ -254,6 +118,211 @@ public partial class App : Application
 
         UnhandledException += App_UnhandledException;
         StartupTrace.Mark("app-ctor-exit");
+    }
+
+    /// <summary>
+    /// 构建 DI 容器。
+    ///
+    /// 默认走轻量路径：<see cref="ServiceCollection"/> + BuildServiceProvider()。
+    /// 通用主机（Host.CreateDefaultBuilder）除 DI 之外还会加载配置源、环境变量、命令行、
+    /// 主机生命周期与环境探测，本应用一样都没用到，却要在冷启动里付出约 118ms（LEVER 3）。
+    /// 注册项与顺序保持与改动前逐条一致，只把“配置”换成等值的代码内构造。
+    ///
+    /// <c>CB_SYNC_HOSTBUILDER=1</c> 时仍走旧的 Host.CreateDefaultBuilder()，供同一二进制 A/B 对照。
+    /// </summary>
+    private static IServiceProvider BuildServices()
+    {
+        if (LegacyHostBuilder)
+        {
+            StartupTrace.Mark("ab-mode-host-legacy");
+            var host = Microsoft.Extensions.Hosting.Host.
+            CreateDefaultBuilder().
+            UseContentRoot(AppContext.BaseDirectory).
+            ConfigureLogging(logging =>
+            {
+                // 先配置日志系统，确保 ILoggerFactory 可用
+            }).
+            ConfigureServices((context, services) => RegisterServices(services, context.Configuration)).
+            Build();
+            StartupTrace.Mark("app-host-built");
+            return host.Services;
+        }
+
+        StartupTrace.Mark("ab-mode-host-lite");
+        var services = new ServiceCollection();
+
+        // 与 Host.CreateDefaultBuilder() 内部配置的日志提供者逐项一致：
+        // Console / Debug / EventSource，Windows 上再加 EventLog。不增不减，避免丢掉诊断输出。
+        // （原代码里的 ConfigureLogging(logging => { }) 是空委托，提供者全部来自默认主机，
+        //   所以这里必须显式还原，否则 CoreLoggerProvider 之外的日志会静默消失。）
+        services.AddLogging(logging =>
+        {
+            logging.AddConsole();
+            logging.AddDebug();
+            logging.AddEventSourceLogger();
+            if (OperatingSystem.IsWindows())
+            {
+                logging.AddEventLog();
+            }
+        });
+
+        RegisterServices(services, configuration: null);
+
+        var provider = services.BuildServiceProvider();
+        StartupTrace.Mark("host-built-lite");
+        StartupTrace.Mark("app-host-built");
+        return provider;
+    }
+
+    /// <summary>
+    /// 所有服务注册（与改动前逐条、同序）。
+    /// <paramref name="configuration"/> 只在旧主机路径下存在；轻量路径传 null，
+    /// 因为 appsettings.json 只提供 LocalSettingsOptions，且其值与下面代码内构造的完全相同。
+    /// </summary>
+    private static void RegisterServices(IServiceCollection services, IConfiguration? configuration)
+    {
+        // Default Activation Handler
+        services.AddTransient<ActivationHandler<LaunchActivatedEventArgs>, DefaultActivationHandler>();
+
+        // Other Activation Handlers
+        services.AddTransient<IActivationHandler, AppNotificationActivationHandler>();
+
+        // Services
+        services.AddSingleton<IAppNotificationService, AppNotificationService>();
+        services.AddSingleton<ILocalSettingsService, LocalSettingsService>();
+        services.AddSingleton<IThemeSelectorService, ThemeSelectorService>();
+        services.AddSingleton<IAccountService, AccountService>();
+        services.AddTransient<INavigationViewService, NavigationViewService>();
+
+        services.AddSingleton<IActivationService, ActivationService>();
+        services.AddSingleton<IPageService, PageService>();
+        services.AddSingleton<INavigationService, NavigationService>();
+
+        // Core Services
+        services.AddSingleton<ISampleDataService, SampleDataService>();
+        services.AddSingleton<IFileService, FileService>();
+
+        services.AddSingleton<Stores.HistoryStore>();
+        services.AddSingleton<Stores.PeerStore>();
+        services.AddSingleton<Stores.TransferStore>();
+        services.AddSingleton<ContentFetchAwaiter>();
+        services.AddSingleton<EventPumpService>();
+
+        // Logging - 先注册日志系统，避免循环依赖
+        services.AddSingleton<Services.Logging.StashLogManager>();
+
+        // 先创建 CoreHostService（不使用 ILoggerFactory，避免循环依赖）
+        services.AddSingleton<CoreHostService>(sp =>
+        {
+            var eventPump = sp.GetRequiredService<EventPumpService>();
+            var localSettings = sp.GetRequiredService<ILocalSettingsService>();
+            var accountService = sp.GetRequiredService<IAccountService>();
+            // 暂时不传入 loggerFactory，避免循环依赖
+            return new CoreHostService(eventPump, localSettings, null, accountService);
+        });
+        services.AddSingleton<ICoreHostService>(sp => sp.GetRequiredService<CoreHostService>());
+
+        // 现在注册日志提供者（需要 ICoreHostService）
+        services.AddSingleton<Services.Logging.CoreLogDispatcher>(sp =>
+        {
+            var coreHost = sp.GetRequiredService<ICoreHostService>();
+            var eventPump = sp.GetRequiredService<EventPumpService>();
+            return new Services.Logging.CoreLogDispatcher(coreHost, eventPump);
+        });
+        services.AddSingleton<Services.Logging.CoreLoggerProvider>(sp =>
+        {
+            var coreHost = sp.GetRequiredService<ICoreHostService>();
+            var dispatcher = sp.GetRequiredService<Services.Logging.CoreLogDispatcher>();
+            var stashManager = sp.GetRequiredService<Services.Logging.StashLogManager>();
+            return new Services.Logging.CoreLoggerProvider(coreHost, dispatcher, stashManager);
+        });
+        // 注册日志提供者
+        services.AddSingleton<Microsoft.Extensions.Logging.ILoggerProvider>(sp =>
+        {
+            var provider = sp.GetRequiredService<Services.Logging.CoreLoggerProvider>();
+            return provider;
+        });
+
+        services.AddSingleton<IClipboardService, ClipboardService>();
+        services.AddSingleton<ClipboardApplyService>();
+
+        // System integration services
+        services.AddSingleton<IStartupService, StartupService>();
+        services.AddSingleton<TrayService>();
+
+        // Views and ViewModels
+        services.AddTransient<SettingsViewModel>();
+        services.AddTransient<SettingsPage>();
+        services.AddTransient<LogsViewModel>(sp =>
+        {
+            var coreHost = sp.GetRequiredService<ICoreHostService>();
+            var stashManager = sp.GetService<Services.Logging.StashLogManager>();
+            var eventPump = sp.GetRequiredService<EventPumpService>();
+            var localSettings = sp.GetRequiredService<ILocalSettingsService>();
+            var loggerFactory = sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>();
+            return new LogsViewModel(coreHost, stashManager, eventPump, localSettings, loggerFactory);
+        });
+        services.AddTransient<LogsPage>();
+        services.AddTransient<DevicesViewModel>(sp =>
+        {
+            var coreHost = sp.GetRequiredService<ICoreHostService>();
+            var localSettings = sp.GetRequiredService<ILocalSettingsService>();
+            var eventPump = sp.GetRequiredService<EventPumpService>();
+            return new DevicesViewModel(coreHost, localSettings, eventPump);
+        });
+        services.AddTransient<DevicesPage>();
+        services.AddSingleton<MainViewModel>(sp =>
+        {
+            var historyStore = sp.GetRequiredService<Stores.HistoryStore>();
+            var pump = sp.GetRequiredService<EventPumpService>();
+            var coreHost = sp.GetRequiredService<ICoreHostService>();
+            var peerStore = sp.GetRequiredService<Stores.PeerStore>();
+            var transferStore = sp.GetRequiredService<Stores.TransferStore>();
+            var navigationService = sp.GetRequiredService<INavigationService>();
+            var localSettings = sp.GetRequiredService<ILocalSettingsService>();
+            var clipboardApply = sp.GetRequiredService<ClipboardApplyService>();
+            var clipboardService = sp.GetRequiredService<IClipboardService>();
+            return new MainViewModel(historyStore, pump, coreHost, peerStore, transferStore, navigationService, localSettings, clipboardApply, clipboardService);
+        });
+        services.AddTransient<MainPage>();
+        services.AddTransient<ShellPage>();
+        services.AddTransient<ShellViewModel>();
+
+        // Configuration
+        if (configuration is not null)
+        {
+            services.Configure<LocalSettingsOptions>(configuration.GetSection(nameof(LocalSettingsOptions)));
+        }
+        else
+        {
+            // 轻量路径：数值与 appsettings.json 完全一致（同时它们也是 LocalSettingsService 的内置默认值），
+            // 因此不再为了这两个字段去读 JSON + 建配置树。
+            services.Configure<LocalSettingsOptions>(options =>
+            {
+                options.ApplicationDataFolder = "ClipBridgeShell_CS/ApplicationData";
+                options.LocalSettingsFile = "LocalSettings.json";
+            });
+        }
+        services.AddSingleton<ClipboardWatcher>(sp =>
+        {
+            var clipboardService = sp.GetRequiredService<IClipboardService>();
+            var coreHostService = sp.GetRequiredService<ICoreHostService>();
+            var localSettings = sp.GetRequiredService<ILocalSettingsService>();
+            var loggerFactory = sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>();
+            return new ClipboardWatcher(clipboardService, coreHostService, localSettings, loggerFactory);
+        });
+
+        // History Service（注入 MainViewModel 以同步锁定与复制选中）
+        services.AddTransient<HistoryViewModel>(sp =>
+        {
+            var coreService = sp.GetRequiredService<ICoreHostService>();
+            var clipboardApply = sp.GetRequiredService<ClipboardApplyService>();
+            var historyStore = sp.GetRequiredService<Stores.HistoryStore>();
+            var clipboardService = sp.GetRequiredService<IClipboardService>();
+            var mainViewModel = sp.GetRequiredService<MainViewModel>();
+            return new HistoryViewModel(coreService, clipboardApply, historyStore, clipboardService, mainViewModel);
+        });
+        services.AddTransient<HistoryPage>();
     }
 
     private void App_UnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
@@ -325,7 +394,7 @@ public partial class App : Application
                 App.MainWindow?.DispatcherQueue.TryEnqueue(async () =>
                 {
                     if (App.MainWindow == null) return;
-                    
+
                     var loc = WinUI3Localizer.Localizer.Get();
                     var currentLang = loc.GetCurrentLanguage();
                     bool isChinese = currentLang.StartsWith("zh", StringComparison.OrdinalIgnoreCase);
@@ -462,7 +531,7 @@ public partial class App : Application
     {
         try
         {
-            var loggerFactory = Host.Services.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>();
+            var loggerFactory = _services.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>();
             loggerFactory.CreateLogger("App").LogInformation("App started - testing log system");
         }
         catch
@@ -533,6 +602,7 @@ public partial class App : Application
 
     private async Task InitializeLocalizer()
     {
+        StartupTrace.Mark("localizer-enter");
         // 兼容非打包（unpackaged）模式：ApplicationData.Current 在非打包模式下会崩溃
         string localFolderPath;
         try
@@ -545,6 +615,7 @@ public partial class App : Application
             localFolderPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
             if (!Directory.Exists(localFolderPath)) Directory.CreateDirectory(localFolderPath);
         }
+        StartupTrace.Mark("localizer-folder-done");
 
         // 1) 准备 Strings 文件夹
         string stringsPath = Path.Combine(localFolderPath, "Strings");
@@ -553,6 +624,7 @@ public partial class App : Application
         const string resw = "Resources.resw";
         await CreateStringResourceFileIfNotExists(stringsPath, "en-US", resw);
         await CreateStringResourceFileIfNotExists(stringsPath, "zh-CN", resw);
+        StartupTrace.Mark("localizer-resw-done");
 
         // 2) 读取已保存的语言
         var settings = App.GetService<ILocalSettingsService>();
@@ -565,12 +637,14 @@ public partial class App : Application
             if (string.IsNullOrEmpty(saved))
                 await settings.SaveSettingAsync("IsFirstRun", false);
         }
+        StartupTrace.Mark("localizer-settings-done");
 
         // 3) 用默认语言构建 Localizer，然后显式 SetLanguage 覆盖内部持久化
         var localizer = await new LocalizerBuilder()
             .AddStringResourcesFolderForLanguageDictionaries(stringsPath)
             .SetOptions(o => o.DefaultLanguage = defaultLang)
             .Build();
+        StartupTrace.Mark("localizer-build-done");
         if (localizer.GetCurrentLanguage() != defaultLang)
             _ = localizer.SetLanguage(defaultLang);
     }
