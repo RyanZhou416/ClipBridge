@@ -239,6 +239,16 @@ enum UploadMsg {
 	},
 }
 
+/// 发送中的传输：AbortHandle + 汇总统计。
+///
+/// 统计只用于传输结束时写**一条**汇总日志。逐块日志已移除：
+/// 1GB 传输按 64KB 分块会写约 1.6 万条 SQLite 行，且都在 actor 主循环里同步插入。
+struct SenderState {
+	handle: tokio::task::AbortHandle,
+	bytes_sent: u64,
+	started_ts_ms: i64,
+}
+
 enum ReceiverTaskMsg {
 	Chunk(bytes::Bytes),
 	Finish {
@@ -312,7 +322,7 @@ pub struct SessionActor {
 	opaque_client_state: Option<CbClientLoginState>,
 	opaque_server_state: Option<CbServerLoginState>,
 	receivers: HashMap<String, ReceiverState>,
-	senders: HashMap<String, tokio::task::AbortHandle>,
+	senders: HashMap<String, SenderState>,
 	cas: crate::cas::Cas,
 	upload_tx: mpsc::Sender<UploadMsg>,
 }
@@ -565,11 +575,40 @@ impl SessionActor {
 							}
 							UploadMsg::Done { transfer_id, sha256: _ } => {
 								actor.send_ctrl(CtrlMsg::ContentEnd { req_id: transfer_id.clone() }).await?;
-								actor.senders.remove(&transfer_id);
+								// 每个传输只写一条汇总日志（替代原先每 64KB 一条的 debug 日志）
+								if let Some(state) = actor.senders.remove(&transfer_id) {
+									let elapsed_ms = now_ms() - state.started_ts_ms;
+									let mut log_store = actor.log_store.lock().unwrap();
+									let _ = log_store.log_info(
+										"Session",
+										&format!(
+											"Outbound transfer completed: transfer_id={transfer_id}, bytes={}, elapsed_ms={elapsed_ms}",
+											state.bytes_sent
+										),
+										Some(&format!(
+											"出站传输已完成: 传输ID={transfer_id}，字节数={}，耗时={elapsed_ms}ms",
+											state.bytes_sent
+										)),
+									);
+								}
 							}
 							UploadMsg::Error { transfer_id, err } => {
-								actor.senders.remove(&transfer_id);
-								// 可选：发送 Error 给对方
+								// 每个传输只写一条（失败）日志
+								if let Some(state) = actor.senders.remove(&transfer_id) {
+									let elapsed_ms = now_ms() - state.started_ts_ms;
+									let mut log_store = actor.log_store.lock().unwrap();
+									let _ = log_store.log_warn(
+										"Session",
+										&format!(
+											"Outbound transfer aborted: transfer_id={transfer_id}, bytes={}, elapsed_ms={elapsed_ms}, error={err}",
+											state.bytes_sent
+										),
+										Some(&format!(
+											"出站传输已中止: 传输ID={transfer_id}，字节数={}，耗时={elapsed_ms}ms，错误={err}",
+											state.bytes_sent
+										)),
+									);
+								}
 								eprintln!("[Session] Upload error for {transfer_id}: {err}");
 							}
 						}
@@ -664,29 +703,25 @@ impl SessionActor {
 	async fn send_data_chunk(&mut self, transfer_id: String, data: bytes::Bytes) -> Result<()> {
 		// [修改] 增加超时控制，防止网络拥塞阻塞心跳
 		// 如果 500ms 发不出去，认为网络拥塞严重，报错断开传输，保住连接
-		let data_size = data.len();
+		let data_size = data.len() as u64;
 		let send_future = self.writer.send(CBFrame::Data {
 			transfer_id: transfer_id.clone(),
 			data,
 		});
 		match tokio::time::timeout(Duration::from_millis(500), send_future).await {
 			Ok(Ok(())) => {
-				// 数据块发送成功（Debug 级别，避免日志过多）
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_debug(
-					"Session",
-					&format!("Data chunk sent: transfer_id={transfer_id}, size={data_size} bytes"),
-					Some(&format!(
-						"数据块已发送: 传输ID={transfer_id}，大小={data_size} 字节"
-					)),
-				);
+				// 逐块不写日志：这里只累加字节数，传输结束时写一条汇总，
+				// 否则 1GB 传输会产生约 1.6 万条 SQLite 日志行。
+				if let Some(state) = self.senders.get_mut(&transfer_id) {
+					state.bytes_sent = state.bytes_sent.saturating_add(data_size);
+				}
 				Ok(())
 			}
 			Ok(Err(e)) => Err(e), // 协议栈错误
 			Err(_) => {
 				// 超时：主动移除 Sender 任务并通知对方 Cancel
-				if let Some(handle) = self.senders.remove(&transfer_id) {
-					handle.abort();
+				if let Some(state) = self.senders.remove(&transfer_id) {
+					state.handle.abort();
 				}
 				{
 					let mut log_store = self.log_store.lock().unwrap();
@@ -1150,8 +1185,8 @@ impl SessionActor {
 					);
 				}
 				// 1. 如果我是发送者：在 senders map 里找
-				if let Some(handle) = self.senders.remove(&req_id) {
-					handle.abort(); // 终止发送任务
+				if let Some(state) = self.senders.remove(&req_id) {
+					state.handle.abort(); // 终止发送任务
 				}
 
 				// 2. 如果我是接收者：调用 handle_content_cancel
@@ -1608,7 +1643,9 @@ impl SessionActor {
 			file_id,
 			transfer_id,
 			expected_sha256,
+			received_bytes,
 			total_bytes,
+			started_ts_ms,
 			..
 		}) = self.receivers.remove(&req_id)
 		{
@@ -1634,12 +1671,14 @@ impl SessionActor {
 			match reply_rx.await {
 				Ok(Ok(final_path)) => {
 					{
+						// 每个传输只写一条汇总（字节数 + 耗时），不再逐块记录
+						let elapsed_ms = now_ms() - started_ts_ms;
 						let mut log_store = self.log_store.lock().unwrap();
 						let _ = log_store.log_info(
-								"Session",
-								&format!("Transfer completed successfully: transfer_id={transfer_id}, total_bytes={total_bytes}, sha256={expected_sha256}"),
-								Some(&format!("传输成功完成: 传输ID={transfer_id}，总字节数={total_bytes}，SHA256={expected_sha256}")),
-							);
+							"Session",
+							&format!("Inbound transfer completed: transfer_id={transfer_id}, bytes={received_bytes}/{total_bytes}, elapsed_ms={elapsed_ms}, sha256={expected_sha256}"),
+							Some(&format!("入站传输成功完成: 传输ID={transfer_id}，字节数={received_bytes}/{total_bytes}，耗时={elapsed_ms}ms，SHA256={expected_sha256}")),
+						);
 					}
 					let store = self.store.clone();
 					let sha_for_db = expected_sha256.clone();
@@ -1917,7 +1956,14 @@ impl SessionActor {
 					.await;
 			});
 
-			self.senders.insert(transfer_id, handle.abort_handle());
+			self.senders.insert(
+				transfer_id,
+				SenderState {
+					handle: handle.abort_handle(),
+					bytes_sent: 0,
+					started_ts_ms: now_ms(),
+				},
+			);
 		} else {
 			// 找不到文件，发送错误
 			self.send_ctrl(CtrlMsg::Error {
@@ -1958,8 +2004,8 @@ impl SessionActor {
 
 	async fn handle_local_cancel(&mut self, transfer_id: String) -> Result<()> {
 		// 1. 尝试作为 Sender 取消
-		if let Some(handle) = self.senders.remove(&transfer_id) {
-			handle.abort(); // 杀掉读文件任务
+		if let Some(state) = self.senders.remove(&transfer_id) {
+			state.handle.abort(); // 杀掉读文件任务
 			self.send_ctrl(CtrlMsg::ContentCancel {
 				req_id: transfer_id.clone(),
 				reason: "User cancelled".into(),
