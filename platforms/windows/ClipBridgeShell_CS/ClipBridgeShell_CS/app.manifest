@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
   <assemblyIdentity version="1.0.0.0" name="ClipBridgeShell_CS.app"/>
+  <!-- 显式声明 asInvoker：ClipBridge 是常驻托盘的普通桌面应用，任何时候都不需要管理员权限。
+       缺少这段时 Windows 会套用默认值/安装程序探测启发式，存在被误判为需要提权的风险。 -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
     <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
       <application>
         <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>

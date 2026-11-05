@@ -22,6 +22,7 @@ using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.Windows.AppLifecycle;
 using Microsoft.Windows.AppNotifications.Builder;
 
 using Windows.Storage;
@@ -272,6 +273,13 @@ public partial class App : Application
 
         //App.GetService<IAppNotificationService>().Show(string.Format("AppNotificationSamplePayload".GetLocalized(), AppContext.BaseDirectory));
 
+        // ⓪ 单实例保护：非主实例把激活重定向给主实例后退出，避免两个进程共用同一份 Core 数据
+        if (!await EnsureSingleInstanceAsync())
+        {
+            Exit();
+            return;
+        }
+
         // ① 初始化 Localizer（打包应用版）
         await InitializeLocalizer();
 
@@ -285,14 +293,10 @@ public partial class App : Application
         CheckHardwareAcceleration();
 #endif
         
-        // 检查账号状态，如果有账号才初始化核心
+        // 核心初始化已统一放在 ActivationService（窗口可见后异步执行），这里只处理未登录提示
         var accountService = App.GetService<IAccountService>();
         var hasAccount = await accountService.HasAccountAsync();
-        if (hasAccount)
-        {
-            _ = App.GetService<CoreHostService>().InitializeAsync();
-        }
-        else
+        if (!hasAccount)
         {
             // 如果没有账号，弹出登录提醒弹窗（延迟一会确保 UI 已加载）
             _ = Task.Run(async () =>
@@ -353,6 +357,50 @@ public partial class App : Application
 
         // 初始化托盘图标
         InitializeTray();
+    }
+
+    /// <summary>
+    /// 单实例保护：主实例返回 true；非主实例把激活重定向给主实例并返回 false（调用方应退出进程）。
+    /// </summary>
+    private static async Task<bool> EnsureSingleInstanceAsync()
+    {
+        try
+        {
+            var current = AppInstance.GetCurrent();
+            var primary = AppInstance.FindOrRegisterForKey("ClipBridgeShellMain");
+
+            if (primary.IsCurrent)
+            {
+                // 主实例：后续激活（例如再次双击图标）会被重定向到这里，把窗口带回前台
+                primary.Activated += (_, _) => ActivateMainWindow();
+                return true;
+            }
+
+            await primary.RedirectActivationToAsync(current.GetActivatedEventArgs());
+            return false;
+        }
+        catch (Exception ex)
+        {
+            // 单实例检查失败时不要阻止应用启动
+            System.Diagnostics.Debug.WriteLine($"[App] Single instance check failed: {ex.Message}");
+            return true;
+        }
+    }
+
+    private static void ActivateMainWindow()
+    {
+        var window = MainWindow;
+        if (window == null) return;
+
+        window.DispatcherQueue.TryEnqueue(() =>
+        {
+            window.Show();
+            if (window.AppWindow.Presenter is OverlappedPresenter presenter)
+            {
+                presenter.Restore();
+            }
+            window.Activate();
+        });
     }
 
     private void InitializeTray()
@@ -474,18 +522,65 @@ public partial class App : Application
         if (!Directory.Exists(languagePath)) Directory.CreateDirectory(languagePath);
 
         string targetFilePath = Path.Combine(languagePath, resourceFileName);
-        // 开发阶段或版本更新时，我们希望覆盖旧的本地化文件以确保新键值生效
-        // if (File.Exists(targetFilePath)) return; 
+
+        // 开发阶段或版本更新时，我们希望覆盖旧的本地化文件以确保新键值生效；
+        // 版本未变化且目标文件已存在时跳过复制，避免每次启动都重写 LocalFolder。
+        string version = GetAppVersion();
+        string stampFilePath = Path.Combine(stringsPath, $".{resourceFileName}.{language}.version");
+        try
+        {
+            if (File.Exists(targetFilePath) && File.Exists(stampFilePath)
+                && string.Equals(await File.ReadAllTextAsync(stampFilePath), version, StringComparison.Ordinal))
+            {
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Failed to read resource version stamp {language}: {ex.Message}");
+        }
 
         string resourceRelativePath = Path.Combine("Strings", language, resourceFileName);
         try 
         {
             var file = await LoadStringResourcesFileFromAppResource(resourceRelativePath);
             await file.CopyAsync(await StorageFolder.GetFolderFromPathAsync(languagePath), resourceFileName, NameCollisionOption.ReplaceExisting);
+
+            // 记录本次复制的版本，供下次启动比对
+            await File.WriteAllTextAsync(stampFilePath, version);
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[App] Failed to copy resource {language}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 获取用于本地化资源版本戳的应用版本号（打包/非打包均可工作）。
+    /// </summary>
+    private static string GetAppVersion()
+    {
+        try
+        {
+            var package = Windows.ApplicationModel.Package.Current;
+            if (package != null)
+            {
+                var v = package.Id.Version;
+                return $"{v.Major}.{v.Minor}.{v.Build}.{v.Revision}";
+            }
+        }
+        catch
+        {
+            // 非打包模式下 Package.Current 会抛异常，退回到程序集版本
+        }
+
+        try
+        {
+            return typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0.0.0";
+        }
+        catch
+        {
+            return "0.0.0.0";
         }
     }
 

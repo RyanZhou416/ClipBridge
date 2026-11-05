@@ -30,7 +30,13 @@ public class StartupService : IStartupService
 
     public IReadOnlyList<StartupMethod> GetAvailableMethods()
     {
-        var methods = new List<StartupMethod> { StartupMethod.Registry, StartupMethod.ScheduledTask };
+        // 说明：这里刻意不再提供 StartupMethod.ScheduledTask。
+        // 该方式需要 schtasks /Create /SC ONLOGON，而它在非提权进程下必然返回
+        // "Access is denied"，旧实现因此回落到 Verb="runas" 强制弹 UAC。
+        // 一个常驻托盘、按用户登录自启的应用完全不需要管理员权限，
+        // 注册表 Run 键（HKCU）足以实现同样的效果且零提权。
+        // 枚举值保留仅用于兼容历史设置里可能持久化的字符串。
+        var methods = new List<StartupMethod> { StartupMethod.Registry };
 #if !DEBUG
         if (RuntimeHelper.IsMSIX)
         {
@@ -45,7 +51,8 @@ public class StartupService : IStartupService
         return method switch
         {
             StartupMethod.Registry => GetRegistryState(),
-            StartupMethod.ScheduledTask => GetScheduledTaskState(),
+            // 计划任务方式已废弃：不再查询，避免任何 schtasks 调用。
+            StartupMethod.ScheduledTask => StartupState.NotSupported,
             StartupMethod.MsixStartupTask => await GetMsixStateAsync(),
             _ => StartupState.NotSupported,
         };
@@ -62,7 +69,8 @@ public class StartupService : IStartupService
         return method switch
         {
             StartupMethod.Registry => SetRegistryEnabled(enable),
-            StartupMethod.ScheduledTask => SetScheduledTaskEnabled(enable),
+            // 计划任务方式已废弃：明确返回不支持，绝不提权。
+            StartupMethod.ScheduledTask => StartupState.NotSupported,
             StartupMethod.MsixStartupTask => await SetMsixEnabledAsync(enable),
             _ => StartupState.NotSupported,
         };
@@ -71,7 +79,7 @@ public class StartupService : IStartupService
     public async Task DisableAllAsync()
     {
         SetRegistryEnabled(false);
-        try { RunSchtasks($"/Delete /TN \"{ScheduledTaskName}\" /F"); } catch { }
+        TryDeleteLegacyScheduledTask();
         if (RuntimeHelper.IsMSIX)
         {
             await SetMsixEnabledAsync(false);
@@ -86,11 +94,28 @@ public class StartupService : IStartupService
         }
         if (except != StartupMethod.ScheduledTask)
         {
-            try { RunSchtasks($"/Delete /TN \"{ScheduledTaskName}\" /F"); } catch { }
+            TryDeleteLegacyScheduledTask();
         }
         if (except != StartupMethod.MsixStartupTask && RuntimeHelper.IsMSIX)
         {
             await SetMsixEnabledAsync(false);
+        }
+    }
+
+    /// <summary>
+    /// 尽力清理旧版本创建的计划任务（历史遗留）。
+    /// 刻意只用非提权方式：删不掉就算了，绝不为清理旧数据弹 UAC。
+    /// 该任务只会按用户登录启动 ClipBridge，不删也不影响功能或安全。
+    /// </summary>
+    private static void TryDeleteLegacyScheduledTask()
+    {
+        try
+        {
+            RunSchtasks($"/Delete /TN \"{ScheduledTaskName}\" /F");
+        }
+        catch
+        {
+            // 忽略：无权限/不存在都无需处理
         }
     }
 
@@ -155,71 +180,7 @@ public class StartupService : IStartupService
 
     #endregion
 
-    #region Scheduled Task
-
-    private static StartupState GetScheduledTaskState()
-    {
-        try
-        {
-            var result = RunSchtasks($"/Query /TN \"{ScheduledTaskName}\" /FO CSV /NH");
-            if (result.ExitCode == 0 && result.Output.Contains(ScheduledTaskName, StringComparison.OrdinalIgnoreCase))
-            {
-                return result.Output.Contains("Ready", StringComparison.OrdinalIgnoreCase)
-                    ? StartupState.Enabled
-                    : StartupState.Disabled;
-            }
-            return StartupState.Disabled;
-        }
-        catch
-        {
-            return StartupState.Unknown;
-        }
-    }
-
-    private static StartupState SetScheduledTaskEnabled(bool enable)
-    {
-        try
-        {
-            if (enable)
-            {
-                var exePath = Environment.ProcessPath;
-                if (string.IsNullOrEmpty(exePath))
-                {
-                    return StartupState.NotSupported;
-                }
-
-                // /F 覆盖已有同名任务，无需先删除；自启时加参数以便启动后最小化到托盘
-                var args = $"/Create /TN \"{ScheduledTaskName}\" /TR \"\\\"{exePath}\\\" {StartupToTrayArgument}\" /SC ONLOGON /RL LIMITED /F /DELAY 0000:10";
-                if (!TryRunSchtasksWithElevation(args))
-                {
-                    return StartupState.Unknown;
-                }
-                return GetScheduledTaskState();
-            }
-            else
-            {
-                TryRunSchtasksWithElevation($"/Delete /TN \"{ScheduledTaskName}\" /F");
-                return StartupState.Disabled;
-            }
-        }
-        catch
-        {
-            return StartupState.Unknown;
-        }
-    }
-
-    /// <summary>
-    /// 先以普通权限尝试，失败则通过 UAC 提权重试。
-    /// </summary>
-    private static bool TryRunSchtasksWithElevation(string arguments)
-    {
-        var result = RunSchtasks(arguments);
-        if (result.ExitCode == 0)
-        {
-            return true;
-        }
-        return RunSchtasksElevated(arguments);
-    }
+    #region Legacy scheduled-task cleanup (best effort, never elevated)
 
     private static (int ExitCode, string Output) RunSchtasks(string arguments)
     {
@@ -241,37 +202,6 @@ public class StartupService : IStartupService
         var output = proc.StandardOutput.ReadToEnd();
         proc.WaitForExit(10_000);
         return (proc.ExitCode, output);
-    }
-
-    /// <summary>
-    /// 以管理员权限运行 schtasks（弹出 UAC 提示）。
-    /// 因为 UseShellExecute=true 不支持重定向输出，所以只返回是否成功。
-    /// </summary>
-    private static bool RunSchtasksElevated(string arguments)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "schtasks.exe",
-                Arguments = arguments,
-                UseShellExecute = true,
-                Verb = "runas",
-                WindowStyle = ProcessWindowStyle.Hidden,
-            };
-            using var proc = Process.Start(psi);
-            if (proc == null)
-            {
-                return false;
-            }
-            proc.WaitForExit(30_000);
-            return proc.ExitCode == 0;
-        }
-        catch (System.ComponentModel.Win32Exception)
-        {
-            // 用户取消了 UAC 提示
-            return false;
-        }
     }
 
     #endregion

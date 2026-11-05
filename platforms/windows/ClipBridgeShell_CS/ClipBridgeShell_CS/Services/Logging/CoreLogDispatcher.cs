@@ -4,7 +4,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
-using ClipBridgeShell_CS.Interop;
 
 namespace ClipBridgeShell_CS.Services.Logging;
 
@@ -153,54 +152,44 @@ public sealed class CoreLogDispatcher : IDisposable
             return;
         }
 
-        var handle = _coreHost.GetHandle();
-        if (handle == IntPtr.Zero)
+        foreach (var entry in batch)
         {
-            return;
+            try
+            {
+                // 使用多语言消息；句柄锁与 FFI 调用由 Core Bridge 负责
+                var messageEn = entry.GetMessageEn();
+                var messageZhCn = entry.GetMessageZhCn();
+
+                await _coreHost.WriteLogAsync(
+                    entry.Level,
+                    entry.Component,
+                    entry.Category,
+                    messageEn,
+                    messageZhCn,
+                    entry.Exception,
+                    entry.PropsJson,
+                    entry.TsUtc // 传递原始时间戳，用于暂存日志回写
+                );
+            }
+            catch (Exception ex)
+            {
+                // 写入失败，记录但不阻塞
+                System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Failed to write log: {ex.Message}");
+            }
         }
 
-        await Task.Run(() =>
+        // 批量写入完成后，统一发送一次 LOG_WRITTEN 事件
+        // 这样避免每条日志都触发事件，导致多个 TickOnce 并发执行
+        if (_eventPump != null && batch.Count > 0)
         {
-            foreach (var entry in batch)
+            var eventJson = System.Text.Json.JsonSerializer.Serialize(new
             {
-                try
-                {
-                    // 使用多语言消息
-                    var messageEn = entry.GetMessageEn();
-                    var messageZhCn = entry.GetMessageZhCn();
-                    
-                    CoreInterop.LogsWrite(
-                        handle,
-                        entry.Level,
-                        entry.Component,
-                        entry.Category,
-                        messageEn,
-                        messageZhCn,
-                        entry.Exception,
-                        entry.PropsJson,
-                        entry.TsUtc // 传递原始时间戳，用于暂存日志回写
-                    );
-                }
-                catch (Exception ex)
-                {
-                    // 写入失败，记录但不阻塞
-                    System.Diagnostics.Debug.WriteLine($"[CoreLogDispatcher] Failed to write log: {ex.Message}");
-                }
-            }
-            
-            // 批量写入完成后，统一发送一次 LOG_WRITTEN 事件
-            // 这样避免每条日志都触发事件，导致多个 TickOnce 并发执行
-            if (_eventPump != null && batch.Count > 0)
-            {
-                var eventJson = System.Text.Json.JsonSerializer.Serialize(new
-                {
-                    type = "LOG_WRITTEN",
-                    ts_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    payload = new { batch_count = batch.Count }
-                });
-                _eventPump.Enqueue(eventJson);
-            }
-        });
+                type = "LOG_WRITTEN",
+                ts_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                payload = new { batch_count = batch.Count }
+            });
+            _eventPump.Enqueue(eventJson);
+        }
     }
 
     public void Dispose()

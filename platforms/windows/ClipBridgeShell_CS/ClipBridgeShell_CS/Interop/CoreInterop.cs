@@ -1,7 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace ClipBridgeShell_CS.Interop;
@@ -18,36 +18,66 @@ public class SourceStats
     public Dictionary<string, long> Categories { get; set; } = new();
 }
 
+/// <summary>
+/// 原始 P/Invoke 层。只负责 FFI 调用与字符串/指针封送，
+/// JSON envelope 解析、状态保护与错误处理统一由 CoreHostService（Core Bridge）负责。
+/// UI 层（ViewModels/Views）不得直接引用本类型。
+/// </summary>
 internal static class CoreInterop
 {
     // 注意：Windows 下实际文件可能是 core_ffi_windows.dll
     private const string DllName = "core_ffi_windows.dll";
     private static string? _customDllPath;
-    private static readonly JsonSerializerOptions _jsonOpts = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        NumberHandling = JsonNumberHandling.AllowReadingFromString
-    };
+    // _customDllPath 由 DllImportResolver（首次 P/Invoke 时在任意线程触发）和 ConfigureDllPath 共享，
+    // 统一用这把锁保护读写，避免未同步的静态字段读取。
+    private static readonly object _dllPathLock = new();
+    private static bool _dllPathConfigured;
+
     // 静态构造函数：配置 DllImportResolver (只运行一次)
     static CoreInterop()
     {
         NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), (name, assembly, path) =>
         {
-            if (name == DllName && !string.IsNullOrEmpty(_customDllPath))
+            if (name != DllName)
             {
-                return NativeLibrary.Load(_customDllPath);
+                // 返回 Zero 让它走默认逻辑
+                return IntPtr.Zero;
             }
-            // 返回 Zero 让它走默认逻辑（或者在这里处理默认路径）
-            return IntPtr.Zero;
+
+            string? customPath;
+            lock (_dllPathLock)
+            {
+                customPath = _customDllPath;
+            }
+
+            return string.IsNullOrEmpty(customPath) ? IntPtr.Zero : NativeLibrary.Load(customPath);
         });
     }
 
     /// <summary>
-    /// 在 CoreHostService 初始化时调用，指定 DLL 的绝对路径
+    /// 在 CoreHostService 初始化时调用，指定 DLL 的绝对路径。
+    /// 线程安全且幂等：只允许首次配置；重复配置相同路径返回 true，配置不同路径返回 false。
     /// </summary>
-    public static void ConfigureDllPath(string absPath)
+    /// <param name="absPath">DLL 的绝对路径。</param>
+    /// <returns>当前解析器是否已指向 <paramref name="absPath"/>。</returns>
+    public static bool ConfigureDllPath(string absPath)
     {
-        _customDllPath = absPath;
+        if (string.IsNullOrWhiteSpace(absPath))
+        {
+            return false;
+        }
+
+        lock (_dllPathLock)
+        {
+            if (_dllPathConfigured)
+            {
+                return string.Equals(_customDllPath, absPath, StringComparison.OrdinalIgnoreCase);
+            }
+
+            _customDllPath = absPath;
+            _dllPathConfigured = true;
+            return true;
+        }
     }
 
     // ==========================================================
@@ -270,15 +300,16 @@ internal static class CoreInterop
     }
 
     // ==========================================================
-    // 8. 高级封装方法 (Wrappers)
-    // 供 ViewModel 直接调用，替代原 Native.cs 的功能
+    // 8. 原始调用辅助 (Raw marshalling helpers)
+    // 只做 P/Invoke 与可空字符串指针封送，不解析 JSON、不判断 rc。
+    // rc 处理与 envelope 解析属于 CoreHostService（Core Bridge）的职责。
     // ==========================================================
 
     /// <summary>
-    /// 写入日志（多语言版本）
+    /// 调用 cb_logs_write，负责可空字符串指针的封送与释放，返回原始 rc。
     /// </summary>
-    /// <param name="tsUtc">时间戳（Unix毫秒）。如果为0或负数，使用当前时间；否则使用提供的时间戳（用于暂存日志回写）</param>
-    public static long LogsWrite(IntPtr handle, int level, string component, string category, string messageEn, string? messageZhCn = null, string? exception = null, string? propsJson = null, long tsUtc = 0)
+    internal static int LogsWriteRaw(IntPtr handle, int level, string component, string category, string messageEn,
+        string? messageZhCn, string? exception, string? propsJson, long tsUtc, out long id)
     {
         // 手动处理可空字符串指针
         IntPtr zhCnPtr = messageZhCn != null ? Marshal.StringToCoTaskMemUTF8(messageZhCn) : IntPtr.Zero;
@@ -287,9 +318,7 @@ internal static class CoreInterop
 
         try
         {
-            var rc = cb_logs_write(handle, level, component, category, messageEn, zhCnPtr, exPtr, propsPtr, tsUtc, out long id);
-            if (rc != 0) throw new Exception($"cb_logs_write failed: {rc}");
-            return id;
+            return cb_logs_write(handle, level, component, category, messageEn, zhCnPtr, exPtr, propsPtr, tsUtc, out id);
         }
         finally
         {
@@ -299,26 +328,13 @@ internal static class CoreInterop
         }
     }
 
-    /// <summary>
-    /// 查询最新的日志（从新到旧排序，用于初始加载）
-    /// </summary>
-    public static List<ClipBridgeShell_CS.Models.LogRow> LogsQueryLatest(IntPtr handle, int levelMin, string? like, int limit, string? lang = null)
+    internal static int LogsQueryLatestRaw(IntPtr handle, int levelMin, string? like, int limit, string? lang, out IntPtr jsonPtr)
     {
         IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
         IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
-        IntPtr jsonPtr = IntPtr.Zero;
         try
         {
-            var rc = cb_logs_query_latest(handle, levelMin, likePtr, limit, langPtr, out jsonPtr);
-            if (rc != 0) throw new Exception($"cb_logs_query_latest failed: {rc}");
-
-            var json = PtrToUtf8AndFree(jsonPtr);
-            var envelope = JsonSerializer.Deserialize<JsonElement>(json, _jsonOpts);
-            if (envelope.TryGetProperty("data", out var data))
-            {
-                return JsonSerializer.Deserialize<List<ClipBridgeShell_CS.Models.LogRow>>(data.GetRawText(), _jsonOpts) ?? new();
-            }
-            return new();
+            return cb_logs_query_latest(handle, levelMin, likePtr, limit, langPtr, out jsonPtr);
         }
         finally
         {
@@ -327,31 +343,13 @@ internal static class CoreInterop
         }
     }
 
-    /// <summary>
-    /// 查询增量日志 (Tail)
-    /// </summary>
-    public static List<ClipBridgeShell_CS.Models.LogRow> LogsQueryAfterId(IntPtr handle, long afterId, int levelMin, string? like, int limit, string? lang = null)
+    internal static int LogsQueryAfterIdRaw(IntPtr handle, long afterId, int levelMin, string? like, int limit, string? lang, out IntPtr jsonPtr)
     {
         IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
         IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
-        IntPtr jsonPtr = IntPtr.Zero;
         try
         {
-            var rc = cb_logs_query_after_id(handle, afterId, levelMin, likePtr, limit, langPtr, out jsonPtr);
-            if (rc != 0) throw new Exception($"cb_logs_query_after_id failed: {rc}");
-
-            // 使用我们新加的 Helper 读取并释放
-            var json = PtrToUtf8AndFree(jsonPtr);
-            // #region agent log
-            // #endregion
-            var envelope = JsonSerializer.Deserialize<JsonElement>(json, _jsonOpts);
-            if (envelope.TryGetProperty("data", out var data))
-            {
-                var dataText = data.GetRawText();
-                var result = JsonSerializer.Deserialize<List<ClipBridgeShell_CS.Models.LogRow>>(dataText, _jsonOpts) ?? new();
-                return result;
-            }
-            return new();
+            return cb_logs_query_after_id(handle, afterId, levelMin, likePtr, limit, langPtr, out jsonPtr);
         }
         finally
         {
@@ -360,26 +358,13 @@ internal static class CoreInterop
         }
     }
 
-    /// <summary>
-    /// 查询 before_id 之前的日志（用于向上滚动加载更早的日志）
-    /// </summary>
-    public static List<ClipBridgeShell_CS.Models.LogRow> LogsQueryBeforeId(IntPtr handle, long beforeId, int levelMin, string? like, int limit, string? lang = null)
+    internal static int LogsQueryBeforeIdRaw(IntPtr handle, long beforeId, int levelMin, string? like, int limit, string? lang, out IntPtr jsonPtr)
     {
         IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
         IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
-        IntPtr jsonPtr = IntPtr.Zero;
         try
         {
-            var rc = cb_logs_query_before_id(handle, beforeId, levelMin, likePtr, limit, langPtr, out jsonPtr);
-            if (rc != 0) throw new Exception($"cb_logs_query_before_id failed: {rc}");
-
-            var json = PtrToUtf8AndFree(jsonPtr);
-            var envelope = JsonSerializer.Deserialize<JsonElement>(json, _jsonOpts);
-            if (envelope.TryGetProperty("data", out var data))
-            {
-                return JsonSerializer.Deserialize<List<ClipBridgeShell_CS.Models.LogRow>>(data.GetRawText(), _jsonOpts) ?? new();
-            }
-            return new();
+            return cb_logs_query_before_id(handle, beforeId, levelMin, likePtr, limit, langPtr, out jsonPtr);
         }
         finally
         {
@@ -388,310 +373,19 @@ internal static class CoreInterop
         }
     }
 
-    /// <summary>
-    /// 查询历史日志 (Page)
-    /// </summary>
-    public static List<ClipBridgeShell_CS.Models.LogRow> LogsQueryRange(IntPtr handle, long startMs, long endMs, int levelMin, string? like, int limit, int offset, string? lang = null)
+    internal static int LogsQueryRangeRaw(IntPtr handle, long startMs, long endMs, int levelMin, string? like, int limit, int offset, string? lang, out IntPtr jsonPtr)
     {
         IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
         IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
-        IntPtr jsonPtr = IntPtr.Zero;
         try
         {
-            var rc = cb_logs_query_range(handle, startMs, endMs, levelMin, likePtr, limit, offset, langPtr, out jsonPtr);
-            if (rc != 0) throw new Exception($"cb_logs_query_range failed: {rc}");
-
-            var json = PtrToUtf8AndFree(jsonPtr);
-            var envelope = JsonSerializer.Deserialize<JsonElement>(json, _jsonOpts);
-            if (envelope.TryGetProperty("data", out var data))
-            {
-                return JsonSerializer.Deserialize<List<ClipBridgeShell_CS.Models.LogRow>>(data.GetRawText(), _jsonOpts) ?? new();
-            }
-            return new();
+            return cb_logs_query_range(handle, startMs, endMs, levelMin, likePtr, limit, offset, langPtr, out jsonPtr);
         }
         finally
         {
             if (likePtr != IntPtr.Zero) Marshal.FreeCoTaskMem(likePtr);
             if (langPtr != IntPtr.Zero) Marshal.FreeCoTaskMem(langPtr);
         }
-    }
-
-    /// <summary>
-    /// 删除旧日志
-    /// </summary>
-    public static long LogsDeleteBefore(IntPtr handle, long cutoffMs)
-    {
-        var rc = cb_logs_delete_before(handle, cutoffMs, out long deleted);
-        if (rc != 0) throw new Exception($"cb_logs_delete_before failed: {rc}");
-        return deleted;
-    }
-
-    /// <summary>
-    /// 按 ID 列表删除日志
-    /// </summary>
-    public static long LogsDeleteByIds(IntPtr handle, long[] ids)
-    {
-        var idsJson = JsonSerializer.Serialize(ids, _jsonOpts);
-        var rc = cb_logs_delete_by_ids(handle, idsJson, out long deleted);
-        if (rc != 0) throw new Exception($"cb_logs_delete_by_ids failed: {rc}");
-        return deleted;
-    }
-
-    /// <summary>
-    /// 获取日志统计
-    /// </summary>
-    public static ClipBridgeShell_CS.Models.LogStats LogsStats(IntPtr handle)
-    {
-        IntPtr jsonPtr = IntPtr.Zero;
-        var rc = cb_logs_stats(handle, out jsonPtr);
-        if (rc != 0) throw new Exception($"cb_logs_stats failed: {rc}");
-
-        var json = PtrToUtf8AndFree(jsonPtr);
-        var envelope = JsonSerializer.Deserialize<JsonElement>(json, _jsonOpts);
-        if (envelope.TryGetProperty("data", out var data))
-        {
-            return JsonSerializer.Deserialize<ClipBridgeShell_CS.Models.LogStats>(data.GetRawText(), _jsonOpts) ?? new ClipBridgeShell_CS.Models.LogStats();
-        }
-        return new ClipBridgeShell_CS.Models.LogStats();
-    }
-
-    /// <summary>
-    /// 获取来源统计（component 和 category 的列表及计数）
-    /// </summary>
-    public static SourceStats LogsSourceStats(IntPtr handle)
-    {
-        IntPtr jsonPtr = IntPtr.Zero;
-        var rc = cb_logs_source_stats(handle, out jsonPtr);
-        if (rc != 0) throw new Exception($"cb_logs_source_stats failed: {rc}");
-
-        var json = PtrToUtf8AndFree(jsonPtr);
-        var envelope = JsonSerializer.Deserialize<JsonElement>(json, _jsonOpts);
-        if (envelope.TryGetProperty("data", out var data))
-        {
-            return JsonSerializer.Deserialize<SourceStats>(data.GetRawText(), _jsonOpts) ?? new SourceStats();
-        }
-        return new SourceStats();
-    }
-
-    /// <summary>
-    /// 清空核心数据库
-    /// </summary>
-    public static void ClearCoreDb(IntPtr handle)
-    {
-        var resultPtr = cb_clear_core_db(handle);
-        var result = PtrToStringAndFree(resultPtr);
-        var envelope = JsonSerializer.Deserialize<JsonElement>(result, _jsonOpts);
-        if (!envelope.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
-        {
-            throw new Exception("Failed to clear core database");
-        }
-    }
-
-    /// <summary>
-    /// 清空日志数据库
-    /// </summary>
-    public static void ClearLogsDb(IntPtr handle)
-    {
-        var resultPtr = cb_clear_logs_db(handle);
-        var result = PtrToStringAndFree(resultPtr);
-        var envelope = JsonSerializer.Deserialize<JsonElement>(result, _jsonOpts);
-        if (!envelope.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
-        {
-            throw new Exception("Failed to clear logs database");
-        }
-    }
-
-    /// <summary>
-    /// 清空统计数据库
-    /// </summary>
-    public static void ClearStatsDb(IntPtr handle)
-    {
-        var resultPtr = cb_clear_stats_db(handle);
-        var result = PtrToStringAndFree(resultPtr);
-        var envelope = JsonSerializer.Deserialize<JsonElement>(result, _jsonOpts);
-        if (!envelope.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
-        {
-            throw new Exception("Failed to clear stats database");
-        }
-    }
-
-    /// <summary>
-    /// 清空缓存（CAS blobs、临时文件等）
-    /// </summary>
-    public static void ClearCache(IntPtr handle)
-    {
-        var resultPtr = cb_clear_cache(handle);
-        var result = PtrToStringAndFree(resultPtr);
-        var envelope = JsonSerializer.Deserialize<JsonElement>(result, _jsonOpts);
-        if (!envelope.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
-        {
-            throw new Exception("Failed to clear cache");
-        }
-    }
-
-    // 私有辅助：读取 Core 返回的 JSON 指针转 String 并通知 Core 释放内存
-    // 注意：这个逻辑和 PtrToStringAndFree 是一样的，为了代码复用，你可以直接用 PtrToStringAndFree
-    private static string PtrToUtf8AndFree(IntPtr ptr)
-    {
-        return PtrToStringAndFree(ptr);
-    }
-
-    /// <summary>
-    /// 查询历史记录 (Wrapper)
-    /// </summary>
-    public static ClipBridgeShell_CS.Core.Models.HistoryPage ListHistory(IntPtr handle, ClipBridgeShell_CS.Core.Models.HistoryQuery query)
-    {
-        if (handle == IntPtr.Zero)
-            return new();
-
-        var queryJson = JsonSerializer.Serialize(query, _jsonOpts);
-
-        // 调用 FFI
-        var jsonPtr = cb_list_history(handle, queryJson);
-
-        try
-        {
-            var json = PtrToStringAndFree(jsonPtr);
-
-            // 日志保持不变
-            /*
-            System.Diagnostics.Debug.WriteLine("=====================================");
-            System.Diagnostics.Debug.WriteLine($"[CoreInterop] Query: {queryJson}");
-            System.Diagnostics.Debug.WriteLine($"[CoreInterop] Result: {json}");
-            System.Diagnostics.Debug.WriteLine("=====================================");
-            */
-
-            if (string.IsNullOrEmpty(json))
-                return new();
-
-            // 【核心修复 START】
-            // 1. 解析 JSON 文档
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            // 2. 检查 "ok"
-            if (root.TryGetProperty("ok", out var ok) && ok.GetBoolean())
-            {
-                // 3. 提取 "data" 节点
-                if (root.TryGetProperty("data", out var data))
-                {
-                    // 4. 将 "data" 节点反序列化为 HistoryPage
-                    // 注意：必须传入 _jsonOpts 以处理 snake_case (item_id -> ItemId)
-                    var page = data.Deserialize<ClipBridgeShell_CS.Core.Models.HistoryPage>(_jsonOpts);
-                    return page ?? new();
-                }
-            }
-            // 【核心修复 END】
-
-            return new();
-        } catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"ListHistory parsing failed: {ex}");
-            return new();
-        }
-    }
-
-    /// <summary>
-    /// 本地删除：软删除 + 从 CAS 移除 blob，并发出 item_deleted 事件
-    /// </summary>
-    public static void DeleteItemLocal(IntPtr handle, string itemId)
-    {
-        if (handle == IntPtr.Zero)
-            throw new InvalidOperationException("Core not initialized");
-        var itemIdJson = JsonSerializer.Serialize(new { item_id = itemId }, _jsonOpts);
-        var ptr = cb_delete_item_local(handle, itemIdJson);
-        var result = PtrToStringAndFree(ptr);
-        using var doc = JsonDocument.Parse(result);
-        if (!doc.RootElement.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
-        {
-            var errMsg = doc.RootElement.TryGetProperty("error", out var err) && err.TryGetProperty("message", out var msg) ? msg.GetString() ?? "Unknown" : "Unknown";
-            throw new Exception($"DeleteItemLocal failed: {errMsg}");
-        }
-    }
-
-    /// <summary>
-    /// 全局删除：与本地删除相同，并广播给所有连接的设备
-    /// </summary>
-    public static void DeleteItemGlobal(IntPtr handle, string itemId)
-    {
-        if (handle == IntPtr.Zero)
-            throw new InvalidOperationException("Core not initialized");
-        var itemIdJson = JsonSerializer.Serialize(new { item_id = itemId }, _jsonOpts);
-        var ptr = cb_delete_item_global(handle, itemIdJson);
-        var result = PtrToStringAndFree(ptr);
-        using var doc = JsonDocument.Parse(result);
-        if (!doc.RootElement.TryGetProperty("ok", out var ok) || !ok.GetBoolean())
-        {
-            var errMsg = doc.RootElement.TryGetProperty("error", out var err) && err.TryGetProperty("message", out var msg) ? msg.GetString() ?? "Unknown" : "Unknown";
-            throw new Exception($"DeleteItemGlobal failed: {errMsg}");
-        }
-    }
-
-    /// <summary>
-    /// 查询缓存统计
-    /// </summary>
-    public static CacheStatsResult QueryCacheStats(IntPtr handle, long startTsMs = 0, long endTsMs = 0, int bucketSec = 10)
-    {
-        var query = new
-        {
-            start_ts_ms = startTsMs,
-            end_ts_ms = endTsMs,
-            bucket_sec = bucketSec
-        };
-        var queryJson = JsonSerializer.Serialize(query, _jsonOpts);
-        var resultPtr = cb_query_cache_stats(handle, queryJson);
-        var result = PtrToStringAndFree(resultPtr);
-
-        var envelope = JsonSerializer.Deserialize<JsonElement>(result, _jsonOpts);
-        if (envelope.TryGetProperty("data", out var data))
-        {
-            return JsonSerializer.Deserialize<CacheStatsResult>(data.GetRawText(), _jsonOpts) ?? new CacheStatsResult();
-        }
-        return new CacheStatsResult();
-    }
-
-    /// <summary>
-    /// 查询网络统计
-    /// </summary>
-    public static NetworkStatsResult QueryNetStats(IntPtr handle, long startTsMs = 0, long endTsMs = 0, int bucketSec = 10)
-    {
-        var query = new
-        {
-            start_ts_ms = startTsMs,
-            end_ts_ms = endTsMs,
-            bucket_sec = bucketSec
-        };
-        var queryJson = JsonSerializer.Serialize(query, _jsonOpts);
-        var resultPtr = cb_query_net_stats(handle, queryJson);
-        var result = PtrToStringAndFree(resultPtr);
-        var envelope = JsonSerializer.Deserialize<JsonElement>(result, _jsonOpts);
-        if (envelope.TryGetProperty("data", out var data))
-        {
-            return JsonSerializer.Deserialize<NetworkStatsResult>(data.GetRawText(), _jsonOpts) ?? new NetworkStatsResult();
-        }
-        return new NetworkStatsResult();
-    }
-
-    /// <summary>
-    /// 查询活动统计
-    /// </summary>
-    public static ActivityStatsResult QueryActivityStats(IntPtr handle, long startTsMs = 0, long endTsMs = 0, int bucketSec = 60)
-    {
-        var query = new
-        {
-            start_ts_ms = startTsMs,
-            end_ts_ms = endTsMs,
-            bucket_sec = bucketSec
-        };
-        var queryJson = JsonSerializer.Serialize(query, _jsonOpts);
-        var resultPtr = cb_query_activity_stats(handle, queryJson);
-        var result = PtrToStringAndFree(resultPtr);
-        var envelope = JsonSerializer.Deserialize<JsonElement>(result, _jsonOpts);
-        if (envelope.TryGetProperty("data", out var data))
-        {
-            return JsonSerializer.Deserialize<ActivityStatsResult>(data.GetRawText(), _jsonOpts) ?? new ActivityStatsResult();
-        }
-        return new ActivityStatsResult();
     }
 }
 

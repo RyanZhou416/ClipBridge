@@ -4,12 +4,14 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
 using ClipBridgeShell_CS.Core.Services;
 using ClipBridgeShell_CS.Helpers;
 using ClipBridgeShell_CS.Interop;
+using ClipBridgeShell_CS.Models;
 using ClipBridgeShell_CS.Stores;
 using Windows.Storage;
 using Microsoft.Extensions.Logging;
@@ -23,15 +25,29 @@ public sealed class CoreHostService : ICoreHostService
     private CoreInterop.CbOnEventFn? _onEventThunk;
     private GCHandle _selfHandle;
     private IntPtr _coreHandle = IntPtr.Zero;
-    private static bool _isResolverSet = false;
+    // 保护 _coreHandle 的“取句柄 → 调用 FFI”与 ShutdownAsync 的“清空 → cb_shutdown”互斥。
+    private readonly object _handleLock = new();
     private readonly EventPumpService _eventPump;
     private readonly ILocalSettingsService _localSettingsService;
     private readonly IAccountService? _accountService;
     private readonly ILogger<CoreHostService>? _logger;
     // 定义 JSON 序列化选项
     private readonly JsonSerializerOptions _jsonOpts;
+    // 解析 Core 返回的 envelope 时复用同一组选项（与旧 CoreInterop 内部行为保持一致）
+    private static readonly JsonSerializerOptions _parseOpts = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        NumberHandling = JsonNumberHandling.AllowReadingFromString
+    };
     // 保存当前账号 UID，用于检测账号切换
     private string? _currentAccountUid;
+
+    /// <summary>
+    /// 仅供测试宿主使用：置 true 后传给 core 的 config 会带 disable_network=true，
+    /// core 不启动 NetManager（不 bind 端口、不起 mDNS），避免 Windows 防火墙弹窗。
+    /// 生产路径必须保持 false。
+    /// </summary>
+    public static bool DisableNetwork { get; set; }
 
     public CoreState State { get; private set; } = CoreState.NotLoaded;
     public CoreDiagnostics Diagnostics { get; } = new();
@@ -127,6 +143,10 @@ public sealed class CoreHostService : ICoreHostService
             data_dir = localFolder,
             cache_dir = cacheFolder,
 
+            // 测试宿主可关闭核心网络栈，避免 bind/mDNS 触发 Windows 防火墙弹窗。
+            // 生产路径 DisableNetwork 恒为 false。
+            disable_network = DisableNetwork,
+
             // 嵌套的 app_config
             app_config = new
             {
@@ -157,11 +177,10 @@ public sealed class CoreHostService : ICoreHostService
 
         try
         {
-            // 3. 配置 Resolver (仅一次)
-            if (!_isResolverSet)
+            // 3. 配置 Resolver（CoreInterop 内部线程安全且幂等）
+            if (!CoreInterop.ConfigureDllPath(dllFullPath))
             {
-                CoreInterop.ConfigureDllPath(dllFullPath);
-                _isResolverSet = true;
+                _logger?.LogWarning("CoreInterop already configured with a different DLL path; keeping the first configuration");
             }
 
             // 4. 检查 ABI
@@ -191,10 +210,16 @@ public sealed class CoreHostService : ICoreHostService
                 Diagnostics.LastInitEnvelopeJson = envelopeJson;
 
                 // [FIX 7] 解析结果并提取 Handle
-                // 假设成功时 JSON 为: {"ok": true, "data": 12345678} (data 为句柄地址)
-                if (!IsEnvelopeOkAndGetHandle(envelopeJson, out var handle, out var errCode, out var errMsg))
+                // 假设成功时 JSON 为: {"ok": true, "data": {"handle": 12345678}} 或 {"ok": true, "data": 12345678}
+                if (!TryParseEnvelope<JsonElement>(envelopeJson, out var dataEl, out var errCode, out var errMsg))
                 {
                     throw new Exception($"Core error: {errCode} - {errMsg}");
+                }
+
+                var handle = ExtractHandle(dataEl, out var handleError);
+                if (handleError != null)
+                {
+                    throw new Exception(handleError);
                 }
 
                 if (handle == IntPtr.Zero)
@@ -202,7 +227,11 @@ public sealed class CoreHostService : ICoreHostService
                     throw new Exception("Init OK but returned handle is NULL/Zero.");
                 }
 
-                _coreHandle = handle;
+                // 句柄的写入也必须与 ShutdownAsync 的读取/清空互斥。
+                lock (_handleLock)
+                {
+                    _coreHandle = handle;
+                }
             });
 
             _logger?.LogInformation("Core initialized successfully, handle: {Handle}", _coreHandle);
@@ -215,7 +244,7 @@ public sealed class CoreHostService : ICoreHostService
                 var currentLang = GetCurrentLanguage();
                 var messageEn = "-------------Core Started-----------";
                 var messageZhCn = "-------------核心开-----------";
-                CoreInterop.LogsWrite(_coreHandle, 2, "System", "Separator", messageEn, messageZhCn, null, null, initStartTime);
+                WriteLogCore(_coreHandle, 2, "System", "Separator", messageEn, messageZhCn, null, null, initStartTime);
             }
             catch (Exception ex)
             {
@@ -335,35 +364,55 @@ public sealed class CoreHostService : ICoreHostService
 
         SetState(CoreState.ShuttingDown);
 
-        if (_coreHandle != IntPtr.Zero)
+        // 清空句柄与 cb_shutdown 必须在 _handleLock 内完成：
+        // 并发的 GetHandle/TryUseHandle 要么在锁前拿到有效句柄并完成调用，
+        // 要么在锁后看到 IntPtr.Zero，不会在 Rust 侧释放实例之后继续使用指针。
+        await Task.Run(() =>
         {
-            // 写入"核心关"日志到核心（在关闭前）
-            try
+            lock (_handleLock)
             {
-                var currentLang = GetCurrentLanguage();
-                var messageEn = "-------------Core Stopped-----------";
-                var messageZhCn = "-------------核心关-----------";
-                CoreInterop.LogsWrite(_coreHandle, 2, "System", "Separator", messageEn, messageZhCn);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[CoreHostService] Failed to write 'Core Stopped' log: {ex}");
-            }
-            
-            try
-            {
-                // [FIX] 放到后台线程防止阻塞
-                await Task.Run(() => CoreInterop.cb_shutdown(_coreHandle));
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: Shutdown error: {ex}");
-            }
-            finally
-            {
+                var handle = _coreHandle;
                 _coreHandle = IntPtr.Zero;
+
+                if (handle == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                // 写入"核心关"日志到核心（在关闭前）
+                try
+                {
+                    var currentLang = GetCurrentLanguage();
+                    var messageEn = "-------------Core Stopped-----------";
+                    var messageZhCn = "-------------核心关-----------";
+                    WriteLogCore(handle, 2, "System", "Separator", messageEn, messageZhCn, null, null, 0);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[CoreHostService] Failed to write 'Core Stopped' log: {ex}");
+                }
+
+                try
+                {
+                    // cb_shutdown 返回 *const c_char envelope：必须读回并释放，否则每次关停泄漏一个 Rust 分配。
+                    var shutdownPtr = CoreInterop.cb_shutdown(handle);
+                    var shutdownJson = CoreInterop.PtrToStringAndFree(shutdownPtr);
+
+                    if (TryParseEnvelope<JsonElement>(shutdownJson, out _, out var errCode, out var errMsg))
+                    {
+                        _logger?.LogInformation("Core shutdown completed.");
+                    }
+                    else
+                    {
+                        _logger?.LogWarning("Core shutdown returned an error envelope: {Code} - {Message}", errCode, errMsg);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[CoreHostService] ShutdownAsync: Shutdown error: {ex}");
+                }
             }
-        }
+        });
 
         if (_selfHandle.IsAllocated)
         {
@@ -373,9 +422,47 @@ public sealed class CoreHostService : ICoreHostService
         SetState(CoreState.NotLoaded);
     }
 
+    /// <summary>
+    /// 获取当前核心句柄。
+    /// </summary>
+    /// <remarks>
+    /// 警告：该返回值在锁释放后可能立即失效——并发的 <see cref="ShutdownAsync"/> 会在锁内把句柄置零
+    /// 并调用 Rust 的 cb_shutdown。调用方“判空后再调用 FFI”存在 TOCTOU 窗口，可能造成 use-after-free
+    /// 或 double-free。新代码请使用 <see cref="TryUseHandle"/> 把调用包在锁内；本方法仅为兼容既有
+    /// 调用点而保留，迁移完成后应移除。
+    /// </remarks>
+    [Obsolete("Use TryUseHandle or a typed ICoreHostService method")]
     public IntPtr GetHandle()
     {
-        return _coreHandle;
+        lock (_handleLock)
+        {
+            return State == CoreState.Ready && _coreHandle != IntPtr.Zero ? _coreHandle : IntPtr.Zero;
+        }
+    }
+
+    /// <summary>
+    /// 在句柄锁内执行 <paramref name="action"/>，保证执行期间不会发生 <see cref="ShutdownAsync"/> 的释放逻辑。
+    /// 这是替代“<see cref="GetHandle"/> 判空后直接调用 FFI”的线程安全用法。
+    /// </summary>
+    /// <param name="action">接收当前核心句柄的委托；返回 true 表示调用成功。</param>
+    /// <returns>句柄可用时返回 <paramref name="action"/> 的结果；句柄不可用时返回 false。</returns>
+    public bool TryUseHandle(Func<IntPtr, bool> action)
+    {
+        if (action is null)
+        {
+            throw new ArgumentNullException(nameof(action));
+        }
+
+        lock (_handleLock)
+        {
+            var handle = _coreHandle;
+            if (State != CoreState.Ready || handle == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            return action(handle);
+        }
     }
 
     private void SetState(CoreState s)
@@ -389,92 +476,116 @@ public sealed class CoreHostService : ICoreHostService
         StateChanged?.Invoke(s);
     }
 
-    private bool IsEnvelopeOkAndGetHandle(string json, out IntPtr handle, out string errCode, out string errMsg)
+    /// <summary>
+    /// 统一的 Core envelope 解析入口：{"ok": true, "data": ...} 或 {"error": {"code", "message"}}。
+    /// 只有 <c>ok</c> 为 true 才返回成功；此时 <paramref name="data"/> 为 data 节点反序列化的结果
+    /// （没有 data 节点时为默认值）。
+    /// </summary>
+    private static bool TryParseEnvelope<T>(string? json, out T? data, out string? errorCode, out string? errorMessage)
     {
-        handle = IntPtr.Zero;
-        errCode = string.Empty;
-        errMsg = string.Empty;
+        data = default;
+        errorCode = null;
+        errorMessage = null;
 
         if (string.IsNullOrWhiteSpace(json))
         {
-            errMsg = "Empty JSON envelope";
+            errorMessage = "Empty JSON envelope";
             return false;
         }
 
         try
         {
-            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
-            // 1. 检查 "ok" 字段
-            if (root.TryGetProperty("ok", out var okElement) && okElement.GetBoolean())
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("ok", out var okEl)
+                && okEl.ValueKind == JsonValueKind.True)
             {
-                // 2. 尝试获取 "data"
-                if (root.TryGetProperty("data", out var dataElement))
+                if (root.TryGetProperty("data", out var dataEl))
                 {
-                    // 情况 A: data 是对象 {"handle": 123} (当前 Rust 实现)
-                    if (dataElement.ValueKind == System.Text.Json.JsonValueKind.Object
-                        && dataElement.TryGetProperty("handle", out var handleElement)
-                        && handleElement.ValueKind == System.Text.Json.JsonValueKind.Number)
-                    {
-                        long val = handleElement.GetInt64();
-                        handle = new IntPtr(val);
-                        return val != 0; // 只有非0才算成功
-                    }
-                    // 情况 B: data 直接是数字 123 (兼容旧版/简化版)
-                    else if (dataElement.ValueKind == System.Text.Json.JsonValueKind.Number)
-                    {
-                        long val = dataElement.GetInt64();
-                        handle = new IntPtr(val);
-                        return val != 0;
-                    }
+                    data = dataEl.Deserialize<T>(_parseOpts);
                 }
+                return true;
+            }
 
-                // 如果走到这里，说明 "ok": true 但没读到有效的 handle
-                errMsg = "Missing or invalid 'handle' in data object";
-                return false;
-            }
-            else
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("error", out var errEl))
             {
-                // 处理错误情况
-                if (root.TryGetProperty("error", out var errorElement))
-                {
-                    if (errorElement.TryGetProperty("code", out var codeEl))
-                        errCode = codeEl.GetString() ?? string.Empty;
-                    if (errorElement.TryGetProperty("message", out var msgEl))
-                        errMsg = msgEl.GetString() ?? string.Empty;
-                }
-                return false;
+                if (errEl.TryGetProperty("code", out var c)) errorCode = c.GetString();
+                if (errEl.TryGetProperty("message", out var m)) errorMessage = m.GetString();
             }
-        } catch (Exception ex)
+            return false;
+        }
+        catch (Exception ex)
         {
-            errMsg = $"JSON parse error: {ex.Message}";
+            errorCode = "GEN_INVALID_MESSAGE";
+            errorMessage = $"Invalid JSON envelope from core: {ex.Message}";
             return false;
         }
     }
 
-    private static bool IsEnvelopeOk(string json, out string? errCode, out string? errMsg)
+    /// <summary>
+    /// 要求 envelope 为成功；否则抛出带 Core 错误码/消息的统一异常。
+    /// </summary>
+    private static void RequireOk(string? json, string operation)
     {
-        errCode = null;
-        errMsg = null;
-        try
+        if (!TryParseEnvelope<JsonElement>(json, out _, out var errorCode, out var errorMessage))
         {
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("ok", out var okEl) && okEl.ValueKind == JsonValueKind.True)
-                return true;
-            if (doc.RootElement.TryGetProperty("error", out var errEl))
-            {
-                if (errEl.TryGetProperty("code", out var c)) errCode = c.GetString();
-                if (errEl.TryGetProperty("message", out var m)) errMsg = m.GetString();
-            }
-            return false;
+            throw new InvalidOperationException(
+                $"{operation} failed: {errorCode ?? "UNKNOWN"} - {errorMessage ?? "Unknown error"}");
         }
-        catch
+    }
+
+    /// <summary>
+    /// 从 init envelope 的 data 节点提取句柄（对象形式或兼容的数字形式）。
+    /// </summary>
+    private static IntPtr ExtractHandle(JsonElement dataEl, out string? error)
+    {
+        error = null;
+
+        if (dataEl.ValueKind == JsonValueKind.Object
+            && dataEl.TryGetProperty("handle", out var handleElement)
+            && handleElement.ValueKind == JsonValueKind.Number)
         {
-            errCode = "GEN_INVALID_MESSAGE";
-            errMsg = "Invalid JSON envelope from core.";
-            return false;
+            return new IntPtr(handleElement.GetInt64());
         }
+
+        if (dataEl.ValueKind == JsonValueKind.Number)
+        {
+            return new IntPtr(dataEl.GetInt64());
+        }
+
+        error = "Missing or invalid 'handle' in data object";
+        return IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// cb_list_peers 返回的原始设备 DTO。字段名与 Core JSON 一致，再映射到 <see cref="Core.Models.Events.PeerMetaPayload"/>。
+    /// </summary>
+    private sealed class PeerDto
+    {
+        public PeerDto()
+        {
+        }
+
+        [JsonPropertyName("device_id")]
+        public string? DeviceId { get; set; }
+
+        [JsonPropertyName("device_name")]
+        public string? DeviceName { get; set; }
+
+        [JsonPropertyName("state")]
+        public string? State { get; set; }
+
+        [JsonPropertyName("last_seen_ts_ms")]
+        public long? LastSeenTsMs { get; set; }
+
+        [JsonPropertyName("share_to_peer")]
+        public bool? ShareToPeer { get; set; }
+
+        [JsonPropertyName("accept_from_peer")]
+        public bool? AcceptFromPeer { get; set; }
     }
 
     // [FIX] 确保 FindCoreDll 被 InitializeAsync 调用
@@ -500,17 +611,29 @@ public sealed class CoreHostService : ICoreHostService
 
     public async Task IngestLocalCopy(string snapshotJson)
     {
-        if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
+        if (State != CoreState.Ready)
             return;
 
         await Task.Run(() =>
         {
             try
             {
-                // 调用 Core FFI
-                var ptr = CoreInterop.cb_ingest_local_copy(_coreHandle, snapshotJson);
+                var ptr = IntPtr.Zero;
+                if (!TryUseHandle(h =>
+                    {
+                        // 调用 Core FFI；返回指针在锁外释放
+                        ptr = CoreInterop.cb_ingest_local_copy(h, snapshotJson);
+                        return true;
+                    }))
+                {
+                    return;
+                }
+
                 // 释放返回值内存（Core返回通常是确认信息或空，这里暂不处理返回值内容，但必须释放）
-                CoreInterop.cb_free_string(ptr);
+                if (ptr != IntPtr.Zero)
+                {
+                    CoreInterop.cb_free_string(ptr);
+                }
             } catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"IngestLocalCopy failed: {ex}");
@@ -521,7 +644,7 @@ public sealed class CoreHostService : ICoreHostService
 
     public async Task<HistoryPage> ListHistoryAsync(HistoryQuery query)
     {
-        if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
+        if (State != CoreState.Ready)
         {
             return new HistoryPage();
         }
@@ -530,7 +653,26 @@ public sealed class CoreHostService : ICoreHostService
         {
             try
             {
-                return CoreInterop.ListHistory(_coreHandle, query);
+                var queryJson = JsonSerializer.Serialize(query, _jsonOpts);
+                var ptr = IntPtr.Zero;
+                if (!TryUseHandle(h =>
+                    {
+                        ptr = CoreInterop.cb_list_history(h, queryJson);
+                        return true;
+                    }))
+                {
+                    return new HistoryPage();
+                }
+
+                var json = CoreInterop.PtrToStringAndFree(ptr);
+                if (string.IsNullOrEmpty(json))
+                {
+                    return new HistoryPage();
+                }
+
+                return TryParseEnvelope<HistoryPage>(json, out var page, out _, out _) && page is not null
+                    ? page
+                    : new HistoryPage();
             } catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"ListHistoryAsync failed: {ex.Message}");
@@ -575,58 +717,8 @@ public sealed class CoreHostService : ICoreHostService
         }
     }
 
-    public async Task IngestLocalCopyAsync(ClipboardSnapshot snapshot)
-    {
-        if (State != CoreState.Ready)
-            return;
-
-        await Task.Run(() =>
-        {
-            try
-            {
-                // 构造符合 Rust TextDto 结构的匿名对象
-                var textDto = new
-                {
-                    utf8 = snapshot.Data,      // 对应 Rust: utf8: String
-                    mime = snapshot.MimeType   // 对应 Rust: mime: Option<String> (可选)
-                };
-
-                var ingestDto = new
-                {
-                    // 1. 对应 Rust: #[serde(rename = "type")] ty
-                    type = "ClipboardSnapshot",
-
-                    // 2. 对应 Rust: ShareMode enum (snake_case)
-                    share_mode = "local_only",
-
-                    // 3. 对应 Rust: ts_ms
-                    ts_ms = snapshot.Timestamp,
-
-                    // 4. 对应 Rust: SnapshotKind enum (snake_case)
-                    kind = "text", // 暂时只处理文本，图片逻辑需另外写
-
-                    // 5. 对应 Rust: text: Option<TextDto>
-                    text = textDto
-                };
-
-                // 序列化
-                var json = JsonSerializer.Serialize(ingestDto, _jsonOpts);
-
-                // 调用 Core
-                var resPtr = CoreInterop.cb_ingest_local_copy(_coreHandle, json);
-
-                // 获取结果
-                var resJson = CoreInterop.PtrToStringAndFree(resPtr);
-            } catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[CoreHostService] Ingest failed: {ex}");
-            }
-        });
-    }
-
     public async Task<string> EnsureContentCachedAsync(string itemId, string? fileId = null)
     {
-
         return await Task.Run(() =>
         {
             var req = new
@@ -635,24 +727,33 @@ public sealed class CoreHostService : ICoreHostService
                 file_id = fileId,
                 part = "content"
             };
-            var json = JsonSerializer.Serialize(req, _jsonOpts);
+            var requestJson = JsonSerializer.Serialize(req, _jsonOpts);
 
+            var resPtr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
+                {
+                    resPtr = CoreInterop.cb_ensure_content_cached(h, requestJson);
+                    return true;
+                }))
+            {
+                throw new InvalidOperationException("ensure_content_cached failed: Core is not ready");
+            }
 
-            var resPtr = CoreInterop.cb_ensure_content_cached(_coreHandle, json);
             var resJson = CoreInterop.PtrToStringAndFree(resPtr);
 
+            if (!TryParseEnvelope<JsonElement>(resJson, out var dataEl, out var errCode, out var errMsg))
+            {
+                throw new Exception($"ensure_content_cached failed: {errCode} - {errMsg}: {resJson}");
+            }
 
-            using var doc = JsonDocument.Parse(resJson);
-            var root = doc.RootElement;
-
-            if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
-                throw new Exception($"ensure_content_cached failed: {resJson}");
-
-            var tid = root.GetProperty("data").GetProperty("transfer_id").GetString();
-            if (string.IsNullOrWhiteSpace(tid))
+            if (dataEl.ValueKind != JsonValueKind.Object
+                || !dataEl.TryGetProperty("transfer_id", out var tidEl)
+                || string.IsNullOrWhiteSpace(tidEl.GetString()))
+            {
                 throw new Exception($"ensure_content_cached missing transfer_id: {resJson}");
+            }
 
-            return tid!;
+            return tidEl.GetString()!;
         });
     }
 
@@ -661,61 +762,46 @@ public sealed class CoreHostService : ICoreHostService
     /// </summary>
     public List<Core.Models.Events.PeerMetaPayload> ListPeers()
     {
-        if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
+        if (State != CoreState.Ready)
         {
             return new List<Core.Models.Events.PeerMetaPayload>();
         }
 
         try
         {
-            var ptr = CoreInterop.cb_list_peers(_coreHandle);
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
+                {
+                    ptr = CoreInterop.cb_list_peers(h);
+                    return true;
+                }))
+            {
+                return new List<Core.Models.Events.PeerMetaPayload>();
+            }
+
             var json = CoreInterop.PtrToStringAndFree(ptr);
 
             if (string.IsNullOrEmpty(json))
                 return new List<Core.Models.Events.PeerMetaPayload>();
 
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
+            if (!TryParseEnvelope<List<PeerDto>>(json, out var dtos, out _, out _) || dtos is null)
                 return new List<Core.Models.Events.PeerMetaPayload>();
 
-            if (!root.TryGetProperty("data", out var dataEl))
-                return new List<Core.Models.Events.PeerMetaPayload>();
-
-            var peers = new List<Core.Models.Events.PeerMetaPayload>();
-            if (dataEl.ValueKind == JsonValueKind.Array)
+            var peers = new List<Core.Models.Events.PeerMetaPayload>(dtos.Count);
+            foreach (var dto in dtos)
             {
-                foreach (var peerEl in dataEl.EnumerateArray())
+                // 与旧的逐字段解析保持一致：缺失字段走默认值，state == "Online" 即在线。
+                var stateStr = dto.State ?? "Offline";
+                peers.Add(new Core.Models.Events.PeerMetaPayload
                 {
-                    var peer = new Core.Models.Events.PeerMetaPayload
-                    {
-                        DeviceId = peerEl.TryGetProperty("device_id", out var did) ? did.GetString() ?? string.Empty : string.Empty,
-                        Name = peerEl.TryGetProperty("device_name", out var name) ? name.GetString() ?? "Unknown" : "Unknown",
-                        IsOnline = peerEl.TryGetProperty("state", out var stateEl) 
-                            ? stateEl.GetString() == "Online" 
-                            : false,
-                        LastSeen = peerEl.TryGetProperty("last_seen_ts_ms", out var lastSeen) 
-                            ? lastSeen.GetInt64() 
-                            : 0,
-                        ShareToPeer = peerEl.TryGetProperty("share_to_peer", out var shareTo) 
-                            ? shareTo.GetBoolean() 
-                            : true,
-                        AcceptFromPeer = peerEl.TryGetProperty("accept_from_peer", out var acceptFrom) 
-                            ? acceptFrom.GetBoolean() 
-                            : true,
-                    };
-
-                    // 转换连接状态
-                    if (peerEl.TryGetProperty("state", out var state))
-                    {
-                        var stateStr = state.GetString() ?? "Offline";
-                        peer.ConnectionState = stateStr;
-                        peer.IsOnline = stateStr == "Online";
-                    }
-
-                    peers.Add(peer);
-                }
+                    DeviceId = dto.DeviceId ?? string.Empty,
+                    Name = dto.DeviceName ?? "Unknown",
+                    IsOnline = stateStr == "Online",
+                    LastSeen = dto.LastSeenTsMs ?? 0,
+                    ShareToPeer = dto.ShareToPeer ?? true,
+                    AcceptFromPeer = dto.AcceptFromPeer ?? true,
+                    ConnectionState = stateStr,
+                });
             }
 
             return peers;
@@ -732,7 +818,7 @@ public sealed class CoreHostService : ICoreHostService
     /// </summary>
     public void SetPeerPolicy(string peerId, bool? shareTo, bool? acceptFrom)
     {
-        if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
+        if (State != CoreState.Ready)
         {
             throw new InvalidOperationException("Core is not ready");
         }
@@ -748,22 +834,17 @@ public sealed class CoreHostService : ICoreHostService
 
             var json = JsonSerializer.Serialize(policy, _jsonOpts);
 
-            var ptr = CoreInterop.cb_set_peer_policy(_coreHandle, json);
-            var result = CoreInterop.PtrToStringAndFree(ptr);
-
-            using var doc = JsonDocument.Parse(result);
-            var root = doc.RootElement;
-
-            if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
-            {
-                var errMsg = "Unknown error";
-                if (root.TryGetProperty("error", out var errEl))
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
                 {
-                    if (errEl.TryGetProperty("message", out var msgEl))
-                        errMsg = msgEl.GetString() ?? errMsg;
-                }
-                throw new Exception($"SetPeerPolicy failed: {errMsg}");
+                    ptr = CoreInterop.cb_set_peer_policy(h, json);
+                    return true;
+                }))
+            {
+                throw new InvalidOperationException("Core is not ready");
             }
+
+            RequireOk(CoreInterop.PtrToStringAndFree(ptr), "SetPeerPolicy");
         }
         catch (Exception ex)
         {
@@ -776,31 +857,24 @@ public sealed class CoreHostService : ICoreHostService
     {
         try
         {
-            if (_coreHandle == IntPtr.Zero)
-                throw new InvalidOperationException("Core not initialized");
-
             var request = new
             {
                 peer_id = peerId
             };
 
             var json = JsonSerializer.Serialize(request, _jsonOpts);
-            var ptr = CoreInterop.cb_clear_peer_fingerprint(_coreHandle, json);
-            var result = CoreInterop.PtrToStringAndFree(ptr);
 
-            using var doc = JsonDocument.Parse(result);
-            var root = doc.RootElement;
-
-            if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
-            {
-                var errMsg = "Unknown error";
-                if (root.TryGetProperty("error", out var errEl))
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
                 {
-                    if (errEl.TryGetProperty("message", out var msgEl))
-                        errMsg = msgEl.GetString() ?? errMsg;
-                }
-                throw new Exception($"ClearPeerFingerprint failed: {errMsg}");
+                    ptr = CoreInterop.cb_clear_peer_fingerprint(h, json);
+                    return true;
+                }))
+            {
+                throw new InvalidOperationException("Core not initialized");
             }
+
+            RequireOk(CoreInterop.PtrToStringAndFree(ptr), "ClearPeerFingerprint");
         }
         catch (Exception ex)
         {
@@ -813,25 +887,17 @@ public sealed class CoreHostService : ICoreHostService
     {
         try
         {
-            if (_coreHandle == IntPtr.Zero)
-                throw new InvalidOperationException("Core not initialized");
-
-            var ptr = CoreInterop.cb_clear_local_cert(_coreHandle);
-            var result = CoreInterop.PtrToStringAndFree(ptr);
-
-            using var doc = JsonDocument.Parse(result);
-            var root = doc.RootElement;
-
-            if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
-            {
-                var errMsg = "Unknown error";
-                if (root.TryGetProperty("error", out var errEl))
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
                 {
-                    if (errEl.TryGetProperty("message", out var msgEl))
-                        errMsg = msgEl.GetString() ?? errMsg;
-                }
-                throw new Exception($"ClearLocalCert failed: {errMsg}");
+                    ptr = CoreInterop.cb_clear_local_cert(h);
+                    return true;
+                }))
+            {
+                throw new InvalidOperationException("Core not initialized");
             }
+
+            RequireOk(CoreInterop.PtrToStringAndFree(ptr), "ClearLocalCert");
         }
         catch (Exception ex)
         {
@@ -842,16 +908,442 @@ public sealed class CoreHostService : ICoreHostService
 
     public Task DeleteItemLocalAsync(string itemId)
     {
-        if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
+        if (State != CoreState.Ready)
             throw new InvalidOperationException("Core is not ready");
-        return Task.Run(() => CoreInterop.DeleteItemLocal(_coreHandle, itemId));
+
+        return Task.Run(() =>
+        {
+            var itemIdJson = JsonSerializer.Serialize(new { item_id = itemId }, _jsonOpts);
+
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
+                {
+                    ptr = CoreInterop.cb_delete_item_local(h, itemIdJson);
+                    return true;
+                }))
+            {
+                throw new InvalidOperationException("Core is not ready");
+            }
+
+            RequireOk(CoreInterop.PtrToStringAndFree(ptr), "DeleteItemLocal");
+        });
     }
 
     public Task DeleteItemGlobalAsync(string itemId)
     {
-        if (State != CoreState.Ready || _coreHandle == IntPtr.Zero)
+        if (State != CoreState.Ready)
             throw new InvalidOperationException("Core is not ready");
-        return Task.Run(() => CoreInterop.DeleteItemGlobal(_coreHandle, itemId));
+
+        return Task.Run(() =>
+        {
+            var itemIdJson = JsonSerializer.Serialize(new { item_id = itemId }, _jsonOpts);
+
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
+                {
+                    ptr = CoreInterop.cb_delete_item_global(h, itemIdJson);
+                    return true;
+                }))
+            {
+                throw new InvalidOperationException("Core is not ready");
+            }
+
+            RequireOk(CoreInterop.PtrToStringAndFree(ptr), "DeleteItemGlobal");
+        });
+    }
+
+    // ==========================================================
+    // 9. 日志 (Logs) - UI 层通过 Core Bridge 访问，不再直接调用 CoreInterop
+    // ==========================================================
+
+    /// <summary>
+    /// 调用 cb_logs_write 写入一条日志；返回核心分配的日志 ID，核心未就绪时返回 0。
+    /// 线程安全，可在后台线程调用。
+    /// </summary>
+    public Task<long> WriteLogAsync(int level, string component, string category, string messageEn,
+        string? messageZhCn = null, string? exception = null, string? propsJson = null, long tsUtc = 0)
+    {
+        if (State != CoreState.Ready)
+        {
+            return Task.FromResult(0L);
+        }
+
+        return Task.Run(() =>
+        {
+            long id = 0;
+            if (!TryUseHandle(h =>
+                {
+                    id = WriteLogCore(h, level, component, category, messageEn, messageZhCn, exception, propsJson, tsUtc);
+                    return true;
+                }))
+            {
+                return 0L;
+            }
+
+            return id;
+        });
+    }
+
+    public Task<List<LogRow>> QueryLogsLatestAsync(int levelMin, string? like, int limit, string? lang = null)
+    {
+        return QueryLogsAsync("cb_logs_query_latest", h =>
+        {
+            var rc = CoreInterop.LogsQueryLatestRaw(h, levelMin, like, limit, lang, out var ptr);
+            return (rc, ptr);
+        });
+    }
+
+    public Task<List<LogRow>> QueryLogsAfterIdAsync(long afterId, int levelMin, string? like, int limit, string? lang = null)
+    {
+        return QueryLogsAsync("cb_logs_query_after_id", h =>
+        {
+            var rc = CoreInterop.LogsQueryAfterIdRaw(h, afterId, levelMin, like, limit, lang, out var ptr);
+            return (rc, ptr);
+        });
+    }
+
+    public Task<List<LogRow>> QueryLogsBeforeIdAsync(long beforeId, int levelMin, string? like, int limit, string? lang = null)
+    {
+        return QueryLogsAsync("cb_logs_query_before_id", h =>
+        {
+            var rc = CoreInterop.LogsQueryBeforeIdRaw(h, beforeId, levelMin, like, limit, lang, out var ptr);
+            return (rc, ptr);
+        });
+    }
+
+    public Task<List<LogRow>> QueryLogsRangeAsync(long startMs, long endMs, int levelMin, string? like, int limit, int offset, string? lang = null)
+    {
+        return QueryLogsAsync("cb_logs_query_range", h =>
+        {
+            var rc = CoreInterop.LogsQueryRangeRaw(h, startMs, endMs, levelMin, like, limit, offset, lang, out var ptr);
+            return (rc, ptr);
+        });
+    }
+
+    /// <summary>
+    /// 日志查询的统一骨架：句柄锁内只做 P/Invoke 并接管返回指针，JSON 解析在锁外完成。
+    /// </summary>
+    private Task<List<LogRow>> QueryLogsAsync(string operation, Func<IntPtr, (int Rc, IntPtr JsonPtr)> invoke)
+    {
+        if (State != CoreState.Ready)
+        {
+            return Task.FromResult(new List<LogRow>());
+        }
+
+        return Task.Run(() =>
+        {
+            var result = (Rc: 0, JsonPtr: IntPtr.Zero);
+            if (!TryUseHandle(h =>
+                {
+                    result = invoke(h);
+                    return true;
+                }))
+            {
+                return new List<LogRow>();
+            }
+
+            var json = CoreInterop.PtrToStringAndFree(result.JsonPtr);
+            if (result.Rc != 0)
+            {
+                throw new Exception($"{operation} failed: {result.Rc}");
+            }
+
+            return TryParseEnvelope<List<LogRow>>(json, out var rows, out _, out _) && rows is not null
+                ? rows
+                : new List<LogRow>();
+        });
+    }
+
+    public Task<long> DeleteLogsBeforeAsync(long cutoffMs)
+    {
+        if (State != CoreState.Ready)
+        {
+            return Task.FromResult(0L);
+        }
+
+        return Task.Run(() =>
+        {
+            long deleted = 0;
+            var rc = 0;
+            if (!TryUseHandle(h =>
+                {
+                    rc = CoreInterop.cb_logs_delete_before(h, cutoffMs, out deleted);
+                    return true;
+                }))
+            {
+                return 0L;
+            }
+
+            if (rc != 0)
+            {
+                throw new Exception($"cb_logs_delete_before failed: {rc}");
+            }
+
+            return deleted;
+        });
+    }
+
+    public Task<long> DeleteLogsByIdsAsync(long[] ids)
+    {
+        if (ids is null)
+        {
+            throw new ArgumentNullException(nameof(ids));
+        }
+
+        if (State != CoreState.Ready)
+        {
+            return Task.FromResult(0L);
+        }
+
+        return Task.Run(() =>
+        {
+            var idsJson = JsonSerializer.Serialize(ids);
+
+            long deleted = 0;
+            var rc = 0;
+            if (!TryUseHandle(h =>
+                {
+                    rc = CoreInterop.cb_logs_delete_by_ids(h, idsJson, out deleted);
+                    return true;
+                }))
+            {
+                return 0L;
+            }
+
+            if (rc != 0)
+            {
+                throw new Exception($"cb_logs_delete_by_ids failed: {rc}");
+            }
+
+            return deleted;
+        });
+    }
+
+    public Task<LogStats> GetLogsStatsAsync()
+    {
+        if (State != CoreState.Ready)
+        {
+            return Task.FromResult(new LogStats());
+        }
+
+        return Task.Run(() =>
+        {
+            var ptr = IntPtr.Zero;
+            var rc = 0;
+            if (!TryUseHandle(h =>
+                {
+                    rc = CoreInterop.cb_logs_stats(h, out ptr);
+                    return true;
+                }))
+            {
+                return new LogStats();
+            }
+
+            var json = CoreInterop.PtrToStringAndFree(ptr);
+            if (rc != 0)
+            {
+                throw new Exception($"cb_logs_stats failed: {rc}");
+            }
+
+            return TryParseEnvelope<LogStats>(json, out var stats, out _, out _) && stats is not null
+                ? stats
+                : new LogStats();
+        });
+    }
+
+    public Task<SourceStats> GetLogsSourceStatsAsync()
+    {
+        if (State != CoreState.Ready)
+        {
+            return Task.FromResult(new SourceStats());
+        }
+
+        return Task.Run(() =>
+        {
+            var ptr = IntPtr.Zero;
+            var rc = 0;
+            if (!TryUseHandle(h =>
+                {
+                    rc = CoreInterop.cb_logs_source_stats(h, out ptr);
+                    return true;
+                }))
+            {
+                return new SourceStats();
+            }
+
+            var json = CoreInterop.PtrToStringAndFree(ptr);
+            if (rc != 0)
+            {
+                throw new Exception($"cb_logs_source_stats failed: {rc}");
+            }
+
+            return TryParseEnvelope<SourceStats>(json, out var stats, out _, out _) && stats is not null
+                ? stats
+                : new SourceStats();
+        });
+    }
+
+    public Task<bool> ClearLogsDbAsync()
+    {
+        if (State != CoreState.Ready)
+        {
+            return Task.FromResult(false);
+        }
+
+        return Task.Run(() =>
+        {
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
+                {
+                    ptr = CoreInterop.cb_clear_logs_db(h);
+                    return true;
+                }))
+            {
+                return false;
+            }
+
+            RequireOk(CoreInterop.PtrToStringAndFree(ptr), "ClearLogsDb");
+            return true;
+        });
+    }
+
+    // ==========================================================
+    // 10. 统计与清库 (Stats / Database) - UI 层通过 Core Bridge 访问
+    // ==========================================================
+
+    public Task<CacheStatsResult> QueryCacheStatsAsync(long startTsMs = 0, long endTsMs = 0, int bucketSec = 10)
+    {
+        return QueryStatsAsync("cb_query_cache_stats", startTsMs, endTsMs, bucketSec, (IntPtr h, string json) => CoreInterop.cb_query_cache_stats(h, json), () => new CacheStatsResult());
+    }
+
+    public Task<NetworkStatsResult> QueryNetStatsAsync(long startTsMs = 0, long endTsMs = 0, int bucketSec = 10)
+    {
+        return QueryStatsAsync("cb_query_net_stats", startTsMs, endTsMs, bucketSec, (IntPtr h, string json) => CoreInterop.cb_query_net_stats(h, json), () => new NetworkStatsResult());
+    }
+
+    public Task<ActivityStatsResult> QueryActivityStatsAsync(long startTsMs = 0, long endTsMs = 0, int bucketSec = 60)
+    {
+        return QueryStatsAsync("cb_query_activity_stats", startTsMs, endTsMs, bucketSec, (IntPtr h, string json) => CoreInterop.cb_query_activity_stats(h, json), () => new ActivityStatsResult());
+    }
+
+    private Task<T> QueryStatsAsync<T>(string operation, long startTsMs, long endTsMs, int bucketSec,
+        Func<IntPtr, string, IntPtr> invoke, Func<T> emptyFactory)
+        where T : class
+    {
+        if (State != CoreState.Ready)
+        {
+            return Task.FromResult(emptyFactory());
+        }
+
+        return Task.Run(() =>
+        {
+            var query = new
+            {
+                start_ts_ms = startTsMs,
+                end_ts_ms = endTsMs,
+                bucket_sec = bucketSec
+            };
+            var queryJson = JsonSerializer.Serialize(query, _jsonOpts);
+
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
+                {
+                    ptr = invoke(h, queryJson);
+                    return true;
+                }))
+            {
+                return emptyFactory();
+            }
+
+            var json = CoreInterop.PtrToStringAndFree(ptr);
+            return TryParseEnvelope<T>(json, out var stats, out _, out _) && stats is not null
+                ? stats
+                : emptyFactory();
+        });
+    }
+
+    public Task<bool> ClearCoreDbAsync()
+    {
+        if (State != CoreState.Ready)
+        {
+            return Task.FromResult(false);
+        }
+
+        return Task.Run(() =>
+        {
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
+                {
+                    ptr = CoreInterop.cb_clear_core_db(h);
+                    return true;
+                }))
+            {
+                return false;
+            }
+
+            RequireOk(CoreInterop.PtrToStringAndFree(ptr), "ClearCoreDb");
+            return true;
+        });
+    }
+
+    public Task<bool> ClearCacheAsync()
+    {
+        if (State != CoreState.Ready)
+        {
+            return Task.FromResult(false);
+        }
+
+        return Task.Run(() =>
+        {
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
+                {
+                    ptr = CoreInterop.cb_clear_cache(h);
+                    return true;
+                }))
+            {
+                return false;
+            }
+
+            RequireOk(CoreInterop.PtrToStringAndFree(ptr), "ClearCache");
+            return true;
+        });
+    }
+
+    public Task<bool> ClearStatsDbAsync()
+    {
+        if (State != CoreState.Ready)
+        {
+            return Task.FromResult(false);
+        }
+
+        return Task.Run(() =>
+        {
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
+                {
+                    ptr = CoreInterop.cb_clear_stats_db(h);
+                    return true;
+                }))
+            {
+                return false;
+            }
+
+            RequireOk(CoreInterop.PtrToStringAndFree(ptr), "ClearStatsDb");
+            return true;
+        });
+    }
+
+    private static long WriteLogCore(IntPtr handle, int level, string component, string category, string messageEn,
+        string? messageZhCn, string? exception, string? propsJson, long tsUtc)
+    {
+        var rc = CoreInterop.LogsWriteRaw(handle, level, component, category, messageEn, messageZhCn, exception, propsJson, tsUtc, out var id);
+        if (rc != 0)
+        {
+            throw new Exception($"cb_logs_write failed: {rc}");
+        }
+
+        return id;
     }
 
 }

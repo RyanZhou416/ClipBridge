@@ -27,7 +27,9 @@ public class ActivationService : IActivationService
     public async Task ActivateAsync(object activationArgs)
     {
         // Execute tasks before activation.
-        await InitializeAsync();
+        // 只初始化主题（读取设置），不在此处启动 Core：
+        // Core 初始化会打开 SQLite、生成 TLS 证书、启动 mDNS，不能阻塞窗口创建与激活路径。
+        await InitializeThemeAsync();
 
         if (App.MainWindow == null)
         {
@@ -56,6 +58,9 @@ public class ActivationService : IActivationService
 
         // Execute tasks after activation.
         await StartupAsync();
+
+        // 窗口已经可见，再异步启动 Core 初始化（不阻塞激活路径）
+        StartCoreInitialization();
     }
 
     private async Task HandleActivationAsync(object activationArgs)
@@ -73,16 +78,35 @@ public class ActivationService : IActivationService
         }
     }
 
-    private async Task InitializeAsync()
+    private async Task InitializeThemeAsync()
     {
-        await _themeSelectorService.InitializeAsync().ConfigureAwait(false);
-        await _coreHostService.InitializeAsync().ConfigureAwait(false);
-        await Task.CompletedTask;
+        await _themeSelectorService.InitializeAsync();
     }
 
     private async Task StartupAsync()
     {
         await _themeSelectorService.SetRequestedThemeAsync();
         await Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// 在窗口显示后异步初始化 Core。初始化失败或未登录不影响窗口，
+    /// 状态通过 CoreHostService 的 CoreState / StateChanged / LastError / Diagnostics 反映。
+    /// </summary>
+    private void StartCoreInitialization()
+    {
+        _ = InitializeCoreAsync();
+    }
+
+    private async Task InitializeCoreAsync()
+    {
+        try
+        {
+            await _coreHostService.InitializeAsync();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[ActivationService] Core initialization failed: {ex}");
+        }
     }
 }

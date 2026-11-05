@@ -253,8 +253,8 @@ public sealed partial class SettingsPage : Page
                 return;
             }
 
-            var handle = coreHost.GetHandle();
-            if (handle == IntPtr.Zero)
+            // 使用 Core Bridge 清空数据库
+            if (!await coreHost.ClearCoreDbAsync())
             {
                 var err = new ContentDialog
                 {
@@ -266,12 +266,6 @@ public sealed partial class SettingsPage : Page
                 await err.ShowAsync();
                 return;
             }
-
-            // 使用核心函数清空数据库
-            await Task.Run(() =>
-            {
-                ClipBridgeShell_CS.Interop.CoreInterop.ClearCoreDb(handle);
-            });
 
             var done = new ContentDialog
             {
@@ -327,8 +321,8 @@ public sealed partial class SettingsPage : Page
                 return;
             }
 
-            var handle = coreHost.GetHandle();
-            if (handle == IntPtr.Zero)
+            // 使用 Core Bridge 清空缓存
+            if (!await coreHost.ClearCacheAsync())
             {
                 var err = new ContentDialog
                 {
@@ -340,12 +334,6 @@ public sealed partial class SettingsPage : Page
                 await err.ShowAsync();
                 return;
             }
-
-            // 使用核心函数清空缓存
-            await Task.Run(() =>
-            {
-                ClipBridgeShell_CS.Interop.CoreInterop.ClearCache(handle);
-            });
 
             var done = new ContentDialog
             {
@@ -401,8 +389,8 @@ public sealed partial class SettingsPage : Page
                 return;
             }
 
-            var handle = coreHost.GetHandle();
-            if (handle == IntPtr.Zero)
+            // 使用 Core Bridge 清空统计数据
+            if (!await coreHost.ClearStatsDbAsync())
             {
                 var err = new ContentDialog
                 {
@@ -414,12 +402,6 @@ public sealed partial class SettingsPage : Page
                 await err.ShowAsync();
                 return;
             }
-
-            // 使用核心函数清空统计数据
-            await Task.Run(() =>
-            {
-                ClipBridgeShell_CS.Interop.CoreInterop.ClearStatsDb(handle);
-            });
 
             var done = new ContentDialog
             {
