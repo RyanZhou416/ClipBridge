@@ -125,14 +125,17 @@ public class EventPumpTests
         // 1. Arrange
         var (pump, _, _, transferStore, _) = CreateSystem();
 
-        // 真实契约：cb_core/src/session/actor.rs:1027-1035
-        // {"type":"TRANSFER_PROGRESS","payload":{"transfer_id":"<uuid>","received":n,"total":n}}
-        // 注意：transfer_id 是字符串；该事件目前不含 state / item_id。
+        // 真实契约：cb_core/src/session/actor.rs handle_data_chunk
+        // {"type":"TRANSFER_PROGRESS","payload":{"transfer_id":"<uuid>","item_id":"<uuid>",
+        //   "state":"downloading","received":n,"total":n}}
+        // transfer_id/item_id 都是字符串；state 由 Core 直接给出。
         var json = """
         {
             "type": "TRANSFER_PROGRESS",
             "payload": {
                 "transfer_id": "55555555-5555-5555-5555-555555555555",
+                "item_id": "item-remote-progress",
+                "state": "downloading",
                 "received": 1024,
                 "total": 2048
             }
@@ -147,13 +150,11 @@ public class EventPumpTests
             "TransferStore 应增加 1 条传输记录（TRANSFER_PROGRESS）");
         var transfer = transferStore.Transfers[0];
         Assert.AreEqual("55555555-5555-5555-5555-555555555555", transfer.TransferId);
-        // 核心进度载荷没有 state，外壳按事件语义补 "downloading"
+        Assert.AreEqual("item-remote-progress", transfer.ItemId);
         Assert.AreEqual("downloading", transfer.State);
         Assert.AreEqual(1024L, transfer.Received);
         Assert.AreEqual(2048L, transfer.Total);
         Assert.AreEqual(0.5, transfer.Progress, 0.001, "进度计算应为 50%");
-        // 核心本次载荷不含 item_id（详见实现报告），不得伪造
-        Assert.IsNull(transfer.ItemId);
 
         // 幂等性：同一 transfer_id 的后续进度应更新原行而不是新增
         var second = """
@@ -161,6 +162,8 @@ public class EventPumpTests
             "type": "TRANSFER_PROGRESS",
             "payload": {
                 "transfer_id": "55555555-5555-5555-5555-555555555555",
+                "item_id": "item-remote-progress",
+                "state": "downloading",
                 "received": 2048,
                 "total": 2048
             }
@@ -213,6 +216,63 @@ public class EventPumpTests
         Assert.AreEqual("item-remote-001", local.ItemId);
         Assert.AreEqual("C:\\cache\\blobs\\0123abcd", local.LocalPath);
         Assert.AreEqual("text/plain", local.Mime);
+
+        pump.Shutdown();
+    }
+
+    [TestMethod]
+    public async Task Enqueue_ContentCached_ShouldCompleteTransfer()
+    {
+        // 1. Arrange：先让进度事件建出一行 downloading
+        var (pump, _, _, transferStore, _) = CreateSystem();
+
+        var progressJson = """
+        {
+            "type": "TRANSFER_PROGRESS",
+            "payload": {
+                "transfer_id": "tr-cached-002",
+                "item_id": "item-remote-002",
+                "state": "downloading",
+                "received": 512,
+                "total": 1024
+            }
+        }
+        """;
+        pump.Enqueue(progressJson);
+        Assert.IsTrue(await WaitUntilAsync(() =>
+                transferStore.Transfers.Count == 1 && transferStore.Transfers[0].State == "downloading"),
+            "CONTENT_CACHED 之前应有 1 条 downloading 传输");
+
+        // 真实契约：cb_core/src/session/actor.rs handle_content_end（CONTENT_CACHED）
+        var cachedJson = """
+        {
+            "type": "CONTENT_CACHED",
+            "payload": {
+                "transfer_id": "tr-cached-002",
+                "item_id": "item-remote-002",
+                "file_id": null,
+                "local_ref": {
+                    "local_path": "C:\\cache\\blobs\\4567efgh",
+                    "item_id": "item-remote-002",
+                    "mime": "text/plain",
+                    "kind": "text",
+                    "sha256": "4567efgh",
+                    "total_bytes": 1024
+                }
+            }
+        }
+        """;
+
+        // 2. Act
+        pump.Enqueue(cachedJson);
+
+        // 3. Assert：成功缓存必须把传输落到 completed 终态，
+        //    否则 ActiveTransfersCount 永不下降、UI 永远停留在 "Downloading 100%"。
+        Assert.IsTrue(await WaitUntilAsync(() =>
+                transferStore.Transfers.Count == 1 && transferStore.Transfers[0].State == "completed"),
+            "CONTENT_CACHED 后对应传输应进入 completed 终态");
+        Assert.AreEqual("tr-cached-002", transferStore.Transfers[0].TransferId);
+        Assert.AreEqual("item-remote-002", transferStore.Transfers[0].ItemId);
 
         pump.Shutdown();
     }

@@ -62,6 +62,24 @@ public class TransferStore
     /// <summary>兼容旧调用名。</summary>
     public void Update(TransferUpdatePayload update) => Upsert(update);
 
+    /// <summary>
+    /// 把一次成功缓存（CONTENT_CACHED）对应的传输标记为 completed 终态。
+    /// 复用 <see cref="Upsert"/> 的“终态不回退”保护；CONTENT_CACHED 不含字节数，
+    /// 因此完成行不保留进度数值（UI 只按 state 判断是否仍在传输）。
+    /// </summary>
+    public void Complete(string transferId, string? itemId = null)
+    {
+        if (string.IsNullOrWhiteSpace(transferId))
+            return;
+
+        Upsert(new TransferUpdatePayload
+        {
+            TransferId = transferId,
+            ItemId = string.IsNullOrWhiteSpace(itemId) ? null : itemId,
+            State = "completed",
+        });
+    }
+
     private static long NowMs() => Environment.TickCount64;
 
     private static bool IsTerminalState(string? state) =>

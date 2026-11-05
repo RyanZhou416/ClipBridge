@@ -193,6 +193,11 @@ public class EventPumpService
 
                     string? itemId = payload.TryGetProperty("item_id", out var iidEl) ? iidEl.GetString() : null;
 
+                    // 缓存成功即传输成功终态：即使 awaiter 已被 Resolve，也要把 TransferStore 的
+                    // 对应行落到 completed（终态不回退），否则 ActiveTransfersCount 永不下降、
+                    // UI 会一直显示 "Downloading 100%"。
+                    _transferStore.Complete(transferId!, itemId);
+
                     string? textUtf8 = null;
                     string? localPath = null;
                     string? mime = null;
@@ -221,9 +226,10 @@ public class EventPumpService
             // --- 传输进度（关键：否则 TransferStore 永远为空、仪表盘活动传输恒为 0）
             case "TRANSFER_PROGRESS":
                 {
-                    // Core 实际载荷（cb_core/src/session/actor.rs:1027-1035）只有：
-                    //   { "transfer_id": string, "received": number, "total": number }
-                    // 不含 state / item_id；外壳为 UI 契约补默认状态 "downloading"。
+                    // Core 实际载荷（cb_core/src/session/actor.rs handle_data_chunk）：
+                    //   { "transfer_id": string, "item_id": string, "state": "downloading",
+                    //     "received": number, "total": number }
+                    // 兼容旧版缺 state 的形态：外壳补默认状态 "downloading"。
                     if (payload.ValueKind != JsonValueKind.Object)
                         return;
 
@@ -241,7 +247,8 @@ public class EventPumpService
             // --- 传输取消（入口点被取消时发出）
             case "TRANSFER_CANCELLED":
                 {
-                    // Core 载荷（cb_core/src/session/actor.rs:1152-1156）：{ "transfer_id": string }
+                    // Core 载荷（cb_core/src/session/actor.rs handle_content_cancel）：
+                    //   { "transfer_id": string, "item_id": string, "state": "cancelled" }
                     if (payload.ValueKind != JsonValueKind.Object)
                         return;
 
