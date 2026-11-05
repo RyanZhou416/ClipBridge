@@ -8,6 +8,16 @@
     <Nullable>enable</Nullable>
     <UseWinUI>true</UseWinUI>
 	<WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
+    <!--
+      Microsoft.NET.Test.Sdk only forces OutputType=Exe (and the generated entry point that
+      produces a *.runtimeconfig.json) when UseWinUI != 'true'. Without a runtimeconfig the
+      VSTest testhost aborts with "testhost.runtimeconfig.json was not found". The WinUI
+      app-model is not needed to run this suite (all tests are plain [TestMethod]s), so force
+      the normal test-host layout while keeping UseWinUI for the MSTest WinUI adapter assets.
+    -->
+    <OutputType>Exe</OutputType>
+    <GenerateProgramFile>true</GenerateProgramFile>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
     <ProjectPriFileName>resources.pri</ProjectPriFileName>
   </PropertyGroup>
   <ItemGroup>

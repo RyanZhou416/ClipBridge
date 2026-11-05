@@ -19,13 +19,16 @@
     <AppxPackageSigningEnabled>False</AppxPackageSigningEnabled>
     <PackageCertificateThumbprint>2394034BFA5A743FA9A4320E10E6475D2A516719</PackageCertificateThumbprint>
     <AppxPackageSigningTimestampDigestAlgorithm>SHA256</AppxPackageSigningTimestampDigestAlgorithm>
-    <AppxAutoIncrementPackageRevision>True</AppxAutoIncrementPackageRevision>
     <AppxSymbolPackageEnabled>False</AppxSymbolPackageEnabled>
     <GenerateTestArtifacts>True</GenerateTestArtifacts>
     <AppxBundle>Auto</AppxBundle>
-    <AppInstallerUri>C:\Users\12693\Downloads</AppInstallerUri>
     <AppxBundlePlatforms>x64</AppxBundlePlatforms>
-    <RustTargetDir>C:\Project\ClipBridge\target\x86_64-pc-windows-msvc\release</RustTargetDir>
+    <!--
+      缺省从工作区根目录推导 Rust 输出目录（repo/target/x86_64-pc-windows-msvc/release）。
+      本文件位于 repo/platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/，所以要上溯 4 层。
+      仍然可以用 -p:RustTargetDir=<dir> 覆盖，避免把某台开发机的绝对路径写进仓库。
+    -->
+    <RustTargetDir Condition="'$(RustTargetDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\..\target\x86_64-pc-windows-msvc\release</RustTargetDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -90,9 +93,41 @@
     <HasPackageAndPublishMenu>true</HasPackageAndPublishMenu>
   </PropertyGroup>
   
+  <!--
+    构建前先编译 Rust core-ffi，保证 C# 侧永远使用刚构建的 core_ffi_windows.dll。
+    背景：此前的流程只按路径 Exists 拷贝 DLL，结果静默加载了一个 6 个月前的旧 DLL，
+    导致所有 Rust 侧修复（包括安全修复）根本没有进入实际运行的程序。
+    - 需要 Rust 工具链；cargo 是增量的，未改动时通常 <1s。
+    - 用 -p:SkipRustBuild=true 可跳过（例如 CI 的纯 C# 作业）。
+    - cargo 不可用或构建失败时只发 Warning，不阻断 C# 构建，但会明确提示 DLL 可能是旧的。
+  -->
+  <PropertyGroup>
+    <CliBridgeRepoRoot>$(MSBuildThisFileDirectory)..\..\..\..</CliBridgeRepoRoot>
+    <SkipRustBuild Condition="'$(SkipRustBuild)' == ''">false</SkipRustBuild>
+  </PropertyGroup>
+
+  <Target Name="BuildCoreFfi" BeforeTargets="BeforeBuild" Condition="'$(SkipRustBuild)' != 'true'">
+    <Message Importance="high" Text="[core-ffi] cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc" />
+    <Exec Command="cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc"
+          WorkingDirectory="$(CliBridgeRepoRoot)"
+          IgnoreExitCode="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="normal">
+      <Output TaskParameter="ExitCode" PropertyName="RustBuildExitCode" />
+    </Exec>
+    <Warning Condition="'$(RustBuildExitCode)' != '0'"
+             Text="[core-ffi] cargo build failed (exit $(RustBuildExitCode)); the app will load $(RustTargetDir)\core_ffi_windows.dll which may be STALE. Install the Rust toolchain or pass -p:SkipRustBuild=true." />
+  </Target>
+
   <!-- 备用：复制 core_ffi_windows.dll 到输出目录（Content 项应该已经处理了） -->
   <Target Name="CopyCoreFfiDll" AfterTargets="Build">
     <Message Text="Copying core_ffi_windows.dll from Rust target to $(OutDir)" Importance="high" />
+    <!--
+      Release 构建缺少 core_ffi_windows.dll 时不再静默通过（运行期会 DllNotFoundException，
+      CoreHostService 只会报告 Degraded）。用 -p:SkipCoreFfiCheck=true 可显式关掉该检查。
+    -->
+    <Warning Condition="'$(Configuration)' == 'Release' and '$(SkipCoreFfiCheck)' != 'true' and !Exists('$(RustTargetDir)\core_ffi_windows.dll')"
+             Text="core_ffi_windows.dll was not found in '$(RustTargetDir)'. The resulting app will fail at runtime with DllNotFoundException (CoreHostService reports 'Degraded'). Build the Rust core-ffi crate (cargo build -p core_ffi_windows --release --target x86_64-pc-windows-msvc) or pass -p:RustTargetDir=&lt;dir&gt;. Set -p:SkipCoreFfiCheck=true to suppress this warning." />
     <Copy SourceFiles="$(RustTargetDir)\core_ffi_windows.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('$(RustTargetDir)\core_ffi_windows.dll')" />
   </Target>
 </Project>
