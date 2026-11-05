@@ -57,47 +57,44 @@ type KeyExchange = TripleDh<opaque_ke::Ristretto255, Sha512>;  // Sha512
 据此在 `deny.toml` 对该 advisory 做**带理由的 ignore**，并在 `crypto.rs` 写入约束注释：
 **若将来把 cipher suite 换成 NIST 曲线，必须重新评估该 advisory（不得静默切换）**。
 
-## 4. 遗留的真实安全缺口（比告警更值得处理）
+## 4. 已修复的真实安全缺口：密码拉伸（KSF）
 
-`crypto.rs` 当前是：
+**决策：已启用**，参数取 OWASP 最低档 `Argon2id(19MiB, t=2, p=1)`，实现见
+`crypto.rs` 的 `Argon2idKsf` + `type Ksf = Argon2idKsf`。
 
-```rust
-type Ksf = opaque_ke::ksf::Identity;   // ← 密码拉伸是关掉的
-```
+- **原缺口**：`type Ksf = opaque_ke::ksf::Identity` 等于把密码拉伸整个关掉。KSF 的作用是
+  在 OPRF 之前抬高离线猜测成本，对"用户自选密码 + 陌生设备配对"是实打实的削弱。
+- **实现方式**：用项目已有的 `argon2 0.6` 自己实现 `Ksf`（`opaque-ke` 公开导出了 `ksf`、
+  `errors`，并 `pub use generic_array`），**零新增依赖**；不启用 `opaque-ke` 自带的 argon2
+  实现，以免再引入一份 `argon2 0.5`。
+- **盐**：固定域分离串 `"CB-OPAQUE-KSF-v1"`（不是秘密，只用于与其他 Argon2 用途隔开）。
+- **参数固定**在常量里：`Ksf` trait 要求 `Default`，且参数一旦变化会让已注册的
+  registration record 全部失效（协议级变更）。
 
-OPAQUE 的 KSF 是对密码做 OPRF 前的拉伸，用于**提升离线猜测成本**。
-`Identity` 等于完全没有拉伸 —— 对"用户自选密码 + 陌生设备配对"来说是实打实的削弱。
+### 配套：注册记录缓存
 
-可选修法（零新增依赖：`opaque_ke` 公开导出了 `ksf`、`errors`，并 `pub use generic_array`）：
+`p2p_get_server_registration()` 内部会跑完整注册流程（`ClientRegistration::start/finish`
+各调用一次 KSF），且它在**每次握手**（`handle_opaque_start`）都会被调用。因此加了进程内缓存：
 
-```rust
-#[derive(Default)]
-pub struct Argon2idKsf;
+- 键 = `SHA-512(password)` 前 16 字节 hex（不放明文密码进静态数据；改密码后自动失效）；
+- 命中时 clone `ServerSetup` / `ServerRegistration` 返回。
 
-impl opaque_ke::ksf::Ksf for Argon2idKsf {
-    fn hash<L: opaque_ke::generic_array::ArrayLength<u8>>(
-        &self,
-        input: opaque_ke::generic_array::GenericArray<u8, L>,
-    ) -> Result<opaque_ke::generic_array::GenericArray<u8, L>, opaque_ke::errors::InternalError> {
-        // 用我们已有的 argon2 0.6（cert.rs 已在用），不引入 opaque-ke 的 argon2 0.5。
-        // Argon2id(m=64MiB, t=3, p=1)，固定域分离盐 "CB-OPAQUE-KSF-v1"。
-        // ...
-    }
-}
-```
+### 实测开销（含两次 KSF）
 
-需要 owner 决定的取舍：
+| 构建 | 首次 | 命中缓存 |
+|---|---|---|
+| debug | 237 ms | 22.8 µs |
+| **release** | **11.1 ms** | **2 µs** |
 
-- **登录额外延迟**：Argon2id 64MiB/t=3 约 100~200ms；而 `p2p_get_server_registration`
-  在每次握手里都会被调用（服务端侧），实际可能增加 200~400ms/次登录。
-  折中可用 `m=19MiB, t=2`（OWASP 最低档，约 40~60ms）。
-- **会使已有 registration record 失效**：KSF 变了派生结果就变。项目尚未发布，没有历史包袱 ——
-  正是现在改的时机。
+即开启后每次登录的真实代价约 **11ms**（服务端侧），客户端侧约 5ms —— 不构成性能问题。
+（这比设计时估的 100~200ms 低一个量级，因为 19MiB/t=2 单次在 release 下仅约 5ms。）
 
 ## 5. 决策与后续
 
 - [x] **保留 `opaque-ke`**，不换 Noise、不换成 mTLS+HMAC（安全论证见 §2）。
 - [x] 保持 `^4.0.1` 稳定版，不锁预发布。
 - [x] `RUSTSEC-2026-0387` 按 §3 收窄后在 `deny.toml` 显式 ignore，并写明"换成 NIST 曲线须重新评估"。
-- [ ] **待定**：是否启用 `Argon2id` KSF（§4），以及参数档位（64MiB/t=3 vs 19MiB/t=2）。
+- [x] 启用 `Argon2id KSF`（19MiB / t=2 / p=1）并加注册记录缓存（§4）。
 - [ ] 待上游：`opaque-ke` 升到 RustCrypto 0.11 一代后，`sha2`/`rand` 可跟进、`crypto-bigint` 告警自然消失。
+- [ ] 后续可做（与认证正交）：`PROTOCOL_VERSION` 加 1，使 KSF 变更后的老对端在帧层被明确拒绝，
+      而不是握到一半才失败。
