@@ -38,6 +38,9 @@ pub fn mk_core(sub: &str, gc_history_max_items: i64, gc_cas_max_bytes: i64) -> (
 			gc_cas_max_bytes,
 			..Default::default()
 		},
+
+		// 单元测试不启动网络（避免 bind socket 触发防火墙弹窗）
+		disable_network: true,
 	};
 
 	let sink: Arc<dyn CoreEventSink> = Arc::new(PrintSink);

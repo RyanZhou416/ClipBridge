@@ -6,6 +6,7 @@ use std::time::Duration;
 // 复用 m1_net 的测试脚手架
 use super::m1_net::{create_test_core, list_peers_async, wait_for};
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_m3_1_text_fetch_success() {
 	let shared_uid = format!("m3_text_{}", uuid::Uuid::new_v4());
@@ -137,6 +138,7 @@ async fn test_m3_1_text_fetch_success() {
 	core_b.shutdown();
 }
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_m3_2_image_fetch_success() {
 	let shared_uid = format!("m3_img_{}", uuid::Uuid::new_v4());
@@ -218,6 +220,7 @@ async fn test_m3_2_image_fetch_success() {
 	core_b.shutdown();
 }
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_m3_3_file_fetch_success() {
 	let shared_uid = format!("m3_file_{}", uuid::Uuid::new_v4());

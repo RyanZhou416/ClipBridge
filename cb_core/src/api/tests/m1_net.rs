@@ -56,6 +56,8 @@ where
 		account_password: "test_password".to_string(),
 		data_dir: data_path.clone(),
 		cache_dir: data_path,
+		// 默认由调用方决定；网络测试在 config_modifier 里保持开启
+		disable_network: false,
 		..Default::default()
 	};
 	config_modifier(&mut config);
@@ -103,7 +105,10 @@ fn workspace_target_dir() -> PathBuf {
 
 #[test]
 fn test_core_api_basics() {
-	let (core, _rx, _dir) = create_test_core("basics", "uid_basics", |_| {});
+	// 本测试只验证本地 API，不需要真实网络
+	let (core, _rx, _dir) = create_test_core("basics", "uid_basics", |c| {
+		c.disable_network = true;
+	});
 	let status_json = core.get_status().expect("get_status failed");
 	assert_eq!(status_json["status"], "Running");
 
@@ -113,6 +118,7 @@ fn test_core_api_basics() {
 	core.shutdown();
 }
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_m1_simulation_loopback() {
 	let shared_uid = format!("m1_loopback_secret{}", uuid::Uuid::new_v4());
@@ -144,6 +150,7 @@ async fn test_m1_simulation_loopback() {
 	sleep(Duration::from_millis(200)).await;
 }
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_m1_data_broadcast() {
 	let shared_uid = "m1broadcast";
@@ -192,6 +199,7 @@ async fn test_m1_data_broadcast() {
 	tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_m1_reconnection() {
 	let shared_uid = format!("m1_recon_secret{}", uuid::Uuid::new_v4());
@@ -246,6 +254,7 @@ async fn test_m1_reconnection() {
 	sleep(Duration::from_millis(200)).await;
 }
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_m1_policy_deny() {
 	let shared_uid = "m1_policy_secret";

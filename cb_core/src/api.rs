@@ -17,7 +17,7 @@ use crate::{cas::Cas, logs::LogStore, stats::StatsStore, store::Store, util::now
  *
  * 定义了 Core 启动所需的设备 ID、名称、账户信息、存储路径以及各项限制策略。
  */
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct CoreConfig {
 	pub device_id: String,        // 本机 device_id（先由壳传入）
 	pub device_name: String,      // 设备显示名
@@ -26,6 +26,25 @@ pub struct CoreConfig {
 	pub data_dir: String,         // 持久：core.db
 	pub cache_dir: String,        // 可清空：CAS blobs/tmp
 	pub app_config: AppConfig,
+	/// 为 true 时完全跳过 NetManager（不 bind socket、不启动 mDNS）。
+	/// 默认 false（= 网络开启），保证正式应用行为不变；仅供测试/CI 关闭网络使用。
+	pub disable_network: bool,
+}
+
+/// 手写 Debug：绝不把账号密码写进日志/panic 输出。
+impl std::fmt::Debug for CoreConfig {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("CoreConfig")
+			.field("device_id", &self.device_id)
+			.field("device_name", &self.device_name)
+			.field("account_uid", &self.account_uid)
+			.field("account_password", &"<redacted>")
+			.field("data_dir", &self.data_dir)
+			.field("cache_dir", &self.cache_dir)
+			.field("app_config", &self.app_config)
+			.field("disable_network", &self.disable_network)
+			.finish()
+	}
 }
 
 /**
@@ -180,34 +199,41 @@ impl Core {
 		// --- M1 集成：启动网络管理器 ---
 		// 注意：这里假设 NetManager::spawn 是同步封装（内部 spawn 异步任务）
 		// 如果是在 FFI 环境且有 Tokio Runtime，这将正常工作。
-		let net_tx = match NetManager::spawn(
-			cfg.clone(),
-			sink.clone(),
-			store_arc.clone(),
-			cas.clone(),
-			log_store_arc.clone(),
-		) {
-			Ok(tx) => {
-				let mut log_store = log_store_arc.lock().unwrap();
-				let _ = log_store.log_info(
-					"Init",
-					"NetManager started successfully",
-					Some("网络管理器启动成功"),
-				);
-				Some(tx)
-			}
-			Err(e) => {
-				let mut log_store = log_store_arc.lock().unwrap();
-				let _ = log_store.log_warn(
-					"Init",
-					&format!(
-						"NetManager failed to start: {e} (continuing without network)"
-					),
-					Some(&format!(
-						"网络管理器启动失败: {e}（将在无网络模式下继续）"
-					)),
-				);
-				None
+		// 测试/CI 可通过 disable_network=true 完全跳过网络启动，避免 bind socket 触发防火墙弹窗。
+		let net_tx = if cfg.disable_network {
+			let mut log_store = log_store_arc.lock().unwrap();
+			let _ = log_store.log_info(
+				"Init",
+				"NetManager disabled by config (tests/CI)",
+				Some("配置已禁用网络管理器（测试/CI）"),
+			);
+			None
+		} else {
+			match NetManager::spawn(
+				cfg.clone(),
+				sink.clone(),
+				store_arc.clone(),
+				cas.clone(),
+				log_store_arc.clone(),
+			) {
+				Ok(tx) => {
+					let mut log_store = log_store_arc.lock().unwrap();
+					let _ = log_store.log_info(
+						"Init",
+						"NetManager started successfully",
+						Some("网络管理器启动成功"),
+					);
+					Some(tx)
+				}
+				Err(e) => {
+					let mut log_store = log_store_arc.lock().unwrap();
+					let _ = log_store.log_warn(
+						"Init",
+						&format!("NetManager failed to start: {e} (continuing without network)"),
+						Some(&format!("网络管理器启动失败: {e}（将在无网络模式下继续）")),
+					);
+					None
+				}
 			}
 		};
 
@@ -564,6 +590,8 @@ impl Core {
 		let account_uid = &self.inner.core_config.account_uid;
 		let mut store = self.inner.store.lock().unwrap();
 		store.delete_peer_fingerprint(account_uid, peer_id)?;
+		// 先释放 DB 锁，再回调壳层事件（避免重入死锁）
+		drop(store);
 
 		// 发送事件通知外壳
 		self.inner.emit_json(serde_json::json!({
@@ -632,6 +660,8 @@ impl Core {
 			"share_to_peer": rule.share_to_peer,
 			"accept_from_peer": rule.accept_from_peer,
 		});
+		// 先释放 DB 锁，再回调壳层事件（避免重入死锁）
+		drop(store);
 		self.inner.emit(event.to_string());
 
 		Ok(())
@@ -642,11 +672,7 @@ impl Core {
 		item_id: &str,
 		file_id: Option<&str>,
 	) -> anyhow::Result<String> {
-		if self
-			.inner
-			.is_shutdown
-			.load(Ordering::Acquire)
-		{
+		if self.inner.is_shutdown.load(Ordering::Acquire) {
 			anyhow::bail!("core shutdown");
 		}
 
@@ -696,7 +722,7 @@ impl Core {
 						} else {
 							self.inner
 								.cas
-								.blob_path(&content.sha256)
+								.blob_path(&content.sha256)?
 								.to_string_lossy()
 								.to_string()
 						};
@@ -760,11 +786,7 @@ impl Core {
 		}
 	}
 
-	pub fn list_history(
-		&self,
-		limit: usize,
-		cursor: Option<i64>,
-	) -> anyhow::Result<Vec<ItemMeta>> {
+	pub fn list_history(&self, limit: usize, cursor: Option<i64>) -> anyhow::Result<Vec<ItemMeta>> {
 		if self.inner.is_shutdown.load(Ordering::Acquire) {
 			anyhow::bail!("core already shutdown");
 		}

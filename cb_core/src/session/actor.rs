@@ -165,20 +165,6 @@ impl SessionActor {
 		let state_ref = Arc::new(Mutex::new(SessionState::TransportReady));
 		let peer_id_ref = Arc::new(Mutex::new(None));
 
-		let fingerprint = match conn.peer_identity() {
-			Some(id) => {
-				let certs = id
-					.downcast::<Vec<rustls::pki_types::CertificateDer>>()
-					.unwrap_or_default();
-				if let Some(cert) = certs.first() {
-					sha256_hex(cert.as_ref())
-				} else {
-					"unknown".to_string()
-				}
-			}
-			None => "unknown".to_string(),
-		};
-
 		let initial_did = expected_peer_id.unwrap_or_else(|| "pending_server".to_string());
 
 		let handle = SessionHandle {
@@ -186,6 +172,18 @@ impl SessionActor {
 			peer_id: peer_id_ref.clone(),
 			state: state_ref.clone(),
 			cmd_tx,
+		};
+
+		// 缺失/空的对端证书视为握手失败：绝不能把 "unknown" 当作指纹写入
+		// trusted_peers，否则 TOFU 会永远“验证通过”。此时不启动 Actor，
+		// 会话标记为 Terminated（对外 Offline），连接随 conn 一起关闭。
+		let fingerprint = match Self::peer_fingerprint(&conn) {
+			Ok(fp) => fp,
+			Err(e) => {
+				eprintln!("[Session] Rejecting session: {e} (fingerprint=unknown, not pinned)");
+				*state_ref.lock().unwrap() = SessionState::Terminated;
+				return handle;
+			}
 		};
 
 		let actor_log_id = initial_did.clone();
@@ -218,6 +216,21 @@ impl SessionActor {
 		handle
 	}
 
+	/// 从 QUIC 连接的对端证书提取 SHA-256 指纹。
+	/// 缺失证书 / 空证书链都返回错误，调用方必须按握手失败处理。
+	fn peer_fingerprint(conn: &Connection) -> Result<String> {
+		let id = conn
+			.peer_identity()
+			.ok_or_else(|| anyhow::anyhow!("peer did not present a TLS client certificate"))?;
+		let certs = id
+			.downcast::<Vec<rustls::pki_types::CertificateDer>>()
+			.unwrap_or_default();
+		let cert = certs
+			.first()
+			.ok_or_else(|| anyhow::anyhow!("peer certificate chain is empty"))?;
+		Ok(sha256_hex(cert.as_ref()))
+	}
+
 	#[allow(clippy::too_many_arguments)]
 	async fn run_actor(
 		role: SessionRole,
@@ -248,7 +261,9 @@ impl SessionActor {
 			let _ = log_store.log_info(
 				"Session",
 				&format!("Session actor spawned: role={role:?}, fingerprint={fingerprint}"),
-				Some(&format!("会话执行器已创建: 角色={role:?}，指纹={fingerprint}")),
+				Some(&format!(
+					"会话执行器已创建: 角色={role:?}，指纹={fingerprint}"
+				)),
 			);
 		}
 
@@ -399,7 +414,9 @@ impl SessionActor {
 				} else {
 					let _ = log_store.log_error(
 						"Session",
-						&format!("Session terminated due to error: device_id={did}, error={reason}"),
+						&format!(
+							"Session terminated due to error: device_id={did}, error={reason}"
+						),
 						Some(&format!("会话因错误终止: 设备ID={did}，错误={reason}")),
 						Some(&reason),
 					);
@@ -468,7 +485,9 @@ impl SessionActor {
 				let _ = log_store.log_debug(
 					"Session",
 					&format!("Data chunk sent: transfer_id={transfer_id}, size={data_size} bytes"),
-					Some(&format!("数据块已发送: 传输ID={transfer_id}，大小={data_size} 字节")),
+					Some(&format!(
+						"数据块已发送: 传输ID={transfer_id}，大小={data_size} 字节"
+					)),
 				);
 				Ok(())
 			}
@@ -677,7 +696,7 @@ impl SessionActor {
 					self.transition_to_online();
 				}
 			}
-			CtrlMsg::AuthFail { code, .. } => anyhow::bail!("Remote AuthFail: {}", code),
+			CtrlMsg::AuthFail { code, .. } => anyhow::bail!("Remote AuthFail: {code}"),
 			CtrlMsg::Ping { ts, msg_id } => {
 				self.send_ctrl(CtrlMsg::Pong {
 					reply_to: msg_id,
@@ -731,7 +750,7 @@ impl SessionActor {
 				}
 			}
 			CtrlMsg::Error { code, message, .. } => {
-				anyhow::bail!("Remote error {}: {:?}", code, message)
+				anyhow::bail!("Remote error {code}: {message:?}")
 			}
 			CtrlMsg::Close { .. } => anyhow::bail!("Remote closed connection"),
 
@@ -799,9 +818,9 @@ impl SessionActor {
 					if ok {
 						if let Some(sha) = &sha_opt {
 							let _ = cas.remove_blob(sha);
-						let now = now_ms();
-						let mut guard = self.store.lock().unwrap();
-						let _ = guard.mark_cache_missing(sha, now);
+							let now = now_ms();
+							let mut guard = self.store.lock().unwrap();
+							let _ = guard.mark_cache_missing(sha, now);
 						}
 						let evt = serde_json::json!({
 							"type": "ITEM_DELETED",
@@ -839,7 +858,14 @@ impl SessionActor {
 			return Ok(());
 		}
 
-		let tmp_path = self.cas.get_tmp_path(&req_id);
+		let tmp_path = match self.cas.get_tmp_path(&req_id) {
+			Ok(p) => p,
+			Err(e) => {
+				// 对端传入非法 transfer_id：拒绝本次传输，但保留会话
+				self.emit_transfer_failed(&req_id, "INVALID_TRANSFER_ID", &e.to_string());
+				return Ok(());
+			}
+		};
 		if let Some(p) = tmp_path.parent() {
 			tokio::fs::create_dir_all(p).await?;
 		}
@@ -993,6 +1019,7 @@ impl SessionActor {
 	async fn handle_data_chunk(&mut self, transfer_id: String, data: bytes::Bytes) -> Result<()> {
 		if let Some(ReceiverState::Receiving {
 			tx,
+			item_id,
 			received_bytes,
 			total_bytes,
 			last_progress_emit,
@@ -1028,6 +1055,8 @@ impl SessionActor {
 					"type": "TRANSFER_PROGRESS",
 					"payload": {
 						"transfer_id": transfer_id,
+						"item_id": item_id.clone(),
+						"state": "downloading",
 						"received": *received_bytes,
 						"total": *total_bytes
 					}
@@ -1144,14 +1173,21 @@ impl SessionActor {
 
 	async fn handle_content_cancel(&mut self, req_id: String, _reason: String) -> Result<()> {
 		if let Some(ReceiverState::Receiving {
-			tx, transfer_id, ..
+			tx,
+			item_id,
+			transfer_id,
+			..
 		}) = self.receivers.remove(&req_id)
 		{
 			let _ = tx.send(ReceiverTaskMsg::Cancel).await;
 
 			let evt = serde_json::json!({
 				"type": "TRANSFER_CANCELLED",
-				"payload": { "transfer_id": transfer_id }
+				"payload": {
+					"transfer_id": transfer_id,
+					"item_id": item_id,
+					"state": "cancelled"
+				}
 			});
 			self.sink.emit(evt.to_string());
 		}
@@ -1242,7 +1278,7 @@ impl SessionActor {
 			// 优先级 2: CAS Blob
 			// 场景: 图片、文本、或者已经被归档的文件，以及 **测试用例** (测试通常只写 CAS)
 			if final_path.is_none() && !target_sha.is_empty() {
-				let blob_path = self.cas.blob_path(&target_sha);
+				let blob_path = self.cas.blob_path(&target_sha)?;
 				if blob_path.exists() {
 					final_path = Some((blob_path, target_sha));
 				}
@@ -1387,7 +1423,9 @@ impl SessionActor {
 				let mut log_store = self.log_store.lock().unwrap();
 				let _ = log_store.log_info(
 					"Session",
-					&format!("Transfer cancelled: transfer_id={transfer_id}, reason=User cancelled"),
+					&format!(
+						"Transfer cancelled: transfer_id={transfer_id}, reason=User cancelled"
+					),
 					Some(&format!("传输已取消: 传输ID={transfer_id}，原因=用户取消")),
 				);
 			}
@@ -1405,7 +1443,9 @@ impl SessionActor {
 				let mut log_store = self.log_store.lock().unwrap();
 				let _ = log_store.log_info(
 					"Session",
-					&format!("Transfer cancelled: transfer_id={transfer_id}, reason=User cancelled"),
+					&format!(
+						"Transfer cancelled: transfer_id={transfer_id}, reason=User cancelled"
+					),
 					Some(&format!("传输已取消: 传输ID={transfer_id}，原因=用户取消")),
 				);
 			}
@@ -1426,7 +1466,7 @@ impl SessionActor {
 		let mut rng = OsRng;
 		let password = self.config.account_password.as_bytes();
 		let start_result = CbClientLogin::start(&mut rng, password)
-			.map_err(|e| anyhow::anyhow!("OPAQUE start failed: {:?}", e))?;
+			.map_err(|e| anyhow::anyhow!("OPAQUE start failed: {e:?}"))?;
 		self.opaque_client_state = Some(start_result.state);
 		let payload = bincode::serialize(&start_result.message)?;
 		self.send_ctrl(CtrlMsg::OpaqueStart {
@@ -1456,7 +1496,7 @@ impl SessionActor {
 				server_response,
 				ClientLoginFinishParameters::default(),
 			)
-			.map_err(|e| anyhow::anyhow!("OPAQUE finish failed: {:?}", e))?;
+			.map_err(|e| anyhow::anyhow!("OPAQUE finish failed: {e:?}"))?;
 		let payload = bincode::serialize(&finish_result.message)?;
 		self.send_ctrl(CtrlMsg::OpaqueFinish {
 			msg_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -1483,7 +1523,7 @@ impl SessionActor {
 			identifier,
 			ServerLoginParameters::default(),
 		)
-		.map_err(|e| anyhow::anyhow!("OPAQUE server start failed: {:?}", e))?;
+		.map_err(|e| anyhow::anyhow!("OPAQUE server start failed: {e:?}"))?;
 		self.opaque_server_state = Some(start_result.state);
 		let payload = bincode::serialize(&start_result.message)?;
 		self.send_ctrl(CtrlMsg::OpaqueResponse {
@@ -1505,7 +1545,7 @@ impl SessionActor {
 			.map_err(|_| anyhow::anyhow!("Invalid OpaqueFinish bytes"))?;
 		let _session_key = server_state
 			.finish(client_message, ServerLoginParameters::default())
-			.map_err(|e| anyhow::anyhow!("Authentication failed: {:?}", e))?;
+			.map_err(|e| anyhow::anyhow!("Authentication failed: {e:?}"))?;
 		self.update_state(SessionState::AccountVerified);
 		Ok(())
 	}
@@ -1537,12 +1577,15 @@ impl SessionActor {
 	fn transition_to_online(&mut self) {
 		self.update_state(SessionState::Online);
 		if let Some(did) = &self.remote_device_id {
-			let mut log_store = self.log_store.lock().unwrap();
-			let _ = log_store.log_info(
-				"Session",
-				&format!("Handshake completed, session online: remote_device_id={did}"),
-				Some(&format!("握手已完成，会话在线: 远程设备ID={did}")),
-			);
+			{
+				let mut log_store = self.log_store.lock().unwrap();
+				let _ = log_store.log_info(
+					"Session",
+					&format!("Handshake completed, session online: remote_device_id={did}"),
+					Some(&format!("握手已完成，会话在线: 远程设备ID={did}")),
+				);
+			}
+			// 事件回调必须在释放 log_store 锁之后触发，避免重入死锁
 			let json = serde_json::json!({
 				"type": "PEER_ONLINE",
 				"ts_ms": now_ms(),

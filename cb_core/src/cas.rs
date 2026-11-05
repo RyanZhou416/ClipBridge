@@ -2,6 +2,49 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// SHA-256 hex 的固定长度（64 个小写 hex 字符）
+const SHA256_HEX_LEN: usize = 64;
+
+/// 校验 SHA-256 hex：必须恰好 64 个字符，且全部为小写 hex。
+///
+/// 该值来自对端 `ContentBegin.sha256`，会被直接拼进文件系统路径，必须严格校验，
+/// 否则 `../x`、空串或非 ASCII 值会导致目录逃逸或 UTF-8 切片 panic。
+fn validate_hash(sha256_hex: &str) -> anyhow::Result<()> {
+	if sha256_hex.len() != SHA256_HEX_LEN {
+		anyhow::bail!(
+			"invalid sha256: expected {} hex chars, got {}",
+			SHA256_HEX_LEN,
+			sha256_hex.len()
+		);
+	}
+	if !sha256_hex
+		.bytes()
+		.all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+	{
+		anyhow::bail!("invalid sha256: expected lowercase hex characters only");
+	}
+	Ok(())
+}
+
+/// 校验单个路径分量（文件名或目录名）。
+///
+/// 拒绝：空串、`.`、`..`、绝对路径、任何路径分隔符。
+fn validate_component(name: &str) -> anyhow::Result<()> {
+	if name.is_empty() || name == "." || name == ".." {
+		anyhow::bail!("invalid path component: {name:?}");
+	}
+	let path = Path::new(name);
+	if path.is_absolute() || path.components().count() != 1 {
+		anyhow::bail!("invalid path component: {name:?}");
+	}
+	// 白名单校验：解析回来的 file_name 必须与原始字符串完全一致
+	if path.file_name().and_then(|n| n.to_str()) != Some(name) {
+		anyhow::bail!("invalid path component: {name:?}");
+	}
+	Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct Cas {
 	cache_dir: PathBuf,
@@ -10,6 +53,19 @@ pub struct Cas {
 }
 
 impl Cas {
+	/// 防御性校验：目标路径的父目录 canonicalize 后必须位于 `cache_dir` 之内。
+	fn ensure_within_cache(&self, target: &Path) -> anyhow::Result<()> {
+		let cache_root = self.cache_dir.canonicalize()?;
+		let parent = target
+			.parent()
+			.ok_or_else(|| anyhow::anyhow!("target path has no parent: {}", target.display()))?;
+		let parent = parent.canonicalize()?;
+		if !parent.starts_with(&cache_root) {
+			anyhow::bail!("refusing to write outside cache dir: {}", target.display());
+		}
+		Ok(())
+	}
+
 	pub fn new(cache_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
 		let cache_dir = cache_dir.as_ref().to_path_buf();
 		let blobs_dir = cache_dir.join("blobs").join("sha256");
@@ -24,13 +80,14 @@ impl Cas {
 		})
 	}
 
-	pub fn blob_path(&self, sha256_hex: &str) -> PathBuf {
+	pub fn blob_path(&self, sha256_hex: &str) -> anyhow::Result<PathBuf> {
+		validate_hash(sha256_hex)?;
 		let prefix = &sha256_hex[0..2];
-		self.blobs_dir.join(prefix).join(sha256_hex)
+		Ok(self.blobs_dir.join(prefix).join(sha256_hex))
 	}
 
 	pub fn blob_exists(&self, sha256_hex: &str) -> bool {
-		self.blob_path(sha256_hex).exists()
+		self.blob_path(sha256_hex).is_ok_and(|p| p.exists())
 	}
 
 	/// 返回：是否发生了“新写入”
@@ -42,7 +99,7 @@ impl Cas {
 	) -> anyhow::Result<bool> {
 		use std::io;
 
-		let dst = self.blob_path(sha256_hex);
+		let dst = self.blob_path(sha256_hex)?;
 		if dst.exists() {
 			return Ok(false);
 		}
@@ -96,11 +153,11 @@ impl Cas {
 
 	/// 删除 blob，返回释放的字节数（若不存在返回 0）
 	pub fn remove_blob(&self, sha256_hex: &str) -> anyhow::Result<i64> {
-		let p = self.blob_path(sha256_hex);
+		let p = self.blob_path(sha256_hex)?;
 		if !p.exists() {
 			return Ok(0);
 		}
-		let sz = p.metadata().map(|m| m.len() as i64).unwrap_or(0);
+		let sz = p.metadata().map_or(0, |m| m.len() as i64);
 		fs::remove_file(p)?;
 		Ok(sz)
 	}
@@ -112,8 +169,12 @@ impl Cas {
 
 	/// M3: 获取一个用于传输的临时文件路径
 	/// 格式: <cache_dir>/tmp/<transfer_id>
-	pub fn get_tmp_path(&self, transfer_id: &str) -> PathBuf {
-		self.tmp_dir.join(transfer_id)
+	///
+	/// transfer_id 来自对端 `ContentBegin.req_id`，必须校验为单一安全分量，
+	/// 否则对端可以借 `../` 写到缓存目录之外。
+	pub fn get_tmp_path(&self, transfer_id: &str) -> anyhow::Result<PathBuf> {
+		validate_component(transfer_id)?;
+		Ok(self.tmp_dir.join(transfer_id))
 	}
 
 	/// M3: 将临时文件“转正”为 Blob
@@ -122,7 +183,7 @@ impl Cas {
 	///
 	/// 返回: 最终的 blob 路径
 	pub fn commit_tmp_file(&self, tmp_path: &Path, sha256: &str) -> anyhow::Result<PathBuf> {
-		let dst = self.blob_path(sha256);
+		let dst = self.blob_path(sha256)?;
 
 		// 1. 目标如果已存在，直接删除临时文件并返回成功
 		if dst.exists() {
@@ -150,9 +211,9 @@ impl Cas {
 	/// M3: 为 Blob 创建一个带后缀的“视图” (用于 Image/File)
 	/// 策略：尝试硬链接，不支持则复制。文件名为 <sha256>.<ext>，放在 blobs/views/ 目录下 (或 cache_dir/files)
 	pub fn materialize_blob(&self, sha256: &str, ext: &str) -> anyhow::Result<PathBuf> {
-		let blob_path = self.blob_path(sha256);
+		let blob_path = self.blob_path(sha256)?;
 		if !blob_path.exists() {
-			anyhow::bail!("Blob not found: {}", sha256);
+			anyhow::bail!("Blob not found: {sha256}");
 		}
 
 		// 构造目标路径：cache_dir/files/<sha256>.<ext>
@@ -166,6 +227,7 @@ impl Cas {
 		let safe_ext = ext.trim_start_matches('.');
 		let filename = format!("{sha256}.{safe_ext}");
 		let target_path = views_dir.join(filename);
+		self.ensure_within_cache(&target_path)?;
 
 		if target_path.exists() {
 			return Ok(target_path);
@@ -189,9 +251,15 @@ impl Cas {
 		transfer_id: &str,
 		filename: &str,
 	) -> anyhow::Result<PathBuf> {
-		let blob_path = self.blob_path(sha256);
+		// sha256、transfer_id、filename 都来自对端（ContentBegin / ItemMeta），
+		// 任一值未校验都可能把文件写出 cache_dir。
+		validate_hash(sha256)?;
+		validate_component(transfer_id)?;
+		validate_component(filename)?;
+
+		let blob_path = self.blob_path(sha256)?;
 		if !blob_path.exists() {
-			anyhow::bail!("Blob not found: {}", sha256);
+			anyhow::bail!("Blob not found: {sha256}");
 		}
 
 		// 目录结构：cache/downloads/transfer_id/
@@ -199,6 +267,7 @@ impl Cas {
 		fs::create_dir_all(&download_dir)?;
 
 		let target_path = download_dir.join(filename);
+		self.ensure_within_cache(&target_path)?;
 
 		// 如果文件已存在且 Hash 一致，直接返回（断点续传/幂等优化）
 		if target_path.exists() {
@@ -222,7 +291,7 @@ impl Cas {
 		let sha256 = hex::encode(hasher.finalize());
 
 		// 2. 检查是否已存在
-		let target_path = self.blob_path(&sha256);
+		let target_path = self.blob_path(&sha256)?;
 		if target_path.exists() {
 			return Ok(sha256);
 		}
@@ -317,5 +386,90 @@ impl Cas {
 		}
 
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn valid_hash() -> String {
+		"0123456789abcdef".repeat(4)
+	}
+
+	#[test]
+	fn accept_normal_hash() {
+		assert!(validate_hash(&valid_hash()).is_ok());
+		assert!(validate_hash(&"0".repeat(64)).is_ok());
+	}
+
+	#[test]
+	fn reject_bad_hash() {
+		let cases = vec![
+			String::new(),
+			"abc".to_string(),
+			valid_hash().to_uppercase(),
+			"g".repeat(64),
+			format!("{}{}", "a".repeat(62), "é"), // 非 ASCII（字节长度仍是 64）
+			format!("{}/..", "a".repeat(61)),     // 含 ../ 的 64 字符值
+			"../x".to_string(),
+		];
+		for bad in cases {
+			assert!(
+				validate_hash(&bad).is_err(),
+				"expected hash rejection: {bad:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn accept_plain_component() {
+		assert!(validate_component("report.pdf").is_ok());
+		assert!(validate_component("a.txt").is_ok());
+	}
+
+	#[test]
+	fn reject_unsafe_component() {
+		for bad in ["../a", "/etc/passwd", "a/b", "..", "", "."] {
+			assert!(
+				validate_component(bad).is_err(),
+				"expected component rejection: {bad:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn blob_path_is_validated() {
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path()).unwrap();
+		let p = cas.blob_path(&valid_hash()).unwrap();
+		assert!(p.starts_with(&cas.blobs_dir));
+		assert_eq!(p.file_name().unwrap().to_str().unwrap(), valid_hash());
+		// 穿越/空值必须在进入文件系统前失败
+		assert!(cas.blob_path("../x").is_err());
+		assert!(cas.blob_path("").is_err());
+		assert!(!cas.blob_exists("../x"));
+	}
+
+	#[test]
+	fn materialize_file_rejects_unsafe_names() {
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path()).unwrap();
+		let sha = cas.put_blob(b"hello").unwrap();
+
+		for bad in ["../a", "/etc/passwd", "a/b", "..", ""] {
+			assert!(
+				cas.materialize_file(&sha, "tid", bad).is_err(),
+				"expected filename rejection: {bad:?}"
+			);
+			assert!(
+				cas.materialize_file(&sha, bad, "a.txt").is_err(),
+				"expected transfer_id rejection: {bad:?}"
+			);
+		}
+
+		let target = cas.materialize_file(&sha, "tid-1", "a.txt").unwrap();
+		let cache_root = cas.cache_dir().canonicalize().unwrap();
+		assert!(target.canonicalize().unwrap().starts_with(&cache_root));
 	}
 }

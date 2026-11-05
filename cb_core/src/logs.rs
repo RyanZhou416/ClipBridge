@@ -38,7 +38,9 @@ impl LogEntry {
 	/// 回退逻辑：目标语言 → "en" → 原始 message 字段
 	pub fn get_message_for_lang(&self, lang: Option<&str>) -> String {
 		// 如果没有指定语言，直接返回原始 message（向后兼容）
-		let Some(lang) = lang else { return self.message.clone() };
+		let Some(lang) = lang else {
+			return self.message.clone();
+		};
 
 		// 尝试解析 JSON
 		let msg_json: Result<serde_json::Value, _> = serde_json::from_str(&self.message);
@@ -110,6 +112,7 @@ impl LogStore {
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
             PRAGMA foreign_keys=ON;
+            PRAGMA busy_timeout=5000;
             ",
 		)?;
 		Ok(())

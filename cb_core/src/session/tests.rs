@@ -94,6 +94,8 @@ fn setup(name: &str, password: &str) -> TestContext {
 		data_dir: path.to_string_lossy().to_string(),
 		cache_dir: path.to_string_lossy().to_string(),
 		app_config: AppConfig::default(),
+		// 这些会话测试需要真实 QUIC 连接
+		disable_network: false,
 	};
 
 	// 初始化 DB (为了 TOFU 表)
@@ -138,6 +140,7 @@ async fn link_peers(server: &TestContext, client: &TestContext) -> (Connection, 
 
 // --- 2. 单元测试用例 ---
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_handshake_success() {
 	let srv_ctx = setup("srv_ok", "tag_secret");
@@ -197,6 +200,7 @@ async fn test_handshake_success() {
 	assert!(fp.is_some(), "Client should have pinned Server fingerprint");
 }
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_auth_fail_tag_mismatch() {
 	// 设置不同的 Account Tag
@@ -237,6 +241,7 @@ async fn test_auth_fail_tag_mismatch() {
 	cli_ctx.sink.assert_no_event("PEER_ONLINE");
 }
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_tofu_reject_changed_fingerprint() {
 	let srv_ctx = setup("srv_hack", "tag_same");

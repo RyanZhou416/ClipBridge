@@ -249,7 +249,7 @@ impl Decoder for CBFrameCodec {
 			}
 			_ => {
 				// 未知帧类型，如果是兼容性考虑可以选择忽略，这里先报错
-				Err(anyhow::anyhow!("Unknown frame type: {}", type_byte))
+				Err(anyhow::anyhow!("Unknown frame type: {type_byte}"))
 			}
 		}
 	}

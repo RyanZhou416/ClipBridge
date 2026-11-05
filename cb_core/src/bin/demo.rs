@@ -107,6 +107,8 @@ async fn main() {
 		data_dir,
 		cache_dir,
 		app_config: Default::default(),
+		// demo 保留真实网络能力
+		disable_network: false,
 	};
 
 	let core = Core::init(config, sink);

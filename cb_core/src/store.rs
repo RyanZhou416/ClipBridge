@@ -39,6 +39,7 @@ impl Store {
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
             PRAGMA foreign_keys=ON;
+            PRAGMA busy_timeout=5000;
             ",
 		)?;
 		Ok(())
@@ -559,8 +560,9 @@ impl Store {
 		if keep_latest < 0 {
 			return Ok(0);
 		}
-		let before = self.conn.changes();
-		self.conn.execute(
+		// execute() 返回本条 UPDATE 实际影响的行数（changes() 只反映最近一条语句，
+		// 用前后差值相减会下溢 panic）。
+		let affected = self.conn.execute(
 			r"
             UPDATE history
             SET is_deleted=1
@@ -574,8 +576,7 @@ impl Store {
             ",
 			params![account_uid, keep_latest],
 		)?;
-		let after = self.conn.changes();
-		Ok((after - before) as i64)
+		Ok(affected as i64)
 	}
 
 	/// 软删除指定 item 的 history 记录
@@ -859,11 +860,7 @@ impl Store {
 	}
 
 	/// M3-3: 获取 FileList 中指定 file_id 的详细信息 (sha256, rel_name, size)
-	pub fn get_file_meta(
-		&self,
-		item_id: &str,
-		file_id: &str,
-	) -> anyhow::Result<Option<FileMeta>> {
+	pub fn get_file_meta(&self, item_id: &str, file_id: &str) -> anyhow::Result<Option<FileMeta>> {
 		let mut stmt = self
 			.conn
 			.prepare("SELECT files_json FROM items WHERE item_id = ?")?;
@@ -872,8 +869,7 @@ impl Store {
 		if let Some(row) = rows.next()? {
 			let json_str: Option<String> = row.get(0)?;
 			if let Some(s) = json_str {
-				let files: Vec<FileMeta> =
-					serde_json::from_str(&s).unwrap_or_default();
+				let files: Vec<FileMeta> = serde_json::from_str(&s).unwrap_or_default();
 				// 找到对应的 file_id
 				let target = files.into_iter().find(|f| f.file_id == file_id);
 				return Ok(target);

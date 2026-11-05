@@ -203,7 +203,7 @@ impl NetManager {
 										reply_tx: reply,
 									}).await;
 								} else {
-									let _ = reply.send(Err(anyhow::anyhow!("Device {} not online", device_id)));
+									let _ = reply.send(Err(anyhow::anyhow!("Device {device_id} not online")));
 								}
 							} else {
 								 let _ = reply.send(Err(anyhow::anyhow!("Item not found or no owner info")));
@@ -522,9 +522,7 @@ impl NetManager {
 			let mut log_store = self.log_store.lock().unwrap();
 			let _ = log_store.log_info(
 				"Network",
-				&format!(
-					"Broadcasting delete to {online_count} online peers: item_id={item_id}",
-				),
+				&format!("Broadcasting delete to {online_count} online peers: item_id={item_id}"),
 				Some(&format!(
 					"正在向 {online_count} 个在线对等设备广播删除: 项目ID={item_id}",
 				)),

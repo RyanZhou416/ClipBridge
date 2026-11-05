@@ -47,6 +47,9 @@ impl TestCore {
 				gc_cas_max_bytes: 1_i64 << 60,
 				..Default::default()
 			},
+
+			// 测试默认不启动网络（避免 bind socket 触发防火墙弹窗）
+			disable_network: true,
 		};
 
 		Self::with_cfg(crate_tag, test_tag, cfg)

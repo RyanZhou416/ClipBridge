@@ -6,6 +6,7 @@ use crate::clipboard::ClipboardSnapshot;
 use crate::net::NetCmd;
 use std::time::Duration;
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_m2_meta_sync_and_db_persistence() {
 	let shared_uid = format!("m2_meta_sync_{}", uuid::Uuid::new_v4());
@@ -132,6 +133,7 @@ fn test_m2_store_idempotency() {
 	assert!(!is_new_2, "Second insert should be ignored (idempotent)");
 }
 
+#[ignore = "binds real sockets (QUIC/mDNS); run with --ignored, needs multicast + a firewall rule"]
 #[tokio::test]
 async fn test_m2_robustness_network_replay() {
 	let shared_uid = format!("m2_robustness_replay_{}", uuid::Uuid::new_v4());

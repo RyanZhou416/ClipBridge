@@ -17,10 +17,14 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::crypto::CryptoProvider;
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{ClientConfig as TlsClientConfig, ServerConfig as TlsServerConfig};
-use rustls::{DigitallySignedStruct, SignatureScheme};
+use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 
 /// 自定义 TLS 验证器：接受任何服务器证书 (Blind Trust)
+///
+/// TODO(security): 客户端必须把服务器证书固定到 TOFU 指纹（首次配对记录、
+/// 之后指纹变化即拒绝），否则中间人可以冒充任意设备。
 #[derive(Debug)]
 struct BlindVerifier(Arc<CryptoProvider>);
 
@@ -40,6 +44,72 @@ impl ServerCertVerifier for BlindVerifier {
 		_now: UnixTime,
 	) -> Result<ServerCertVerified, rustls::Error> {
 		Ok(ServerCertVerified::assertion())
+	}
+
+	fn verify_tls12_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &DigitallySignedStruct,
+	) -> Result<HandshakeSignatureValid, rustls::Error> {
+		verify_tls12_signature(
+			message,
+			cert,
+			dss,
+			&self.0.signature_verification_algorithms,
+		)
+	}
+
+	fn verify_tls13_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &DigitallySignedStruct,
+	) -> Result<HandshakeSignatureValid, rustls::Error> {
+		verify_tls13_signature(
+			message,
+			cert,
+			dss,
+			&self.0.signature_verification_algorithms,
+		)
+	}
+
+	fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+		self.0.signature_verification_algorithms.supported_schemes()
+	}
+}
+
+/// 服务器端 TLS 验证器：**请求**客户端证书（TOFU 需要指纹），但不在 TLS 层
+/// 拒绝未知证书——是否信任由 SessionActor 中的 TOFU 策略决定。
+#[derive(Debug)]
+struct RequestClientCertVerifier(Arc<CryptoProvider>);
+
+impl RequestClientCertVerifier {
+	fn new(provider: Arc<CryptoProvider>) -> Self {
+		Self(provider)
+	}
+}
+
+impl ClientCertVerifier for RequestClientCertVerifier {
+	fn offer_client_auth(&self) -> bool {
+		true
+	}
+
+	fn client_auth_mandatory(&self) -> bool {
+		false
+	}
+
+	fn root_hint_subjects(&self) -> &[DistinguishedName] {
+		&[]
+	}
+
+	fn verify_client_cert(
+		&self,
+		_end_entity: &CertificateDer<'_>,
+		_intermediates: &[CertificateDer<'_>],
+		_now: UnixTime,
+	) -> Result<ClientCertVerified, rustls::Error> {
+		Ok(ClientCertVerified::assertion())
 	}
 
 	fn verify_tls12_signature(
@@ -109,7 +179,7 @@ impl Transport {
 		let mut server_tls = TlsServerConfig::builder_with_provider(crypto.clone())
 			.with_protocol_versions(&[&rustls::version::TLS13])
 			.context("server: unsupported TLS versions")?
-			.with_no_client_auth()
+			.with_client_cert_verifier(Arc::new(RequestClientCertVerifier::new(crypto.clone())))
 			.with_single_cert(cert_chain.clone(), priv_key_server)
 			.context("invalid server cert")?;
 
@@ -175,10 +245,7 @@ impl Transport {
 
 	pub fn is_ipv4(&self) -> bool {
 		// 如果获取失败，默认认为是 IPv4（为了兼容性）
-		self.endpoint
-			.local_addr()
-			.map(|a| a.is_ipv4())
-			.unwrap_or(true)
+		self.endpoint.local_addr().map_or(true, |a| a.is_ipv4())
 	}
 
 	pub fn shutdown(&self) {
