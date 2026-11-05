@@ -385,28 +385,43 @@ impl SessionActor {
 						match cmd {
 							Some(SessionCmd::SendMeta(mut meta)) => {
 								if actor.state == SessionState::Online {
-									let msg_id = uuid::Uuid::new_v4().to_string();
-									let item_id = meta.item_id.clone();
-									let device_id = actor.remote_device_id.clone().unwrap_or_else(|| "unknown".to_string());
-
-									// 不要把发送端的本地路径告诉接收端
-									for f in &mut meta.files {
-										f.local_path = None;
-									}
-
-									{
+									// 出站策略：share_to_peer=false 的对端不广播元数据。
+									// net.rs 的 broadcast_meta 只处理全局 DenyAll，这里按会话逐对端拦截。
+									if !actor.outbound_share_allowed().await? {
+										let device_id = actor
+											.remote_device_id
+											.clone()
+											.unwrap_or_else(|| "unknown".to_string());
 										let mut log_store = actor.log_store.lock().unwrap();
-										let _ = log_store.log_info(
+										let _ = log_store.log_warn(
 											"Session",
-											&format!("Metadata sent to peer: device_id={device_id}, item_id={item_id}, msg_id={msg_id}"),
-											Some(&format!("元数据已发送至对等设备: 设备ID={device_id}，项目ID={item_id}，消息ID={msg_id}")),
+											&format!("Metadata broadcast skipped by share_to_peer policy: device_id={device_id}, item_id={}", meta.item_id),
+											Some(&format!("共享策略禁止向该设备广播元数据: 设备ID={device_id}，项目ID={}", meta.item_id)),
 										);
-									}
+									} else {
+										let msg_id = uuid::Uuid::new_v4().to_string();
+										let item_id = meta.item_id.clone();
+										let device_id = actor.remote_device_id.clone().unwrap_or_else(|| "unknown".to_string());
 
-									actor.send_ctrl(CtrlMsg::ItemMeta {
-										msg_id: Some(msg_id),
-										item: *meta
-									}).await?;
+										// 不要把发送端的本地路径告诉接收端
+										for f in &mut meta.files {
+											f.local_path = None;
+										}
+
+										{
+											let mut log_store = actor.log_store.lock().unwrap();
+											let _ = log_store.log_info(
+												"Session",
+												&format!("Metadata sent to peer: device_id={device_id}, item_id={item_id}, msg_id={msg_id}"),
+												Some(&format!("元数据已发送至对等设备: 设备ID={device_id}，项目ID={item_id}，消息ID={msg_id}")),
+											);
+										}
+
+										actor.send_ctrl(CtrlMsg::ItemMeta {
+											msg_id: Some(msg_id),
+											item: *meta
+										}).await?;
+									}
 								}
 							}
 							Some(SessionCmd::Shutdown) => {
@@ -665,6 +680,46 @@ impl SessionActor {
 		)
 	}
 
+	/// 查询当前对端的共享策略规则（PeerRule）。
+	///
+	/// DB 访问统一放进 spawn_blocking，避免阻塞异步线程；对端设备 ID 未知时返回 None。
+	async fn load_peer_rule(&self) -> Result<Option<crate::store::PeerRule>> {
+		let Some(device_id) = self.remote_device_id.clone() else {
+			return Ok(None);
+		};
+		let account_uid = self.config.account_uid.clone();
+		let store = self.store.clone();
+		tokio::task::spawn_blocking(move || {
+			let guard = store.lock().unwrap();
+			guard.get_peer_rule(&account_uid, &device_id)
+		})
+		.await?
+	}
+
+	/// 出站共享策略：share_to_peer=false 或对端身份未知时拒绝；
+	/// 规则不存在时沿用历史默认（允许），与 get_peers_info 的展示默认值一致。
+	async fn outbound_share_allowed(&self) -> Result<bool> {
+		if self.remote_device_id.is_none() {
+			return Ok(false);
+		}
+		match self.load_peer_rule().await? {
+			Some(rule) => Ok(rule.share_to_peer),
+			None => Ok(true),
+		}
+	}
+
+	/// 入站接收策略：accept_from_peer=false 或对端身份未知时拒绝；
+	/// 规则不存在时沿用历史默认（允许）。
+	async fn inbound_accept_allowed(&self) -> Result<bool> {
+		if self.remote_device_id.is_none() {
+			return Ok(false);
+		}
+		match self.load_peer_rule().await? {
+			Some(rule) => Ok(rule.accept_from_peer),
+			None => Ok(true),
+		}
+	}
+
 	async fn handle_control_msg(&mut self, msg: CtrlMsg) -> Result<()> {
 		// 唯一鉴权入口：未认证前只放行白名单消息（握手/协议控制），
 		// 其余业务消息统一在这里拒绝并终止会话。
@@ -868,11 +923,43 @@ impl SessionActor {
 				let store = self.store.clone();
 				let account_uid = self.config.account_uid.clone();
 				let item_clone = item.clone();
-				let is_new = tokio::task::spawn_blocking(move || {
-					let mut guard = store.lock().unwrap();
-					guard.insert_remote_item(&account_uid, &item_clone, now_ms())
-				})
-				.await??;
+				let device_id = self.remote_device_id.clone();
+				// 入站策略检查与落库放在同一个 spawn_blocking 中：
+				// accept_from_peer=false（或对端身份未知）时整条元数据丢弃。
+				let (accepted, is_new) =
+					tokio::task::spawn_blocking(move || -> Result<(bool, bool)> {
+						let mut guard = store.lock().unwrap();
+						let Some(did) = device_id else {
+							return Ok((false, false));
+						};
+						if matches!(
+							guard.get_peer_rule(&account_uid, &did)?,
+							Some(rule) if !rule.accept_from_peer
+						) {
+							return Ok((false, false));
+						}
+						let is_new =
+							guard.insert_remote_item(&account_uid, &item_clone, now_ms())?;
+						Ok((true, is_new))
+					})
+					.await??;
+				if !accepted {
+					// 这里不回 CtrlMsg::Error：对端收到 Error 会直接终止会话，
+					// 而共享策略开关不应误杀正常连接，丢弃并记录日志即可。
+					let mut log_store = self.log_store.lock().unwrap();
+					let _ = log_store.log_warn(
+						"Session",
+						&format!(
+							"Metadata rejected by accept_from_peer policy: item_id={}",
+							item.item_id
+						),
+						Some(&format!(
+							"接收策略禁止接收该设备的元数据: 项目ID={}",
+							item.item_id
+						)),
+					);
+					return Ok(());
+				}
 				if is_new {
 					let json = serde_json::json!({
 						"type": "ITEM_META_ADDED",
@@ -986,6 +1073,25 @@ impl SessionActor {
 		file_sha256: String, // 注意：这是整个文件的 Hash，Resume 时不需要校验它
 		mime: String,
 	) -> Result<()> {
+		// 入站策略：accept_from_peer=false（或对端身份未知）时拒绝接收内容。
+		// 用 ContentCancel 而非 Error 通知对端：Error 会被对端视为致命错误并断开会话。
+		if !self.inbound_accept_allowed().await? {
+			{
+				let mut log_store = self.log_store.lock().unwrap();
+				let _ = log_store.log_warn(
+					"Session",
+					&format!("Transfer rejected by accept_from_peer policy: transfer_id={req_id}, item_id={item_id}"),
+					Some(&format!("接收策略禁止接收内容: 传输ID={req_id}，项目ID={item_id}")),
+				);
+			}
+			self.send_ctrl(CtrlMsg::ContentCancel {
+				req_id,
+				reason: "accept_from_peer disabled".into(),
+			})
+			.await?;
+			return Ok(());
+		}
+
 		{
 			let mut log_store = self.log_store.lock().unwrap();
 			let _ = log_store.log_info(
@@ -1380,6 +1486,19 @@ impl SessionActor {
 		file_id: Option<String>,
 		offset: Option<u64>,
 	) -> Result<()> {
+		// 出站策略：share_to_peer=false（或对端身份未知）时拒绝提供任何内容。
+		// 这是内容外泄的最后一道闸门 —— 即使对端绕过 UI 直接发 ContentGet 也拿不到字节。
+		if !self.outbound_share_allowed().await? {
+			let _ = self
+				.send_ctrl(CtrlMsg::Error {
+					reply_to: Some(transfer_id),
+					code: "PEER_POLICY_DENIED".into(),
+					message: Some("share_to_peer is disabled for this peer".into()),
+				})
+				.await;
+			return Ok(());
+		}
+
 		// [修改] 1. 查找文件路径 (补全了 CAS 和 Local Path 的双重查找)
 		let (file_path_res, mime_val) = {
 			let store = self.store.lock().unwrap();
