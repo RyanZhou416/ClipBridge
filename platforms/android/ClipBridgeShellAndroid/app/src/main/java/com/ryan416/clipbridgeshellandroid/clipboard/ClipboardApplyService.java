@@ -72,6 +72,11 @@ public class ClipboardApplyService {
 			}
 
 			// 写入系统剪贴板 + 防回环
+			// watcher 必须由 ForegroundService 先注入；若仍为空则显式报错，不要再让 NPE 被 catch(Throwable) 吞掉
+			if (watcher == null) {
+				Log.e(TAG, "ClipboardWatcher 未初始化，无法抑制回环，放弃本次应用. itemId=" + itemId);
+				return;
+			}
 			watcher.markNextChangeSuppressed(text);
 			ClipData clip = ClipData.newPlainText("ClipBridge", text);
 
@@ -83,7 +88,8 @@ public class ClipboardApplyService {
 				Log.e(TAG, "Failed to apply via Shizuku (Binder Error?)");
 			}
 		} catch (Throwable t) {
-			Log.e(TAG, "applyItemToClipboard failed", t);
+			// 带上 itemId，便于在 logcat 里定位是哪一条内容失败
+			Log.e(TAG, "applyItemToClipboard failed. itemId=" + itemId, t);
 		}
 	}
 

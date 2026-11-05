@@ -63,8 +63,8 @@ public class ForegroundService extends Service {
 		if (awaiter == null) awaiter = new ContentFetchAwaiter();
 		if (listener == null) listener = sink::onCoreEvent;
 
-		if (applyService == null) {
-			if (core == null) core = new CoreInterop();
+		if (core == null) core = new CoreInterop();
+		if (!core.isReady()) {
 			Log.i(TAG, "Initializing Core...");
 
 			// Core Init
@@ -74,15 +74,30 @@ public class ForegroundService extends Service {
 
 			if (!core.isReady()) {
 				// init 返回 ok:false（例如缺少凭据 / 路径不可写）：必须显式失败，不能假装核心已就绪。
-				// 不创建 applyService，这样下一次 onStartCommand 会重新尝试 init。
+				// 不创建 watcher/applyService，这样下一次 onStartCommand 会重新尝试 init。
 				String code = core.getLastInitErrorCode();
 				String message = core.getLastInitErrorMessage();
 				Log.e(TAG, "Core init FAILED: code=" + code + " message=" + message);
 				updateNotification("ClipBridge 初始化失败", code + ": " + message);
 				return START_STICKY;
 			}
+		}
 
-			// Apply Service
+		// 先创建 ClipboardWatcher，再把它注入 ClipboardApplyService：
+		// 旧顺序把 null watcher 传了进去，applyItemToClipboard 里的 markNextChangeSuppressed 必然 NPE。
+		if (clipboardWatcher == null) {
+			clipboardWatcher = new ClipboardWatcher(getApplicationContext(), core);
+
+			new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+				if (clipboardWatcher != null) {
+					Log.i(TAG, "Delayed start of ClipboardWatcher...");
+					clipboardWatcher.start();
+				}
+			}, 500); // 延迟 500ms
+		}
+
+		// Apply Service（此时 clipboardWatcher 一定非空）
+		if (applyService == null) {
 			applyService = new ClipboardApplyService(getApplicationContext(), clipboardWatcher, core, awaiter);
 		}
 
@@ -93,17 +108,6 @@ public class ForegroundService extends Service {
 		if (eventPump == null) {
 			eventPump = new EventPump(router);
 			eventPump.start();
-		}
-
-		if (clipboardWatcher == null) {
-			clipboardWatcher = new ClipboardWatcher(getApplicationContext(), core);
-
-			new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-				if (clipboardWatcher != null) {
-					Log.i(TAG, "Delayed start of ClipboardWatcher...");
-					clipboardWatcher.start();
-				}
-			}, 500); // 延迟 500ms
 		}
 
 		return START_STICKY;
