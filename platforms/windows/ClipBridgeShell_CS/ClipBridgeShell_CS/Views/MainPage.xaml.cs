@@ -50,11 +50,15 @@ public sealed partial class MainPage : Page
 
     public MainPage()
     {
+        StartupTrace.Mark("mainpage-ctor-enter");
         try
         {
             ViewModel = App.GetService<MainViewModel>();
+            StartupTrace.Mark("mainpage-vm-resolved");
             InitializeComponent();
+            StartupTrace.Mark("mainpage-xaml-inflated");
             InitCardContextMenu();
+            StartupTrace.Mark("mainpage-ctor-exit");
             // 监听数据变化，更新图表（在Loaded之后）
             Loaded += OnPageLoaded;
             Unloaded += OnPageUnloaded;

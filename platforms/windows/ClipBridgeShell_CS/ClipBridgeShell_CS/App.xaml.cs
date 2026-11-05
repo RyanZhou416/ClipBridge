@@ -428,10 +428,19 @@ public partial class App : Application
             Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
             () =>
             {
-                StartupTrace.Mark("deferred-init-start");
-                InitializeNotifications();
-                RunStartupLogSmokeTest();
-                StartupTrace.Mark("deferred-init-done");
+                StartupTrace.Mark("deferred-init-scheduled");
+
+                // 这两件事都不依赖 UI 线程（通知注册只是 AppNotificationManager.Register()，
+                // 日志自检是文件 IO），却实测占住 UI 线程约 99ms，把图表首绘与背景图一起往后推。
+                // 交替 A/B（6 对，隐藏桌面）：移到线程池后"图表/背景图就绪"配对中位数 -70.1ms
+                // （4/6 同向），"可用时间"变化在噪声内。因此固定放线程池。
+                _ = Task.Run(() =>
+                {
+                    StartupTrace.Mark("deferred-init-start");
+                    InitializeNotifications();
+                    RunStartupLogSmokeTest();
+                    StartupTrace.Mark("deferred-init-done");
+                });
             });
 
 
