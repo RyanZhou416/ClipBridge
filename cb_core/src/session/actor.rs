@@ -147,6 +147,27 @@ fn receiver_idle_expired(now: i64, last_activity_ms: i64) -> bool {
 	now - last_activity_ms > RECEIVER_IDLE_TIMEOUT_MS
 }
 
+/// 把 item 自身 `content.sha256` 对应的 content_cache 行标记为 present。
+///
+/// FileList 传输里 `ContentBegin.sha256` 只是**单个文件**的 hash，而 `content_cache`
+/// 以 item 的 `content.sha256` 为键；直接用它 UPDATE 会命中 0 行（旧代码还把结果丢弃）。
+/// 因此优先取 item 的 `sha256_hex`，查不到时才回退到本次传输的 hash。
+///
+/// 返回 `(实际标记的 sha, 受影响行数)`，调用方负责在 0 行时记录警告而不是硬失败。
+fn mark_item_content_cached(
+	store: &mut Store,
+	item_id: &str,
+	fallback_sha: &str,
+	now: i64,
+) -> anyhow::Result<(String, usize)> {
+	let item_sha = store
+		.get_item_sha256(item_id)?
+		.filter(|sha| !sha.is_empty())
+		.unwrap_or_else(|| fallback_sha.to_string());
+	let rows = store.mark_cache_present(&item_sha, now)?;
+	Ok((item_sha, rows))
+}
+
 /// 数据块越界判定：绝不允许对端写出其声明的 `total_bytes`，也不允许超过硬上限。
 ///
 /// 返回 `Some(code)` 表示本块必须让整个传输失败（code 用于 TRANSFER_FAILED 事件）。
@@ -1681,7 +1702,9 @@ impl SessionActor {
 						);
 					}
 					let store = self.store.clone();
-					let sha_for_db = expected_sha256.clone();
+					// 注意：ContentBegin.sha256 是本次传输片段的 hash。FileList 传输时它只是
+					// 其中一个文件的 sha，不能用来标记 content_cache（见 mark_item_content_cached）。
+					let transfer_sha = expected_sha256.clone();
 					let iid = item_id.clone();
 					let fid = file_id.clone();
 					let final_path_str = final_path.to_string_lossy().to_string();
@@ -1689,7 +1712,9 @@ impl SessionActor {
 					// 【新增】查询 DB 获取完整元数据
 					let meta_info = tokio::task::spawn_blocking(move || {
 						let mut guard = store.lock().unwrap();
-						guard.mark_cache_present(&sha_for_db, now_ms())?; // 原有逻辑 [cite: 298]
+						// 按 item 自身 content.sha256 标记缓存并保留命中行数
+						let (marked_sha, marked_rows) =
+							mark_item_content_cached(&mut guard, &iid, &transfer_sha, now_ms())?;
 
 						// 补充查询
 						let mime = guard.get_item_mime(&iid)?.unwrap_or_default();
@@ -1704,11 +1729,30 @@ impl SessionActor {
 							"file" // 或 "binary"，但要和文档一致
 						};
 
-						Ok::<(String, String), anyhow::Error>((mime, kind.to_string()))
+						Ok::<(String, String, String, usize), anyhow::Error>((
+							mime,
+							kind.to_string(),
+							marked_sha,
+							marked_rows,
+						))
 					})
 					.await??;
 
-					let (mime, kind) = meta_info;
+					let (mime, kind, marked_sha, marked_rows) = meta_info;
+					if marked_rows == 0 {
+						// 0 行说明 content_cache 里没有该 item 的记录（例如元数据已被删除）；
+						// 传输本身仍然成功，只记警告，不硬失败。
+						let mut log_store = self.log_store.lock().unwrap();
+						let _ = log_store.log_warn(
+							"Session",
+							&format!(
+								"mark_cache_present matched 0 rows: item_id={item_id}, item_sha256={marked_sha}, transfer_sha256={expected_sha256}"
+							),
+							Some(&format!(
+								"缓存标记未命中任何行: 项目ID={item_id}，项目SHA256={marked_sha}，传输SHA256={expected_sha256}"
+							)),
+						);
+					}
 
 					// 【修改】构造符合文档的 local_ref
 					let local_ref = serde_json::json!({
