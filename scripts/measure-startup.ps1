@@ -244,17 +244,29 @@ function Stop-TargetProcesses {
     foreach ($target in $targets) {
         try {
             Stop-Process -Id $target.Id -Force -ErrorAction Stop
+            try { [void]$target.WaitForExit(2000) } catch { }
         }
         catch {
-            if (-not $Quiet) {
+            # “拒绝访问”通常表示进程已经在退出过程中；此时继续等待即可，不应直接判失败。
+            $denied = $_.Exception.Message -match '拒绝访问|Access is denied'
+            if (-not $denied -and -not $Quiet) {
                 throw "无法结束进程 $($target.ProcessName) (PID=$($target.Id))：$($_.Exception.Message)"
             }
         }
     }
 
-    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    # 强制终止 WinUI 进程偶尔需要数秒（DWM/COM 拆除），并把"仍在退出中"的情况算作成功路径。
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    $reKilled = $false
     while ([DateTime]::UtcNow -lt $deadline) {
         if (@(Get-TargetProcesses).Count -eq 0) { return $true }
+        if (-not $reKilled -and ([DateTime]::UtcNow -gt $deadline.AddSeconds(-7))) {
+            # 中途补一刀，处理第一次 Stop-Process 丢失的进程
+            $reKilled = $true
+            foreach ($t in @(Get-TargetProcesses)) {
+                try { Stop-Process -Id $t.Id -Force -ErrorAction Stop } catch { }
+            }
+        }
         Start-Sleep -Milliseconds 50
     }
 
