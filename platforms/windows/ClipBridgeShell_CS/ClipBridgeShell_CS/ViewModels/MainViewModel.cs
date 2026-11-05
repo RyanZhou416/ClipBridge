@@ -333,6 +333,11 @@ public partial class MainViewModel : ObservableRecipient
         _clipboardApply = clipboardApply;
         _clipboardService = clipboardService;
 
+        // 统一解锁入口由 ClipboardService 发出：历史页删除锁定项等外部入口解锁后，
+        // 首页也必须同步清空锁定态，否则 UI 继续显示锁定并拦截复制。
+        if (_clipboardService != null)
+            _clipboardService.ClipboardLockChanged += OnClipboardLockChanged;
+
         // 创建一个测试按钮命令：点击后模拟 Core 发来一条数据
         TestAddEventCommand = new RelayCommand(() =>
         {
@@ -876,13 +881,32 @@ public partial class MainViewModel : ObservableRecipient
         }
     }
 
-    private void UnlockClipboard()
+    /// <summary>
+    /// ClipboardService 的统一解锁通知：任何入口解锁后同步清空首页锁定态
+    /// （历史页删除锁定项也会走这里，避免首页仍拦截复制）。
+    /// </summary>
+    private void OnClipboardLockChanged(object? sender, bool isLocked)
     {
-        _clipboardService?.UnlockClipboard();
+        if (isLocked) return;
+        ClearLockedState();
+    }
+
+    /// <summary>解锁后的统一状态复位（锁定文本已由 ClipboardService 清空）。</summary>
+    private void ClearLockedState()
+    {
         _lockedItemMeta = null;
         LockedItemId = null;
         SelectedItemId = null;
         OnPropertyChanged(nameof(SelectedItemId));
+    }
+
+    private void UnlockClipboard()
+    {
+        _clipboardService?.UnlockClipboard();
+
+        // 没有 ClipboardService（降级/测试环境）时不会触发解锁事件，这里兜底复位
+        if (_clipboardService == null)
+            ClearLockedState();
 
         var loc = WinUI3Localizer.Localizer.Get();
         var msg = loc.GetLocalizedString("Main_ClipboardUnlocked");

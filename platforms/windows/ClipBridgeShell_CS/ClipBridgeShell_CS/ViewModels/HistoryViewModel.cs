@@ -126,6 +126,16 @@ public partial class HistoryViewModel : ObservableRecipient, IDisposable
         await _mainViewModel.ToggleLockItemAsync(item);
     }
 
+    /// <summary>
+    /// 删除锁定项后必须清空剪贴板锁定文本，否则已删除的内容会持续覆盖后续复制（直到重启）。
+    /// 解锁统一走 <see cref="IClipboardService.UnlockClipboard"/>，两处 UI 状态由 ClipboardLockChanged 同步。
+    /// </summary>
+    private void UnlockIfDeletedItemWasLocked(string itemId)
+    {
+        if (_clipboardService.LockedItemId == itemId)
+            _clipboardService.UnlockClipboard();
+    }
+
     private void SyncPinnedItem()
     {
         var lockedId = _clipboardService.LockedItemId;
@@ -304,6 +314,7 @@ public partial class HistoryViewModel : ObservableRecipient, IDisposable
         try
         {
             await _coreService.DeleteItemLocalAsync(item.ItemId);
+            UnlockIfDeletedItemWasLocked(item.ItemId);
             ApplyFilters();
             var loc = WinUI3Localizer.Localizer.Get();
             var msg = loc.GetLocalizedString("Main_ItemDeleted");
@@ -324,6 +335,7 @@ public partial class HistoryViewModel : ObservableRecipient, IDisposable
         try
         {
             await _coreService.DeleteItemGlobalAsync(item.ItemId);
+            UnlockIfDeletedItemWasLocked(item.ItemId);
             ApplyFilters();
             var loc = WinUI3Localizer.Localizer.Get();
             var msg = loc.GetLocalizedString("Main_ItemDeletedGlobal");
