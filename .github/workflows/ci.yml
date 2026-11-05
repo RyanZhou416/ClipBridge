@@ -8,27 +8,40 @@ on:
 permissions:
   contents: read
 
+# 同一分支/PR 的新推送取消仍在跑的旧运行：Android 要交叉编译两份 Rust .so 再跑
+# Gradle/CMake，macOS 要跑 Swift 编译器，都是分钟级任务；不取消就会让已经被取代的
+# 运行继续烧分钟数。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       csharp: ${{ steps.filter.outputs.csharp }}
+      android: ${{ steps.filter.outputs.android }}
+      macos: ${{ steps.filter.outputs.macos }}
     steps:
       - uses: actions/checkout@v4
-      # The rust filter must cover every platform FFI crate (windows/macos/android) and the
-      # android/macos shell directories; otherwise changes confined to platforms/android/core-ffi
-      # or platforms/macos/core-ffi trigger no Rust job at all. There is no Android/NDK job, so
-      # android shell changes are routed to the Rust checks instead.
+      # 过滤器的职责是“只有相关文件变了才启动对应 job”：
+      # - rust 只覆盖 Rust 核心/共享 FFI/各平台 core-ffi。旧过滤器把
+      #   platforms/android/ClipBridgeShellAndroid/** 和 platforms/macos/** 也算进
+      #   rust job，但 rust job 从不编译这两个外壳 —— 等于把 Android/macOS 变更
+      #   路由进了一个永远发现不了问题的 job。现在它们各自有真正的编译 job。
+      # - android：整个 platforms/android（外壳 + Android FFI），以及它交叉编译所依赖
+      #   的 Rust 源码（cb_core、crates、Cargo.lock）；核心改动同样可能让 .so 编不过。
+      # - macos：只覆盖 SwiftPM 外壳目录；纯 Rust 改动不会启动 macOS runner。
+      # - 门禁脚本自身变化时也重跑 android，避免“改了检查却没人跑”。
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
             rust:
               - 'cb_core/**'
+              - 'crates/**'
               - 'platforms/**/core-ffi/**'
-              - 'platforms/android/ClipBridgeShellAndroid/**'
-              - 'platforms/macos/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
@@ -40,6 +53,14 @@ jobs:
               - '**/*.props'
               - '**/*.targets'
               - '.editorconfig'
+            android:
+              - 'platforms/android/**'
+              - 'cb_core/**'
+              - 'crates/**'
+              - 'Cargo.lock'
+              - 'scripts/check-android-shell-contracts.sh'
+            macos:
+              - 'platforms/macos/ClipBridgeShell_macOS/**'
 
   rust:
     needs: changes
@@ -108,6 +129,173 @@ jobs:
 
       - name: Check workspace (Windows targets)
         run: cargo check --workspace --all-targets
+
+  # Android 外壳在旧 CI 里从未被编译过：platforms/android/** 只被路由到 Rust job，
+  # 而 Rust job 只跑 cargo fmt/clippy/test，从不碰 Android 侧代码。四个已合入的阻塞级
+  # 缺陷（init 缺必填字段、AIDL 事务码错位、null watcher、ensure_content_cached 参数
+  # 形状）都是在“CI 全绿”的情况下漏进去的。这个 job 保证：Android 侧代码真的能编译、
+  # Rust .so 真能进 jniLibs、APK 真能产出并包含两份 ABI 的 .so；其中 init/AIDL/
+  # ensure_content_cached 三项另由下面的静态契约脚本兜住。null watcher 属于运行时对象
+  # 生命周期问题，编译器和静态检查都看不见（见报告中的补测建议），需要仪器测试。
+  android:
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 固定 JDK 21：Gradle 8.13（wrapper 版本）拒绝在 JDK 25 上运行（本地已实测），
+      # 浮动 java-version 会在 runner 镜像换 JDK 时无声地把门禁弄红/弄绿。
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      # setup-android@v3 负责提供 sdkmanager 并接受 license；它要求 JDK 17+，所以必须
+      # 放在 setup-java 之后。
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 版本全部从项目里抄来，避免“CI 装的和项目要的不一样”：
+      # - NDK 26.3.11579264 = app/build.gradle.kts 的 ndkVersion
+      # - platform 36 / build-tools 36.0.0 = compileSdk/targetSdk 36
+      # - CMake 3.22.1 = app/src/main/cpp/CMakeLists.txt 的 cmake_minimum_required
+      - name: Install Android SDK packages (platform 36, build-tools, NDK, CMake)
+        run: |
+          set -euo pipefail
+          ( yes | sdkmanager --licenses > /dev/null ) || true
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;26.3.11579264" \
+            "cmake;3.22.1"
+
+      - name: Add Rust Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Cache cargo (Android job)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-android-
+
+      # 静态契约门禁：编译器只能证明 Java/AIDL 自洽，证明不了与平台/Rust 的契约。
+      # 这里钉死 API 36 的 IClipboard 事务码顺序、检查 init JSON 覆盖 InitConfigDto
+      # 必填字段、检查 ensure_content_cached 的请求键与 transfer_id 解析。
+      - name: Android shell contracts (AIDL order, init keys, FFI request shape)
+        run: bash scripts/check-android-shell-contracts.sh
+
+      # 用 plain cargo 而不是 cargo ndk，理由有两个：
+      # 1) build.gradle.kts 在配置阶段检查 target/<triple>/release/libcore_ffi_android.so
+      #    是否存在来决定 abiFilters；cargo ndk -o <jniLibs> 不会写这两个路径，结果
+      #    availableAbis 为空、只剩 arm64-v8a，x86_64 会被静默跳过。
+      # 2) cargo ndk 是额外 cargo 子命令，版本不受 Cargo.lock 约束；plain cargo + NDK
+      #    clang 只依赖仓库已声明的工具链，repeatability 更好。
+      # API level 用 26，与 app/build.gradle.kts 的 minSdk 一致；.so 同时写进
+      # target/<triple>/release（Gradle 的 copyRustSo 读这里）和 app/src/main/jniLibs
+      # （CMake 的 target_link_directories 读这里），保证链接与打包都有输入。
+      - name: Build Android FFI (.so for arm64-v8a and x86_64)
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          NDK="$SDK/ndk/26.3.11579264"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          API=26
+          export ANDROID_NDK_ROOT="$NDK"
+          export ANDROID_NDK_HOME="$NDK"
+          export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android${API}-clang"
+          export CC_x86_64_linux_android="$TOOLCHAIN/x86_64-linux-android${API}-clang"
+          export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+          export AR_x86_64_linux_android="$TOOLCHAIN/llvm-ar"
+          export RANLIB_aarch64_linux_android="$TOOLCHAIN/llvm-ranlib"
+          export RANLIB_x86_64_linux_android="$TOOLCHAIN/llvm-ranlib"
+          # cc-rs 也会按带连字符的目标三元组查环境变量（给 ring/rusqlite 的 C 代码用）
+          export "CC_aarch64-linux-android=$CC_aarch64_linux_android"
+          export "CC_x86_64-linux-android=$CC_x86_64_linux_android"
+          export "AR_aarch64-linux-android=$AR_aarch64_linux_android"
+          export "AR_x86_64-linux-android=$AR_x86_64_linux_android"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android${API}-clang"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$TOOLCHAIN/x86_64-linux-android${API}-clang"
+          cargo build -p core-ffi-android --release --locked --target aarch64-linux-android
+          cargo build -p core-ffi-android --release --locked --target x86_64-linux-android
+          for pair in arm64-v8a:aarch64-linux-android x86_64:x86_64-linux-android; do
+            abi="${pair%%:*}"
+            triple="${pair##*:}"
+            src="target/${triple}/release/libcore_ffi_android.so"
+            test -f "$src" || { echo "未产出 $src" >&2; exit 1; }
+            dest="platforms/android/ClipBridgeShellAndroid/app/src/main/jniLibs/${abi}"
+            mkdir -p "$dest"
+            cp "$src" "$dest/libcore_ffi_android.so"
+          done
+
+      # gradlew 在仓库里是 100644（Windows 本地不受影响），Ubuntu checkout 后没有执行位。
+      - name: Make Gradle wrapper executable
+        working-directory: platforms/android/ClipBridgeShellAndroid
+        run: chmod +x gradlew
+
+      # assembleDebug 同时做：AIDL 编译、Java 编译、CMake 编译 cb_jni 并链接
+      # core_ffi_android、打包 APK。注意 app/build.gradle.kts 里 “No Rust .so files
+      # found” 只是 println 警告，不会让构建失败；所以下面再用 APK 内容断言兜底。
+      - name: Build debug APK
+        working-directory: platforms/android/ClipBridgeShellAndroid
+        run: ./gradlew :app:assembleDebug --stacktrace --console=plain
+
+      # 真正验证 .so 进了包：只看 "BUILD SUCCESSFUL" 不够，历史 warning 正说明
+      # .so 缺失时 Gradle 仍然会成功。
+      - name: Verify APK contains Rust .so for both ABIs
+        working-directory: platforms/android/ClipBridgeShellAndroid
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK" || { echo "未产出 $APK" >&2; exit 1; }
+          entries="$(unzip -l "$APK")"
+          for abi in arm64-v8a x86_64; do
+            if ! grep -q "lib/${abi}/libcore_ffi_android.so" <<< "$entries"; then
+              echo "APK 缺少 lib/${abi}/libcore_ffi_android.so（Rust .so 没有进 jniLibs）" >&2
+              exit 1
+            fi
+          done
+          echo "OK: APK 同时包含 arm64-v8a 与 x86_64 的 Rust .so"
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: platforms/android/ClipBridgeShellAndroid/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  # macOS 外壳同样从未被 CI 编译过（platforms/macos/** 以前只进 Rust job）。
+  # SwiftPM 包目前是桩实现（CoreBridge 直接 throw notImplemented），但 swift build
+  # 仍能挡住语法/类型/并发隔离层面的腐烂，避免“看起来还在、其实编不过”。
+  # TODO: 真正的 app 产物由 platforms/macos/ClipBridgeShell_macOS/ClipBridge/ClipBridge.xcodeproj
+  # 构建；CI 还没有跑 xcodebuild，也没有把 Rust dylib 嵌进 bundle。等 FFI 绑定落地后补。
+  # Package.swift 的 swift-tools-version 是 6.2，因此要求 macos-latest 带 Xcode 26+。
+  # 注意：Swift 6.2 默认启用 SE-0444（成员导入可见性）。若这里报 ObservableObject/
+  # @Published 未定义，说明 CoreHostService.swift 只 import Foundation 却用了 Combine
+  # 的成员，需要在 Swift 源码补 `import Combine`（属于 shell 修复，不是放宽本门禁）。
+  macos:
+    needs: changes
+    if: needs.changes.outputs.macos == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build SwiftPM shell
+        working-directory: platforms/macos/ClipBridgeShell_macOS
+        run: swift build
 
   csharp:
     needs: changes
