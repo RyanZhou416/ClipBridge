@@ -300,12 +300,16 @@ impl Core {
 		self.inner.shutdown();
 	}
 
-	/// 清空所有缓存（CAS blobs、临时文件等）
+	/// 清空所有缓存（CAS blobs、临时文件、视图等）
+	///
+	/// 只清“内容”、不清“元数据”：`content_cache` 行必须保留（只把 `present` 置 0），
+	/// 因为 `items`/`history` 的读取都以 INNER JOIN `content_cache` 取 `total_bytes`；
+	/// 删行会让整个历史记录从所有查询中消失。
 	pub fn clear_cache(&self) -> anyhow::Result<()> {
 		self.inner.cas.clear_all()?;
-		// 同时清空数据库中的缓存记录
-		let store = self.inner.store.lock().unwrap();
-		store.conn.execute("DELETE FROM content_cache", [])?;
+		// 内容已从磁盘删除，但“曾经缓存过这个 sha”的元数据继续保留，供 history 查询 JOIN。
+		let mut store = self.inner.store.lock().unwrap();
+		store.mark_all_cache_missing()?;
 		Ok(())
 	}
 
@@ -898,3 +902,65 @@ impl Inner {
 
 #[cfg(test)]
 mod tests;
+
+/// `clear_cache` 回归测试：清缓存只能清“内容”，不能把历史元数据一起藏起来。
+#[cfg(test)]
+mod clear_cache_regression {
+	use super::*;
+
+	struct NoopSink;
+	impl CoreEventSink for NoopSink {
+		fn emit(&self, _event_json: String) {}
+	}
+
+	#[test]
+	fn clear_cache_keeps_history_visible() {
+		let root = tempfile::tempdir().unwrap();
+		let cfg = CoreConfig {
+			device_id: "dev-clear".to_string(),
+			device_name: "dev".to_string(),
+			account_uid: "acct-clear".to_string(),
+			account_password: "test_password".to_string(),
+			data_dir: root.path().join("data").to_string_lossy().into_owned(),
+			cache_dir: root.path().join("cache").to_string_lossy().into_owned(),
+			app_config: AppConfig::default(),
+			disable_network: true,
+		};
+		let core = Core::init(cfg, Arc::new(NoopSink));
+
+		let meta = core
+			.ingest_local_copy(ClipboardSnapshot::Text {
+				text_utf8: "history must survive clear_cache".to_string(),
+				ts_ms: now_ms(),
+			})
+			.unwrap();
+		let sha = meta.content.sha256.clone();
+		assert!(core.inner.cas.blob_exists(&sha));
+
+		core.clear_cache().unwrap();
+
+		// 内容确实清掉了
+		assert!(!core.inner.cas.blob_exists(&sha));
+		let present = core
+			.inner
+			.store
+			.lock()
+			.unwrap()
+			.get_cache_present(&sha)
+			.unwrap();
+		assert!(!present, "clear_cache 后 present 必须为 0");
+
+		// 但历史/元数据查询必须仍能看到这条记录
+		let list = core.list_history(10, None).unwrap();
+		assert!(
+			list.iter().any(|m| m.item_id == meta.item_id),
+			"clear_cache 之后 list_history 不应丢失历史记录"
+		);
+		assert!(
+			core.get_item_meta(&meta.item_id).unwrap().is_some(),
+			"clear_cache 之后 get_item_meta 不应返回 None"
+		);
+
+		core.shutdown();
+	}
+}

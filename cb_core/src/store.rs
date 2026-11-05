@@ -277,6 +277,17 @@ impl Store {
 		Ok(n)
 	}
 
+	/// 清空缓存实现：保留 `content_cache` 行，只把 `present` 置 0。
+	///
+	/// 不能直接 `DELETE FROM content_cache`：`items`/`history` 的读取都 INNER JOIN
+	/// `content_cache`，删行会让用户的历史记录从所有查询里消失。
+	pub fn mark_all_cache_missing(&mut self) -> anyhow::Result<usize> {
+		let n = self
+			.conn
+			.execute("UPDATE content_cache SET present=0", [])?;
+		Ok(n)
+	}
+
 	/// Phase C：CAS 写完后把 present=1，并 touch LRU
 	pub fn mark_cache_present(&mut self, sha256_hex: &str, now_ms: i64) -> anyhow::Result<usize> {
 		let n = self.conn.execute(
