@@ -265,6 +265,35 @@ impl Drop for TempFileGuard {
 	}
 }
 
+/// 会话终止守护 (RAII)：保证 `state_ref` 在所有退出路径上都落到 `Terminated`。
+///
+/// `run_actor` 里 `conn.open_bi().await?` / `start_handshake().await?` 等早期 `?`
+/// 返回、以及任务 panic，都不会执行末尾的状态赋值。若状态停在 TransportReady /
+/// Handshaking，`NetManager::maintain_sessions` 就永远不会回收该句柄，
+/// `handle_discovery_event` 也会一直认为该设备已有会话而拒绝重连 ——
+/// 一次失败的首次连接会永久废掉这个对端，直到应用重启。这里用 Drop 兜底。
+struct TerminatedGuard {
+	state_ref: Arc<Mutex<SessionState>>,
+}
+
+impl TerminatedGuard {
+	fn new(state_ref: Arc<Mutex<SessionState>>) -> Self {
+		Self { state_ref }
+	}
+}
+
+impl Drop for TerminatedGuard {
+	fn drop(&mut self) {
+		// Drop 里不能 panic：毒化的锁也要拿回内部值继续写，
+		// 否则 panic=unwind 下会直接 abort 进程。
+		let mut guard = match self.state_ref.lock() {
+			Ok(guard) => guard,
+			Err(poisoned) => poisoned.into_inner(),
+		};
+		*guard = SessionState::Terminated;
+	}
+}
+
 pub struct SessionActor {
 	role: SessionRole,
 	writer: FramedWrite<SendStream, CBFrameCodec>,
@@ -327,10 +356,16 @@ impl SessionActor {
 
 		let actor_log_id = initial_did.clone();
 		let state_ref_clone = state_ref.clone();
+		// 单独留一份给 Drop 守护：state_ref_clone 会被 move 进 run_actor。
+		let state_ref_for_guard = state_ref.clone();
 		let peer_id_ref_clone = peer_id_ref.clone();
 		let config_arc = Arc::new(config);
 
 		tokio::spawn(async move {
+			// 关键：守护比 run_actor 更早创建、更晚 drop。无论 run_actor 从哪个
+			// `?` 提前返回（open_bi / start_handshake 失败）还是任务 panic，
+			// 状态最终都会被写成 Terminated，NetManager 才能回收会话并允许重连。
+			let _terminated_guard = TerminatedGuard::new(state_ref_for_guard);
 			let (upload_tx, upload_rx) = mpsc::channel(32);
 			if let Err(e) = Self::run_actor(
 				role,

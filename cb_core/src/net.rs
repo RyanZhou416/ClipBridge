@@ -358,7 +358,11 @@ impl NetManager {
 		// --- B. 清理死链 & 生成/升级退避 ---
 		let mut dead_ids = Vec::new();
 		self.sessions.retain(|s| {
-			if s.is_finished() {
+			// 防御网：除了正常路径的 Terminated，actor 任务已结束
+			// （cmd_rx 被 drop → cmd_tx.is_closed()）的句柄也必须回收。
+			// 否则残留句柄会让 handle_discovery_event 一直认为“该设备已有会话”
+			// 而拒绝重连，直到进程重启。
+			if s.is_finished() || s.cmd_tx.is_closed() {
 				// 彻底挂了
 				if !s.device_id().starts_with("pending") {
 					dead_ids.push(s.device_id().clone());
