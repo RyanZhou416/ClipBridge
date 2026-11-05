@@ -114,10 +114,6 @@ public sealed partial class MainPage : Page
     // 1600 可避免 UniformToFill 放大后出现明显糊化。
     private const int BackgroundDecodePixelWidth = 1600;
 
-    /// <summary>对照开关：CB_SYNC_MAINPAGE_LOADED=1 时保持旧的“在 OnPageLoaded 里同步解码+首绘”行为。</summary>
-    private static readonly bool SyncLoadedForAb =
-        string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_MAINPAGE_LOADED"), "1", StringComparison.Ordinal);
-
     // 首绘是否还挂在合并重绘队列里（用于只打一次 mainpage-charts-deferred 标记）
     private bool _initialChartDrawPending;
 
@@ -158,15 +154,10 @@ public sealed partial class MainPage : Page
                 NetworkChartCanvas.SizeChanged += OnChartCanvasSizeChanged;
                 ActivityChartCanvas.SizeChanged += OnChartCanvasSizeChanged;
 
-                // 背景图片颜色检测：新路径在首帧之后由 ImageOpened / 延迟加载触发；
-                // A/B 对照模式保留旧的“Loaded 时立即检测”。
+                // 背景图片颜色检测：首帧之后由 ImageOpened / 延迟加载触发。
                 if (HeroImage != null)
                 {
                     HeroImage.ImageOpened += OnHeroImageOpened;
-                    if (SyncLoadedForAb && HeroImage.Source != null)
-                    {
-                        _ = DetectBackgroundColorAndUpdateTitleLegacyAsync();
-                    }
                 }
 
                 // 监听设置变化，当背景图片改变时重新加载
@@ -179,21 +170,9 @@ public sealed partial class MainPage : Page
 
             StartRelativeTimeRefresh();
 
-            if (SyncLoadedForAb)
-            {
-                StartupTrace.Mark("ab-mode-loaded-sync");
-                // A/B 对照：保持旧的“OnPageLoaded 内同步解码 + 图表首绘”
-                SafeDrawChart(DrawCacheChart, "Cache");
-                SafeDrawChart(DrawNetworkChart, "Network");
-                SafeDrawChart(DrawActivityChart, "Activity");
-                _ = LoadBackgroundImageAsync(legacySync: true);
-            }
-            else
-            {
-                StartupTrace.Mark("ab-mode-loaded-deferred");
-                // 首帧之后再绘制图表、加载/检测背景图，避免和第一帧抢 UI 线程
-                DeferStartupWorkUntilAfterFirstFrame();
-            }
+            StartupTrace.Mark("ab-mode-loaded-deferred");
+            // 首帧之后再绘制图表、加载/检测背景图，避免和第一帧抢 UI 线程
+            DeferStartupWorkUntilAfterFirstFrame();
         }
         catch (Exception ex)
         {
@@ -325,7 +304,7 @@ public sealed partial class MainPage : Page
     }
 
     // 首帧之后再做的启动工作：图表首绘（复用合并重绘队列）与背景图加载/颜色检测。
-    // 注意：这里不能 Activate 窗口、不能弹对话框，避免在对照测量时抢焦点。
+    // 注意：这里不能 Activate 窗口、不能弹对话框，避免在测量时抢焦点。
     private void DeferStartupWorkUntilAfterFirstFrame()
     {
         // 图表首绘：只标记脏位，复用既有的 Low 优先级合并重绘队列（不新增定时器）
@@ -343,85 +322,9 @@ public sealed partial class MainPage : Page
         });
     }
 
-    // ---- 旧行为（仅 A/B 对照使用）：解析与解码都在调用线程上完成，不读缓存 ----
     private async void OnHeroImageOpened(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
-        if (SyncLoadedForAb)
-        {
-            await DetectBackgroundColorAndUpdateTitleLegacyAsync();
-        }
-        else
-        {
-            await DetectBackgroundColorAndUpdateTitleAsync();
-        }
-    }
-
-    private async Task DetectBackgroundColorAndUpdateTitleLegacyAsync()
-    {
-        try
-        {
-            if (HeroImage?.Source == null || TitleTextBlock == null)
-                return;
-
-            Windows.Storage.StorageFile? imageFile = null;
-
-            // 获取图片源
-            var imageSource = HeroImage.Source;
-            if (imageSource is Microsoft.UI.Xaml.Media.Imaging.BitmapImage bitmapImage)
-            {
-                // 尝试从 Uri 读取（默认图片）
-                var uri = bitmapImage.UriSource;
-                if (uri != null && uri.Scheme == "ms-appx")
-                {
-                    try
-                    {
-                        imageFile = await Windows.Storage.StorageFile.GetFileFromApplicationUriAsync(uri);
-                    }
-                    catch
-                    {
-                        // Uri 方式失败，尝试从路径读取（自定义图片）
-                    }
-                }
-            }
-
-            // 如果 Uri 方式失败，尝试从设置中读取自定义图片路径
-            if (imageFile == null)
-            {
-                var settingsService = App.GetService<ClipBridgeShell_CS.Contracts.Services.ILocalSettingsService>();
-                var customImagePath = await settingsService.ReadSettingAsync<string?>(BackgroundImagePathSettingKey);
-                if (!string.IsNullOrEmpty(customImagePath))
-                {
-                    try
-                    {
-                        imageFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(customImagePath);
-                    }
-                    catch
-                    {
-                        // 读取失败
-                    }
-                }
-            }
-
-            if (imageFile != null)
-            {
-                await DetectImageColorAndUpdateTitleLegacyAsync(imageFile);
-            }
-        }
-        catch (Exception ex)
-        {
-            // 如果检测失败，使用默认颜色
-            System.Diagnostics.Debug.WriteLine($"检测背景颜色失败: {ex.Message}");
-        }
-    }
-
-    private async Task DetectImageColorAndUpdateTitleLegacyAsync(Windows.Storage.StorageFile file)
-    {
-        var color = await DecodeTitleColorFromFileAsync(file);
-        if (color.HasValue)
-        {
-            // 更新标题颜色（使用辅助方法，确保不受主题影响）
-            UpdateTitleColor(color.Value);
-        }
+        await DetectBackgroundColorAndUpdateTitleAsync();
     }
 
     // 只负责解码 + 计算标题区域平均亮度，不碰 UI。（调用方决定放在 UI 线程还是后台线程）
@@ -726,8 +629,7 @@ public sealed partial class MainPage : Page
     }
     
     // 加载背景图片（用户自定义或默认）。
-    // legacySync = true 仅用于 A/B 对照，复现旧的“在 OnPageLoaded 调用链里同步解码检测”行为。
-    private async Task LoadBackgroundImageAsync(bool legacySync = false)
+    private async Task LoadBackgroundImageAsync()
     {
         try
         {
@@ -756,12 +658,12 @@ public sealed partial class MainPage : Page
             if (imageFile != null)
             {
                 _lastBackgroundImagePath = string.IsNullOrEmpty(imageFile.Path) ? customImagePath : imageFile.Path;
-                await ApplyLoadedBackgroundImageAsync(imageFile, legacySync);
+                await ApplyLoadedBackgroundImageAsync(imageFile);
                 return;
             }
 
             _lastBackgroundImagePath = null;
-            await ApplyDefaultBackgroundImageAsync(legacySync);
+            await ApplyDefaultBackgroundImageAsync();
         }
         catch (Exception ex)
         {
@@ -770,31 +672,23 @@ public sealed partial class MainPage : Page
             if (HeroImage != null)
             {
                 var fallbackBitmap = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
-                if (!legacySync)
-                {
-                    fallbackBitmap.DecodePixelWidth = BackgroundDecodePixelWidth;
-                }
+                fallbackBitmap.DecodePixelWidth = BackgroundDecodePixelWidth;
                 fallbackBitmap.UriSource = new Uri("ms-appx:///Assets/background.jpg");
 
                 _backgroundImageGeneration++;
                 HeroImage.Source = fallbackBitmap;
 
-                if (!legacySync)
-                {
-                    _ = DetectBackgroundColorAndUpdateTitleAsync();
-                }
+                _ = DetectBackgroundColorAndUpdateTitleAsync();
             }
         }
     }
 
-    private async Task ApplyLoadedBackgroundImageAsync(Windows.Storage.StorageFile imageFile, bool legacySync)
+    private async Task ApplyLoadedBackgroundImageAsync(Windows.Storage.StorageFile imageFile)
     {
         var bitmapImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
-        if (!legacySync)
-        {
-            // 下采样解码：按显示所需宽度解码，避免整张 3840x2160 背景图占用 UI 线程时间与内存
-            bitmapImage.DecodePixelWidth = BackgroundDecodePixelWidth;
-        }
+
+        // 下采样解码：按显示所需宽度解码，避免整张 3840x2160 背景图占用 UI 线程时间与内存
+        bitmapImage.DecodePixelWidth = BackgroundDecodePixelWidth;
 
         using (var stream = await imageFile.OpenAsync(Windows.Storage.FileAccessMode.Read))
         {
@@ -804,60 +698,29 @@ public sealed partial class MainPage : Page
         _backgroundImageGeneration++;
         HeroImage!.Source = bitmapImage;
 
-        if (legacySync)
-        {
-            // A/B 对照：与旧实现一致，在同一调用链里直接解码检测
-            await DetectImageColorAndUpdateTitleLegacyAsync(imageFile);
-        }
-        else
-        {
-            // 首帧之后异步检测；解码在后台线程，ImageOpened 触发的检测会被去重
-            _ = DetectBackgroundColorAndUpdateTitleAsync();
-        }
+        // 首帧之后异步检测；解码在后台线程，ImageOpened 触发的检测会被去重
+        _ = DetectBackgroundColorAndUpdateTitleAsync();
     }
 
-    private async Task ApplyDefaultBackgroundImageAsync(bool legacySync)
+    private async Task ApplyDefaultBackgroundImageAsync()
     {
         var defaultUri = new Uri("ms-appx:///Assets/background.jpg");
 
-        // 新路径：XAML 已经声明了同一张默认图时不再重复解码，只补一次首帧后的颜色检测
-        if (!legacySync && IsSourceTheDefaultBackground(defaultUri))
+        // XAML 已经声明了同一张默认图时不再重复解码，只补一次首帧后的颜色检测
+        if (IsSourceTheDefaultBackground(defaultUri))
         {
             _ = DetectBackgroundColorAndUpdateTitleAsync();
             return;
         }
 
         var bitmapImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
-        if (!legacySync)
-        {
-            bitmapImage.DecodePixelWidth = BackgroundDecodePixelWidth;
-        }
+        bitmapImage.DecodePixelWidth = BackgroundDecodePixelWidth;
         bitmapImage.UriSource = defaultUri;
 
         _backgroundImageGeneration++;
         HeroImage!.Source = bitmapImage;
 
-        if (legacySync)
-        {
-            // 加载默认图片后，检测颜色并更新标题
-            try
-            {
-                var imageFile = await Windows.Storage.StorageFile.GetFileFromApplicationUriAsync(defaultUri);
-                if (imageFile != null)
-                {
-                    await DetectImageColorAndUpdateTitleLegacyAsync(imageFile);
-                }
-            }
-            catch
-            {
-                // 如果检测失败，使用默认颜色
-                System.Diagnostics.Debug.WriteLine("无法检测默认背景图片颜色");
-            }
-        }
-        else
-        {
-            _ = DetectBackgroundColorAndUpdateTitleAsync();
-        }
+        _ = DetectBackgroundColorAndUpdateTitleAsync();
     }
 
     private bool IsSourceTheDefaultBackground(Uri defaultUri)
@@ -885,14 +748,7 @@ public sealed partial class MainPage : Page
         // 主题变化时，重新检测背景颜色并更新标题
         // 延迟一下，确保主题切换完成后再更新
         await Task.Delay(50);
-        if (SyncLoadedForAb)
-        {
-            await DetectBackgroundColorAndUpdateTitleLegacyAsync();
-        }
-        else
-        {
-            await DetectBackgroundColorAndUpdateTitleAsync();
-        }
+        await DetectBackgroundColorAndUpdateTitleAsync();
     }
 
     // 更新标题颜色的辅助方法：直接设置 TextBlock 前景色，完全不受主题影响

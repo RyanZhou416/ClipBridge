@@ -20,13 +20,6 @@ public class ActivationService : IActivationService
     private readonly ICoreHostService _coreHostService;
     private UIElement? _shell = null;
 
-    // 启动耗时 A/B 对照开关（默认关闭，只用于同一份二进制内交替实测）：
-    //   CB_SYNC_SHELL=1 → 旧路径：先构建 ShellPage 再 Activate（对照臂）；
-    //   未设置           → 新路径：先显示占位层，首帧之后再低优先级构建 Shell。
-    // 跨会话测量噪声很大，只有同一二进制内交替运行才能把“这次改造本身”的收益量出来。
-    private static readonly bool SyncShellForAb =
-        string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_SHELL"), "1", StringComparison.Ordinal);
-
     // 测量模式：CB_STARTUP_NO_FOREGROUND=1 时窗口“可见但不抢焦点”。
     // 连续测 5~7 次启动耗时时，Activate() 会反复把用户正在用的窗口抢到前台，必须避免。
     private static readonly bool SuppressForeground =
@@ -36,27 +29,12 @@ public class ActivationService : IActivationService
     private const int SW_SHOWNOACTIVATE = 4;
 
     /// <summary>
-    /// 顺序 A/B 对照开关：<c>CB_SYNC_TITLEBAR_FIRST=1</c> → 旧顺序（先 ExtendsContentIntoTitleBar，
-    /// 再挂占位内容）；未设置 → 新顺序（先挂内容再扩展，实测省约 20ms）。只用于同二进制交替实测。
-    /// </summary>
-    private static readonly bool TitlebarFirstForAb =
-        string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_TITLEBAR_FIRST"), "1", StringComparison.Ordinal);
-
-    /// <summary>
     /// 实测记录（勿重复试验）：
     /// 1) "Theme == Default 时跳过 Shell 重建后的重套主题" —— 无效，反而 +23.4ms。那 89ms 是
     ///    Content 赋值后的首次布局，不是 RequestedTheme 赋值本身，跳过赋值救不了布局。
     /// 2) "延迟构建改用 Normal 优先级" —— 可见 +11.5ms、可用 +44.7ms，两项都更差。
     /// 结论：这两条都不做，保持"Low 优先级 + 始终重套主题"。
     /// </summary>
-
-    /// <summary>
-    /// 主题初始化 A/B 对照开关（默认关闭）：
-    /// <c>CB_SYNC_THEME=1</c> → 旧路径：窗口创建前就 await 主题设置读取（对照臂）；
-    /// 未设置              → 新路径：主题读取与窗口构造重叠，首帧之后再套用（满足视觉规则时）。
-    /// </summary>
-    private static readonly bool SyncThemeForAb =
-        string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_THEME"), "1", StringComparison.Ordinal);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -73,22 +51,11 @@ public class ActivationService : IActivationService
     public async Task ActivateAsync(object activationArgs)
     {
         // ① 主题设置读取（LEVER 2）
-        // 默认：只启动、不等待，让它与下面的窗口构造重叠（实测主题初始化约 68ms）。
+        // 只启动、不等待，让它与下面的窗口构造重叠（实测主题初始化约 68ms）。
         // 窗口显示之前再根据“视觉正确性规则”决定：能安全推迟就推迟到首帧之后套用，
-        // 不能就回退到同步路径。CB_SYNC_THEME=1 时完全保持改动前的顺序。
-        Task? themeReadTask;
-        if (SyncThemeForAb)
-        {
-            StartupTrace.Mark("ab-mode-theme-sync");
-            themeReadTask = StartThemeRead();
-            await themeReadTask;
-            StartupTrace.Mark("theme-init-done");
-        }
-        else
-        {
-            StartupTrace.Mark("ab-mode-theme-deferred");
-            themeReadTask = StartThemeRead();
-        }
+        // 不能就回退到同步路径。
+        StartupTrace.Mark("ab-mode-theme-deferred");
+        var themeReadTask = StartThemeRead();
 
         if (App.MainWindow == null)
         {
@@ -100,82 +67,49 @@ public class ActivationService : IActivationService
 
         // 主题是否允许推迟到首帧之后套用（只有“推迟不会造成可见闪烁”时才为 true）。
         var themeApplyDeferred = false;
-        if (!SyncThemeForAb)
-        {
-            // 视觉正确性规则（不可妥协）：
-            // 窗口首帧一定用“当前系统主题”绘制。若保存的主题与它不同，把套用推迟到首帧之后
-            // 就会先看到系统主题、再跳成保存主题——一次可见的闪烁。
-            // 因此必须在窗口可见（Activate）之前拿到保存值，并做一次廉价判定：
-            //   ① 保存值 = Default      → 它本来就等于系统主题，之后套用是无操作，安全；
-            //   ② 保存值 = 当前系统主题 → 之后套用同样无视觉变化，安全；
-            //   ③ 其它                  → 本次启动回退同步路径（主题留在关键路径上），宁可慢也不闪。
-            // 判定只是枚举比较；保存值来自上面同一次设置读取。正常情况该读取已与窗口构造
-            // 重叠完成，await 一个已完成任务不占关键路径。
-            var readWasInFlightWhenWindowReady = !themeReadTask!.IsCompleted;
-            await themeReadTask;
-            if (readWasInFlightWhenWindowReady)
-            {
-                // 读取比窗口构造慢：只能在窗口可见前等它，这属于回退，不是默认路径。
-                StartupTrace.Mark("theme-read-waited");
-            }
-            StartupTrace.Mark("theme-init-done");
 
-            themeApplyDeferred = CanApplyThemeAfterFirstFrame();
-            StartupTrace.Mark(themeApplyDeferred ? "theme-apply-deferred" : "theme-sync-fallback");
+        // 视觉正确性规则（不可妥协）：
+        // 窗口首帧一定用“当前系统主题”绘制。若保存的主题与它不同，把套用推迟到首帧之后
+        // 就会先看到系统主题、再跳成保存主题——一次可见的闪烁。
+        // 因此必须在窗口可见（Activate）之前拿到保存值，并做一次廉价判定：
+        //   ① 保存值 = Default      → 它本来就等于系统主题，之后套用是无操作，安全；
+        //   ② 保存值 = 当前系统主题 → 之后套用同样无视觉变化，安全；
+        //   ③ 其它                  → 本次启动回退同步路径（主题留在关键路径上），宁可慢也不闪。
+        // 判定只是枚举比较；保存值来自上面同一次设置读取。正常情况该读取已与窗口构造
+        // 重叠完成，await 一个已完成任务不占关键路径。
+        var readWasInFlightWhenWindowReady = !themeReadTask.IsCompleted;
+        await themeReadTask;
+        if (readWasInFlightWhenWindowReady)
+        {
+            // 读取比窗口构造慢：只能在窗口可见前等它，这属于回退，不是默认路径。
+            StartupTrace.Mark("theme-read-waited");
         }
+        StartupTrace.Mark("theme-init-done");
+
+        themeApplyDeferred = CanApplyThemeAfterFirstFrame();
+        StartupTrace.Mark(themeApplyDeferred ? "theme-apply-deferred" : "theme-sync-fallback");
 
         // 关键改动：先让窗口可见，Shell 排到首帧之后构建。
         // 旧顺序里 ShellPage 的 XAML（实测约 164ms）发生在 Activate() 之前，直接抬高“到窗口可见”。
         var buildShellDeferred = false;
 
-        if (SyncShellForAb)
+        StartupTrace.Mark("ab-mode-deferred");
+        if (mainWindow.Content == null)
         {
-            // A/B 对照臂：与改动前完全一致的顺序（先建 Shell 再激活），供同一二进制交替实测。
-            StartupTrace.Mark("ab-mode-sync");
-            if (mainWindow.Content == null)
-            {
-                // 本地化器可能还在后台构建（LEVER 1）：ShellPage 的 XAML l:Uids 与 OnLoaded
-                // 都依赖本地化资源，必须在 GetService 之前等它就绪。
-                // App.LocalizerReady 内部已捕获异常，永远不会抛，不会把这里卡死。
-                await App.WaitLocalizerReadyAsync();
-                _shell = App.GetService<ShellPage>();
-                mainWindow.Content = _shell ?? new Frame();
-            }
-            StartupTrace.Mark("shellpage-created");
-
-            await HandleActivationAsync(activationArgs);
-            StartupTrace.Mark("activation-handlers-done");
+            // 顺序：先挂占位内容，再打开扩展内容模式。
+            // 实测 ExtendsContentIntoTitleBar 单独占 77.7ms，而内容岛只有 0.2ms；
+            // 先有内容再扩展，可省约 20ms（77.7 → 57.5），且视觉完全不变。
+            mainWindow.Content = CreatePlaceholderContent();
+            StartupTrace.Mark("placeholder-set");
+            mainWindow.ExtendsContentIntoTitleBar = true;
+            StartupTrace.Mark("titlebar-extended");
+            buildShellDeferred = true;
         }
         else
         {
-            StartupTrace.Mark("ab-mode-deferred");
-            if (mainWindow.Content == null)
-            {
-                // 顺序实验：先挂占位内容，再打开扩展内容模式。
-                // 实测 ExtendsContentIntoTitleBar 单独占 77.7ms，而内容岛只有 0.2ms；
-                // 先有内容再扩展，可省约 20ms（77.7 → 57.5），且视觉完全不变。
-                if (TitlebarFirstForAb)
-                {
-                    mainWindow.ExtendsContentIntoTitleBar = true;
-                    StartupTrace.Mark("titlebar-extended");
-                    mainWindow.Content = CreatePlaceholderContent();
-                    StartupTrace.Mark("placeholder-set");
-                }
-                else
-                {
-                    mainWindow.Content = CreatePlaceholderContent();
-                    StartupTrace.Mark("placeholder-set");
-                    mainWindow.ExtendsContentIntoTitleBar = true;
-                    StartupTrace.Mark("titlebar-extended");
-                }
-                buildShellDeferred = true;
-            }
-            else
-            {
-                // 非首次激活（内容已存在）：维持原有行为，直接走激活处理器。
-                await HandleActivationAsync(activationArgs);
-                StartupTrace.Mark("activation-handlers-done");
-            }
+            // 非首次激活（内容已存在）：维持原有行为，直接走激活处理器。
+            await HandleActivationAsync(activationArgs);
+            StartupTrace.Mark("activation-handlers-done");
         }
 
         // 自启到托盘：若由注册表/计划任务传入 --startup-to-tray，不激活主窗口，直接隐藏到托盘

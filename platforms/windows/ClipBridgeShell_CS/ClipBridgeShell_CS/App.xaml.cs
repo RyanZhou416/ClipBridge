@@ -15,9 +15,7 @@ using ClipBridgeShell_CS.Services;
 using ClipBridgeShell_CS.ViewModels;
 using ClipBridgeShell_CS.Views;
 
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
@@ -72,21 +70,6 @@ public partial class App : Application
     /// 未设置时行为与原先完全一致。
     /// </summary>
     internal static readonly bool SuppressForeground = MeasurementWindow.SuppressForeground;
-
-    /// <summary>
-    /// 启动耗时 A/B 对照开关（默认关闭，只用于同一份二进制内交替实测）：
-    /// <c>CB_SYNC_LOCALIZER=1</c> → 旧路径：先 await 本地化器构建完成，再进入激活流程；
-    /// 未设置                    → 新路径：本地化器后台构建，启动期需要它的消费者各自 await。
-    /// </summary>
-    private static readonly bool SyncLocalizerForAb =
-        string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_LOCALIZER"), "1", StringComparison.Ordinal);
-
-    /// <summary>
-    /// <c>CB_SYNC_HOSTBUILDER=1</c> → 旧路径：Host.CreateDefaultBuilder() 构建通用主机（对照臂）；
-    /// 未设置                   → 新路径：ServiceCollection + BuildServiceProvider()。
-    /// </summary>
-    private static readonly bool LegacyHostBuilder =
-        string.Equals(Environment.GetEnvironmentVariable("CB_SYNC_HOSTBUILDER"), "1", StringComparison.Ordinal);
 
     /// <summary>
     /// 后台本地化初始化任务。默认模式下 <see cref="OnLaunched"/> 只启动它、不等待；
@@ -157,33 +140,13 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// 构建 DI 容器。
-    ///
-    /// 默认走轻量路径：<see cref="ServiceCollection"/> + BuildServiceProvider()。
+    /// 构建 DI 容器：<see cref="ServiceCollection"/> + BuildServiceProvider()。
     /// 通用主机（Host.CreateDefaultBuilder）除 DI 之外还会加载配置源、环境变量、命令行、
     /// 主机生命周期与环境探测，本应用一样都没用到，却要在冷启动里付出约 118ms（LEVER 3）。
     /// 注册项与顺序保持与改动前逐条一致，只把“配置”换成等值的代码内构造。
-    ///
-    /// <c>CB_SYNC_HOSTBUILDER=1</c> 时仍走旧的 Host.CreateDefaultBuilder()，供同一二进制 A/B 对照。
     /// </summary>
     private static IServiceProvider BuildServices()
     {
-        if (LegacyHostBuilder)
-        {
-            StartupTrace.Mark("ab-mode-host-legacy");
-            var host = Microsoft.Extensions.Hosting.Host.
-            CreateDefaultBuilder().
-            UseContentRoot(AppContext.BaseDirectory).
-            ConfigureLogging(logging =>
-            {
-                // 先配置日志系统，确保 ILoggerFactory 可用
-            }).
-            ConfigureServices((context, services) => RegisterServices(services, context.Configuration)).
-            Build();
-            StartupTrace.Mark("app-host-built");
-            return host.Services;
-        }
-
         StartupTrace.Mark("ab-mode-host-lite");
         var services = new ServiceCollection();
 
@@ -202,7 +165,7 @@ public partial class App : Application
             }
         });
 
-        RegisterServices(services, configuration: null);
+        RegisterServices(services);
 
         var provider = services.BuildServiceProvider();
         StartupTrace.Mark("host-built-lite");
@@ -212,10 +175,9 @@ public partial class App : Application
 
     /// <summary>
     /// 所有服务注册（与改动前逐条、同序）。
-    /// <paramref name="configuration"/> 只在旧主机路径下存在；轻量路径传 null，
-    /// 因为 appsettings.json 只提供 LocalSettingsOptions，且其值与下面代码内构造的完全相同。
+    /// appsettings.json 只提供 LocalSettingsOptions，且其值与下面代码内构造的完全相同。
     /// </summary>
-    private static void RegisterServices(IServiceCollection services, IConfiguration? configuration)
+    private static void RegisterServices(IServiceCollection services)
     {
         // Default Activation Handler
         services.AddTransient<ActivationHandler<LaunchActivatedEventArgs>, DefaultActivationHandler>();
@@ -325,20 +287,13 @@ public partial class App : Application
         services.AddTransient<ShellViewModel>();
 
         // Configuration
-        if (configuration is not null)
+        // 数值与 appsettings.json 完全一致（同时它们也是 LocalSettingsService 的内置默认值），
+        // 因此不再为了这两个字段去读 JSON + 建配置树。
+        services.Configure<LocalSettingsOptions>(options =>
         {
-            services.Configure<LocalSettingsOptions>(configuration.GetSection(nameof(LocalSettingsOptions)));
-        }
-        else
-        {
-            // 轻量路径：数值与 appsettings.json 完全一致（同时它们也是 LocalSettingsService 的内置默认值），
-            // 因此不再为了这两个字段去读 JSON + 建配置树。
-            services.Configure<LocalSettingsOptions>(options =>
-            {
-                options.ApplicationDataFolder = "ClipBridgeShell_CS/ApplicationData";
-                options.LocalSettingsFile = "LocalSettings.json";
-            });
-        }
+            options.ApplicationDataFolder = "ClipBridgeShell_CS/ApplicationData";
+            options.LocalSettingsFile = "LocalSettings.json";
+        });
         services.AddSingleton<ClipboardWatcher>(sp =>
         {
             var clipboardService = sp.GetRequiredService<IClipboardService>();
@@ -396,22 +351,9 @@ public partial class App : Application
         //   - 首帧只画一个空占位层（不解析任何本地化资源）；
         //   - ShellPage 已排到首帧之后的低优先级回调里，构建前会显式 await App.LocalizerReady；
         //   - 窗口标题先用字面量兜底，就绪后再换成正式文本。
-        // CB_SYNC_LOCALIZER=1 时退回旧行为（先等本地化器，再激活），供同一二进制 A/B 对照。
-        if (SyncLocalizerForAb)
-        {
-            StartupTrace.Mark("ab-mode-localizer-sync");
-        }
-        else
-        {
-            StartupTrace.Mark("ab-mode-localizer-deferred");
-        }
+        StartupTrace.Mark("ab-mode-localizer-deferred");
 
         LocalizerReady = RunLocalizerSafelyAsync();
-
-        if (SyncLocalizerForAb)
-        {
-            await WaitLocalizerReadyAsync();
-        }
 
         // ② 再走 Template Studio 原有流程（里面会调用 ActivationService）
         await App.GetService<IActivationService>().ActivateAsync(args);
