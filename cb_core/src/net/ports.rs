@@ -16,8 +16,15 @@
 /// 数据端点总数的环境变量名。
 pub const DATA_ENDPOINT_COUNT_ENV: &str = "CB_QUIC_DATA_ENDPOINTS";
 
-/// 数据端点总数默认值（1 个控制端点 + 1 个数据端点）。
-pub const DEFAULT_DATA_ENDPOINT_COUNT: usize = 2;
+/// 数据端点总数默认值：**1 = 只有控制端点**（与引入多端点之前的行为一致）。
+///
+/// 为什么默认关闭：C1 的 A/B（ADR-002 §5.4）用 `CB_QUIC_WORKERS` 做了对照，确认
+/// 探针全程只用了 5~7/32 个核、**并不是 CPU 饱和**；在这个前提下多端点没有可复现的
+/// 聚合收益（D=2 只有 +12~14% 的弱信号，D=4 为 0~9%，而默认 worker 下 D=1 反而最好）。
+/// 另外每条数据连接要额外付一次 OPAQUE 握手，公网上数据端口还可能不可达（每个大传输
+/// 最多多等约 8s 才回退到控制连接）。因此默认单端点；等有 10G 真机并完成 C2
+/// （单文件跨连接分片）之后再考虑开启。
+pub const DEFAULT_DATA_ENDPOINT_COUNT: usize = 1;
 
 /// 数据端点总数下限：1 = 只有控制端点（今天的行为）。
 pub const MIN_DATA_ENDPOINT_COUNT: usize = 1;
