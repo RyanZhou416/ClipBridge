@@ -39,6 +39,11 @@ futures = "0.3"
 # --- QUIC & TLS (全栈使用 0.23 生态) ---
 # quinn 0.11 默认使用 rustls 0.23
 quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-tokio"] }
+# UDP socket 缓冲：quinn 没有暴露设置 SO_RCVBUF/SO_SNDBUF 的 API，必须在把
+# socket 交给 Endpoint::new 之前自己设置。jumbo（9000 B）下 Windows 默认 64 KiB
+# 接收缓冲只够放 ~7 个数据报，实测损失约 35% 吞吐（见 transport.rs 的注释）。
+# socket2 已经作为 quinn-udp/tokio 的传递依赖出现在 Cargo.lock 里，不新增下载。
+socket2 = "0.6"
 # 显式使用 0.23，并开启 ring 特性 (必须，否则 quinn 无法创建默认 provider)
 rustls = { version = "0.23.35", default-features = false, features = ["ring", "std"] }
 # rcgen 0.13 配合 rustls 0.23 使用
