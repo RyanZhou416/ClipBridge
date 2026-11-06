@@ -1,6 +1,6 @@
 // cb_core/src/proto.rs
 use anyhow::Result;
-use bytes::Bytes;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 // 协议版本号
@@ -9,17 +9,22 @@ use serde::{Deserialize, Serialize};
 // - 2：bincode → postcard 之后的首个版本
 // - 3：新增 `CtrlMsg::ContentDenied`（策略拒绝改为非致命）。握手会强制比对版本，
 //      老对端在 Hello/HelloAck 阶段即被拒绝，而不是卡在解码失败。
-pub const PROTOCOL_VERSION: u32 = 3;
+// - 4（ADR-002 阶段 B1）：控制面/数据面分离。控制流（本条 bidi 流）只承载
+//      `CBFrame::Control`；每个传输额外开一条 bidi 数据流，先写
+//      `[u32 LE header_len][postcard(TransferHeader)]`，随后直接写文件字节，
+//      最后 FIN。旧的 `CBFrame::Data` 帧类型从线格式中删除（版本号已 +1，
+//      两端必须同版本，无需兼容旧对端）。
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug)]
 pub enum CBFrame {
-	Control(Box<CtrlMsg>), // JSON 信令 (Type=1)
-	Data { transfer_id: String, data: Bytes },
+	/// 控制流上唯一的帧类型。数据传输已迁移到独立的每传输数据流
+	/// （见 [`TransferHeader`]），不再走这条流。
+	Control(Box<CtrlMsg>),
 }
 
 // 帧类型常量
 const FRAME_TYPE_CTRL: u8 = 0x01;
-const FRAME_TYPE_DATA: u8 = 0x02;
 
 // 鉴权成功后的会话标记
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +161,103 @@ pub enum CtrlMsg {
 	},
 }
 
+/// 每传输独立数据流的头（ADR-002 阶段 B1）。
+///
+/// 线格式（由发送端在数据流上写入）：
+///
+/// ```text
+/// [u32 LE header_len][postcard(TransferHeader)][raw payload bytes ...]
+/// ```
+///
+/// 头里携带的字段与控制面的 `ContentBegin` / `ContentGet` 一一对应，因此接收端
+/// 即使先收到数据流（控制流与数据流是两条独立的 QUIC 流，交付顺序无法保证）
+/// 也能据此完成路由与校验，不会丢信息：
+///
+/// - `req_id`：等于 `ContentGet.msg_id` / `ContentBegin.req_id`，即 transfer_id；
+/// - `offset` / `length`：本段数据的起点与长度（B1 固定 `offset=0`、
+///   `length=ContentBegin.total_bytes`；B2 的并行子流/续传会用到非零 offset）；
+/// - `sha256`：与 `ContentBegin.sha256` 相同的期望 hash（整次传输片段的 hash）；
+/// - `mime` / `item_id` / `file_id`：与 `ContentBegin` 相同，便于独立核对。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferHeader {
+	pub req_id: String,
+	pub item_id: String,
+	pub file_id: Option<String>,
+	/// 本数据流第一个字节在整个传输中的偏移。
+	pub offset: u64,
+	/// 本数据流头部之后跟随的负载字节数。
+	pub length: u64,
+	/// 期望的 SHA-256（与 `ContentBegin.sha256` 一致）。
+	pub sha256: String,
+	/// MIME（与 `ContentBegin.mime` 一致）。
+	pub mime: String,
+}
+
+/// 数据流头部的长度前缀字节数（小端 u32）。
+pub const TRANSFER_HEADER_LEN_BYTES: usize = 4;
+
+/// 数据流头部的上限（编码后）。防止恶意对端用超大长度前缀迫使我们分配内存。
+pub const MAX_TRANSFER_HEADER_BYTES: usize = 64 * 1024;
+
+/// 通用 postcard 编码（线格式与 OPAQUE 消息共用，见 actor 的 opaque_encode）。
+pub fn postcard_encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+	postcard::to_stdvec(value).map_err(|e| anyhow::anyhow!("postcard 序列化失败: {e}"))
+}
+
+/// 通用 postcard 解码（见 actor 的 opaque_decode）。
+pub fn postcard_decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+	postcard::from_bytes(bytes).map_err(|e| anyhow::anyhow!("postcard 反序列化失败: {e}"))
+}
+
+impl TransferHeader {
+	/// 编码为 postcard 字节（不含长度前缀）。
+	pub fn encode(&self) -> Result<Vec<u8>> {
+		postcard_encode(self)
+	}
+
+	/// 从 postcard 字节（不含长度前缀）解码。
+	pub fn decode(bytes: &[u8]) -> Result<Self> {
+		postcard_decode(bytes)
+	}
+}
+
+/// 构造数据流头部的完整线格式：`[u32 LE len][postcard]`。
+pub fn encode_transfer_header_frame(header: &TransferHeader) -> Result<Vec<u8>> {
+	let body = header.encode()?;
+	if body.len() > MAX_TRANSFER_HEADER_BYTES {
+		anyhow::bail!(
+			"transfer header too large: {} > {}",
+			body.len(),
+			MAX_TRANSFER_HEADER_BYTES
+		);
+	}
+	let mut frame = Vec::with_capacity(TRANSFER_HEADER_LEN_BYTES + body.len());
+	frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+	frame.extend_from_slice(&body);
+	Ok(frame)
+}
+
+/// 解析完整的数据流头部线格式（`[u32 LE len][postcard]`）。
+///
+/// `frame` 必须恰好包含一个头部（允许后面还有负载字节，但解析只消费头部）。
+pub fn decode_transfer_header_frame(frame: &[u8]) -> Result<TransferHeader> {
+	if frame.len() < TRANSFER_HEADER_LEN_BYTES {
+		anyhow::bail!("transfer header frame too short: {}", frame.len());
+	}
+	let len = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
+	if len == 0 || len > MAX_TRANSFER_HEADER_BYTES {
+		anyhow::bail!("invalid transfer header length: {len}");
+	}
+	let end = TRANSFER_HEADER_LEN_BYTES + len;
+	if frame.len() < end {
+		anyhow::bail!(
+			"transfer header frame truncated: need {end} bytes, got {}",
+			frame.len()
+		);
+	}
+	TransferHeader::decode(&frame[TRANSFER_HEADER_LEN_BYTES..end])
+}
+
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -179,29 +281,6 @@ impl Encoder<CBFrame> for CBFrameCodec {
 				dst.put_u32_le(len as u32);
 				dst.put_u8(FRAME_TYPE_CTRL); // Type = 1
 				dst.put_slice(&json_bytes);
-			}
-			CBFrame::Data { transfer_id, data } => {
-				// 格式: [Len(4)][Type(1)][ID_Len(2)][ID_Bytes][Data]
-				let id_bytes = transfer_id.as_bytes();
-				let id_len = id_bytes.len();
-				if id_len > 65535 {
-					return Err(anyhow::anyhow!("Transfer ID too long"));
-				}
-
-				let frame_len = 1 + 2 + id_len + data.len(); // Type + ID_Len + ID + Data
-				if frame_len > MAX_FRAME_SIZE {
-					return Err(anyhow::anyhow!("Frame too large"));
-				}
-
-				dst.reserve(4 + frame_len);
-				dst.put_u32_le(frame_len as u32);
-				dst.put_u8(FRAME_TYPE_DATA);
-
-				// 写入 ID
-				dst.put_u16_le(id_len as u16);
-				dst.put_slice(id_bytes);
-				// 写入数据
-				dst.put_slice(&data);
 			}
 		}
 		Ok(())
@@ -237,35 +316,108 @@ impl Decoder for CBFrameCodec {
 		let type_byte = src[0];
 
 		// 读取 Payload
-		let mut payload = src.split_to(len).split_off(1);
+		let payload = src.split_to(len).split_off(1);
 
 		match type_byte {
 			FRAME_TYPE_CTRL => {
 				let msg: CtrlMsg = serde_json::from_slice(&payload)?;
 				Ok(Some(CBFrame::Control(Box::new(msg))))
 			}
-			FRAME_TYPE_DATA => {
-				// 解码 ID
-				if payload.len() < 2 {
-					return Err(anyhow::anyhow!("Data frame too short"));
-				}
-				let id_len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
-				payload.advance(2);
-
-				if payload.len() < id_len {
-					return Err(anyhow::anyhow!("Data frame truncated ID"));
-				}
-				let id_bytes = payload.split_to(id_len);
-				let transfer_id = String::from_utf8(id_bytes.to_vec())?;
-
-				// 剩下的就是 data
-				let data = payload.freeze();
-				Ok(Some(CBFrame::Data { transfer_id, data }))
-			}
 			_ => {
-				// 未知帧类型，如果是兼容性考虑可以选择忽略，这里先报错
-				Err(anyhow::anyhow!("Unknown frame type: {type_byte}"))
+				// B1 起数据帧不再出现在控制流上；旧版的 TYPE=2 也被视为协议违规。
+				Err(anyhow::anyhow!(
+					"Unknown control-stream frame type: {type_byte} (data frames are no longer allowed on the control stream)"
+				))
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn sample_header(file_id: Option<&str>) -> TransferHeader {
+		TransferHeader {
+			req_id: "transfer-1".to_string(),
+			item_id: "item-1".to_string(),
+			file_id: file_id.map(ToString::to_string),
+			offset: 0,
+			length: 64 * 1024,
+			sha256: "a".repeat(64),
+			mime: "text/plain".to_string(),
+		}
+	}
+
+	/// `TransferHeader` 必须能通过 postcard 无损往返（含 `Option::Some/None` 两种
+	/// `file_id`），且长度前缀与负载长度一致。这是 B1 数据流唯一的应用层编解码，
+	/// 用 socket-free 测试覆盖。
+	#[test]
+	fn transfer_header_postcard_roundtrip() {
+		for file_id in [None, Some("file-7")] {
+			let header = sample_header(file_id);
+			let frame = encode_transfer_header_frame(&header).expect("encode header");
+
+			let declared = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
+			assert_eq!(
+				declared,
+				frame.len() - TRANSFER_HEADER_LEN_BYTES,
+				"长度前缀必须等于 postcard 负载长度"
+			);
+
+			let decoded = decode_transfer_header_frame(&frame).expect("decode header");
+			assert_eq!(decoded, header);
+		}
+	}
+
+	/// 头部的长度前缀是安全边界：截断/超长/零长度都必须报错，而不是分配或 panic。
+	#[test]
+	fn transfer_header_frame_rejects_malformed_input() {
+		let frame = encode_transfer_header_frame(&sample_header(None)).unwrap();
+
+		// 截断的长度前缀
+		assert!(decode_transfer_header_frame(&frame[..2]).is_err());
+		// 截断的负载
+		assert!(decode_transfer_header_frame(&frame[..frame.len() - 1]).is_err());
+		// 长度前缀为 0
+		assert!(decode_transfer_header_frame(&0u32.to_le_bytes()).is_err());
+		// 长度前缀超过上限
+		let mut oversized = Vec::new();
+		oversized.extend_from_slice(&((MAX_TRANSFER_HEADER_BYTES + 1) as u32).to_le_bytes());
+		oversized.extend_from_slice(&[0u8; 8]);
+		assert!(decode_transfer_header_frame(&oversized).is_err());
+	}
+
+	/// 控制流仍使用原有 `[u32 LE len][type=1][json]` 分帧；B1 起 TYPE=2（旧
+	/// Data 帧）必须被拒绝，避免半新半旧的线格式被静默接受。
+	#[test]
+	fn control_stream_roundtrips_and_rejects_legacy_data_frames() {
+		use bytes::BytesMut;
+		use tokio_util::codec::{Decoder, Encoder};
+
+		let msg = CtrlMsg::ContentEnd {
+			req_id: "transfer-1".to_string(),
+		};
+		let mut codec = CBFrameCodec;
+		let mut buf = BytesMut::new();
+		codec
+			.encode(CBFrame::Control(Box::new(msg)), &mut buf)
+			.expect("encode control frame");
+		assert_eq!(buf[4], FRAME_TYPE_CTRL);
+
+		let decoded = codec.decode(&mut buf).expect("decode control frame");
+		assert!(matches!(
+			decoded,
+			Some(CBFrame::Control(inner)) if matches!(*inner, CtrlMsg::ContentEnd { .. })
+		));
+
+		// 旧 Data 帧：Type=0x02。长度 3 = Type + 2 字节 ID 长度。
+		let mut legacy = BytesMut::new();
+		legacy.extend_from_slice(&3u32.to_le_bytes());
+		legacy.extend_from_slice(&[0x02, 0x00, 0x00]);
+		assert!(
+			codec.decode(&mut legacy).is_err(),
+			"legacy Data frames must be rejected on the control stream"
+		);
 	}
 }
