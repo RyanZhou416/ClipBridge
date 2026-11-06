@@ -299,6 +299,189 @@ fn ctrl_msg_kind(msg: &CtrlMsg) -> &'static str {
 	}
 }
 
+/// 握手阶段闸门：只有处于 `expected` 阶段才允许推进。
+///
+/// 线格式上 OPAQUE 消息是独立的控制帧，对端（或中间人）可以重复/乱序发送。
+/// 例如在 `OpaqueStart` 阶段直接发 `OpaqueFinish`，旧实现会拿 `None` 的
+/// server state 去 finish（只报 Missing server state），但 duplicate OpaqueStart
+/// 会覆盖已生成的 server state，等于让对端重置认证状态机。这里统一在入口拒绝。
+fn ensure_handshake_step(state: &SessionState, expected: &HandshakeStep, what: &str) -> Result<()> {
+	if matches!(state, SessionState::Handshaking(step) if step == expected) {
+		return Ok(());
+	}
+	anyhow::bail!(
+		"Protocol error: {what} not allowed in state {state:?} (expected Handshaking({expected:?}))"
+	)
+}
+
+/// 客户端 `AuthOk` 只允许在 OPAQUE 客户端 login 完成之后接受。
+///
+/// `handle_opaque_response` 成功后会进入 `Handshaking(WaitingAuthOk)`；任何更早
+/// 的状态（WaitingForHelloAck / OpaqueResponse / ...）收到 `AuthOk` 都说明对端
+/// 跳过了 OPAQUE 认证，此时绝不能进入 Online，更不能写 `trusted_peers`。
+fn ensure_auth_ok_after_opaque(state: &SessionState) -> Result<()> {
+	if *state == SessionState::Handshaking(HandshakeStep::WaitingAuthOk) {
+		return Ok(());
+	}
+	anyhow::bail!(
+		"Protocol error: AuthOk before OPAQUE login completed (state={state:?}); refusing to pin or go online"
+	)
+}
+
+/// `HelloAck.server_device_id` 必须等于拨号目标（`expected_peer_id`，若已知）。
+///
+/// 否则恶意服务端可以先回 HelloAck 抢注任意设备 ID，再完成 OPAQUE/TOFU，
+/// 让本机把指纹永久固定到错误 ID 上（ID squatting）。
+fn validate_hello_ack_device(expected_peer_id: Option<&str>, advertised: &str) -> Result<()> {
+	if let Some(expected) = expected_peer_id {
+		if expected != advertised {
+			anyhow::bail!(
+				"Protocol error: HelloAck server_device_id mismatch: dialed={expected}, advertised={advertised}"
+			);
+		}
+	}
+	Ok(())
+}
+
+/// 握手期间的对端设备 ID 暂存区。
+///
+/// `Hello`/`HelloAck` 里的 `device_id` 在 OPAQUE + TOFU 完成前**不可信**：
+/// - 恶意服务端可以先回 `AuthOk`/伪造 `HelloAck` 抢注 ID；
+/// - TOFU 需要该 ID，但校验通过前不能写进 `SessionHandle::peer_id`，
+///   否则外壳/连接池会把未认证身份当成已认证对端。
+#[derive(Debug, Default)]
+struct PeerIdentity {
+	/// 拨号目标（客户端）；服务端为 None。
+	expected: Option<String>,
+	/// Hello/HelloAck 通告、尚未认证的 ID。
+	pending: Option<String>,
+	/// OPAQUE + TOFU 都成功后才会被写入，并同步到 `SessionHandle::peer_id`。
+	committed: Option<String>,
+}
+
+impl PeerIdentity {
+	fn with_expected(expected: Option<String>) -> Self {
+		Self {
+			expected,
+			..Self::default()
+		}
+	}
+
+	fn expected(&self) -> Option<&str> {
+		self.expected.as_deref()
+	}
+
+	fn pending(&self) -> Option<&str> {
+		self.pending.as_deref()
+	}
+
+	fn committed(&self) -> Option<&str> {
+		self.committed.as_deref()
+	}
+
+	/// 供日志使用的显示 ID：已认证优先，未认证时回退到 pending。
+	fn display(&self) -> Option<&str> {
+		self.committed.as_deref().or(self.pending.as_deref())
+	}
+
+	/// 记录 Hello/HelloAck 中的 device id，但**不**对外发布。
+	fn note_pending(&mut self, device_id: String) -> Result<()> {
+		validate_hello_ack_device(self.expected(), &device_id)?;
+		self.pending = Some(device_id);
+		Ok(())
+	}
+
+	/// OPAQUE + TOFU 都成功后调用：把待验证身份升级为已认证身份。
+	fn commit(&mut self) -> Result<String> {
+		let device_id = self
+			.pending
+			.take()
+			.context("Protocol error: no pending peer device id to commit")?;
+		self.committed = Some(device_id.clone());
+		Ok(device_id)
+	}
+}
+
+/// 客户端 `AuthOk` 的收尾顺序：先要求 OPAQUE 已完成，再 TOFU 校验，最后才
+/// 提交对端身份。任何一步失败都会终止会话，不会进入 Online，也不会把未认证
+/// 的 device id 发布给外壳。
+async fn finish_client_auth_ok<F, Fut>(
+	state: &SessionState,
+	peer: &mut PeerIdentity,
+	run_tofu: F,
+) -> Result<String>
+where
+	F: FnOnce(&str) -> Fut,
+	Fut: std::future::Future<Output = Result<()>>,
+{
+	ensure_auth_ok_after_opaque(state)?;
+	let device_id = peer
+		.pending()
+		.context("Protocol error: AuthOk before Hello/HelloAck recorded a peer device id")?
+		.to_string();
+	run_tofu(&device_id).await?;
+	peer.commit()
+}
+
+/// TOFU 指纹校验/首次固定（在阻塞池里打开 DB，避免占住 Tokio worker）。
+async fn tofu_check_and_pin(
+	data_dir: String,
+	account_uid: String,
+	device_id: String,
+	fingerprint: String,
+) -> Result<()> {
+	tokio::task::spawn_blocking(move || {
+		let store = Store::open(&data_dir)?;
+		if let Some(saved_fp) = store.get_peer_fingerprint(&account_uid, &device_id)? {
+			if saved_fp != fingerprint {
+				anyhow::bail!("TLS_PIN_MISMATCH: saved={saved_fp}, got={fingerprint}");
+			}
+		} else {
+			let mut store_mut = Store::open(&data_dir)?;
+			store_mut.save_peer_fingerprint(&account_uid, &device_id, &fingerprint, now_ms())?;
+			println!("[Session] TOFU pinned device {device_id} with fp {fingerprint}");
+		}
+		Ok(())
+	})
+	.await?
+}
+
+/// 出站内容解析：决定 `ContentGet` 实际读取的路径。
+///
+/// `files_json` 里的 `local_path` 只对**本机拥有的 item** 可信。远端 item 的
+/// `local_path` 在 `Store::insert_remote_item` 入库时已被剥离，但旧库/未来路径
+/// 仍可能残留；这里再加一道 owner 校验，非本机 item 一律只走 CAS，避免把
+/// 本机任意文件流给对端。
+fn resolve_outbound_content_path(
+	owner_device_id: Option<&str>,
+	local_device_id: &str,
+	target_sha: &str,
+	local_path: Option<&str>,
+	cas: &crate::cas::Cas,
+) -> Result<Option<(PathBuf, String)>> {
+	let mut final_path = None;
+
+	// 优先级 1: 本地原始文件（仅当 item 属于本机）。
+	if owner_device_id == Some(local_device_id) {
+		if let Some(lp_str) = local_path {
+			let p = PathBuf::from(lp_str);
+			if p.exists() {
+				final_path = Some((p, target_sha.to_string()));
+			}
+		}
+	}
+
+	// 优先级 2: CAS Blob（远端 item 的唯一合法来源）。
+	if final_path.is_none() && !target_sha.is_empty() {
+		let blob_path = cas.blob_path(target_sha)?;
+		if blob_path.exists() {
+			final_path = Some((blob_path, target_sha.to_string()));
+		}
+	}
+
+	Ok(final_path)
+}
+
 /// 按 MIME 归类入站内容（`file_id` 非空时由调用方直接判为 FileList）。
 fn kind_from_mime(mime: &str) -> ItemKind {
 	if mime.starts_with("text/") {
@@ -2138,7 +2321,9 @@ pub struct SessionActor {
 	state_ref: Arc<Mutex<SessionState>>,
 	peer_id_ref: Arc<Mutex<Option<String>>>,
 	state: SessionState,
-	remote_device_id: Option<String>,
+	/// 对端设备 ID 的“待验证 / 已认证”状态机。未认证的 Hello/HelloAck ID
+	/// 只进入 `pending`，OPAQUE + TOFU 成功后才 `commit` 并同步到句柄。
+	peer_identity: PeerIdentity,
 	remote_fingerprint: String,
 	last_active_at: i64,
 	cmd_rx: mpsc::Receiver<SessionCmd>,
@@ -2234,7 +2419,9 @@ impl SessionActor {
 		let load_ref = Arc::new(TransferLoad::default());
 		let remote_addr = conn.remote_address();
 
-		let initial_did = expected_peer_id.unwrap_or_else(|| "pending_server".to_string());
+		let initial_did = expected_peer_id
+			.clone()
+			.unwrap_or_else(|| "pending_server".to_string());
 
 		let handle = SessionHandle {
 			initial_id: initial_did.clone(),
@@ -2282,6 +2469,7 @@ impl SessionActor {
 				state_ref_clone,
 				peer_id_ref_clone,
 				cmd_rx,
+				expected_peer_id,
 				fingerprint,
 				upload_tx,
 				upload_rx,
@@ -2325,6 +2513,7 @@ impl SessionActor {
 		state_ref: Arc<Mutex<SessionState>>,
 		peer_id_ref: Arc<Mutex<Option<String>>>,
 		cmd_rx: mpsc::Receiver<SessionCmd>,
+		expected_peer_id: Option<String>,
 		fingerprint: String,
 		upload_tx: mpsc::Sender<UploadMsg>,
 		mut upload_rx: mpsc::Receiver<UploadMsg>,
@@ -2382,7 +2571,7 @@ impl SessionActor {
 			state_ref,
 			peer_id_ref,
 			state: SessionState::TransportReady,
-			remote_device_id: None,
+			peer_identity: PeerIdentity::with_expected(expected_peer_id),
 			remote_fingerprint: fingerprint,
 			last_active_at: now_ms(),
 			cmd_rx,
@@ -2437,9 +2626,10 @@ impl SessionActor {
 									// net.rs 的 broadcast_meta 只处理全局 DenyAll，这里按会话逐对端拦截。
 									if !actor.outbound_share_allowed().await? {
 										let device_id = actor
-											.remote_device_id
-											.clone()
-											.unwrap_or_else(|| "unknown".to_string());
+											.peer_identity
+											.committed()
+											.unwrap_or("unknown")
+											.to_string();
 										actor.log_sink.log_warn(
 											"Session",
 											&format!("Metadata broadcast skipped by share_to_peer policy: device_id={device_id}, item_id={}", meta.item_id),
@@ -2448,12 +2638,14 @@ impl SessionActor {
 									} else {
 										let msg_id = uuid::Uuid::new_v4().to_string();
 										let item_id = meta.item_id.clone();
-										let device_id = actor.remote_device_id.clone().unwrap_or_else(|| "unknown".to_string());
+										let device_id = actor
+											.peer_identity
+											.committed()
+											.unwrap_or("unknown")
+											.to_string();
 
 										// 不要把发送端的本地路径告诉接收端
-										for f in &mut meta.files {
-											f.local_path = None;
-										}
+										meta.strip_local_paths();
 
 										actor.log_sink.log_info(
 												"Session",
@@ -2597,7 +2789,7 @@ impl SessionActor {
 		// 数据会话（C1）不对外发 PEER_OFFLINE：同一设备仍由控制会话代表，
 		// 否则外壳会在每次数据连接重建时看到设备反复消失/重连。
 		if actor.kind == SessionKind::Control {
-			if let Some(did) = &actor.remote_device_id {
+			if let Some(did) = actor.peer_identity.committed() {
 				let reason = match &run_result {
 					Ok(()) => "Connection closed".to_string(),
 					Err(e) => format!("Error: {e}"),
@@ -2640,8 +2832,8 @@ impl SessionActor {
 			*s = new_state;
 		}
 
-		// 记录状态转换
-		if let Some(device_id) = &self.remote_device_id {
+		// 记录状态转换（认证前的设备 ID 只用于日志，不对外发布）
+		if let Some(device_id) = self.peer_identity.display() {
 			self.log_sink.log_info(
 				"Session",
 				&format!(
@@ -2656,8 +2848,9 @@ impl SessionActor {
 		}
 	}
 
-	fn update_remote_id(&mut self, id: String) {
-		self.remote_device_id = Some(id.clone());
+	/// OPAQUE + TOFU 成功后调用：把 `peer_identity` 里已认证的 ID 同步到
+	/// `SessionHandle::peer_id`（外壳/连接池据此识别“已认证对端”）。
+	fn publish_remote_id(&mut self, id: String) {
 		let mut lock = self.peer_id_ref.lock().unwrap();
 		*lock = Some(id);
 	}
@@ -2773,7 +2966,7 @@ impl SessionActor {
 	///
 	/// DB 访问统一放进 spawn_blocking，避免阻塞异步线程；对端设备 ID 未知时返回 None。
 	async fn load_peer_rule(&self) -> Result<Option<crate::store::PeerRule>> {
-		let Some(device_id) = self.remote_device_id.clone() else {
+		let Some(device_id) = self.peer_identity.committed().map(str::to_string) else {
 			return Ok(None);
 		};
 		let account_uid = self.config.account_uid.clone();
@@ -2788,7 +2981,7 @@ impl SessionActor {
 	/// 出站共享策略：share_to_peer=false 或对端身份未知时拒绝；
 	/// 规则不存在时沿用历史默认（允许），与 get_peers_info 的展示默认值一致。
 	async fn outbound_share_allowed(&self) -> Result<bool> {
-		if self.remote_device_id.is_none() {
+		if self.peer_identity.committed().is_none() {
 			return Ok(false);
 		}
 		match self.load_peer_rule().await? {
@@ -2800,7 +2993,7 @@ impl SessionActor {
 	/// 入站接收策略：accept_from_peer=false 或对端身份未知时拒绝；
 	/// 规则不存在时沿用历史默认（允许）。
 	async fn inbound_accept_allowed(&self) -> Result<bool> {
-		if self.remote_device_id.is_none() {
+		if self.peer_identity.committed().is_none() {
 			return Ok(false);
 		}
 		match self.load_peer_rule().await? {
@@ -2869,7 +3062,7 @@ impl SessionActor {
 						);
 					}
 					// Hello 只允许在握手初始状态接收一次：已认证会话上再次收到 Hello
-					// 属于协议违规，绝不能借此重置状态机或覆盖 remote_device_id。
+					// 属于协议违规，绝不能借此重置状态机或覆盖 peer_identity。
 					if self.state != SessionState::Handshaking(HandshakeStep::WaitingForHello) {
 						let _ = self
 							.send_ctrl(CtrlMsg::Error {
@@ -2911,7 +3104,8 @@ impl SessionActor {
 							.await;
 						anyhow::bail!("Auth failed: uid mismatch");
 					}
-					self.update_remote_id(device_id.clone());
+					// 只记录待验证 ID；OPAQUE + TOFU 通过前不发布到 SessionHandle。
+					self.peer_identity.note_pending(device_id.clone())?;
 					// C1：记录对端通告的数据端口（空列表 = 对端只有控制连接）。
 					self.set_peer_data_ports(data_ports);
 					self.log_sink.log_info(
@@ -2951,12 +3145,20 @@ impl SessionActor {
 							"Protocol version mismatch: local={PROTOCOL_VERSION}, remote={protocol_version}"
 						);
 					}
+					// 只接受对第一个 Hello 的应答；重复 HelloAck 不能重置 OPAQUE 状态机。
+					ensure_handshake_step(
+						&self.state,
+						&HandshakeStep::WaitingForHelloAck,
+						"HelloAck",
+					)?;
 					self.log_sink.log_info(
                             "Session",
                             &format!("Hello message received: remote_device_id={server_device_id}, remote_account_uid=N/A"),
                             Some(&format!("Hello 消息已接收: 远程设备ID={server_device_id}，远程账号=N/A")),
 					);
-					self.update_remote_id(server_device_id.clone());
+					// F2：验证服务端自称的 ID 是否等于拨号目标；同时只放进
+					// pending，OPAQUE + TOFU 成功后才 commit。
+					self.peer_identity.note_pending(server_device_id.clone())?;
 					// C1：记录服务端通告的数据端口（空列表 = 服务端只有控制连接）。
 					self.set_peer_data_ports(data_ports);
 					self.start_opaque_login().await?;
@@ -2989,6 +3191,9 @@ impl SessionActor {
 							.await;
 						return Err(e);
 					}
+					// OPAQUE + TOFU 都成功后才承认对端身份。
+					let committed = self.peer_identity.commit()?;
+					self.publish_remote_id(committed);
 					self.send_ctrl(CtrlMsg::AuthOk {
 						reply_to: msg_id,
 						session_flags: AuthSessionFlags {
@@ -3001,8 +3206,24 @@ impl SessionActor {
 			}
 			CtrlMsg::AuthOk { .. } => {
 				if self.role == SessionRole::Client {
+					// F2：只有在 OPAQUE 客户端 login 完成（WaitingAuthOk）之后才接受
+					// AuthOk；否则恶意服务端可以在 HelloAck 后立刻回 AuthOk 骗取
+					// TOFU 固定与 Online 状态。TOFU 成功后才提交对端身份。
+					let data_dir = self.config.data_dir.clone();
+					let account_uid = self.config.account_uid.clone();
+					let fingerprint = self.remote_fingerprint.clone();
+					let committed =
+						finish_client_auth_ok(&self.state, &mut self.peer_identity, |device_id| {
+							tofu_check_and_pin(
+								data_dir.clone(),
+								account_uid.clone(),
+								device_id.to_string(),
+								fingerprint.clone(),
+							)
+						})
+						.await?;
+					self.publish_remote_id(committed);
 					self.update_state(SessionState::AccountVerified);
-					self.perform_tofu_check_async().await?;
 					self.transition_to_online();
 				}
 			}
@@ -3015,8 +3236,11 @@ impl SessionActor {
 				.await?;
 			}
 			CtrlMsg::Pong { .. } => {}
-			CtrlMsg::ItemMeta { item, msg_id, .. } => {
-				if let Some(did) = &self.remote_device_id {
+			CtrlMsg::ItemMeta {
+				mut item, msg_id, ..
+			} => {
+				let did = self.peer_identity.committed().map(str::to_string);
+				if let Some(did) = &did {
 					self.log_sink.log_info(
 						"Session",
 						&format!(
@@ -3029,11 +3253,28 @@ impl SessionActor {
 						)),
 					);
 				}
+				// F1：`files[].local_path` 是 hostile input（会让本机把任意文件
+				// 流给对端，UNC 还会触发 SMB 认证）。先剥离再落库/发事件；同时
+				// 记录警告，不打印攻击者可控的路径本身。
+				let stripped_local_paths = item.strip_local_paths();
+				if stripped_local_paths > 0 {
+					self.log_sink.log_warn(
+						"Session",
+						&format!(
+							"Peer-supplied local_path stripped from inbound metadata: device_id={:?}, item_id={}, files={stripped_local_paths}",
+							did, item.item_id
+						),
+						Some(&format!(
+							"已剥离入站元数据中的对端本地路径（不可信输入）: 设备ID={:?}，项目ID={}，文件数={stripped_local_paths}",
+							did, item.item_id
+						)),
+					);
+				}
 				// 认证闸门已在 handle_control_msg 顶部保证此时必然 Online，无需重复判断。
 				let store = self.store.clone();
 				let account_uid = self.config.account_uid.clone();
 				let item_clone = item.clone();
-				let device_id = self.remote_device_id.clone();
+				let device_id = did.clone();
 				// 入站策略检查与落库放在同一个 spawn_blocking 中：
 				// accept_from_peer=false（或对端身份未知）时整条元数据丢弃。
 				let (accepted, is_new) =
@@ -4589,14 +4830,18 @@ impl SessionActor {
 		// （`?` 把 DB / CAS 错误原样返回给 handle_control_msg）。
 		let store = self.store.clone();
 		let cas = self.cas.clone();
+		let local_device_id = self.config.device_id.clone();
 		let item_id_bg = item_id.clone();
 		let file_id_bg = file_id.clone();
 		let (file_path_res, mime_val) =
 			tokio::task::spawn_blocking(move || -> Result<(Option<(PathBuf, String)>, String)> {
 				let store = store.lock().unwrap();
 
-				// A. 获取目标的 SHA256 和 (可选的) 本地路径
-				//    如果是 FileList 子文件，查 files_json；如果是 Text/Image，查 item 主表
+				// 防御纵深（F1）：`files_json` 里的 local_path 只对**本机拥有**的
+				// item 可信。远端 item 的 local_path 已在入库时剥离，但旧库/未来
+				// 路径仍可能残留；这里按 owner_device_id 再校验一次，非本机 owner
+				// 一律只从 CAS 取内容。
+				let owner = store.get_item_owner(&item_id_bg)?;
 				let (target_sha, local_path_opt) = if let Some(fid) = &file_id_bg {
 					// Case 1: FileList 中的子文件
 					if let Some(fmeta) = store.get_file_meta(&item_id_bg, fid)? {
@@ -4616,26 +4861,14 @@ impl SessionActor {
 					.get_item_mime(&item_id_bg)?
 					.unwrap_or("application/octet-stream".to_string());
 
-				// C. 决定最终读取路径
-				let mut final_path = None;
-
-				// 优先级 1: 本地原始文件 (Local Path)
-				// 场景: 用户刚复制了一个 2GB 视频，还没进 CAS，或者为了支持 tail/resuming
-				if let Some(lp_str) = local_path_opt {
-					let p = PathBuf::from(lp_str);
-					if p.exists() {
-						final_path = Some((p, target_sha.clone()));
-					}
-				}
-
-				// 优先级 2: CAS Blob
-				// 场景: 图片、文本、或者已经被归档的文件，以及 **测试用例** (测试通常只写 CAS)
-				if final_path.is_none() && !target_sha.is_empty() {
-					let blob_path = cas.blob_path(&target_sha)?;
-					if blob_path.exists() {
-						final_path = Some((blob_path, target_sha));
-					}
-				}
+				// C. 决定最终读取路径（owner 校验 + CAS 回退都在这里）
+				let final_path = resolve_outbound_content_path(
+					owner.as_deref(),
+					&local_device_id,
+					&target_sha,
+					local_path_opt.as_deref(),
+					&cas,
+				)?;
 
 				Ok((final_path, mime))
 			})
@@ -4839,6 +5072,11 @@ impl SessionActor {
 	}
 
 	async fn handle_opaque_response(&mut self, response_bytes: &[u8]) -> Result<()> {
+		ensure_handshake_step(
+			&self.state,
+			&HandshakeStep::OpaqueResponse,
+			"OpaqueResponse",
+		)?;
 		let client_state = self
 			.opaque_client_state
 			.take()
@@ -4874,6 +5112,8 @@ impl SessionActor {
 	}
 
 	async fn handle_opaque_start(&mut self, start_bytes: &[u8]) -> Result<()> {
+		// 服务端只接受首个 OpaqueStart：重复发送不能覆盖已生成的 server state。
+		ensure_handshake_step(&self.state, &HandshakeStep::OpaqueStart, "OpaqueStart")?;
 		// 首次登录的 80~120ms 主要花在 `p2p_get_server_registration`（内部跑 Argon2id）；
 		// 它和 `ServerLogin::start` 一起放进同一个阻塞任务，闭包内完成反序列化与 KE2 编码。
 		let password = self.config.account_password.clone();
@@ -4911,6 +5151,8 @@ impl SessionActor {
 	}
 
 	async fn handle_opaque_finish(&mut self, finish_bytes: &[u8]) -> Result<()> {
+		// 必须先有 OpaqueStart（状态 OpaqueFinish）；乱序 Finish 直接拒绝。
+		ensure_handshake_step(&self.state, &HandshakeStep::OpaqueFinish, "OpaqueFinish")?;
 		let server_state = self
 			.opaque_server_state
 			.take()
@@ -4933,28 +5175,22 @@ impl SessionActor {
 		Ok(())
 	}
 
+	/// 服务端在 `OpaqueFinish` 之后、提交对端身份之前执行 TOFU 校验。
+	///
+	/// 使用 `pending` 而不是 `committed`：身份只有在 TOFU 成功后才允许提交。
 	async fn perform_tofu_check_async(&self) -> Result<()> {
-		let data_dir = self.config.data_dir.clone();
-		let uid = self.config.account_uid.clone();
 		let did = self
-			.remote_device_id
-			.clone()
-			.context("missing remote device id")?;
-		let rfp = self.remote_fingerprint.clone();
-		tokio::task::spawn_blocking(move || {
-			let store = Store::open(&data_dir)?;
-			if let Some(saved_fp) = store.get_peer_fingerprint(&uid, &did)? {
-				if saved_fp != rfp {
-					anyhow::bail!("TLS_PIN_MISMATCH: saved={saved_fp}, got={rfp}");
-				}
-			} else {
-				let mut store_mut = Store::open(&data_dir)?;
-				store_mut.save_peer_fingerprint(&uid, &did, &rfp, now_ms())?;
-				println!("[Session] TOFU pinned device {did} with fp {rfp}");
-			}
-			Ok(())
-		})
-		.await?
+			.peer_identity
+			.pending()
+			.context("missing peer device id before TOFU pin")?
+			.to_string();
+		tofu_check_and_pin(
+			self.config.data_dir.clone(),
+			self.config.account_uid.clone(),
+			did,
+			self.remote_fingerprint.clone(),
+		)
+		.await
 	}
 
 	fn transition_to_online(&mut self) {
@@ -4964,7 +5200,7 @@ impl SessionActor {
 		if self.kind == SessionKind::Data {
 			return;
 		}
-		if let Some(did) = &self.remote_device_id {
+		if let Some(did) = self.peer_identity.committed() {
 			self.log_sink.log_info(
 				"Session",
 				&format!("Handshake completed, session online: remote_device_id={did}"),
@@ -4982,7 +5218,7 @@ impl SessionActor {
 
 	async fn tick_heartbeat(&mut self) -> Result<()> {
 		if now_ms() - self.last_active_at > HEARTBEAT_TIMEOUT.as_millis() as i64 {
-			if let Some(did) = &self.remote_device_id {
+			if let Some(did) = self.peer_identity.committed() {
 				self.log_sink.log_warn(
 					"Session",
 					&format!(
@@ -5006,7 +5242,7 @@ impl SessionActor {
 		}
 		if self.state == SessionState::Online {
 			// 心跳发送（Debug 级别，避免日志过多）
-			if let Some(did) = &self.remote_device_id {
+			if let Some(did) = self.peer_identity.committed() {
 				self.log_sink.log_debug(
 					"Session",
 					&format!("Heartbeat sent: device_id={did}"),
@@ -6178,5 +6414,333 @@ mod transfer_guard_tests {
 			&"b".repeat(64)
 		)
 		.is_err());
+	}
+}
+
+/// F1/F2 回归：远端路径注入与“未完成认证就接受 AuthOk”的防线。
+///
+/// 这些用例全部 socket-free：只覆盖 actor 中可独立测试的纯函数/状态机
+/// （`PeerIdentity`、`ensure_*`、`finish_client_auth_ok`、出站路径解析）。
+#[cfg(test)]
+mod sender_auth_hardening_tests {
+	use super::{
+		ensure_auth_ok_after_opaque, ensure_handshake_step, finish_client_auth_ok,
+		resolve_outbound_content_path, tofu_check_and_pin, validate_hello_ack_device, PeerIdentity,
+	};
+	use crate::cas::Cas;
+	use crate::model::{FileMeta, ItemContent, ItemKind, ItemMeta, ItemPreview};
+	use crate::session::{HandshakeStep, SessionState};
+	use crate::store::Store;
+	use std::sync::atomic::{AtomicBool, Ordering};
+	use std::sync::Arc;
+
+	fn file_meta(file_id: &str, sha: &str, local_path: Option<&std::path::Path>) -> FileMeta {
+		FileMeta {
+			file_id: file_id.to_string(),
+			rel_name: "payload.bin".to_string(),
+			size_bytes: 10,
+			sha256: Some(sha.to_string()),
+			local_path: local_path.map(|p| p.to_string_lossy().to_string()),
+		}
+	}
+
+	fn file_list_meta(item_id: &str, owner_device_id: &str, file: FileMeta) -> ItemMeta {
+		ItemMeta {
+			ty: "ItemMeta".to_string(),
+			item_id: item_id.to_string(),
+			kind: ItemKind::FileList,
+			created_ts_ms: 1,
+			source_device_id: owner_device_id.to_string(),
+			source_device_name: None,
+			size_bytes: 10,
+			preview: ItemPreview::default(),
+			content: ItemContent {
+				mime: "application/x-clipbridge-files".to_string(),
+				sha256: "a".repeat(64),
+				total_bytes: 10,
+			},
+			files: vec![file],
+			expires_ts_ms: None,
+		}
+	}
+
+	// --- F2: 握手身份状态机 ---
+
+	/// Hello/HelloAck 的 ID 只进入 pending；认证完成前 `committed` 必须为空。
+	#[test]
+	fn peer_id_is_pending_until_auth_then_committed() {
+		let mut peer = PeerIdentity::with_expected(Some("srv-expected".to_string()));
+		peer.note_pending("srv-expected".to_string()).unwrap();
+
+		assert!(peer.committed().is_none(), "认证前不得提交对端身份");
+		assert_eq!(peer.pending(), Some("srv-expected"));
+		// pending 只用于内部日志/TOFU，不会进入 SessionHandle::peer_id。
+		assert_eq!(peer.display(), Some("srv-expected"));
+
+		let committed = peer.commit().expect("commit after auth");
+		assert_eq!(committed, "srv-expected");
+		assert_eq!(peer.committed(), Some("srv-expected"));
+		assert!(peer.pending().is_none(), "commit 后 pending 必须被清空");
+	}
+
+	/// HelloAck.server_device_id 与拨号目标不一致时必须在写 pending 之前失败。
+	#[test]
+	fn hello_ack_with_wrong_device_id_fails_before_pending() {
+		assert!(validate_hello_ack_device(Some("srv-a"), "srv-a").is_ok());
+		// 服务端主动连接时（expected=None）只能接受通告值。
+		assert!(validate_hello_ack_device(None, "anything").is_ok());
+
+		let mut peer = PeerIdentity::with_expected(Some("srv-a".to_string()));
+		let err = peer
+			.note_pending("srv-evil".to_string())
+			.expect_err("ID mismatch must fail the session before TOFU");
+		assert!(
+			err.to_string().contains("mismatch"),
+			"unexpected error: {err}"
+		);
+		assert!(peer.pending().is_none(), "mismatch 不能写入 pending");
+		assert!(peer.committed().is_none());
+
+		let mut unknown_target = PeerIdentity::with_expected(None);
+		unknown_target.note_pending("srv-x".to_string()).unwrap();
+		assert!(unknown_target.committed().is_none());
+	}
+
+	/// 认证前到达的 AuthOk：不得进入 Online，不得调用 TOFU，不得写 trusted_peers。
+	#[tokio::test]
+	async fn auth_ok_before_opaque_completion_rejected_without_pinning() {
+		let dir = tempfile::tempdir().unwrap();
+		let _store = Store::open(dir.path()).unwrap();
+		let mut peer = PeerIdentity::with_expected(Some("srv-a".to_string()));
+		peer.note_pending("srv-a".to_string()).unwrap();
+
+		// 客户端只发过 Hello，尚未完成 OPAQUE（例如恶意服务端在 HelloAck 后
+		// 立刻插一个 AuthOk）。
+		let early_state = SessionState::Handshaking(HandshakeStep::WaitingForHelloAck);
+		assert!(
+			ensure_auth_ok_after_opaque(&early_state).is_err(),
+			"AuthOk must be rejected before OPAQUE completes"
+		);
+
+		let tofu_called = Arc::new(AtomicBool::new(false));
+		let called = tofu_called.clone();
+		let data_dir = dir.path().to_string_lossy().to_string();
+		let result = finish_client_auth_ok(&early_state, &mut peer, move |device_id| {
+			called.store(true, Ordering::SeqCst);
+			let data_dir = data_dir.clone();
+			let device_id = device_id.to_string();
+			async move { tofu_check_and_pin(data_dir, "uid".to_string(), device_id, "fp".into()).await }
+		})
+		.await;
+
+		assert!(result.is_err());
+		assert!(
+			!tofu_called.load(Ordering::SeqCst),
+			"TOFU must not run before OPAQUE completes"
+		);
+		assert!(
+			peer.committed().is_none(),
+			"unauthenticated ID must not be committed"
+		);
+		let store = Store::open(dir.path()).unwrap();
+		assert!(
+			store
+				.get_peer_fingerprint("uid", "srv-a")
+				.unwrap()
+				.is_none(),
+			"early AuthOk must not write trusted_peers"
+		);
+	}
+
+	/// OPAQUE 完成（WaitingAuthOk）后 AuthOk 才被接受：TOFU 成功后才提交身份。
+	#[tokio::test]
+	async fn auth_ok_after_opaque_pins_then_commits() {
+		let dir = tempfile::tempdir().unwrap();
+		let _store = Store::open(dir.path()).unwrap();
+		let mut peer = PeerIdentity::with_expected(Some("srv-ok".to_string()));
+		peer.note_pending("srv-ok".to_string()).unwrap();
+
+		let state = SessionState::Handshaking(HandshakeStep::WaitingAuthOk);
+		assert!(ensure_auth_ok_after_opaque(&state).is_ok());
+		let data_dir = dir.path().to_string_lossy().to_string();
+		let committed = finish_client_auth_ok(&state, &mut peer, move |device_id| {
+			let data_dir = data_dir.clone();
+			let device_id = device_id.to_string();
+			async move { tofu_check_and_pin(data_dir, "uid".to_string(), device_id, "fp".into()).await }
+		})
+		.await
+		.expect("AuthOk after OPAQUE should succeed");
+
+		assert_eq!(committed, "srv-ok");
+		assert_eq!(peer.committed(), Some("srv-ok"));
+		let store = Store::open(dir.path()).unwrap();
+		assert_eq!(
+			store
+				.get_peer_fingerprint("uid", "srv-ok")
+				.unwrap()
+				.as_deref(),
+			Some("fp"),
+			"TOFU must pin only after the AuthOk gate passes"
+		);
+	}
+
+	/// 服务端 OPAQUE 阶段必须按顺序推进：重复 OpaqueStart / 乱序 OpaqueFinish 拒绝。
+	#[test]
+	fn opaque_stages_reject_out_of_order_frames() {
+		let waiting_start = SessionState::Handshaking(HandshakeStep::OpaqueStart);
+		assert!(
+			ensure_handshake_step(&waiting_start, &HandshakeStep::OpaqueStart, "OpaqueStart")
+				.is_ok()
+		);
+		assert!(
+			ensure_handshake_step(&waiting_start, &HandshakeStep::OpaqueFinish, "OpaqueFinish")
+				.is_err(),
+			"OpaqueFinish before OpaqueStart must be rejected"
+		);
+		assert!(
+			ensure_handshake_step(&waiting_start, &HandshakeStep::OpaqueStart, "OpaqueStart")
+				.is_ok()
+		);
+
+		let waiting_finish = SessionState::Handshaking(HandshakeStep::OpaqueFinish);
+		assert!(
+			ensure_handshake_step(&waiting_finish, &HandshakeStep::OpaqueStart, "OpaqueStart")
+				.is_err(),
+			"duplicate OpaqueStart must not reset the server state"
+		);
+		assert!(ensure_handshake_step(
+			&waiting_finish,
+			&HandshakeStep::OpaqueFinish,
+			"OpaqueFinish"
+		)
+		.is_ok());
+	}
+
+	// --- F1: 出站内容路径解析 ---
+
+	/// 远端 item 的 local_path 不可用：没有 CAS 时必须解析失败；有 CAS 时只走 CAS。
+	#[test]
+	fn remote_owned_local_path_is_ignored_and_cas_is_used() {
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path().join("cas")).unwrap();
+		let secret = dir.path().join("victim-secret.docx");
+		std::fs::write(&secret, b"top-secret").unwrap();
+		let secret_str = secret.to_string_lossy().to_string();
+		let sha = "c".repeat(64);
+
+		// 远端 owner + 真实存在的 local_path + 无 CAS => 拒绝（None）。
+		assert!(
+			resolve_outbound_content_path(
+				Some("peer-evil"),
+				"local-dev",
+				&sha,
+				Some(&secret_str),
+				&cas,
+			)
+			.unwrap()
+			.is_none(),
+			"remote-owned local_path must never be served"
+		);
+
+		// 远端 owner + CAS 命中 => 只返回 CAS blob，不返回 local_path。
+		cas.put_if_absent(&sha, b"cas-bytes", "tmp-resolve")
+			.unwrap();
+		let (path, resolved_sha) = resolve_outbound_content_path(
+			Some("peer-evil"),
+			"local-dev",
+			&sha,
+			Some(&secret_str),
+			&cas,
+		)
+		.unwrap()
+		.expect("CAS fallback must resolve");
+		assert_eq!(resolved_sha, sha);
+		assert_eq!(path, cas.blob_path(&sha).unwrap());
+		assert_eq!(std::fs::read(&path).unwrap(), b"cas-bytes");
+
+		// owner 未知（item 不存在/旧数据）同样不能使用 local_path。
+		assert!(
+			resolve_outbound_content_path(None, "local-dev", "", Some(&secret_str), &cas)
+				.unwrap()
+				.is_none()
+		);
+	}
+
+	/// 端到端回归：经 `insert_remote_item` 落库的远端 metadata 不再带有 local_path，
+	/// 即使磁盘上的目标文件真实存在也无法被 ContentGet 使用。
+	#[test]
+	fn insert_remote_item_is_not_usable_for_content_get() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+		let secret = dir.path().join("victim-secret.docx");
+		std::fs::write(&secret, b"top-secret").unwrap();
+		let sha = "d".repeat(64);
+		let meta = file_list_meta(
+			"item-evil",
+			"peer-evil",
+			file_meta("file-evil", &sha, Some(&secret)),
+		);
+		store.insert_remote_item("uid", &meta, 1).unwrap();
+
+		let owner = store.get_item_owner("item-evil").unwrap().unwrap();
+		let fmeta = store
+			.get_file_meta("item-evil", "file-evil")
+			.unwrap()
+			.unwrap();
+		assert!(fmeta.local_path.is_none(), "入库时必须剥离 local_path");
+
+		let cas = Cas::new(dir.path().join("cas")).unwrap();
+		assert!(
+			resolve_outbound_content_path(
+				Some(&owner),
+				"local-dev",
+				fmeta.sha256.as_deref().unwrap(),
+				fmeta.local_path.as_deref(),
+				&cas,
+			)
+			.unwrap()
+			.is_none(),
+			"remote item must not resolve to the local file"
+		);
+	}
+
+	/// 本地 owner 的合法行为保持不变：未归档的原始文件仍可直接读取。
+	#[test]
+	fn local_owned_item_keeps_using_local_path() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+		let secret = dir.path().join("local-original.docx");
+		std::fs::write(&secret, b"local-content").unwrap();
+		let sha = "e".repeat(64);
+		let meta = file_list_meta(
+			"item-local",
+			"local-dev",
+			file_meta("file-local", &sha, Some(&secret)),
+		);
+		store.insert_meta_and_history("uid", &meta, 1).unwrap();
+
+		let owner = store.get_item_owner("item-local").unwrap().unwrap();
+		assert_eq!(owner, "local-dev");
+		let fmeta = store
+			.get_file_meta("item-local", "file-local")
+			.unwrap()
+			.unwrap();
+		assert_eq!(
+			fmeta.local_path.as_deref(),
+			Some(secret.to_string_lossy().as_ref()),
+			"本地 ingest 必须保留 local_path"
+		);
+
+		let cas = Cas::new(dir.path().join("cas")).unwrap();
+		let (path, _) = resolve_outbound_content_path(
+			Some(&owner),
+			"local-dev",
+			fmeta.sha256.as_deref().unwrap(),
+			fmeta.local_path.as_deref(),
+			&cas,
+		)
+		.unwrap()
+		.expect("local-owned item may use local_path");
+		assert_eq!(path, secret);
 	}
 }

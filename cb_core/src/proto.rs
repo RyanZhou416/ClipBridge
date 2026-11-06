@@ -341,6 +341,13 @@ use tokio_util::codec::{Decoder, Encoder};
 
 const MAX_FRAME_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
+/// 最小合法控制帧长度（`len` 只覆盖 Type + Payload）。
+///
+/// `len == 0` 时旧实现会在空 `BytesMut` 上执行 `src[0]` / `split_off(1)` 而
+/// panic；`len == 1` 只有 Type、没有可解析的 JSON。两者都必须作为解码错误
+/// 在消费长度前缀**之前**拒绝。
+const MIN_FRAME_LEN: usize = 2;
+
 pub struct CBFrameCodec;
 
 impl Encoder<CBFrame> for CBFrameCodec {
@@ -378,6 +385,14 @@ impl Decoder for CBFrameCodec {
 		len_bytes.copy_from_slice(&src[..4]);
 		let len = u32::from_le_bytes(len_bytes) as usize;
 
+		// F10：长度前缀不可信。`len < MIN_FRAME_LEN` 时连 Type 字节都不完整，
+		// 后续 `split_to` / `split_off` 会在空缓冲区上 panic，必须先拒绝。
+		if len < MIN_FRAME_LEN {
+			return Err(anyhow::anyhow!(
+				"Frame too short during decode: len={len} (minimum {MIN_FRAME_LEN})"
+			));
+		}
+
 		if len > MAX_FRAME_SIZE {
 			return Err(anyhow::anyhow!("Frame too large during decode"));
 		}
@@ -390,11 +405,11 @@ impl Decoder for CBFrameCodec {
 		// 消费 Length (4 bytes)
 		src.advance(4);
 
-		// 读取 Type (1 byte)
-		let type_byte = src[0];
-
-		// 读取 Payload
-		let payload = src.split_to(len).split_off(1);
+		// 读取 Type (1 byte) + Payload。`len >= MIN_FRAME_LEN` 已保证 split_to
+		// 不会 panic；payload 允许为空，由 JSON 解码返回错误而不是 panic。
+		let mut body = src.split_to(len);
+		let type_byte = body.split_to(1)[0];
+		let payload = body.freeze();
 
 		match type_byte {
 			FRAME_TYPE_CTRL => {
@@ -589,6 +604,38 @@ mod tests {
 			codec.decode(&mut legacy).is_err(),
 			"legacy Data frames must be rejected on the control stream"
 		);
+	}
+
+	/// F10：长度前缀为 0/1 的控制帧必须返回 Err（旧实现在空 `BytesMut` 上
+	/// `src[0]` / `split_off(1)` 会 panic）；截断帧仍返回 `Ok(None)` 等更多字节。
+	#[test]
+	fn zero_length_and_truncated_control_frames_never_panic() {
+		use bytes::BytesMut;
+		use tokio_util::codec::Decoder;
+
+		let mut codec = CBFrameCodec;
+
+		// [u32 len = 0]：最坏情况，旧实现在 `src[0]` 处 panic。
+		let mut zero = BytesMut::from(&[0u8, 0, 0, 0][..]);
+		assert!(
+			codec.decode(&mut zero).is_err(),
+			"len=0 must be a decode error, not a panic"
+		);
+
+		// len=1 只有 Type 字节，低于最小帧长度。
+		let mut one = BytesMut::from(&[1u8, 0, 0, 0, FRAME_TYPE_CTRL][..]);
+		assert!(
+			codec.decode(&mut one).is_err(),
+			"len=1 must be a decode error"
+		);
+
+		// 截断的负载：必须 Ok(None)（等待更多字节）而不是 panic。
+		let mut truncated = BytesMut::from(&[5u8, 0, 0, 0, FRAME_TYPE_CTRL, b'{'][..]);
+		assert!(codec.decode(&mut truncated).unwrap().is_none());
+
+		// 长度前缀本身截断。
+		let mut short_prefix = BytesMut::from(&[0u8, 0][..]);
+		assert!(codec.decode(&mut short_prefix).unwrap().is_none());
 	}
 
 	/// B2 的区间计划必须能随 `ContentBegin` 走控制流 JSON 无损往返；`TransferRange`

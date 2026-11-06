@@ -64,10 +64,22 @@ pub struct ItemMeta {
 impl ItemMeta {
 	pub fn sanitize_for_broadcast(&mut self) {
 		self.source_device_name = None; // 可选：隐藏设备名细节
-								  // 关键：清除所有文件的本地路径
+		self.strip_local_paths(); // 关键：清除所有文件的本地路径
+	}
+
+	/// 剥离所有文件的 `local_path`，返回被剥离的数量。
+	///
+	/// `local_path` 会让本机在 `ContentGet` 时把任意本地文件当作内容发出去
+	/// （UNC 路径还会触发 outbound SMB 认证），因此**远端元数据是不可信输入**：
+	/// 入站路径必须先调用本方法再落库/转发。返回数量用于记录 hostile input 警告。
+	pub fn strip_local_paths(&mut self) -> usize {
+		let mut stripped = 0;
 		for f in &mut self.files {
-			f.local_path = None;
+			if f.local_path.take().is_some() {
+				stripped += 1;
+			}
 		}
+		stripped
 	}
 }
 

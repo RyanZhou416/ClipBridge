@@ -1089,6 +1089,21 @@ impl Store {
 		meta: &ItemMeta,
 		now_ms: i64,
 	) -> anyhow::Result<bool> {
+		// 安全（F1）：远端 ItemMeta 是不可信输入。`files[].local_path` 一旦入库，
+		// 对端只要再发 `ContentGet{item_id,file_id}` 就能让本机把任意本地文件
+		// 当作内容流回去（UNC 路径还会触发 outbound SMB 认证）。因此入库前
+		// 必须剥离，且明确记录对端尝试注入的 hostile input（不记录路径本身，
+		// 避免攻击者控制的内容污染日志）。
+		let mut sanitized_meta = meta.clone();
+		let stripped_local_paths = sanitized_meta.strip_local_paths();
+		if stripped_local_paths > 0 {
+			eprintln!(
+				"[Store] WARNING: dropped {stripped_local_paths} peer-supplied local_path value(s) from remote item {} (untrusted input)",
+				sanitized_meta.item_id
+			);
+		}
+		let meta = &sanitized_meta;
+
 		let tx = self.conn.transaction()?;
 
 		// 1. content_cache: 远端来的默认 present=0 (Lazy Fetch)
@@ -1471,5 +1486,80 @@ mod schema_tests {
 			.any(|c| c == "durable");
 		assert!(has_durable);
 		assert_eq!(user_version(&reopened.conn), SCHEMA_VERSION);
+	}
+
+	/// 回归（F1）：远端 `ItemMeta.files[].local_path` 是 hostile input，入库前
+	/// 必须被剥离；否则对端只需 `ContentGet` 就能读到任意本地文件。
+	#[test]
+	fn insert_remote_item_strips_peer_supplied_local_path() {
+		use crate::model::{ItemContent, ItemPreview};
+
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+
+		// 真实存在的本地文件：若 local_path 被保留，ContentGet 会把它流给对端。
+		let secret = dir.path().join("victim-secret.docx");
+		std::fs::write(&secret, b"top secret").unwrap();
+		let secret_str = secret.to_string_lossy().to_string();
+		let file_sha = "a".repeat(64);
+
+		let meta = ItemMeta {
+			ty: "ItemMeta".to_string(),
+			item_id: "item-evil".to_string(),
+			kind: ItemKind::FileList,
+			created_ts_ms: 1,
+			source_device_id: "peer-evil".to_string(),
+			source_device_name: None,
+			size_bytes: 10,
+			preview: ItemPreview::default(),
+			content: ItemContent {
+				mime: "application/x-clipbridge-files".to_string(),
+				sha256: "b".repeat(64),
+				total_bytes: 10,
+			},
+			files: vec![FileMeta {
+				file_id: "file-evil".to_string(),
+				rel_name: "secret.docx".to_string(),
+				size_bytes: 10,
+				sha256: Some(file_sha),
+				local_path: Some(secret_str.clone()),
+			}],
+			expires_ts_ms: None,
+		};
+
+		assert!(store.insert_remote_item("acct", &meta, 1).unwrap());
+		// 调用方传入的原始 DTO 不应被修改（调用方还要用它发事件）。
+		assert_eq!(
+			meta.files[0].local_path.as_deref(),
+			Some(secret_str.as_str())
+		);
+
+		let files_json: String = store
+			.conn
+			.query_row(
+				"SELECT files_json FROM items WHERE item_id = 'item-evil'",
+				[],
+				|r| r.get(0),
+			)
+			.unwrap();
+		let persisted: Vec<serde_json::Value> = serde_json::from_str(&files_json).unwrap();
+		assert!(
+			persisted[0].get("local_path").is_none(),
+			"local_path must be stripped before persistence: {files_json}"
+		);
+		assert_eq!(
+			store
+				.get_file_meta("item-evil", "file-evil")
+				.unwrap()
+				.unwrap()
+				.local_path,
+			None,
+			"store accessor must never return a peer-supplied local path"
+		);
+		// owner 仍保持远端身份：防守逻辑（local_path 仅本地 owner 可用）依赖它。
+		assert_eq!(
+			store.get_item_owner("item-evil").unwrap().as_deref(),
+			Some("peer-evil")
+		);
 	}
 }
