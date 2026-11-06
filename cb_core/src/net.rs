@@ -41,6 +41,70 @@ const MAX_INBOUND_DATA_SESSIONS: usize = 64;
 /// 入站数据连接：`(数据端点槽位, 已完成的 QUIC 连接)`。
 type AcceptedDataConnection = (usize, crate::transport::Connection);
 
+/// 覆盖 NetManager runtime worker 数的环境变量。
+///
+/// 存在的原因有两个：
+/// 1. **单机多 Core 实验**：同一台机器上并行跑 hub + 多个 peer 时，每个 Core
+///    默认最多 8 个 worker（5 个 Core 就是 40 个线程），线程创建/调度开销会和
+///    被测传输路径混在一起，很难判断“多 endpoint 是否更快”到底是传输收益还是
+///    CPU 争抢的副作用。显式固定 worker 数，才能把实验的线程预算压到相对
+///    CPU 容量明显不饱和的水平，只比较传输路径本身。
+/// 2. **低核设备**：需要比 `available_parallelism` 推断更保守的线程预算时，
+///    可以直接固定一个更小的值。
+///
+/// 语义：未设置 / 空串 / 非法值 → 维持原行为
+/// `available_parallelism().map_or(2, |n| n.get().clamp(2, 8))`；合法整数夹到
+/// `[1, 16]`（允许 1 个 worker 的极端低功耗配置，也允许 16 作为实验上限）。
+const QUIC_WORKERS_ENV: &str = "CB_QUIC_WORKERS";
+const QUIC_WORKERS_MIN: usize = 1;
+const QUIC_WORKERS_MAX: usize = 16;
+
+/// 默认 worker 数：与引入 `CB_QUIC_WORKERS` 之前完全一致。
+fn default_worker_threads() -> usize {
+	std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 8))
+}
+
+/// 解析 `CB_QUIC_WORKERS`（纯函数，便于单测）。
+///
+/// `None`/空串/非法值返回 `default`（保持历史行为）；合法整数夹到
+/// `[QUIC_WORKERS_MIN, QUIC_WORKERS_MAX]`。
+fn resolve_worker_threads(raw: Option<&str>, default: usize) -> usize {
+	let Some(raw) = raw else {
+		return default;
+	};
+	let trimmed = raw.trim();
+	if trimmed.is_empty() {
+		return default;
+	}
+	match trimmed.parse::<usize>() {
+		Ok(value) => value.clamp(QUIC_WORKERS_MIN, QUIC_WORKERS_MAX),
+		Err(_) => default,
+	}
+}
+
+/// 读取一次环境变量并解析；非法值 / 越界值打印一行提示，避免“配置了但没生效”
+/// 却毫无线索（与 `net::ports` 的 `CB_QUIC_DATA_ENDPOINTS` 处理风格一致）。
+fn worker_threads_from_env() -> usize {
+	let default = default_worker_threads();
+	let raw = std::env::var(QUIC_WORKERS_ENV).ok();
+	let workers = resolve_worker_threads(raw.as_deref(), default);
+	if let Some(raw) = raw.as_deref() {
+		let trimmed = raw.trim();
+		let parsed = trimmed.parse::<usize>().ok();
+		if parsed.is_none() && !trimmed.is_empty() {
+			eprintln!(
+				"[NetManager] {QUIC_WORKERS_ENV}={raw:?} 不是合法整数，使用默认 {default} 个 worker"
+			);
+		} else if parsed.is_some_and(|value| value != workers) {
+			eprintln!(
+				"[NetManager] {QUIC_WORKERS_ENV}={raw:?} 已夹到 {workers}（允许范围 \
+				 {QUIC_WORKERS_MIN}..={QUIC_WORKERS_MAX}）"
+			);
+		}
+	}
+	workers
+}
+
 /// 网络层管理器
 pub struct NetManager {
 	config: crate::api::CoreConfig,
@@ -444,8 +508,11 @@ impl NetManager {
 				// 上限仍与 min(available_parallelism, …) 结合：手机 / 低核设备并行度低，
 				// 会自然夹到更小的值；下限 2 保证“一个 worker 被慢任务占住时，
 				// 仍有另一个 worker 推进 accept / 发现 / 心跳”。
-				let worker_threads =
-					std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 8));
+				//
+				// 可用 CB_QUIC_WORKERS 显式覆盖（见该常量注释）：单机多 Core 实验
+				// 需要把每个 Core 的线程预算固定在与 CPU 容量相比明显不饱和的
+				// 水平，避免把线程创建/调度争抢混进传输路径的测量；默认值保持不变。
+				let worker_threads = worker_threads_from_env();
 				let rt = tokio::runtime::Builder::new_multi_thread()
 					.worker_threads(worker_threads)
 					.enable_all()
@@ -1435,5 +1502,32 @@ mod tests {
 			cmd_rx.try_recv().is_err(),
 			"dropped message must not be queued"
 		);
+	}
+
+	/// `CB_QUIC_WORKERS` 的解析契约：未设置/空串/非法值保持历史默认，
+	/// 合法整数夹到 1..=16（单机多 Core 实验需要 2~3，低功耗设备可能用 1）。
+	#[test]
+	fn quic_workers_env_parsing_defaults_clamps_and_applies() {
+		// 未设置 / 空串 / 非法值 → 调用方传入的默认值（原行为）。
+		assert_eq!(resolve_worker_threads(None, 8), 8);
+		assert_eq!(resolve_worker_threads(Some(""), 8), 8);
+		assert_eq!(resolve_worker_threads(Some("   "), 8), 8);
+		assert_eq!(resolve_worker_threads(Some("jumbo"), 8), 8);
+		assert_eq!(resolve_worker_threads(Some("-1"), 8), 8);
+		assert_eq!(resolve_worker_threads(Some("2.5"), 8), 8);
+
+		// 合法值原样采用（允许前后空白）。
+		assert_eq!(resolve_worker_threads(Some("1"), 8), 1);
+		assert_eq!(resolve_worker_threads(Some(" 2 "), 8), 2);
+		assert_eq!(resolve_worker_threads(Some("3"), 8), 3);
+		assert_eq!(resolve_worker_threads(Some("16"), 8), 16);
+
+		// 越界夹取：0 -> 1，>16 -> 16。
+		assert_eq!(resolve_worker_threads(Some("0"), 8), 1);
+		assert_eq!(resolve_worker_threads(Some("17"), 8), 16);
+		assert_eq!(resolve_worker_threads(Some("999999"), 8), 16);
+
+		// 默认值本身仍落在历史区间 2..=8 内（环境无关的不变量）。
+		assert!((2..=8).contains(&default_worker_threads()));
 	}
 }
