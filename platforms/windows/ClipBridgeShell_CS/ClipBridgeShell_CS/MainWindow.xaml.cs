@@ -122,9 +122,12 @@ public sealed partial class MainWindow : Window
         // （见 Helpers/DragBackdropFill）。CB_NO_DRAG_BACKDROP_TOGGLE=1 可关闭该行为用于 A/B。
         this.SetDragBackdropToggle();
 
-        // 调试：CB_FORCE_DRAG_FILL=1 时让窗口从启动起就停留在“拖拽中”状态
-        // （回退色填充 + DWMSBT_NONE），用于和正常 Mica 外观做截图对比；未设置时立即返回。
+        // 调试：CB_FORCE_DRAG_FILL=1 / CB_FORCE_DRAG_SNAPSHOT=1 时让窗口从启动起就停留在
+        // 对应的“伪拖拽”状态（填充，或屏幕快照覆盖层 + DWMSBT_NONE），用于截图对比。
+        // 快照优先级更高：两个都设置时只进入快照状态（EnableForcedDragFill 内部会跳过）。
+        // 未设置时两个调用都立即返回，行为零变化。
         this.EnableForcedDragFill();
+        this.EnableForcedDragSnapshot();
 
         dispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         settings = new UISettings();

@@ -75,6 +75,10 @@ internal static class WindowExtensions
     /// 2.5%→5.7%，本进程 ≈0.01%），但合成器被逐帧塞满会反压应用的 Present，最终表现为拖拽时
     /// 帧间隔变长（1% low 53ms、最差 89ms）。所以只在 WM_ENTERSIZEMOVE → WM_EXITSIZEMOVE 这个
     /// “窗口真的在动”的区间里把背景关掉，静止时保持原样：拖拽拿回流畅度，静态外观与改动前一致。
+    /// 大窗口实测仍是 UI 线程 7.31ms/帧（117% 预算），说明还有“每帧把整棵重内容重新提交”
+    /// 的固定成本；因此本方法现在还会在进入拖拽时把当前客户区像素冻结成一张覆盖层（见
+    /// <see cref="DragSnapshot"/>），让拖拽期间屏幕上看到的是同一张位图，而不是每帧重画的
+    /// hero 图/透明度遮罩/图表/亚克力卡片。
     ///
     /// 机制：复用 <see cref="SetMinimumSize"/> 已经使用的 comctl32 SetWindowSubclass（不同的
     /// uIdSubclass），不替换窗口过程、也不需要自己向原 WndProc 转发；同一 HWND 上的多个子类化
@@ -83,25 +87,40 @@ internal static class WindowExtensions
     /// 视觉保持：Mica 一旦消失，透明的 XAML 页面会直接透出桌面壁纸（实测同一区域从 #1C1C1E
     /// 变成 #658DA6）。所以摘掉 backdrop 的同时，用 Mica 文档规定的回退外观
     /// （SolidBackgroundFillColorBase，见 <see cref="DragBackdropFill"/>）把内容根刷成不透明；
-    /// 退出时先恢复 DWMWA_SYSTEMBACKDROP_TYPE，再在下一帧 Low 优先级撤掉填充，
-    /// 避免 DWM 异步应用属性期间闪一帧壁纸。
+    /// 退出时先恢复 DWMWA_SYSTEMBACKDROP_TYPE，再在下一帧 Low 优先级撤掉填充/覆盖层，
+    /// 避免 DWM 异步应用属性期间闪一帧壁纸。快照覆盖层显示在内容根最上层，且抓取的是“包含
+    /// Mica 的屏幕像素”，所以拖拽期间用户看到的是进入拖拽前那一帧的精确画面。
     ///
     /// 关掉 backdrop 的方式：优先
     /// DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE=38, DWMSBT_NONE=0)，
     /// 不碰 <see cref="Window.SystemBackdrop"/> —— MicaBackdrop 控制器保持存活，恢复是“瞬间”的；
     /// 只有 DWM 属性调用失败（例如 Windows 10 没有属性 38）才退回旧的 SystemBackdrop = null 路径。
     ///
-    /// 环境变量（全部默认关闭，未设置时行为与改动前一致）：
-    /// - <c>CB_NO_DRAG_BACKDROP_TOGGLE=1</c>：完全关闭本行为（连子类化/强制填充都不安装）；
-    /// - <c>CB_DRAG_FILL_ONLY=1</c>：只铺回退色、不碰 DWM backdrop，用于验证“纯不透明填充”
-    ///   能否让 DWM 自行省掉 Mica 合成；
-    /// - <c>CB_FORCE_DRAG_FILL=1</c>：启动后立刻进入并一直停留在“拖拽中”状态
-    ///   （填充 + DWMSBT_NONE），直到进程退出，用于和正常 Mica 外观做截图对比；
-    /// - <c>CB_STARTUP_TRACE=1</c>：写 trace（drag-backdrop-off/on 及各项失败标记）。
+    /// 环境变量与优先级（从高到低；高优先级命中后，低优先级的开关不再改变该行为）：
+    /// 1. <c>CB_NO_DRAG_BACKDROP_TOGGLE=1</c>：完全关闭本行为（含快照、填充、强制状态），
+    ///    连子类化都不安装 —— 与改动前逐字一致；
+    /// 2. <c>CB_NO_DRAG_SNAPSHOT=1</c>：只关闭快照，保留“回退色填充 + DWM backdrop 开关”；
+    /// 3. <c>CB_DRAG_FILL_ONLY=1</c>：只铺回退色、不碰 DWM backdrop（也不做快照），
+    ///    用于验证“纯不透明填充”能否让 DWM 自行省掉 Mica 合成；
+    /// 4. <c>CB_FORCE_DRAG_SNAPSHOT=1</c>：启动后等 Shell 布局稳定，抓一次快照并一直停留在
+    ///    “快照覆盖 + 回退色 + DWMSBT_NONE”状态（用于和正常 Mica 外观做截图像素对比）；
+    ///    若同时设置 <c>CB_FORCE_DRAG_FILL=1</c>，快照优先；若快照路径被 2/3 关闭，
+    ///    则本开关无效（不会偷偷退回强制填充，避免误判截图属于哪种状态）；
+    /// 5. <c>CB_FORCE_DRAG_FILL=1</c>：启动后一直停留在“伪拖拽”状态（填充 + DWMSBT_NONE），
+    ///    不做快照，直到进程退出；
+    /// 6. 以上都未设置（默认）：普通拖拽走“快照 + 填充 + DWM backdrop 开关”。
+    ///
+    /// 失败回退：
+    /// - 快照抓取/建位图失败（Shell 尚未构建、BitBlt 失败、写位图失败等）→ 本次拖拽只走填充；
+    /// - 填充也失败且没有可用的快照 → 不关 backdrop，退化为“拖拽时仍挂 Mica”；
+    /// - 拖拽中途客户区尺寸变化（边框缩放）→ 第一次检测到尺寸变化就隐藏快照、改走填充，
+    ///   本段手势剩余时间不再重抓；退出时照常恢复 Mica；
+    /// - 有快照但填充失败时仍可安全关 backdrop（覆盖层已经证明能盖住整个客户区）。
     ///
     /// 幂等/安全性：重复或嵌套的进入只保留第一次保存的状态；没有配对的退出什么都不做；
-    /// 背景本来就是 null 时直接返回；拖拽中关闭（WM_CLOSE）先恢复；窗口销毁（WM_NCDESTROY）
-    /// 只清理托管状态。所有 Win32/属性操作都包 try/catch，失败只降级、不抛出。
+    /// 背景本来就是 null 时直接返回（此时快照也不会被使用，视觉零变化）；拖拽中关闭（WM_CLOSE）
+    /// 先恢复；窗口销毁（WM_NCDESTROY）只清理托管状态。所有 Win32/属性操作都包 try/catch，
+    /// 失败只降级、不抛出。日志一律经 <c>CB_STARTUP_TRACE=1</c> 门控。
     /// </summary>
     public static void SetDragBackdropToggle(this Window window)
     {
@@ -142,7 +161,11 @@ internal static class WindowExtensions
     /// </summary>
     public static void EnableForcedDragFill(this Window window)
     {
-        if (!DragBackdropToggleEnabled || !ForceDragFillEnabled || _forcedDragFillTimer != null)
+        // 快照优先：两个强制开关同时设置时只进入快照状态，避免截图归属不明。
+        if (!DragBackdropToggleEnabled
+            || !ForceDragFillEnabled
+            || ForcedSnapshotModeEnabled
+            || _forcedDragFillTimer != null)
         {
             return;
         }
@@ -161,6 +184,40 @@ internal static class WindowExtensions
         timer.IsRepeating = true;
         timer.Tick += (_, _) => ApplyForcedDragFill(window);
         _forcedDragFillTimer = timer;
+        timer.Start();
+    }
+
+    /// <summary>
+    /// 调试开关 <c>CB_FORCE_DRAG_SNAPSHOT=1</c>：启动后等 Shell 布局稳定，抓一次客户区快照
+    /// 并一直停留在“快照覆盖 + 回退色 + DWMSBT_NONE”状态，直到进程退出。用于截一张与正常
+    /// Mica 外观做像素对比的图；未设置时立即返回，行为零变化。
+    ///
+    /// 为什么需要定时器等：MainWindow 构造时内容根还是空/占位层，ShellPage 要等首帧之后才
+    /// 以 Low 优先级构建。这里每 100ms 检查一次，命中“覆盖层已存在且已有布局尺寸”后再等
+    /// <see cref="ForcedSnapshotSettleMs"/>，让 Shell 的第一帧/背景图解码落定，然后才抓图；
+    /// 抓图必须在 Mica 还挂着的时候做（否则抓到的是回退色）。
+    ///
+    /// 失败降级：超过 <see cref="ForcedSnapshotMaxWaitMs"/> 仍抓不到，就退回强制填充
+    /// （CB_FORCE_DRAG_FILL 的视觉效果）并写 trace，保证至少能截到一张确定状态的图。
+    /// </summary>
+    public static void EnableForcedDragSnapshot(this Window window)
+    {
+        if (!ForcedSnapshotModeEnabled || _forcedSnapshotTimer != null)
+        {
+            return;
+        }
+
+        var queue = window.DispatcherQueue;
+        if (queue == null)
+        {
+            return;
+        }
+
+        var timer = queue.CreateTimer();
+        timer.Interval = TimeSpan.FromMilliseconds(100);
+        timer.IsRepeating = true;
+        timer.Tick += (_, _) => ApplyForcedDragSnapshot(window);
+        _forcedSnapshotTimer = timer;
         timer.Start();
     }
 
@@ -234,6 +291,12 @@ internal static class WindowExtensions
     /// <summary>窗口过程被销毁：comctl32 会自动摘除子类化，这里只清理托管侧状态。</summary>
     private const uint WM_NCDESTROY = 0x0082;
 
+    /// <summary>客户区尺寸改变（边框缩放、最大化、DPI 变化）。拖拽中收到 = 快照会拉伸，必须放弃。</summary>
+    private const uint WM_SIZE = 0x0005;
+
+    /// <summary>窗口位置或尺寸改变；纯移动时也会收到，所以要和抓取尺寸比对后才放弃快照。</summary>
+    private const uint WM_WINDOWPOSCHANGED = 0x0047;
+
     /// <summary>拖拽开始（背景已关掉、回退色已铺）时写入 startup.log 的稳定标记，便于按行聚合。</summary>
     private const string DragBackdropOffTrace = "drag-backdrop-off";
 
@@ -261,6 +324,30 @@ internal static class WindowExtensions
     /// <summary>回退画刷的实际来源（theme-brush / app-resource-brush / theme-color / hardcoded-*）。</summary>
     private const string DragBackdropFillSourceTrace = "drag-backdrop-fill-source";
 
+    /// <summary>有快照但回退色铺不上：覆盖层仍可安全盖住整个客户区，因此继续关 backdrop。</summary>
+    private const string DragSnapshotFillUnavailableTrace = "drag-snapshot-fill-unavailable";
+
+    /// <summary>拖拽中途客户区尺寸变了：隐藏快照，本段手势剩余时间退回填充路径。</summary>
+    private const string DragSnapshotDroppedResizeTrace = "drag-snapshot-dropped-resize";
+
+    /// <summary>CB_FORCE_DRAG_SNAPSHOT=1 第一次真正进入“快照伪拖拽”状态时写一行。</summary>
+    private const string DragSnapshotForcedTrace = "drag-snapshot-force";
+
+    /// <summary>CB_FORCE_DRAG_SNAPSHOT=1 长时间抓不到图，降级为强制填充状态。</summary>
+    private const string DragSnapshotForcedFillFallbackTrace = "drag-snapshot-force-fill-fallback";
+
+    /// <summary>强制快照收到 WM_CLOSE 时恢复背景/隐藏覆盖层后写一行。</summary>
+    private const string DragSnapshotForcedOffTrace = "drag-snapshot-force-off";
+
+    /// <summary>强制快照看到 Shell 布局完成后再等这么久（毫秒），让首帧/背景图解码落定。</summary>
+    private const int ForcedSnapshotSettleMs = 800;
+
+    /// <summary>强制快照等待覆盖层可用的上限（毫秒）；超时降级为强制填充。</summary>
+    private const int ForcedSnapshotMaxWaitMs = 10000;
+
+    /// <summary>强制快照定时器周期（毫秒），也是就绪等待的计时步长。</summary>
+    private const int ForcedSnapshotTickMs = 100;
+
     // DWMWA_SYSTEMBACKDROP_TYPE：Windows 11 22H2 (22621) 起公开的 DWM 窗口属性；
     // 写入/读取都用 cbAttribute=sizeof(int)=4。Windows 10 上这两个调用会失败，走旧路径。
     private const int DWMWA_SYSTEMBACKDROP_TYPE = 38;
@@ -284,6 +371,26 @@ internal static class WindowExtensions
     /// <summary>CB_FORCE_DRAG_FILL=1：启动后一直停留在“拖拽中”状态，供截图对比。</summary>
     private static readonly bool ForceDragFillEnabled = IsEnvSwitch("CB_FORCE_DRAG_FILL");
 
+    /// <summary>CB_FORCE_DRAG_SNAPSHOT=1：启动后一直停留在“快照伪拖拽”状态，供截图对比。</summary>
+    private static readonly bool ForceDragSnapshotEnabled = IsEnvSwitch("CB_FORCE_DRAG_SNAPSHOT");
+
+    /// <summary>
+    /// 普通拖拽是否使用快照覆盖层。优先级：
+    /// CB_NO_DRAG_BACKDROP_TOGGLE=1（连子类化都不安装）→ CB_NO_DRAG_SNAPSHOT=1（关快照）
+    /// → CB_DRAG_FILL_ONLY=1（只填充、不碰 backdrop）→ 默认开启快照。
+    /// </summary>
+    private static readonly bool SnapshotPathEnabled =
+        DragBackdropToggleEnabled
+        && !IsEnvSwitch("CB_NO_DRAG_SNAPSHOT")
+        && !DragFillOnlyEnabled;
+
+    /// <summary>
+    /// CB_FORCE_DRAG_SNAPSHOT 是否真正生效。快照路径被 <c>CB_NO_DRAG_SNAPSHOT</c> /
+    /// <c>CB_DRAG_FILL_ONLY</c> 关闭时本开关无效（不偷偷退回强制填充，避免截图归属歧义）。
+    /// 若同时设置 CB_FORCE_DRAG_FILL，快照优先。
+    /// </summary>
+    private static readonly bool ForcedSnapshotModeEnabled = SnapshotPathEnabled && ForceDragSnapshotEnabled;
+
     /// <summary>传给 SetWindowSubclass 的 dwRefData 所对应的窗口句柄（进程内只分配一次）。</summary>
     private static GCHandle _dragBackdropWindowHandle;
 
@@ -302,8 +409,32 @@ internal static class WindowExtensions
     /// <summary>当前是否处于“拖拽期背景已关掉”状态，用于吸收重复/嵌套的 WM_ENTERSIZEMOVE。</summary>
     private static bool _backdropSuspended;
 
+    /// <summary>本次拖拽是否成功显示了快照覆盖层（决定 WM_SIZE 时要不要放弃快照）。</summary>
+    private static bool _dragSnapshotShown;
+
+    /// <summary>
+    /// 本次拖拽的回退色是否真的铺上了。尺寸变化放弃快照时：只有铺上了才能直接撤覆盖层，
+    /// 否则撤掉会露出桌面壁纸，必须先恢复 backdrop。
+    /// </summary>
+    private static bool _dragFillApplied;
+
+    /// <summary>CB_FORCE_DRAG_SNAPSHOT 是否已经生效（生效后忽略真实进出消息，保持状态）。</summary>
+    private static bool _forcedSnapshotActive;
+
     /// <summary>CB_FORCE_DRAG_FILL 的周期检查定时器（进程生命周期内保持引用）。</summary>
     private static DispatcherQueueTimer? _forcedDragFillTimer;
+
+    /// <summary>CB_FORCE_DRAG_SNAPSHOT 的启动等待/抓取定时器（进程生命周期内保持引用）。</summary>
+    private static DispatcherQueueTimer? _forcedSnapshotTimer;
+
+    /// <summary>强制快照：看到 Shell 布局完成后已经过去的等待时长（毫秒），用于再等几帧稳定。</summary>
+    private static int _forcedSnapshotSettleMs;
+
+    /// <summary>强制快照：从启动定时器起累计等待的时长（毫秒），超过上限就降级为强制填充。</summary>
+    private static int _forcedSnapshotWaitedMs;
+
+    /// <summary>强制快照：抓取失败次数；失败后继续重试，直到总等待超时。</summary>
+    private static int _forcedSnapshotCaptureFailures;
 
     /// <summary>强制填充是否已写过那唯一一行 trace。</summary>
     private static bool _forcedDragFillApplied;
@@ -320,18 +451,53 @@ internal static class WindowExtensions
         switch (msg)
         {
             case WM_ENTERSIZEMOVE:
+                if (_forcedSnapshotActive)
+                {
+                    // CB_FORCE_DRAG_SNAPSHOT：已经固定在快照状态，真实拖动也保持不动。
+                    break;
+                }
+
                 SuspendBackdropForDrag(dwRefData);
                 break;
 
             case WM_EXITSIZEMOVE:
+                if (_forcedSnapshotActive)
+                {
+                    // 强制快照状态要一直保持到进程退出，不因一次真实拖动而恢复 Mica。
+                    break;
+                }
+
                 // 松手 / Esc 取消 / Snap 结束都在这里恢复；没有配对的进入消息时是空操作。
                 RestoreBackdropAfterDrag(dwRefData);
+                break;
+
+            case WM_SIZE:
+            case WM_WINDOWPOSCHANGED:
+                // 边框缩放（以及最大化/DPI 变化）会让客户区尺寸在移动-缩放循环里变化：
+                // 快照会被 Stretch 拉花，第一次检测到就放弃快照，本段手势剩余时间退回填充。
+                // 强制快照是静态截图状态（不参与真实拖拽），这里不拆它。
+                if (_backdropSuspended && !_forcedSnapshotActive)
+                {
+                    DropSnapshotIfResized(dwRefData);
+                }
+
                 break;
 
             case WM_CLOSE:
                 // 拖拽过程中关闭窗口（例如 Alt+F4）：窗口会被隐藏而不是销毁，必须先装回背景，
                 // 否则下一次显示窗口时会永久缺 Mica。非拖拽期间是无操作。
-                RestoreBackdropAfterDrag(dwRefData);
+                if (_forcedSnapshotActive)
+                {
+                    ExitForcedSnapshot(dwRefData);
+                }
+                else
+                {
+                    RestoreBackdropAfterDrag(dwRefData);
+                }
+
+                // 关闭路径上窗口马上隐藏：DWM 已经先恢复，同步撤覆盖层不会产生可见跳变，
+                // 也避免“隐藏后 Low 回调没跑、下次显示还挂着旧快照”。
+                DragSnapshot.HideNow();
                 break;
 
             case WM_NCDESTROY:
@@ -340,6 +506,9 @@ internal static class WindowExtensions
                 ResetDragBackdropState();
                 DragBackdropFill.Reset();
                 StopForcedDragFill();
+                StopForcedDragSnapshot();
+                DragSnapshot.Reset();
+                _forcedSnapshotActive = false;
                 break;
         }
 
@@ -401,7 +570,18 @@ internal static class WindowExtensions
         _dwmBackdropDisabled = false;
         _systemBackdropNulled = false;
         _backdropSuspended = true;
+        _dragSnapshotShown = false;
 
+        // ① 先抓快照并显示覆盖层 —— 必须在 DWM backdrop 切到 NONE 之前：
+        //    快照抓的是屏幕像素（含 Mica），切完 backdrop 再抓就只能抓到回退色了。
+        //    抓取失败（Shell 还没构建 / BitBlt 失败 / 位图创建失败）只记录，不抛出。
+        if (SnapshotPathEnabled)
+        {
+            _dragSnapshotShown = DragSnapshot.TryCaptureAndShow(window);
+        }
+
+        // ② 再铺回退色：它是覆盖层下面的兜底（覆盖层若因尺寸/重绘出现缝隙也不会露出壁纸），
+        //    也是尺寸变化后放弃快照时立即生效的降级外观。
         bool painted;
         try
         {
@@ -413,21 +593,33 @@ internal static class WindowExtensions
             LogDragBackdropFailure("fill", ex);
         }
 
-        if (!painted)
+        if (!painted && !_dragSnapshotShown)
         {
-            // 铺不上回退色就不要再关 backdrop，否则会重新露出壁纸。
+            // 既没有回退色也没有快照：不要再关 backdrop，否则会重新露出壁纸。
             // 退化为“拖拽时仍挂 Mica”：只损失流畅度，不改变外观。
             StartupTrace.Mark(DragBackdropPaintFailedTrace);
             ResetDragBackdropState();
             return;
         }
 
-        // 诊断：记录实际用的回退画刷来源（资源缺失时会退到 hardcoded-*）。
-        StartupTrace.Mark($"{DragBackdropFillSourceTrace}={DragBackdropFill.LastBrushSource}");
+        _dragFillApplied = painted;
+
+        if (!painted)
+        {
+            // 有快照时回退色铺不上是安全的：覆盖层已经证明能盖住整个客户区。
+            // 但尺寸变化必须放弃快照时，下面的 DropSnapshotIfResized 会先恢复 backdrop 再撤覆盖层。
+            StartupTrace.Mark(DragSnapshotFillUnavailableTrace);
+        }
+        else
+        {
+            // 诊断：记录实际用的回退画刷来源（资源缺失时会退到 hardcoded-*）。
+            StartupTrace.Mark($"{DragBackdropFillSourceTrace}={DragBackdropFill.LastBrushSource}");
+        }
 
         if (DragFillOnlyEnabled)
         {
             // A/B：只验证“不透明填充”本身能否让 DWM 省掉合成，不动 backdrop。
+            // （SnapshotPathEnabled 在本模式下为 false，所以这里不会残留覆盖层。）
             StartupTrace.Mark(DragBackdropOffTrace);
             return;
         }
@@ -515,10 +707,125 @@ internal static class WindowExtensions
             }
         }
 
+        // 顺序要求：原 backdrop 已经恢复（上面是同步 DwmSetWindowAttribute），
+        // 覆盖层才排到下一轮 Low 撤销 —— 让 DWM 先应用恢复后的 Mica，再撤遮罩。
+        // 与填充同一优先级：同一帧内先隐藏覆盖层、再清填充，两次移除都在下一帧呈现之前。
+        // 位图保留在缓存里，下次拖拽同尺寸可复用。window 为 null 时立即隐藏。
+        DragSnapshot.ScheduleHide(window);
+
         // 最后才撤填充，且排到下一轮 Low：让 DWM 先异步应用刚恢复的 backdrop，
         // 否则会闪一帧桌面壁纸。window 为 null 时 ScheduleClear 会用内部持有的窗口。
         DragBackdropFill.ScheduleClear(window);
         StartupTrace.Mark(DragBackdropOnTrace);
+    }
+
+    /// <summary>
+    /// 拖拽中途检测客户区尺寸变化：第一次发现快照尺寸与当前客户区不一致时，隐藏快照并放弃，
+    /// 本段手势剩余时间退回“填充 + 无 backdrop”的旧路径（快照拉伸比重新渲染更难解释）。
+    /// 纯移动（尺寸不变）不会触发任何动作。
+    /// </summary>
+    private static void DropSnapshotIfResized(IntPtr dwRefData)
+    {
+        if (!_dragSnapshotShown)
+        {
+            return;
+        }
+
+        var window = ResolveDragBackdropWindow(dwRefData);
+        if (window == null)
+        {
+            return;
+        }
+
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+        if (hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        if (!GetClientRect(hwnd, out var client))
+        {
+            return;
+        }
+
+        if (client.Right == DragSnapshot.CapturedWidth && client.Bottom == DragSnapshot.CapturedHeight)
+        {
+            return;
+        }
+
+        if (!_dragFillApplied && !TryRestoreBackdropForResize(window, hwnd))
+        {
+            // 极罕见：回退色没铺上、原 backdrop 也恢复不了。此时撤掉覆盖层就会露出壁纸，
+            // 宁可让快照继续拉伸（视觉暂时变形），也不能出现空白/壁纸窗口。
+            StartupTrace.Mark($"{DragSnapshotDroppedResizeTrace}-no-fill-keep");
+            return;
+        }
+
+        // 先落状态再隐藏：隐藏动作可能同步触发布局/渲染回调，重入时不应再走一次。
+        _dragSnapshotShown = false;
+        DragSnapshot.HideNow();
+        StartupTrace.Mark(DragSnapshotDroppedResizeTrace);
+    }
+
+    /// <summary>
+    /// 尺寸变化放弃快照、但没有回退色可兜底时的补救：把本次拖拽关掉的 backdrop 先恢复，
+    /// 再让调用方隐藏覆盖层。恢复成功后退出路径不会再重复恢复（标志已清）。
+    /// 返回 false 表示两条恢复路径都失败，调用方必须保留覆盖层。
+    /// </summary>
+    private static bool TryRestoreBackdropForResize(Window window, IntPtr hwnd)
+    {
+        try
+        {
+            if (_dwmBackdropDisabled)
+            {
+                if (TrySetDwmBackdropType(hwnd, _savedBackdropType))
+                {
+                    _dwmBackdropDisabled = false;
+                    StartupTrace.Mark("drag-snapshot-resize-restore-backdrop");
+                    return true;
+                }
+
+                // DWM 属性不可用：退回 SystemBackdrop 实例路径。
+                try
+                {
+                    window.SystemBackdrop = null;
+                    window.SystemBackdrop = _savedBackdrop;
+                    _dwmBackdropDisabled = false;
+                    _systemBackdropNulled = false;
+                    StartupTrace.Mark("drag-snapshot-resize-restore-backdrop");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    LogDragBackdropFailure("resize-restore", ex);
+                    return false;
+                }
+            }
+
+            if (_systemBackdropNulled)
+            {
+                try
+                {
+                    window.SystemBackdrop = _savedBackdrop;
+                    _systemBackdropNulled = false;
+                    StartupTrace.Mark("drag-snapshot-resize-restore-backdrop");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    LogDragBackdropFailure("resize-restore", ex);
+                    return false;
+                }
+            }
+
+            // 本来就没关 backdrop（例如两条关闭路径都失败）：撤覆盖层不会露壁纸。
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LogDragBackdropFailure("resize-restore", ex);
+            return false;
+        }
     }
 
     /// <summary>把拖拽状态字段复位；不碰任何 UI / Win32 状态。</summary>
@@ -529,6 +836,8 @@ internal static class WindowExtensions
         _dwmBackdropDisabled = false;
         _systemBackdropNulled = false;
         _backdropSuspended = false;
+        _dragSnapshotShown = false;
+        _dragFillApplied = false;
     }
 
     /// <summary>CB_FORCE_DRAG_FILL 的周期应用：内容根/主题变化时重新铺色，DWM 只设一次。</summary>
@@ -582,6 +891,218 @@ internal static class WindowExtensions
         }
 
         _forcedDragFillTimer = null;
+    }
+
+    /// <summary>
+    /// CB_FORCE_DRAG_SNAPSHOT 的周期步骤：等 Shell 的覆盖层有布局尺寸 → 再稳定
+    /// <see cref="ForcedSnapshotSettleMs"/> → 抓图（此时 Mica 还挂着）→ 铺回退色 →
+    /// 保存并关闭 DWM backdrop → 固定状态并停表。失败/超时降级为强制填充。
+    /// </summary>
+    private static void ApplyForcedDragSnapshot(Window window)
+    {
+        if (!ForcedSnapshotModeEnabled || _forcedSnapshotActive)
+        {
+            StopForcedDragSnapshot();
+            return;
+        }
+
+        try
+        {
+            _forcedSnapshotWaitedMs += ForcedSnapshotTickMs;
+
+            if (!DragSnapshot.IsOverlayReady(window))
+            {
+                // Shell 还没构建完（占位层是空 Grid，没有覆盖层）。继续等，直到上限。
+                if (_forcedSnapshotWaitedMs >= ForcedSnapshotMaxWaitMs)
+                {
+                    EnterForcedFillFallback(window);
+                }
+
+                return;
+            }
+
+            // Shell 已经有布局尺寸，但首帧/背景图解码可能还在进行；再等几帧，
+            // 避免把“占位层刚被替换”的半成品抓成快照。
+            if (_forcedSnapshotSettleMs < ForcedSnapshotSettleMs)
+            {
+                _forcedSnapshotSettleMs += ForcedSnapshotTickMs;
+                return;
+            }
+
+            if (!DragSnapshot.TryCaptureAndShow(window))
+            {
+                _forcedSnapshotCaptureFailures++;
+                if (_forcedSnapshotCaptureFailures == 1)
+                {
+                    // DragSnapshot 已经写过失败阶段；总等待超时后再降级。
+                    StartupTrace.Mark($"drag-snapshot-force-capture-retry={_forcedSnapshotWaitedMs}");
+                }
+
+                if (_forcedSnapshotWaitedMs >= ForcedSnapshotMaxWaitMs)
+                {
+                    EnterForcedFillFallback(window);
+                }
+
+                return;
+            }
+
+            // 抓图成功，且抓的是“Mica 还挂着”的画面。下面按正式拖拽同样的顺序收尾：
+            // 先铺回退色（覆盖层下面），再保存状态并关闭 DWM backdrop。
+            var painted = false;
+            try
+            {
+                painted = DragBackdropFill.TryApply(window);
+            }
+            catch (Exception ex)
+            {
+                LogDragBackdropFailure("forced-snapshot-fill", ex);
+            }
+
+            if (!painted)
+            {
+                StartupTrace.Mark(DragSnapshotFillUnavailableTrace);
+            }
+            else
+            {
+                StartupTrace.Mark($"{DragBackdropFillSourceTrace}={DragBackdropFill.LastBrushSource}");
+            }
+
+            SystemBackdrop? saved;
+            try
+            {
+                saved = window.SystemBackdrop;
+            }
+            catch (Exception ex)
+            {
+                LogDragBackdropFailure("read", ex);
+                DragSnapshot.HideNow();
+                DragBackdropFill.ClearNow();
+                StopForcedDragSnapshot();
+                return;
+            }
+
+            if (saved == null)
+            {
+                // 没有 Mica（CB_NO_MICA=1 等）：这套快照对比没有意义，也不该改变外观。
+                // 覆盖层和刚才铺上的回退色都撤掉，回到启动时的原样。
+                DragSnapshot.HideNow();
+                DragBackdropFill.ClearNow();
+                StopForcedDragSnapshot();
+                StartupTrace.Mark($"{DragBackdropErrorTrace}-forced-snapshot-no-backdrop");
+                return;
+            }
+
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            if (!TryGetDwmBackdropType(hwnd, out var savedType))
+            {
+                savedType = DWMSBT_MAINWINDOW;
+                StartupTrace.Mark(DragBackdropDwmReadFailedTrace);
+            }
+
+            _savedBackdrop = saved;
+            _savedBackdropType = savedType;
+            _dwmBackdropDisabled = false;
+            _systemBackdropNulled = false;
+            _backdropSuspended = true;
+
+            if (TrySetDwmBackdropType(hwnd, DWMSBT_NONE))
+            {
+                _dwmBackdropDisabled = true;
+            }
+            else
+            {
+                StartupTrace.Mark(DragBackdropDwmSetFailedTrace);
+                try
+                {
+                    window.SystemBackdrop = null;
+                    _systemBackdropNulled = true;
+                }
+                catch (Exception ex)
+                {
+                    LogDragBackdropFailure("forced-snapshot-detach", ex);
+                }
+            }
+
+            _forcedSnapshotActive = true;
+            StartupTrace.Mark(DragSnapshotForcedTrace);
+            StopForcedDragSnapshot();
+        }
+        catch (Exception ex)
+        {
+            LogDragBackdropFailure("forced-snapshot", ex);
+
+            // 半成品状态必须收回：绝不留一个“悬起但没恢复”的 backdrop / 可见覆盖层。
+            if (_backdropSuspended && !_forcedSnapshotActive)
+            {
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+                if (_dwmBackdropDisabled)
+                {
+                    _ = TrySetDwmBackdropType(hwnd, _savedBackdropType);
+                }
+                else if (_systemBackdropNulled)
+                {
+                    try
+                    {
+                        window.SystemBackdrop = _savedBackdrop;
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                ResetDragBackdropState();
+            }
+
+            DragSnapshot.HideNow();
+            DragBackdropFill.ScheduleClear(window);
+            StopForcedDragSnapshot();
+        }
+    }
+
+    /// <summary>强制快照等不到可用覆盖层/抓图持续失败时，退回强制填充的视觉状态。</summary>
+    private static void EnterForcedFillFallback(Window window)
+    {
+        StartupTrace.Mark(DragSnapshotForcedFillFallbackTrace);
+        DragSnapshot.HideNow();
+        StopForcedDragSnapshot();
+        ApplyForcedDragFill(window);
+    }
+
+    private static void StopForcedDragSnapshot()
+    {
+        _forcedSnapshotSettleMs = 0;
+        _forcedSnapshotWaitedMs = 0;
+
+        if (_forcedSnapshotTimer == null)
+        {
+            return;
+        }
+
+        try
+        {
+            _forcedSnapshotTimer.Stop();
+        }
+        catch
+        {
+        }
+
+        _forcedSnapshotTimer = null;
+    }
+
+    /// <summary>
+    /// 强制快照状态结束（目前只在 WM_CLOSE 调用）：走与普通拖拽完全相同的恢复顺序 ——
+    /// 先恢复 DWM backdrop / SystemBackdrop，再安排隐藏覆盖层。
+    /// </summary>
+    private static void ExitForcedSnapshot(IntPtr dwRefData)
+    {
+        if (!_forcedSnapshotActive)
+        {
+            return;
+        }
+
+        _forcedSnapshotActive = false;
+        RestoreBackdropAfterDrag(dwRefData);
+        StartupTrace.Mark(DragSnapshotForcedOffTrace);
     }
 
     /// <summary>读 DWMWA_SYSTEMBACKDROP_TYPE；hwnd 无效 / 系统不支持（Windows 10）时返回 false。</summary>
@@ -670,6 +1191,15 @@ internal static class WindowExtensions
         public Point MaxTrackSize;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
     [DllImport("comctl32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, IntPtr uIdSubclass, IntPtr dwRefData);
@@ -686,6 +1216,10 @@ internal static class WindowExtensions
 
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(IntPtr hWnd, out Rect lpRect);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

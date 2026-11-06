@@ -92,6 +92,16 @@
                 <Frame Grid.Row="1" x:Name="NavigationFrame" />
             </Grid>
         </NavigationView>
-        
+
+        <!-- 拖拽期冻结画面覆盖层（Helpers/DragSnapshot.cs）：
+             必须是根 Grid 的最后一个子元素；Canvas.ZIndex=2 保证它盖过标题栏（ZIndex=1）。
+             平时 Collapsed，进入 WM_ENTERSIZEMOVE 时贴一张客户区屏幕快照，退出时隐藏。
+             IsHitTestVisible=False：即使显示出来也不拦截鼠标，标题栏拖动/边框缩放照常工作。 -->
+        <Image x:Name="DragSnapshotOverlay"
+               Canvas.ZIndex="2"
+               Stretch="Fill"
+               Visibility="Collapsed"
+               IsHitTestVisible="False" />
+
     </Grid>
 </Page>
