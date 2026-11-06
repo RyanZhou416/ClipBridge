@@ -41,8 +41,18 @@ internal static class WorkingSetTrimmer
 {
     private const string DisableEnvVarName = "CB_NO_WS_TRIM";
 
+    /// <summary>
+    /// 可选开关：<c>CB_WS_TRIM_MINIMIZE=1</c> 时也把“最小化”当作可裁剪状态。
+    ///
+    /// 默认**不**裁剪最小化：实测裁剪后恢复需要 0.5~0.9 秒重绘（窗口 40ms 就响应，
+    /// 但客户区内容要等换页 + 重新合成），而省下的工作集在 20 秒后又被后台活动涨回
+    /// 78~86MB —— 收益短暂、代价可感。隐藏到托盘时用户看不到窗口，裁剪才划算。
+    /// </summary>
+    private const string TrimOnMinimizeEnvVarName = "CB_WS_TRIM_MINIMIZE";
+
     /// <summary>窗口不可见后延迟多久再裁剪（毫秒）：过滤“最小化后又马上还原”的场景。</summary>
     private const int TrimDelayMs = 3000;
+
 
     /// <summary>CB_NO_WS_TRIM=1 时关闭；其它值（含未设置、空、0、false）一律视为开启。</summary>
     private static readonly bool Enabled =
@@ -66,6 +76,13 @@ internal static class WorkingSetTrimmer
 
     /// <summary>裁剪功能是否开启（只受 <c>CB_NO_WS_TRIM=1</c> 影响）。</summary>
     public static bool IsEnabled => Enabled;
+
+    /// <summary>
+    /// 是否也把“最小化”当作可裁剪状态（<c>CB_WS_TRIM_MINIMIZE=1</c> 时才为 true）。
+    /// 默认 false：隐藏到托盘才裁剪，最小化保持秒开。
+    /// </summary>
+    public static bool TrimOnMinimize { get; } =
+        string.Equals(Environment.GetEnvironmentVariable(TrimOnMinimizeEnvVarName)?.Trim(), "1", StringComparison.Ordinal);
 
     /// <summary>
     /// 窗口变为最小化 / 隐藏到托盘（或托盘-only 生命周期里根本没有窗口）时调用。

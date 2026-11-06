@@ -219,6 +219,13 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// 按窗口当前状态通知 <see cref="WorkingSetTrimmer"/>：不可见 → 排队延迟裁剪；可见 → 取消并复位。
+    ///
+    /// 默认只把“隐藏到托盘（IsVisible = false）”当作可裁剪状态。最小化**默认不裁剪**：
+    /// 实测裁剪后恢复要 0.5~0.9 秒才重绘完（窗口 40ms 就响应），而省下的工作集 20 秒后又
+    /// 被后台活动涨回 78~86MB —— 代价可感、收益短暂。需要极限省内存的场景可显式设置
+    /// <c>CB_WS_TRIM_MINIMIZE=1</c> 把最小化也纳入。
+    ///
+    /// 普通失焦 / 切到别的窗口时窗口仍然可见，用户随时会看回来，仍然绝不裁剪。
     /// 任何异常都只写 Debug 输出，不影响窗口本身。
     /// </summary>
     private void UpdateWorkingSetTrimPolicy()
@@ -226,10 +233,11 @@ public sealed partial class MainWindow : Window
         try
         {
             var minimized = AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized };
-            var hidden = !AppWindow.IsVisible || minimized;
+            var trimOnMinimize = WorkingSetTrimmer.TrimOnMinimize;
+            var hidden = !AppWindow.IsVisible || (minimized && trimOnMinimize);
 
             // CB_STARTUP_TRACE=1 时可复核状态切换顺序（未开启时不写文件；切换本身很稀疏）。
-            StartupTrace.Mark($"ws-policy hidden={hidden} visible={AppWindow.IsVisible} minimized={minimized}");
+            StartupTrace.Mark($"ws-policy hidden={hidden} visible={AppWindow.IsVisible} minimized={minimized} trim-on-minimize={trimOnMinimize}");
 
             if (hidden)
             {
