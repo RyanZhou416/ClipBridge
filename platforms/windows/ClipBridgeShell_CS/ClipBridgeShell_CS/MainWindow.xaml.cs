@@ -35,8 +35,8 @@ public sealed partial class MainWindow : Window
     // 那条恢复路径本来就是空操作）；后两者经交替 A/B 实测为噪声（+21ms / -2ms，同向对数
     // 不足），按"不留看起来更快但没有实测支撑的代码"的原则移除，只保留打点。
 
-    private Microsoft.UI.Dispatching.DispatcherQueue dispatcherQueue;
-    private UISettings settings;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueue dispatcherQueue;
+    private readonly UISettings settings;
     private bool _closeHintShown;
 
     /// <summary>
@@ -135,6 +135,15 @@ public sealed partial class MainWindow : Window
 
         AppWindow.Closing += AppWindow_Closing;
 
+        // 窗口不可见（最小化 / 隐藏到托盘）时延迟归还工作集；还原/显示时取消。
+        // 普通失焦不触发（窗口仍然可见）。策略与安全约束见 Helpers/WorkingSetTrimmer.cs。
+        AppWindow.Changed += AppWindow_Changed;
+
+        // AppWindow.Changed 在状态切换瞬间可能仍读到旧状态（实测：还原事件里 presenter 还是
+        // Minimized），只靠它会让“本次隐藏期已裁剪”标记在还原后不复位，导致下一次最小化不再裁剪。
+        // Window.Activated 在窗口真正回到前台之后才触发，作为补充入口再同步一次状态。
+        Activated += MainWindow_Activated;
+
         StartupTrace.Mark("mainwindow-ctor-exit");
     }
 
@@ -156,6 +165,9 @@ public sealed partial class MainWindow : Window
         PostMessageW(hwnd, WM_NCMOUSELEAVE, IntPtr.Zero, IntPtr.Zero);
         this.Hide();
 
+        // 显式通知一次（AppWindow.Changed 的可见性变化通常也会触发；WorkingSetTrimmer 幂等）。
+        WorkingSetTrimmer.OnWindowHidden();
+
         if (!_closeHintShown)
         {
             var showHint = await settingsService.ReadSettingAsync<bool?>("ShowFirstCloseHint") ?? true;
@@ -176,6 +188,61 @@ public sealed partial class MainWindow : Window
                 tray.ShowBalloonTip(title, content);
                 await settingsService.SaveSettingAsync("ShowFirstCloseHint", false);
             }
+        }
+    }
+
+    /// <summary>
+    /// 维护“不可见时裁剪工作集”的触发策略。
+    ///
+    /// 只把“最小化（presenter = Minimized）”和“隐藏到托盘（IsVisible = false）”当作不可见：
+    /// 普通失焦 / 切到别的窗口时窗口仍然可见，用户随时会看回来，绝不能裁剪。
+    /// 这里只观察可见性与呈现器状态变化，窗口大小/位置变化直接忽略。
+    /// </summary>
+    private void AppWindow_Changed(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        if (!args.DidVisibilityChange && !args.DidPresenterChange)
+        {
+            return;
+        }
+
+        UpdateWorkingSetTrimPolicy();
+    }
+
+    /// <summary>
+    /// 窗口真正被激活（还原 / 从托盘显示 / 启动）后补一次状态同步：
+    /// <see cref="AppWindow.Changed"/> 触发时 presenter 状态可能还没更新完，不能作为唯一入口。
+    /// </summary>
+    private void MainWindow_Activated(object sender, WindowActivatedEventArgs args)
+    {
+        UpdateWorkingSetTrimPolicy();
+    }
+
+    /// <summary>
+    /// 按窗口当前状态通知 <see cref="WorkingSetTrimmer"/>：不可见 → 排队延迟裁剪；可见 → 取消并复位。
+    /// 任何异常都只写 Debug 输出，不影响窗口本身。
+    /// </summary>
+    private void UpdateWorkingSetTrimPolicy()
+    {
+        try
+        {
+            var minimized = AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized };
+            var hidden = !AppWindow.IsVisible || minimized;
+
+            // CB_STARTUP_TRACE=1 时可复核状态切换顺序（未开启时不写文件；切换本身很稀疏）。
+            StartupTrace.Mark($"ws-policy hidden={hidden} visible={AppWindow.IsVisible} minimized={minimized}");
+
+            if (hidden)
+            {
+                WorkingSetTrimmer.OnWindowHidden();
+            }
+            else
+            {
+                WorkingSetTrimmer.OnWindowVisible();
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[MainWindow] Working-set trim policy update failed: {ex}");
         }
     }
 

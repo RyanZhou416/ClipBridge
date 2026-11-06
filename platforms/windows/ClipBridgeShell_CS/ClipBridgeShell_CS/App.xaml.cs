@@ -58,7 +58,10 @@ public partial class App : Application
         get; set;
     }
 
-    public static UIElement? AppTitlebar { get; set; }
+    public static UIElement? AppTitlebar
+    {
+        get; set;
+    }
     public static NavigationViewItem? SettingsNavItem
     {
         get; set;
@@ -125,7 +128,7 @@ public partial class App : Application
         {
             // 忽略环境变量设置失败
         }
-        
+
         InitializeComponent();
         StartupTrace.Mark("app-initcomponent-done");
 
@@ -402,7 +405,7 @@ public partial class App : Application
         // 检测渲染模式（仅在 Debug 模式下）
         CheckHardwareAcceleration();
 #endif
-        
+
         // 核心初始化已统一放在 ActivationService（窗口可见后异步执行），这里只处理未登录提示
         var accountService = App.GetService<IAccountService>();
         var hasAccount = await accountService.HasAccountAsync();
@@ -422,11 +425,11 @@ public partial class App : Application
 
                     var loc = WinUI3Localizer.Localizer.Get();
                     var currentLang = loc.GetCurrentLanguage();
-                    bool isChinese = currentLang.StartsWith("zh", StringComparison.OrdinalIgnoreCase);
-                    
+                    var isChinese = currentLang.StartsWith("zh", StringComparison.OrdinalIgnoreCase);
+
                     // 尝试获取本地化字符串
                     var title = loc.GetLocalizedString("Resources/Startup_LoginRequired_Title");
-                    if (string.IsNullOrEmpty(title) || title == "Resources/Startup_LoginRequired_Title") 
+                    if (string.IsNullOrEmpty(title) || title == "Resources/Startup_LoginRequired_Title")
                     {
                         title = isChinese ? "需要登录" : "Login Required";
                     }
@@ -434,8 +437,8 @@ public partial class App : Application
                     var content = loc.GetLocalizedString("Resources/Startup_LoginRequired_Content");
                     if (string.IsNullOrEmpty(content) || content == "Resources/Startup_LoginRequired_Content")
                     {
-                        content = isChinese 
-                            ? "需要登录账号才能初始化核心功能。账号和密码可以随意填写，但必须在所有设备上保持一致才能同步剪贴板。" 
+                        content = isChinese
+                            ? "需要登录账号才能初始化核心功能。账号和密码可以随意填写，但必须在所有设备上保持一致才能同步剪贴板。"
                             : "A login account is required to initialize core functions. You can use any username and password, but they must be consistent across all devices to sync your clipboard.";
                     }
 
@@ -529,6 +532,10 @@ public partial class App : Application
             {
                 window.Activate();
             }
+
+            // 窗口已重新可见：取消可能还挂在 3 秒延迟上的工作集裁剪（见 Helpers/WorkingSetTrimmer）。
+            WorkingSetTrimmer.OnWindowVisible();
+
             StartupTrace.Mark("warm-activate-done");
         });
     }
@@ -578,6 +585,13 @@ public partial class App : Application
             var tray = App.GetService<TrayService>();
             tray.Initialize();
 
+            // 托盘-only 生命周期（主窗口为 null）时应用本来就不可见：按“已隐藏”排一次裁剪。
+            // WorkingSetTrimmer 不依赖窗口对象，因此这里不会因为 null 而失败。
+            if (App.MainWindow == null)
+            {
+                WorkingSetTrimmer.OnWindowHidden();
+            }
+
             tray.ShowWindowRequested += (_, _) =>
             {
                 if (App.MainWindow != null)
@@ -589,6 +603,9 @@ public partial class App : Application
                         p.Restore();
                     }
                     App.MainWindow.Activate();
+
+                    // 从托盘显示后窗口重新可见：取消尚未触发的延迟裁剪。
+                    WorkingSetTrimmer.OnWindowVisible();
                 }
             };
 
@@ -613,7 +630,7 @@ public partial class App : Application
             // 检查环境变量
             var disableHwAccel = Environment.GetEnvironmentVariable("WINUI_DISABLE_HW_ACCEL");
             var dxgiDisableHwAccel = Environment.GetEnvironmentVariable("DXGI_DISABLE_HW_ACCEL");
-            
+
             var message = "硬件加速检测:\n";
             message += $"WINUI_DISABLE_HW_ACCEL: {disableHwAccel ?? "未设置"}\n";
             message += $"DXGI_DISABLE_HW_ACCEL: {dxgiDisableHwAccel ?? "未设置"}\n";
@@ -622,7 +639,7 @@ public partial class App : Application
             message += "2. 添加应用并设置为 '高性能'\n";
             message += "3. 确保显卡驱动是最新版本\n";
             message += "4. 使用 Release 模式运行（Debug 模式可能使用软件渲染）";
-            
+
             System.Diagnostics.Debug.WriteLine(message);
         }
         catch
@@ -700,9 +717,9 @@ public partial class App : Application
         StartupTrace.Mark("localizer-folder-done");
 
         // 1) 准备 Strings 文件夹
-        string stringsPath = Path.Combine(localFolderPath, "Strings");
+        var stringsPath = Path.Combine(localFolderPath, "Strings");
         if (!Directory.Exists(stringsPath)) Directory.CreateDirectory(stringsPath);
-        
+
         const string resw = "Resources.resw";
         await CreateStringResourceFileIfNotExists(stringsPath, "en-US", resw);
         await CreateStringResourceFileIfNotExists(stringsPath, "zh-CN", resw);
@@ -728,7 +745,7 @@ public partial class App : Application
 
         var settings = App.GetService<ILocalSettingsService>();
         var saved = await settings.ReadSettingAsync<string>("PreferredLanguage");
-        string defaultLang = NormalizeLanguageTag(saved ?? CultureInfo.CurrentUICulture.Name);
+        var defaultLang = NormalizeLanguageTag(saved ?? CultureInfo.CurrentUICulture.Name);
 
         if (string.IsNullOrEmpty(saved) || saved != defaultLang)
         {
@@ -759,15 +776,15 @@ public partial class App : Application
 
     private static async Task CreateStringResourceFileIfNotExists(string stringsPath, string language, string resourceFileName)
     {
-        string languagePath = Path.Combine(stringsPath, language);
+        var languagePath = Path.Combine(stringsPath, language);
         if (!Directory.Exists(languagePath)) Directory.CreateDirectory(languagePath);
 
-        string targetFilePath = Path.Combine(languagePath, resourceFileName);
+        var targetFilePath = Path.Combine(languagePath, resourceFileName);
 
         // 开发阶段或版本更新时，我们希望覆盖旧的本地化文件以确保新键值生效；
         // 版本未变化且目标文件已存在时跳过复制，避免每次启动都重写 LocalFolder。
-        string version = GetAppVersion();
-        string stampFilePath = Path.Combine(stringsPath, $".{resourceFileName}.{language}.version");
+        var version = GetAppVersion();
+        var stampFilePath = Path.Combine(stringsPath, $".{resourceFileName}.{language}.version");
         try
         {
             if (File.Exists(targetFilePath) && File.Exists(stampFilePath)
@@ -781,8 +798,8 @@ public partial class App : Application
             System.Diagnostics.Debug.WriteLine($"[App] Failed to read resource version stamp {language}: {ex.Message}");
         }
 
-        string resourceRelativePath = Path.Combine("Strings", language, resourceFileName);
-        try 
+        var resourceRelativePath = Path.Combine("Strings", language, resourceFileName);
+        try
         {
             var file = await LoadStringResourcesFileFromAppResource(resourceRelativePath);
             await file.CopyAsync(await StorageFolder.GetFolderFromPathAsync(languagePath), resourceFileName, NameCollisionOption.ReplaceExisting);
@@ -827,7 +844,7 @@ public partial class App : Application
 
     private static async Task<StorageFile> LoadStringResourcesFileFromAppResource(string filePath)
     {
-        try 
+        try
         {
             Uri resourcesFileUri = new($"ms-appx:///{filePath}");
             return await StorageFile.GetFileFromApplicationUriAsync(resourcesFileUri);
@@ -861,20 +878,20 @@ public partial class App : Application
     {
         try
         {
-            string dllName = "core_ffi_windows.dll";
+            var dllName = "core_ffi_windows.dll";
 
             // 1. 找到 WinUI 实际运行时使用的 DLL
-            string? appDllPath = FindCoreDll(dllName);
+            var appDllPath = FindCoreDll(dllName);
 
             // 2. Rust 官方输出目录 DLL
-            string rustDllPath =
+            var rustDllPath =
                 @"C:\Project\ClipBridge\target\x86_64-pc-windows-msvc\release\core_ffi_windows.dll";
 
             string header;
             string body;
 
-            bool appDllExists = !string.IsNullOrEmpty(appDllPath) && File.Exists(appDllPath);
-            bool rustDllExists = File.Exists(rustDllPath);
+            var appDllExists = !string.IsNullOrEmpty(appDllPath) && File.Exists(appDllPath);
+            var rustDllExists = File.Exists(rustDllPath);
 
             FileInfo? appInfo = appDllExists ? new FileInfo(appDllPath!) : null;
             FileInfo? rustInfo = rustDllExists ? new FileInfo(rustDllPath) : null;
@@ -949,24 +966,24 @@ public partial class App : Application
     /// </summary>
     private static string? FindCoreDll(string dllName)
     {
-        string? current = AppContext.BaseDirectory?
+        var current = AppContext.BaseDirectory?
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
         if (string.IsNullOrEmpty(current))
             return null;
 
         const int maxLevels = 5;
-        int level = 0;
+        var level = 0;
 
         while (current != null && level <= maxLevels)
         {
             // 1. 当前目录
-            string candidate = Path.Combine(current, dllName);
+            var candidate = Path.Combine(current, dllName);
             if (File.Exists(candidate))
                 return candidate;
 
             // 2. 当前目录下的 win-x64
-            string winX64 = Path.Combine(current, "win-x64", dllName);
+            var winX64 = Path.Combine(current, "win-x64", dllName);
             if (File.Exists(winX64))
                 return winX64;
 
@@ -991,32 +1008,32 @@ public partial class App : Application
     /// </summary>
     private static (string Configuration, string Tfm, string Arch, string RidDir) AnalyzeBuildInfo(string dllPath)
     {
-        string dir = Path.GetDirectoryName(dllPath) ?? string.Empty;
+        var dir = Path.GetDirectoryName(dllPath) ?? string.Empty;
 
         var parts = dir
             .Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
                    StringSplitOptions.RemoveEmptyEntries);
 
         // 配置：Debug / Release
-        string configuration = parts.FirstOrDefault(p =>
+        var configuration = parts.FirstOrDefault(p =>
             p.Equals("Debug", StringComparison.OrdinalIgnoreCase) ||
             p.Equals("Release", StringComparison.OrdinalIgnoreCase)
         ) ?? "未知";
 
         // TFM：例如 net9.0-windows10.0.26100.0
-        string tfm = parts.FirstOrDefault(p =>
+        var tfm = parts.FirstOrDefault(p =>
             p.StartsWith("net", StringComparison.OrdinalIgnoreCase)
         ) ?? "未知";
 
         // 架构目录：x64 / x86 / arm64
-        string arch = parts.FirstOrDefault(p =>
+        var arch = parts.FirstOrDefault(p =>
             p.Equals("x64", StringComparison.OrdinalIgnoreCase) ||
             p.Equals("x86", StringComparison.OrdinalIgnoreCase) ||
             p.Equals("arm64", StringComparison.OrdinalIgnoreCase)
         ) ?? "未知";
 
         // RID 目录：win-x64 / win-x86 / win-arm64 等
-        string ridDir = parts.FirstOrDefault(p =>
+        var ridDir = parts.FirstOrDefault(p =>
             p.StartsWith("win-", StringComparison.OrdinalIgnoreCase)
         ) ?? "无";
 

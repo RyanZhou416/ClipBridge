@@ -2,18 +2,21 @@ using System;
 using System.Collections.Specialized;
 using System.Linq;
 using System.Threading.Tasks;
-using ClipBridgeShell_CS.Core.Models.Events;
-using ClipBridgeShell_CS.Interop;
-using ClipBridgeShell_CS.ViewModels;
-using ClipBridgeShell_CS.Helpers;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
+using ClipBridgeShell_CS.Core.Models.Events;
+using ClipBridgeShell_CS.Helpers;
+using ClipBridgeShell_CS.Interop;
+using ClipBridgeShell_CS.ViewModels;
 using ClipBridgeShell_CS.Views;
-using WinUI3Localizer;
+using CommunityToolkit.WinUI;
 using Microsoft.UI;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
@@ -21,10 +24,7 @@ using Windows.Foundation;
 using Windows.Graphics.Imaging;
 using Windows.Storage.Streams;
 using Windows.UI;
-using Microsoft.UI.Xaml;
-using CommunityToolkit.WinUI;
-using Microsoft.UI.Composition;
-using Microsoft.UI.Xaml.Hosting;
+using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS.Views;
 
@@ -36,7 +36,7 @@ public sealed partial class MainPage : Page
     } = null!;
 
     private Microsoft.UI.Xaml.Controls.InfoBar? _errorInfoBar;
-    
+
     // 卡片选中状态管理（性能优化：只更新变化的卡片，而不是遍历所有卡片）
     private Microsoft.UI.Xaml.Controls.Border? _selectedBorder;
 
@@ -110,9 +110,12 @@ public sealed partial class MainPage : Page
     // 启动优化：背景图加载 / 标题颜色检测 / 图表首绘都推迟到首帧之后
     private const string BackgroundImagePathSettingKey = "MainPage_BackgroundImagePath";
     private const string TitleColorCacheSettingKey = "MainPage_TitleColorCache";
-    // 3840x2160 的原始背景图按 1600 宽解码（约 1/5 像素量）；hero 区约 600 高、通常 1200~1600 宽，
-    // 1600 可避免 UniformToFill 放大后出现明显糊化。
-    private const int BackgroundDecodePixelWidth = 1600;
+    // 3840x2160 的原始背景图按 1280 宽解码（约 1/9 像素量）；hero 区约 600 高，
+    // 1280 仍高于 hero 的可见高度，UniformToFill 放大后的糊化在“背景图是装饰性虚化层”的前提下不可察觉。
+    // 内存：1280x720x4 ≈ 3.5MB，比 1600x900x4 ≈ 5.5MB 少约 2MB 的常驻原生位图。
+    // 注意：XAML 里 Image.Source 声明的默认背景图不经过这里（首次加载不会重复解码），
+    // 因此该常量只影响“用户自定义背景 / 回退重载”路径。
+    private const int BackgroundDecodePixelWidth = 1280;
 
     /// <summary>
     /// 视差速度：卡片区相对页面滚动**额外**移动的比例。
@@ -314,6 +317,16 @@ public sealed partial class MainPage : Page
                 settingsService.SettingChanged -= OnSettingChanged;
 
                 this.ActualThemeChanged -= OnPageThemeChanged;
+            }
+
+            // 页面已经离开可视树（导航离开 / 窗口销毁）：丢弃 hero 背景图的解码位图。
+            // 解码后的 BGRA 位图是原生内存（默认 3840x2160 背景图约 33MB），页面不可见时没有保留价值，
+            // 置空 Source 能立即归还，而不是等页面对象被 GC 终结。
+            // 返回时由 OnPageLoaded → DeferStartupWorkUntilAfterFirstFrame → LoadBackgroundImageAsync
+            // 重新加载；新页面实例本来就带 XAML 默认源，因此不会出现空白 hero。
+            if (HeroImage != null)
+            {
+                HeroImage.Source = null;
             }
         }
         catch (Exception ex)
@@ -746,13 +759,22 @@ public sealed partial class MainPage : Page
             CacheKey = cacheKey;
         }
 
-        public string? AppxUri { get; }
+        public string? AppxUri
+        {
+            get;
+        }
 
-        public string? CustomPath { get; }
+        public string? CustomPath
+        {
+            get;
+        }
 
-        public string CacheKey { get; }
+        public string CacheKey
+        {
+            get;
+        }
     }
-    
+
     // 加载背景图片（用户自定义或默认）。
     private async Task LoadBackgroundImageAsync()
     {
@@ -1039,12 +1061,12 @@ public sealed partial class MainPage : Page
         if (sender is Microsoft.UI.Xaml.Controls.Border cardBorder && cardBorder.Tag is ItemMetaPayload item)
         {
             ViewModel.SelectItemCommand.Execute(item);
-            
+
             if (_selectedBorder != null && _selectedBorder != cardBorder)
             {
                 UpdateCardSelection(_selectedBorder, forceUnselected: true);
             }
-            
+
             _selectedBorder = cardBorder;
             UpdateCardSelection(cardBorder);
         }
@@ -1116,12 +1138,12 @@ public sealed partial class MainPage : Page
             cardBorder.Background = GetCardBackgroundBrush();
             UpdateCardSelection(cardBorder);
             UpdateCardLockIcon(cardBorder);
-            
+
             if (ViewModel.IsItemSelected(item.ItemId))
             {
                 _selectedBorder = cardBorder;
             }
-            
+
             // 设置设备名称
             var deviceNameTextBlock = FindVisualChildByName<Microsoft.UI.Xaml.Controls.TextBlock>(cardBorder, "DeviceNameText");
             if (deviceNameTextBlock != null && deviceNameTextBlock.Inlines.Count > 1)
@@ -1138,7 +1160,7 @@ public sealed partial class MainPage : Page
                     // 如果 source_device_name 为空，判断是否为本机设备
                     var localDeviceId = ViewModel.GetLocalDeviceId();
                     System.Diagnostics.Debug.WriteLine($"[MainPage] SourceDeviceName 为空，SourceDeviceId: {item.SourceDeviceId}, LocalDeviceId: {localDeviceId}");
-                    
+
                     if (!string.IsNullOrEmpty(localDeviceId) && item.SourceDeviceId == localDeviceId)
                     {
                         // 本机设备，使用 MachineName
@@ -1150,7 +1172,7 @@ public sealed partial class MainPage : Page
                         // 其他设备，从 PeerStore 查找
                         deviceName = ViewModel.GetDeviceName(item.SourceDeviceId);
                         System.Diagnostics.Debug.WriteLine($"[MainPage] 从 PeerStore 获取: {deviceName}");
-                        
+
                         // 如果还是找不到（返回的是 deviceId），尝试使用 MachineName 作为后备
                         if (deviceName == item.SourceDeviceId)
                         {
@@ -1161,7 +1183,7 @@ public sealed partial class MainPage : Page
                         }
                     }
                 }
-                
+
                 if (deviceNameTextBlock.Inlines[1] is Microsoft.UI.Xaml.Documents.Run run)
                 {
                     run.Text = deviceName;
@@ -1169,7 +1191,7 @@ public sealed partial class MainPage : Page
             }
         }
     }
-    
+
     private static T? FindVisualChildByName<T>(Microsoft.UI.Xaml.DependencyObject parent, string name) where T : Microsoft.UI.Xaml.DependencyObject
     {
         for (var i = 0; i < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(parent); i++)
@@ -1197,9 +1219,9 @@ public sealed partial class MainPage : Page
             {
                 var state = ViewModel.GetItemState(item);
                 var stateColor = ViewModel.GetItemStateColor(state);
-                
+
                 badge.Background = new SolidColorBrush(stateColor);
-                
+
                 // 查找StateText
                 var stateText = FindVisualChild<Microsoft.UI.Xaml.Controls.TextBlock>(badge);
                 if (stateText != null)
@@ -1254,23 +1276,23 @@ public sealed partial class MainPage : Page
     private void UpdateAllCardsSelection()
     {
         if (ViewModel?.RecentItems == null) return;
-        
+
         // 1. 取消之前选中卡片的选中状态
         if (_selectedBorder != null)
         {
             // 检查之前的卡片是否仍然存在且仍然被选中
-            if (_selectedBorder.Tag is ItemMetaPayload oldItem && 
+            if (_selectedBorder.Tag is ItemMetaPayload oldItem &&
                 ViewModel.IsItemSelected(oldItem.ItemId))
             {
                 // 如果之前的卡片仍然是选中的，说明 SelectedItemId 没有改变，不需要更新
                 return;
             }
-            
+
             // 取消之前的选中状态
             UpdateCardSelection(_selectedBorder);
             _selectedBorder = null;
         }
-        
+
         // 2. 找到并选中新的卡片（仅在通过代码修改 SelectedItemId 时才会执行到这里）
         if (!string.IsNullOrEmpty(ViewModel.SelectedItemId) && RecentItemsRepeater != null)
         {
@@ -1294,7 +1316,7 @@ public sealed partial class MainPage : Page
                         {
                             border = FindVisualChildByName<Microsoft.UI.Xaml.Controls.Border>(element, "CardBorder");
                         }
-                        
+
                         if (border != null)
                         {
                             _selectedBorder = border;
@@ -1317,15 +1339,15 @@ public sealed partial class MainPage : Page
         if (border.Tag is ItemMetaPayload item)
         {
             var isSelected = forceUnselected ? false : ViewModel.IsItemSelected(item.ItemId);
-            
+
             // 查找内容 Grid，用于调整 Padding
             var contentGrid = FindVisualChildByName<Microsoft.UI.Xaml.Controls.Grid>(border, "ContentGrid");
-            
+
             if (isSelected)
             {
                 // 选中时：边框加粗（从 1px 变为 2px），颜色改为选中颜色
                 border.BorderThickness = new Microsoft.UI.Xaml.Thickness(2);
-                
+
                 // 从 Page.Resources 获取边框颜色
                 var themeDictionaries = this.Resources.ThemeDictionaries;
                 var currentTheme = this.ActualTheme == Microsoft.UI.Xaml.ElementTheme.Light ? "Light" : "Dark";
@@ -1336,7 +1358,7 @@ public sealed partial class MainPage : Page
                         border.BorderBrush = themeBrush;
                     }
                 }
-                
+
                 // 减少 Padding 来补偿边框占用的额外空间
                 if (contentGrid != null)
                 {
@@ -1348,7 +1370,7 @@ public sealed partial class MainPage : Page
                 // 未选中时：恢复默认边框（1px），颜色使用 CardStrokeColorDefaultBrush
                 border.BorderThickness = new Microsoft.UI.Xaml.Thickness(1);
                 border.BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Microsoft.UI.Xaml.Application.Current.Resources["CardStrokeColorDefaultBrush"];
-                
+
                 if (contentGrid != null)
                 {
                     contentGrid.Padding = new Microsoft.UI.Xaml.Thickness(12, 12, 12, 12);
@@ -1399,7 +1421,7 @@ public sealed partial class MainPage : Page
                     HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Stretch,
                     Margin = new Microsoft.UI.Xaml.Thickness(0, 0, 0, 12)
                 };
-                
+
                 // 添加到ContentStackPanel的顶部
                 if (ContentStackPanel != null)
                 {
@@ -1423,7 +1445,7 @@ public sealed partial class MainPage : Page
         try
         {
             CacheChartCanvas.Children.Clear();
-            
+
             var padding = 40.0;
             var width = CacheChartCanvas.ActualWidth > 0 ? CacheChartCanvas.ActualWidth : 600;
             var height = CacheChartCanvas.ActualHeight > 0 ? CacheChartCanvas.ActualHeight : 200;
@@ -1455,7 +1477,7 @@ public sealed partial class MainPage : Page
             {
                 return;
             }
-            
+
             double maxValue = ViewModel.CacheSeries[0].CacheBytes;
             double minValue = ViewModel.CacheSeries[0].CacheBytes;
             for (var i = 1; i < count; i++)
@@ -1464,7 +1486,7 @@ public sealed partial class MainPage : Page
                 if (value > maxValue) maxValue = value;
                 if (value < minValue) minValue = value;
             }
-            
+
             var valueRange = maxValue - minValue;
             if (valueRange == 0)
                 valueRange = 1;
@@ -1488,7 +1510,8 @@ public sealed partial class MainPage : Page
                 };
                 CacheChartCanvas.Children.Add(polyline);
             }
-        } catch (Exception)
+        }
+        catch (Exception)
         {
             throw;
         }
@@ -1499,7 +1522,7 @@ public sealed partial class MainPage : Page
         try
         {
             NetworkChartCanvas.Children.Clear();
-            
+
             var padding = 40.0;
             var width = NetworkChartCanvas.ActualWidth > 0 ? NetworkChartCanvas.ActualWidth : 600;
             var height = NetworkChartCanvas.ActualHeight > 0 ? NetworkChartCanvas.ActualHeight : 200;
@@ -1531,7 +1554,7 @@ public sealed partial class MainPage : Page
             {
                 return;
             }
-            
+
             double maxValue = Math.Max(ViewModel.NetworkSeries[0].BytesSent, ViewModel.NetworkSeries[0].BytesRecv);
             for (var i = 1; i < count; i++)
             {
@@ -1539,7 +1562,7 @@ public sealed partial class MainPage : Page
                 var pointMax = Math.Max(point.BytesSent, point.BytesRecv);
                 if (pointMax > maxValue) maxValue = pointMax;
             }
-            
+
             var minValue = 0.0;
             var valueRange = maxValue - minValue;
             if (valueRange == 0)
@@ -1586,7 +1609,8 @@ public sealed partial class MainPage : Page
                 };
                 NetworkChartCanvas.Children.Add(recvLine);
             }
-        } catch (Exception)
+        }
+        catch (Exception)
         {
             throw;
         }
@@ -1597,7 +1621,7 @@ public sealed partial class MainPage : Page
         try
         {
             ActivityChartCanvas.Children.Clear();
-            
+
             var padding = 40.0;
             var width = ActivityChartCanvas.ActualWidth > 0 ? ActivityChartCanvas.ActualWidth : 600;
             var height = ActivityChartCanvas.ActualHeight > 0 ? ActivityChartCanvas.ActualHeight : 200;
@@ -1629,7 +1653,7 @@ public sealed partial class MainPage : Page
             {
                 return;
             }
-            
+
             double maxValue = Math.Max(
                 Math.Max(ViewModel.ActivitySeries[0].TextCount, ViewModel.ActivitySeries[0].ImageCount),
                 ViewModel.ActivitySeries[0].FilesCount
@@ -1640,7 +1664,7 @@ public sealed partial class MainPage : Page
                 var pointMax = Math.Max(Math.Max(point.TextCount, point.ImageCount), point.FilesCount);
                 if (pointMax > maxValue) maxValue = pointMax;
             }
-            
+
             var minValue = 0.0;
             var valueRange = maxValue - minValue;
             if (valueRange == 0)
@@ -1708,7 +1732,8 @@ public sealed partial class MainPage : Page
                 };
                 ActivityChartCanvas.Children.Add(filesLine);
             }
-        } catch (Exception)
+        }
+        catch (Exception)
         {
             throw;
         }
@@ -1733,15 +1758,15 @@ public sealed partial class MainPage : Page
             if (account.HasValue)
             {
                 var deviceName = System.Environment.MachineName;
-                
+
                 // 创建内容面板
                 var contentPanel = new StackPanel
                 {
                     Spacing = 12
                 };
-                
+
                 var loc = Localizer.Get();
-                
+
                 // 账号信息
                 var accountInfo = new TextBlock
                 {
@@ -1750,7 +1775,7 @@ public sealed partial class MainPage : Page
                     Margin = new Thickness(0, 0, 0, 8)
                 };
                 contentPanel.Children.Add(accountInfo);
-                
+
                 // 设备信息
                 var deviceInfo = new TextBlock
                 {
@@ -1758,7 +1783,7 @@ public sealed partial class MainPage : Page
                     FontSize = 14
                 };
                 contentPanel.Children.Add(deviceInfo);
-                
+
                 var dialog = new ContentDialog
                 {
                     Title = loc.GetLocalizedString("AccountInfo_Title"),
@@ -1767,23 +1792,23 @@ public sealed partial class MainPage : Page
                     CloseButtonText = loc.GetLocalizedString("AccountInfo_Close"),
                     XamlRoot = this.XamlRoot
                 };
-                
+
                 var result = await dialog.ShowAsync();
-                
+
                 // 如果点击了"更换账号"
                 if (result == ContentDialogResult.Primary)
                 {
                     // 清除当前账号
                     await accountService.ClearAccountAsync();
-                    
+
                     // 关闭核心（如果正在运行）
                     var coreHost = App.GetService<ICoreHostService>();
-                    if (coreHost.State == CoreState.Ready || 
+                    if (coreHost.State == CoreState.Ready ||
                         coreHost.State == CoreState.Loading)
                     {
                         await coreHost.ShutdownAsync();
                     }
-                    
+
                     // 显示登录对话框
                     var loginDialog = new LoginDialog(accountService);
                     loginDialog.XamlRoot = this.XamlRoot;
