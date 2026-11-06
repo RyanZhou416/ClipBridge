@@ -1327,7 +1327,7 @@ impl SessionActor {
 				..
 			} => {
 				if self.role == SessionRole::Server {
-					self.handle_opaque_finish(&bytes)?;
+					self.handle_opaque_finish(&bytes).await?;
 					if let Err(e) = self.perform_tofu_check_async().await {
 						let _ = self
 							.send_ctrl(CtrlMsg::Error {
@@ -2554,13 +2554,29 @@ impl SessionActor {
 	// handle_opaque_finish, perform_tofu_check_async, transition_to_online, tick_heartbeat
 	// are kept exactly as they were in the input file.
 
+	// 【并发审计修复】OPAQUE 的 Argon2id(19MiB, t=2) 绝不能跑在 tokio worker 上：
+	// 实测单次客户端登录的 KSF 约 40~60ms；服务端首次登录（`p2p_get_server_registration`
+	// 现算注册记录，之后命中 crypto.rs 的缓存）约 80~120ms。这些纯 CPU 调用过去直接
+	// 落在 actor 的 select 主循环里，会卡住复用同一 worker 的其他会话任务 —— 重连风暴时
+	// 互相拖慢，甚至把心跳拖到超时。现在四个 OPAQUE 阶段的 CPU 部分全部丢给
+	// `spawn_blocking`，async 侧只保留状态机推进与发送，线格式/状态机完全不变。
+	//
+	// 注意：真正的 Argon2 在 `ClientLogin::finish`（`get_password_derived_key`）与
+	// `handle_opaque_start` 的注册流程里；`ClientLogin::start`/`ServerLogin::start`
+	// 本身较轻，但为了让四步共用同一条"CPU 在阻塞池"的边界也一并包进去。
 	async fn start_opaque_login(&mut self) -> Result<()> {
-		let mut rng = OsRng;
-		let password = self.config.account_password.as_bytes();
-		let start_result = CbClientLogin::start(&mut rng, password)
-			.map_err(|e| anyhow::anyhow!("OPAQUE start failed: {e:?}"))?;
-		self.opaque_client_state = Some(start_result.state);
-		let payload = opaque_encode(&start_result.message)?;
+		// 只跨线程传 owned 数据：密码 String 进，ClientLogin 状态 + 已序列化 KE1 出。
+		let password = self.config.account_password.clone();
+		let (state, payload) = tokio::task::spawn_blocking(move || {
+			let mut rng = OsRng;
+			let start_result = CbClientLogin::start(&mut rng, password.as_bytes())
+				.map_err(|e| anyhow::anyhow!("OPAQUE start failed: {e:?}"))?;
+			let payload = opaque_encode(&start_result.message)?;
+			Ok::<_, anyhow::Error>((start_result.state, payload))
+		})
+		.await
+		.context("OPAQUE client start blocking task failed")??;
+		self.opaque_client_state = Some(state);
 		self.send_ctrl(CtrlMsg::OpaqueStart {
 			msg_id: Some(uuid::Uuid::new_v4().to_string()),
 			reply_to: None,
@@ -2576,20 +2592,26 @@ impl SessionActor {
 			.opaque_client_state
 			.take()
 			.ok_or_else(|| anyhow::anyhow!("Protocol error: Missing client state"))?;
-		let password = self.config.account_password.as_bytes();
-		let mut rng = OsRng;
+		// KSF 就在这里的 `finish` 里：状态/密码/服务端响应移进阻塞池，
+		// 只把序列化好的 KE3 字节带回来（session_key 在闭包内用完即 drop）。
+		let password = self.config.account_password.clone();
 		let server_response: opaque_ke::CredentialResponse<DefaultCipherSuite> =
 			opaque_decode(response_bytes)
 				.map_err(|_| anyhow::anyhow!("Invalid OpaqueResponse bytes"))?;
-		let finish_result = client_state
-			.finish(
-				&mut rng,
-				password,
-				server_response,
-				ClientLoginFinishParameters::default(),
-			)
-			.map_err(|e| anyhow::anyhow!("OPAQUE finish failed: {e:?}"))?;
-		let payload = opaque_encode(&finish_result.message)?;
+		let payload = tokio::task::spawn_blocking(move || {
+			let mut rng = OsRng;
+			let finish_result = client_state
+				.finish(
+					&mut rng,
+					password.as_bytes(),
+					server_response,
+					ClientLoginFinishParameters::default(),
+				)
+				.map_err(|e| anyhow::anyhow!("OPAQUE finish failed: {e:?}"))?;
+			opaque_encode(&finish_result.message)
+		})
+		.await
+		.context("OPAQUE client finish blocking task failed")??;
 		self.send_ctrl(CtrlMsg::OpaqueFinish {
 			msg_id: Some(uuid::Uuid::new_v4().to_string()),
 			reply_to: None,
@@ -2601,23 +2623,32 @@ impl SessionActor {
 	}
 
 	async fn handle_opaque_start(&mut self, start_bytes: &[u8]) -> Result<()> {
-		let mut rng = OsRng;
-		let identifier = b"clipbridge-user";
-		let (server_setup, server_rec) =
-			p2p_get_server_registration(&self.config.account_password)?;
-		let client_message =
-			opaque_decode(start_bytes).map_err(|_| anyhow::anyhow!("Invalid OpaqueStart bytes"))?;
-		let start_result = CbServerLogin::start(
-			&mut rng,
-			&server_setup,
-			Some(server_rec),
-			client_message,
-			identifier,
-			ServerLoginParameters::default(),
-		)
-		.map_err(|e| anyhow::anyhow!("OPAQUE server start failed: {e:?}"))?;
-		self.opaque_server_state = Some(start_result.state);
-		let payload = opaque_encode(&start_result.message)?;
+		// 首次登录的 80~120ms 主要花在 `p2p_get_server_registration`（内部跑 Argon2id）；
+		// 它和 `ServerLogin::start` 一起放进同一个阻塞任务，闭包内完成反序列化与 KE2 编码。
+		let password = self.config.account_password.clone();
+		let start_bytes = start_bytes.to_vec();
+		let (state, payload) = tokio::task::spawn_blocking(move || {
+			let identifier = b"clipbridge-user";
+			let (server_setup, server_rec) = p2p_get_server_registration(&password)?;
+			let client_message: opaque_ke::CredentialRequest<DefaultCipherSuite> =
+				opaque_decode(&start_bytes)
+					.map_err(|_| anyhow::anyhow!("Invalid OpaqueStart bytes"))?;
+			let mut rng = OsRng;
+			let start_result = CbServerLogin::start(
+				&mut rng,
+				&server_setup,
+				Some(server_rec),
+				client_message,
+				identifier,
+				ServerLoginParameters::default(),
+			)
+			.map_err(|e| anyhow::anyhow!("OPAQUE server start failed: {e:?}"))?;
+			let payload = opaque_encode(&start_result.message)?;
+			Ok::<_, anyhow::Error>((start_result.state, payload))
+		})
+		.await
+		.context("OPAQUE server start blocking task failed")??;
+		self.opaque_server_state = Some(state);
 		self.send_ctrl(CtrlMsg::OpaqueResponse {
 			msg_id: Some(uuid::Uuid::new_v4().to_string()),
 			reply_to: None,
@@ -2628,16 +2659,25 @@ impl SessionActor {
 		Ok(())
 	}
 
-	fn handle_opaque_finish(&mut self, finish_bytes: &[u8]) -> Result<()> {
+	async fn handle_opaque_finish(&mut self, finish_bytes: &[u8]) -> Result<()> {
 		let server_state = self
 			.opaque_server_state
 			.take()
 			.ok_or_else(|| anyhow::anyhow!("Protocol error: Missing server state"))?;
-		let client_message = opaque_decode(finish_bytes)
-			.map_err(|_| anyhow::anyhow!("Invalid OpaqueFinish bytes"))?;
-		let _session_key = server_state
-			.finish(client_message, ServerLoginParameters::default())
-			.map_err(|e| anyhow::anyhow!("Authentication failed: {e:?}"))?;
+		// 服务端 finish 不跑 KSF，但仍包含 HMAC/群运算；同样移出 worker。
+		// 会话密钥在闭包内生成并 drop，不跨线程。
+		let finish_bytes = finish_bytes.to_vec();
+		tokio::task::spawn_blocking(move || -> Result<()> {
+			let client_message: opaque_ke::CredentialFinalization<DefaultCipherSuite> =
+				opaque_decode(&finish_bytes)
+					.map_err(|_| anyhow::anyhow!("Invalid OpaqueFinish bytes"))?;
+			let _session_key = server_state
+				.finish(client_message, ServerLoginParameters::default())
+				.map_err(|e| anyhow::anyhow!("Authentication failed: {e:?}"))?;
+			Ok(())
+		})
+		.await
+		.context("OPAQUE server finish blocking task failed")??;
 		self.update_state(SessionState::AccountVerified);
 		Ok(())
 	}
@@ -2799,6 +2839,80 @@ mod opaque_wire_tests {
 			)
 			.unwrap()
 		);
+	}
+
+	/// 覆盖 Argon2 迁移后的**线程边界**（不需要 socket）：四个 OPAQUE 阶段都按 actor 的
+	/// 做法把 CPU 部分放进 `spawn_blocking`，让 `ClientLogin`/`ServerLogin` 状态跨线程
+	/// 移入、序列化消息移出。加密数学本身由 crypto.rs 的测试覆盖，这里只验证
+	/// "状态是 Send、换线程后握手仍能走完"—— 正是本次改动唯一可能出错的地方。
+	#[tokio::test]
+	async fn opaque_login_phases_survive_spawn_blocking() {
+		use opaque_ke::{CredentialFinalization, CredentialRequest, CredentialResponse};
+
+		let password = "user_secret_key_123456";
+		let caller_thread = std::thread::current().id();
+
+		// 阶段 1：客户端 start（状态跨线程回到 async 侧 + KE1 字节）。
+		let password_owned = password.to_string();
+		let (client_state, ke1_bytes) = tokio::task::spawn_blocking(move || {
+			let mut rng = OsRng;
+			let start = CbClientLogin::start(&mut rng, password_owned.as_bytes()).unwrap();
+			(start.state, opaque_encode(&start.message).unwrap())
+		})
+		.await
+		.expect("client start blocking task must not panic");
+
+		let ke1: CredentialRequest<DefaultCipherSuite> = opaque_decode(&ke1_bytes).unwrap();
+
+		// 阶段 2：服务端 start（首次登录的注册 Argon2 + KE2 全部留在阻塞池里）。
+		let password_owned = password.to_string();
+		let (server_state, ke2_bytes) = tokio::task::spawn_blocking(move || {
+			let (setup, rec) = p2p_get_server_registration(&password_owned).unwrap();
+			let mut rng = OsRng;
+			let start = CbServerLogin::start(
+				&mut rng,
+				&setup,
+				Some(rec),
+				ke1,
+				b"clipbridge-user",
+				ServerLoginParameters::default(),
+			)
+			.unwrap();
+			(start.state, opaque_encode(&start.message).unwrap())
+		})
+		.await
+		.expect("server start blocking task must not panic");
+
+		let ke2: CredentialResponse<DefaultCipherSuite> = opaque_decode(&ke2_bytes).unwrap();
+
+		// 阶段 3：客户端 finish（真正的 Argon2id KSF）——状态移入，只有 KE3 出来。
+		let password_owned = password.to_string();
+		let ke3_bytes = tokio::task::spawn_blocking(move || {
+			// 阻塞池线程 ≠ 调用方 async 线程：这是 KSF 已离开 tokio worker 的直接证据。
+			assert_ne!(std::thread::current().id(), caller_thread);
+			let mut rng = OsRng;
+			let finish = client_state
+				.finish(
+					&mut rng,
+					password_owned.as_bytes(),
+					ke2,
+					ClientLoginFinishParameters::default(),
+				)
+				.unwrap();
+			opaque_encode(&finish.message).unwrap()
+		})
+		.await
+		.expect("client finish blocking task must not panic");
+
+		// 阶段 4：服务端 finish —— 状态移入，会话密钥在闭包内 drop。
+		let ke3: CredentialFinalization<DefaultCipherSuite> = opaque_decode(&ke3_bytes).unwrap();
+		tokio::task::spawn_blocking(move || {
+			server_state
+				.finish(ke3, ServerLoginParameters::default())
+				.expect("server must verify the client across the blocking boundary");
+		})
+		.await
+		.expect("server finish blocking task must not panic");
 	}
 }
 

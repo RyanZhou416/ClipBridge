@@ -150,6 +150,23 @@ pub struct Transport {
 	pub local_cert_der: Vec<u8>,
 }
 
+/// QUIC 空闲超时（毫秒）：两端必须一致，见 [`Transport::new`] 中的中文说明。
+const QUIC_MAX_IDLE_TIMEOUT_MS: u32 = 10_000;
+
+/// QUIC keep-alive 间隔：两端一致，避免空闲超时被误判 / 无谓重连。
+const QUIC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// 构造两端共用的 QUIC [`TransportConfig`]。
+///
+/// 把超时/keep-alive 收在一处，防止客户端、服务端以后只改一边（此前的 bug 就是
+/// 只给服务端设了 10s，客户端残留 quinn 默认的 ~30s）。
+fn quic_transport_config() -> TransportConfig {
+	let mut transport_config = TransportConfig::default();
+	transport_config.max_idle_timeout(Some(VarInt::from_u32(QUIC_MAX_IDLE_TIMEOUT_MS).into()));
+	transport_config.keep_alive_interval(Some(QUIC_KEEP_ALIVE_INTERVAL));
+	transport_config
+}
+
 impl Transport {
 	/// 创建 Transport 实例
 	///
@@ -189,10 +206,8 @@ impl Transport {
 			.context("failed to build QuicServerConfig from rustls ServerConfig")?;
 		let mut server_config = ServerConfig::with_crypto(Arc::new(quic_server));
 
-		let mut transport_config = TransportConfig::default();
-		transport_config.max_idle_timeout(Some(VarInt::from_u32(10_000).into()));
-		transport_config.keep_alive_interval(Some(Duration::from_secs(2)));
-		server_config.transport_config(Arc::new(transport_config));
+		// 服务端：10s 空闲超时 + 2s keep-alive（见 quic_transport_config）。
+		server_config.transport_config(Arc::new(quic_transport_config()));
 
 		// 3. Client TLS
 		let mut client_tls = TlsClientConfig::builder_with_provider(crypto.clone())
@@ -207,7 +222,14 @@ impl Transport {
 
 		let quic_client = QuicClientConfig::try_from(client_tls)
 			.context("failed to build QuicClientConfig from rustls ClientConfig")?;
-		let client_config = quinn::ClientConfig::new(Arc::new(quic_client));
+
+		// 【并发审计修复】客户端此前没有 `TransportConfig`，走的是 quinn 默认的空闲超时
+		// （约 30s）；服务端已经按 10s 判定对端死亡。两端不对称会让客户端在服务端早已
+		// 放弃之后还挂着一条"僵尸连接"：心跳/业务帧写进已死连接、错误要 ~30s 才暴露，
+		// 期间重连退避也被拖慢。这里复用与服务器完全相同的 10s 超时 + 2s keep-alive：
+		// 让两端几乎同时判定对端死亡，更快失败、更快重连，不会长期保留僵尸连接。
+		let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client));
+		client_config.transport_config(Arc::new(quic_transport_config()));
 
 		// 4. Bind
 		let addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), listen_port);
