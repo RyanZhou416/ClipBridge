@@ -46,6 +46,20 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private const string FallbackTitle = "ClipBridge";
 
+    /// <summary>
+    /// <c>CB_NO_MICA=1</c>：启动时不挂 Mica 背景，<see cref="Window.SystemBackdrop"/> 保持 null。
+    /// 默认不设置 = 保持现状（创建 MicaBackdrop），所以正常用户完全看不到差异。
+    ///
+    /// 用途：同一份构建产物、只切这一个环境变量，截两张同位置截图做像素对比，
+    /// 量化 Mica 在“页面主体是透明 XAML、hero 图只盖住顶部”的情况下到底覆盖了多少可见面积 ——
+    /// 这件事只能靠像素差异客观回答，不能靠猜。只认字符串 "1"。
+    ///
+    /// 与 <c>CB_NO_DRAG_BACKDROP_TOGGLE</c> 互不干扰：这里没挂 Mica 时，拖拽开关读到的
+    /// SystemBackdrop 本来就是 null，会直接返回、什么都不做（见 WindowExtensions.SetDragBackdropToggle）。
+    /// </summary>
+    private static readonly bool MicaDisabledByEnv =
+        string.Equals(Environment.GetEnvironmentVariable("CB_NO_MICA")?.Trim(), "1", StringComparison.Ordinal);
+
     public MainWindow()
     {
         StartupTrace.Mark("mainwindow-ctor-enter");
@@ -54,7 +68,18 @@ public sealed partial class MainWindow : Window
         // 原来在 XAML 里的 <Window.SystemBackdrop><MicaBackdrop/></Window.SystemBackdrop>
         // 现在放在代码里设置。new MicaBackdrop() 的默认 Kind=Base，与 XAML 空元素写法等价；
         // 这里紧接 InitializeComponent 赋值，仍在窗口首次显示之前，视觉与改动前一致。
-        this.SystemBackdrop = new MicaBackdrop();
+        //
+        // CB_NO_MICA=1 时不创建 MicaBackdrop（SystemBackdrop 保持 null），用于像素级 A/B 截图；
+        // 未设置该变量时走 else 分支，与改动前逐字节等价。日志由 StartupTrace 自身门控，
+        // 只有 CB_STARTUP_TRACE=1 时才会写入 startup.log，正常运行时保持安静。
+        if (MicaDisabledByEnv)
+        {
+            StartupTrace.Mark("mica-disabled-by-env");
+        }
+        else
+        {
+            this.SystemBackdrop = new MicaBackdrop();
+        }
 
         StartupTrace.Mark("mainwindow-backdrop-done");
 
@@ -89,6 +114,12 @@ public sealed partial class MainWindow : Window
         // 替代 XAML 里 WindowEx 的 MinWidth="500" / MinHeight="500"：
         // 用与 WinUIEx 相同的 WM_GETMINMAXINFO 子类化机制，按下当前 DPI 换算成物理像素。
         this.SetMinimumSize(500, 500);
+
+        // 标题栏拖动 / 边框缩放期间临时摘掉 Mica 背景，松手后装回同一个实例。
+        // 原因：Mica 由 DWM 逐帧重新合成，窗口移动时会把合成器压满并反压 Present（因果链详见
+        // Helpers/WindowExtensions.SetDragBackdropToggle 的注释）。只在“窗口真的在动”的区间里
+        // 关掉，静止外观与改动前完全一致；CB_NO_DRAG_BACKDROP_TOGGLE=1 可关闭该行为用于 A/B。
+        this.SetDragBackdropToggle();
 
         dispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         settings = new UISettings();
