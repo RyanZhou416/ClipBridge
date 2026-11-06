@@ -115,11 +115,16 @@ public sealed partial class MainWindow : Window
         // 用与 WinUIEx 相同的 WM_GETMINMAXINFO 子类化机制，按下当前 DPI 换算成物理像素。
         this.SetMinimumSize(500, 500);
 
-        // 标题栏拖动 / 边框缩放期间临时摘掉 Mica 背景，松手后装回同一个实例。
+        // 标题栏拖动 / 边框缩放期间临时关掉 Mica 背景，松手后恢复。
         // 原因：Mica 由 DWM 逐帧重新合成，窗口移动时会把合成器压满并反压 Present（因果链详见
         // Helpers/WindowExtensions.SetDragBackdropToggle 的注释）。只在“窗口真的在动”的区间里
-        // 关掉，静止外观与改动前完全一致；CB_NO_DRAG_BACKDROP_TOGGLE=1 可关闭该行为用于 A/B。
+        // 关掉；关掉的同时用 Mica 文档回退色铺满内容根，避免透明页面露出桌面壁纸
+        // （见 Helpers/DragBackdropFill）。CB_NO_DRAG_BACKDROP_TOGGLE=1 可关闭该行为用于 A/B。
         this.SetDragBackdropToggle();
+
+        // 调试：CB_FORCE_DRAG_FILL=1 时让窗口从启动起就停留在“拖拽中”状态
+        // （回退色填充 + DWMSBT_NONE），用于和正常 Mica 外观做截图对比；未设置时立即返回。
+        this.EnableForcedDragFill();
 
         dispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         settings = new UISettings();

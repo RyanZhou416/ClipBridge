@@ -2,6 +2,7 @@
 using System;
 using System.Runtime.InteropServices;
 
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -66,27 +67,41 @@ internal static class WindowExtensions
     }
 
     /// <summary>
-    /// 标题栏拖动 / 边框缩放期间临时摘掉窗口的背景（Mica），松手后立刻装回 <b>同一个</b> 背景实例。
+    /// 标题栏拖动 / 边框缩放期间临时关掉窗口的背景材料（Mica），松手后恢复原样。
     ///
     /// 因果链：Mica 不是应用自己绘制的像素，而是由 DWM（桌面合成器）直接作用在窗口目标上的背景材料。
     /// 窗口静止时这块合成结果可以缓存；一旦窗口正在移动/缩放，窗口目标每帧都在变，DWM 就必须
     /// 每帧重新合成一次 Mica —— 这份成本记在 dwm.exe 而不是本进程头上（实测拖拽时 DWM GPU 3D
     /// 2.5%→5.7%，本进程 ≈0.01%），但合成器被逐帧塞满会反压应用的 Present，最终表现为拖拽时
     /// 帧间隔变长（1% low 53ms、最差 89ms）。所以只在 WM_ENTERSIZEMOVE → WM_EXITSIZEMOVE 这个
-    /// “窗口真的在动”的区间里把背景置空，静止时保持原样：拖拽拿回流畅度，静态外观与改动前一致。
+    /// “窗口真的在动”的区间里把背景关掉，静止时保持原样：拖拽拿回流畅度，静态外观与改动前一致。
     ///
     /// 机制：复用 <see cref="SetMinimumSize"/> 已经使用的 comctl32 SetWindowSubclass（不同的
     /// uIdSubclass），不替换窗口过程、也不需要自己向原 WndProc 转发；同一 HWND 上的多个子类化
     /// 会沿 DefSubclassProc 链依次调用，现有 WM_GETMINMAXINFO 最小尺寸逻辑不受影响。
     ///
-    /// 环境变量：
-    /// - <c>CB_NO_DRAG_BACKDROP_TOGGLE=1</c>：完全关闭本行为（连子类化都不安装），用于 A/B 测量；
-    ///   未设置（默认）= 开启。
-    /// - <c>CB_STARTUP_TRACE=1</c>：每次拖拽进入/退出各写一行 startup.log；默认不写，避免刷日志。
+    /// 视觉保持：Mica 一旦消失，透明的 XAML 页面会直接透出桌面壁纸（实测同一区域从 #1C1C1E
+    /// 变成 #658DA6）。所以摘掉 backdrop 的同时，用 Mica 文档规定的回退外观
+    /// （SolidBackgroundFillColorBase，见 <see cref="DragBackdropFill"/>）把内容根刷成不透明；
+    /// 退出时先恢复 DWMWA_SYSTEMBACKDROP_TYPE，再在下一帧 Low 优先级撤掉填充，
+    /// 避免 DWM 异步应用属性期间闪一帧壁纸。
     ///
-    /// 幂等/安全性：重复或嵌套的消息只保留第一次保存的实例；WM_EXITSIZEMOVE 没有配对时什么都不做；
-    /// 背景本来就是 null 时直接返回；窗口在拖拽中被关闭（本应用的关闭是隐藏而非销毁）时在 WM_CLOSE
-    /// 先把背景装回；窗口销毁时只清理托管状态。切换属性全部包 try/catch，失败只降级、不抛出。
+    /// 关掉 backdrop 的方式：优先
+    /// DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE=38, DWMSBT_NONE=0)，
+    /// 不碰 <see cref="Window.SystemBackdrop"/> —— MicaBackdrop 控制器保持存活，恢复是“瞬间”的；
+    /// 只有 DWM 属性调用失败（例如 Windows 10 没有属性 38）才退回旧的 SystemBackdrop = null 路径。
+    ///
+    /// 环境变量（全部默认关闭，未设置时行为与改动前一致）：
+    /// - <c>CB_NO_DRAG_BACKDROP_TOGGLE=1</c>：完全关闭本行为（连子类化/强制填充都不安装）；
+    /// - <c>CB_DRAG_FILL_ONLY=1</c>：只铺回退色、不碰 DWM backdrop，用于验证“纯不透明填充”
+    ///   能否让 DWM 自行省掉 Mica 合成；
+    /// - <c>CB_FORCE_DRAG_FILL=1</c>：启动后立刻进入并一直停留在“拖拽中”状态
+    ///   （填充 + DWMSBT_NONE），直到进程退出，用于和正常 Mica 外观做截图对比；
+    /// - <c>CB_STARTUP_TRACE=1</c>：写 trace（drag-backdrop-off/on 及各项失败标记）。
+    ///
+    /// 幂等/安全性：重复或嵌套的进入只保留第一次保存的状态；没有配对的退出什么都不做；
+    /// 背景本来就是 null 时直接返回；拖拽中关闭（WM_CLOSE）先恢复；窗口销毁（WM_NCDESTROY）
+    /// 只清理托管状态。所有 Win32/属性操作都包 try/catch，失败只降级、不抛出。
     /// </summary>
     public static void SetDragBackdropToggle(this Window window)
     {
@@ -114,6 +129,39 @@ internal static class WindowExtensions
             DragBackdropSubclassProc,
             DragBackdropSubclassId,
             GCHandle.ToIntPtr(_dragBackdropWindowHandle));
+    }
+
+    /// <summary>
+    /// 调试开关 <c>CB_FORCE_DRAG_FILL=1</c>：启动后让窗口一直停留在“拖拽中”的视觉状态
+    /// （内容根铺 Mica 回退色 + DWM backdrop = DWMSBT_NONE），直到进程退出。
+    /// 用于截一张与正常 Mica 外观对比的图；未设置时立即返回，行为零变化。
+    ///
+    /// 内容根要等 ActivationService 挂上占位层 / ShellPage 之后才存在，所以用
+    /// DispatcherQueueTimer 周期检查：内容根被替换（占位层 → Shell）或主题变化时重新铺色，
+    /// DWM 属性只设置一次。CB_DRAG_FILL_ONLY=1 同样生效（只铺色、不碰 DWM）。
+    /// </summary>
+    public static void EnableForcedDragFill(this Window window)
+    {
+        if (!DragBackdropToggleEnabled || !ForceDragFillEnabled || _forcedDragFillTimer != null)
+        {
+            return;
+        }
+
+        var queue = window.DispatcherQueue;
+        if (queue == null)
+        {
+            return;
+        }
+
+        // 先试一次：内容通常还没挂上，这里基本是空操作；真正的应用交给定时器。
+        ApplyForcedDragFill(window);
+
+        var timer = queue.CreateTimer();
+        timer.Interval = TimeSpan.FromMilliseconds(100);
+        timer.IsRepeating = true;
+        timer.Tick += (_, _) => ApplyForcedDragFill(window);
+        _forcedDragFillTimer = timer;
+        timer.Start();
     }
 
     /// <summary>
@@ -186,14 +234,40 @@ internal static class WindowExtensions
     /// <summary>窗口过程被销毁：comctl32 会自动摘除子类化，这里只清理托管侧状态。</summary>
     private const uint WM_NCDESTROY = 0x0082;
 
-    /// <summary>拖拽开始（背景已摘掉）时写入 startup.log 的稳定标记，便于按行聚合。</summary>
+    /// <summary>拖拽开始（背景已关掉、回退色已铺）时写入 startup.log 的稳定标记，便于按行聚合。</summary>
     private const string DragBackdropOffTrace = "drag-backdrop-off";
 
-    /// <summary>拖拽结束（背景已恢复）时写入 startup.log 的稳定标记。</summary>
+    /// <summary>拖拽结束（DWM 属性已恢复、填充已安排撤销）时写入 startup.log 的稳定标记。</summary>
     private const string DragBackdropOnTrace = "drag-backdrop-on";
 
-    /// <summary>切换失败时写入 startup.log 的标记前缀，后面接失败阶段（read/detach/restore）。</summary>
+    /// <summary>切换失败时写入 startup.log 的标记前缀，后面接失败阶段（read/fill/detach/restore/forced-fill）。</summary>
     private const string DragBackdropErrorTrace = "drag-backdrop-error";
+
+    /// <summary>内容根铺回退色失败：此时保留 Mica、不改 DWM backdrop，绝不把壁纸露出来。</summary>
+    private const string DragBackdropPaintFailedTrace = "drag-backdrop-paint-failed";
+
+    /// <summary>DwmGetWindowAttribute(38) 失败（如 Windows 10）：仍按默认 2 继续。</summary>
+    private const string DragBackdropDwmReadFailedTrace = "drag-backdrop-dwm-read-failed";
+
+    /// <summary>DwmSetWindowAttribute(38, DWMSBT_NONE) 失败：退回 SystemBackdrop = null 路径。</summary>
+    private const string DragBackdropDwmSetFailedTrace = "drag-backdrop-dwm-set-failed";
+
+    /// <summary>退出时恢复 DWMWA_SYSTEMBACKDROP_TYPE 失败：再让 XAML 重装一次 Mica。</summary>
+    private const string DragBackdropDwmRestoreFailedTrace = "drag-backdrop-dwm-restore-failed";
+
+    /// <summary>CB_FORCE_DRAG_FILL=1 第一次真正进入“拖拽中”状态时写一行。</summary>
+    private const string DragBackdropForcedFillTrace = "drag-backdrop-force-fill";
+
+    /// <summary>回退画刷的实际来源（theme-brush / app-resource-brush / theme-color / hardcoded-*）。</summary>
+    private const string DragBackdropFillSourceTrace = "drag-backdrop-fill-source";
+
+    // DWMWA_SYSTEMBACKDROP_TYPE：Windows 11 22H2 (22621) 起公开的 DWM 窗口属性；
+    // 写入/读取都用 cbAttribute=sizeof(int)=4。Windows 10 上这两个调用会失败，走旧路径。
+    private const int DWMWA_SYSTEMBACKDROP_TYPE = 38;
+    private const int DWMSBT_NONE = 0;
+
+    /// <summary>DWMSBT_MAINWINDOW：Mica Base，也是读取失败时的默认恢复值。</summary>
+    private const int DWMSBT_MAINWINDOW = 2;
 
     /// <summary>拖拽背景开关自己的 (hwnd, uIdSubclass) 标识，必须与最小尺寸的 MinSizeSubclassId 不同。</summary>
     private static readonly IntPtr DragBackdropSubclassId = (IntPtr)0x4344;
@@ -201,21 +275,44 @@ internal static class WindowExtensions
     /// <summary>与 MinMaxSubclassProc 同理：必须由静态字段持有，否则委托会被 GC 回收而留下野函数指针。</summary>
     private static readonly SubclassProc DragBackdropSubclassProc = OnDragBackdropMessage;
 
-    /// <summary>CB_NO_DRAG_BACKDROP_TOGGLE=1 时关闭本行为；未设置（默认）= 开启。</summary>
-    private static readonly bool DragBackdropToggleEnabled =
-        !string.Equals(
-            Environment.GetEnvironmentVariable("CB_NO_DRAG_BACKDROP_TOGGLE")?.Trim(),
-            "1",
-            StringComparison.Ordinal);
+    /// <summary>CB_NO_DRAG_BACKDROP_TOGGLE=1 时关闭本行为（含强制填充）；未设置（默认）= 开启。</summary>
+    private static readonly bool DragBackdropToggleEnabled = !IsEnvSwitch("CB_NO_DRAG_BACKDROP_TOGGLE");
+
+    /// <summary>CB_DRAG_FILL_ONLY=1：只铺回退色，不碰 DWM backdrop。</summary>
+    private static readonly bool DragFillOnlyEnabled = IsEnvSwitch("CB_DRAG_FILL_ONLY");
+
+    /// <summary>CB_FORCE_DRAG_FILL=1：启动后一直停留在“拖拽中”状态，供截图对比。</summary>
+    private static readonly bool ForceDragFillEnabled = IsEnvSwitch("CB_FORCE_DRAG_FILL");
 
     /// <summary>传给 SetWindowSubclass 的 dwRefData 所对应的窗口句柄（进程内只分配一次）。</summary>
     private static GCHandle _dragBackdropWindowHandle;
 
-    /// <summary>进入拖拽前窗口上的背景实例；退出时原样装回，复用同一个 MicaBackdrop 实例。</summary>
+    /// <summary>进入拖拽前窗口上的背景实例；仅在 DWM 路径失败、退回 SystemBackdrop=null 时用于恢复。</summary>
     private static SystemBackdrop? _savedBackdrop;
 
-    /// <summary>当前是否处于“拖拽期背景已摘除”状态，用于吸收重复/嵌套的 WM_ENTERSIZEMOVE。</summary>
+    /// <summary>进入拖拽时读到的 DWMWA_SYSTEMBACKDROP_TYPE；读取失败时保持默认 DWMSBT_MAINWINDOW。</summary>
+    private static int _savedBackdropType = DWMSBT_MAINWINDOW;
+
+    /// <summary>本次拖拽是否真的把 DWMWA_SYSTEMBACKDROP_TYPE 设成了 DWMSBT_NONE（决定退出时走哪条恢复路径）。</summary>
+    private static bool _dwmBackdropDisabled;
+
+    /// <summary>是否走了“DWM 调用失败 → SystemBackdrop = null”的兜底路径（退出时需要装回实例）。</summary>
+    private static bool _systemBackdropNulled;
+
+    /// <summary>当前是否处于“拖拽期背景已关掉”状态，用于吸收重复/嵌套的 WM_ENTERSIZEMOVE。</summary>
     private static bool _backdropSuspended;
+
+    /// <summary>CB_FORCE_DRAG_FILL 的周期检查定时器（进程生命周期内保持引用）。</summary>
+    private static DispatcherQueueTimer? _forcedDragFillTimer;
+
+    /// <summary>强制填充是否已写过那唯一一行 trace。</summary>
+    private static bool _forcedDragFillApplied;
+
+    /// <summary>强制填充是否已经设置过 DWM backdrop（只设一次）。</summary>
+    private static bool _forcedDwmDisabled;
+
+    private static bool IsEnvSwitch(string name) =>
+        string.Equals(Environment.GetEnvironmentVariable(name)?.Trim(), "1", StringComparison.Ordinal);
 
     /// <summary>拖拽期背景开关的窗口过程：只观察进出移动-缩放循环的消息，其余原样交给子类化链。</summary>
     private static IntPtr OnDragBackdropMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, IntPtr uIdSubclass, IntPtr dwRefData)
@@ -239,9 +336,10 @@ internal static class WindowExtensions
 
             case WM_NCDESTROY:
                 // 窗口真的销毁了：没有可恢复的目标，只清掉托管状态，
-                // 避免同进程内重建窗口时沿用上一次残留的“已挂起”。
-                _savedBackdrop = null;
-                _backdropSuspended = false;
+                // 避免同进程内重建窗口时沿用上一次残留的“已挂起”/填充记录。
+                ResetDragBackdropState();
+                DragBackdropFill.Reset();
+                StopForcedDragFill();
                 break;
         }
 
@@ -249,14 +347,17 @@ internal static class WindowExtensions
     }
 
     /// <summary>
-    /// 进入移动-缩放循环：保存当前 SystemBackdrop 后把它置空。保存/恢复的是同一个对象引用，
-    /// 因此拖拽结束后重新装回的是 MainWindow 构造期创建的那个 MicaBackdrop，不会新建第二套 Mica。
+    /// 进入移动-缩放循环：
+    /// ① 读并记住当前 DWMWA_SYSTEMBACKDROP_TYPE（读取失败按文档默认值 DWMSBT_MAINWINDOW）；
+    /// ② 用 Mica 文档规定的回退色铺满内容根；
+    /// ③ 把 DWM backdrop 设为 DWMSBT_NONE —— 不碰 SystemBackdrop，MicaBackdrop 控制器保持存活。
+    /// 只有 DWM 设置失败时才退回旧的 SystemBackdrop = null 路径。
     /// </summary>
     private static void SuspendBackdropForDrag(IntPtr dwRefData)
     {
         if (_backdropSuspended)
         {
-            // 嵌套/重复的 WM_ENTERSIZEMOVE：保留第一次保存的实例，绝不能把 null 覆盖进去。
+            // 嵌套/重复的 WM_ENTERSIZEMOVE：保留第一次保存的状态，绝不能覆盖。
             return;
         }
 
@@ -279,32 +380,85 @@ internal static class WindowExtensions
 
         if (saved == null)
         {
-            // 本来就没有背景（CB_NO_MICA=1、CB_FRAME_TRACE_MICA=0，或用户系统不支持 Mica）：
-            // 无需切换，也不留下“已挂起”状态 —— 这正是“背景已为 null 时安全返回”的分支。
+            // 本来就没有背景（CB_NO_MICA=1、CB_FRAME_TRACE_MICA=0，或系统不支持 Mica）：
+            // 没有可关的 backdrop；这时候铺回退色反而会改变外观，所以直接返回。
             return;
         }
 
-        // 先落状态再改属性：SystemBackdrop 的 setter 可能同步回到窗口过程，提前置位让重入安全返回。
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+
+        if (!TryGetDwmBackdropType(hwnd, out var savedType))
+        {
+            // Windows 10 没有属性 38；读不到就按文档默认的 Mica Base 恢复。
+            // 后面设置 DWMSBT_NONE 通常也会失败，从而走 SystemBackdrop = null 的旧路径。
+            savedType = DWMSBT_MAINWINDOW;
+            StartupTrace.Mark(DragBackdropDwmReadFailedTrace);
+        }
+
+        // 先落状态再改属性：属性 setter / DWM 调用如果同步回到窗口过程，提前置位让重入安全返回。
         _savedBackdrop = saved;
+        _savedBackdropType = savedType;
+        _dwmBackdropDisabled = false;
+        _systemBackdropNulled = false;
         _backdropSuspended = true;
 
+        bool painted;
         try
         {
-            window.SystemBackdrop = null;
+            painted = DragBackdropFill.TryApply(window);
         }
         catch (Exception ex)
         {
-            // 摘不掉只是退化成旧行为（拖拽时仍有 Mica），绝不能影响拖拽本身；状态已置位，
-            // 退出时会尝试把原实例装回去（相同实例的赋值是幂等的）。
-            LogDragBackdropFailure("detach", ex);
+            painted = false;
+            LogDragBackdropFailure("fill", ex);
+        }
+
+        if (!painted)
+        {
+            // 铺不上回退色就不要再关 backdrop，否则会重新露出壁纸。
+            // 退化为“拖拽时仍挂 Mica”：只损失流畅度，不改变外观。
+            StartupTrace.Mark(DragBackdropPaintFailedTrace);
+            ResetDragBackdropState();
             return;
+        }
+
+        // 诊断：记录实际用的回退画刷来源（资源缺失时会退到 hardcoded-*）。
+        StartupTrace.Mark($"{DragBackdropFillSourceTrace}={DragBackdropFill.LastBrushSource}");
+
+        if (DragFillOnlyEnabled)
+        {
+            // A/B：只验证“不透明填充”本身能否让 DWM 省掉合成，不动 backdrop。
+            StartupTrace.Mark(DragBackdropOffTrace);
+            return;
+        }
+
+        if (TrySetDwmBackdropType(hwnd, DWMSBT_NONE))
+        {
+            _dwmBackdropDisabled = true;
+            StartupTrace.Mark(DragBackdropOffTrace);
+            return;
+        }
+
+        // DWM 属性不可用（Windows 10 / 旧 build）：退回改动前的 SystemBackdrop = null 路径。
+        StartupTrace.Mark(DragBackdropDwmSetFailedTrace);
+        try
+        {
+            window.SystemBackdrop = null;
+            _systemBackdropNulled = true;
+        }
+        catch (Exception ex)
+        {
+            // 两条路都关不掉只是退化成旧行为（拖拽时仍有 Mica）；
+            // 回退色已经铺上，退出时照常清掉，绝不影响拖拽本身。
+            LogDragBackdropFailure("detach", ex);
         }
 
         StartupTrace.Mark(DragBackdropOffTrace);
     }
 
     /// <summary>
-    /// 退出移动-缩放循环：把进入时保存的同一个背景实例装回去。
+    /// 退出移动-缩放循环：先恢复 DWMWA_SYSTEMBACKDROP_TYPE（或兜底的 SystemBackdrop 实例），
+    /// 再把回退色填充安排到下一轮 Low 优先级撤销。
     /// 任何失败都只降级 + 记录，绝不把异常抛回窗口过程。
     /// </summary>
     private static void RestoreBackdropAfterDrag(IntPtr dwRefData)
@@ -317,28 +471,156 @@ internal static class WindowExtensions
 
         // 先把状态清干净再碰属性：即使 setter 抛异常也不会卡在“永久挂起”，
         // 下一次拖拽仍能正常保存/恢复。
-        var saved = _savedBackdrop;
-        _savedBackdrop = null;
-        _backdropSuspended = false;
+        var savedBackdrop = _savedBackdrop;
+        var savedType = _savedBackdropType;
+        var dwmDisabled = _dwmBackdropDisabled;
+        var systemBackdropNulled = _systemBackdropNulled;
+        ResetDragBackdropState();
 
         var window = ResolveDragBackdropWindow(dwRefData);
-        if (window == null)
+
+        if (!DragFillOnlyEnabled && window != null)
+        {
+            if (dwmDisabled)
+            {
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+                if (!TrySetDwmBackdropType(hwnd, savedType))
+                {
+                    StartupTrace.Mark(DragBackdropDwmRestoreFailedTrace);
+
+                    // 极低概率的兜底：让 XAML 重新把 MicaBackdrop 装回去。
+                    // 先置 null 再赋原实例：相同实例直接赋值可能被 setter 判成 no-op。
+                    try
+                    {
+                        window.SystemBackdrop = null;
+                        window.SystemBackdrop = savedBackdrop;
+                    }
+                    catch (Exception ex)
+                    {
+                        LogDragBackdropFailure("restore", ex);
+                    }
+                }
+            }
+            else if (systemBackdropNulled)
+            {
+                try
+                {
+                    // 装回同一个实例（MainWindow 构造里 new 的那个）。
+                    window.SystemBackdrop = savedBackdrop;
+                }
+                catch (Exception ex)
+                {
+                    LogDragBackdropFailure("restore", ex);
+                }
+            }
+        }
+
+        // 最后才撤填充，且排到下一轮 Low：让 DWM 先异步应用刚恢复的 backdrop，
+        // 否则会闪一帧桌面壁纸。window 为 null 时 ScheduleClear 会用内部持有的窗口。
+        DragBackdropFill.ScheduleClear(window);
+        StartupTrace.Mark(DragBackdropOnTrace);
+    }
+
+    /// <summary>把拖拽状态字段复位；不碰任何 UI / Win32 状态。</summary>
+    private static void ResetDragBackdropState()
+    {
+        _savedBackdrop = null;
+        _savedBackdropType = DWMSBT_MAINWINDOW;
+        _dwmBackdropDisabled = false;
+        _systemBackdropNulled = false;
+        _backdropSuspended = false;
+    }
+
+    /// <summary>CB_FORCE_DRAG_FILL 的周期应用：内容根/主题变化时重新铺色，DWM 只设一次。</summary>
+    private static void ApplyForcedDragFill(Window window)
+    {
+        try
+        {
+            if (!DragBackdropFill.EnsureApplied(window))
+            {
+                return;
+            }
+
+            if (!DragFillOnlyEnabled && !_forcedDwmDisabled)
+            {
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+                if (TrySetDwmBackdropType(hwnd, DWMSBT_NONE))
+                {
+                    _forcedDwmDisabled = true;
+                }
+                else
+                {
+                    StartupTrace.Mark(DragBackdropDwmSetFailedTrace);
+                }
+            }
+
+            if (!_forcedDragFillApplied)
+            {
+                _forcedDragFillApplied = true;
+                StartupTrace.Mark(DragBackdropForcedFillTrace);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogDragBackdropFailure("forced-fill", ex);
+        }
+    }
+
+    private static void StopForcedDragFill()
+    {
+        if (_forcedDragFillTimer == null)
         {
             return;
         }
 
         try
         {
-            // 装回同一个实例（MainWindow 构造里 new 的那个）。
-            window.SystemBackdrop = saved;
+            _forcedDragFillTimer.Stop();
         }
-        catch (Exception ex)
+        catch
         {
-            LogDragBackdropFailure("restore", ex);
-            return;
         }
 
-        StartupTrace.Mark(DragBackdropOnTrace);
+        _forcedDragFillTimer = null;
+    }
+
+    /// <summary>读 DWMWA_SYSTEMBACKDROP_TYPE；hwnd 无效 / 系统不支持（Windows 10）时返回 false。</summary>
+    private static bool TryGetDwmBackdropType(IntPtr hwnd, out int backdropType)
+    {
+        backdropType = DWMSBT_MAINWINDOW;
+        if (hwnd == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        try
+        {
+            return DwmGetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, out backdropType, sizeof(int)) >= 0;
+        }
+        catch
+        {
+            backdropType = DWMSBT_MAINWINDOW;
+            return false;
+        }
+    }
+
+    /// <summary>写 DWMWA_SYSTEMBACKDROP_TYPE；失败（例如 Windows 10）返回 false，由调用方降级。</summary>
+    private static bool TrySetDwmBackdropType(IntPtr hwnd, int backdropType)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        try
+        {
+            var value = backdropType;
+            return DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ref value, sizeof(int)) >= 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>从 dwRefData 里的 GCHandle 取回窗口；句柄失效时只降级为“没有窗口”，不抛出。</summary>
@@ -394,6 +676,13 @@ internal static class WindowExtensions
 
     [DllImport("comctl32.dll")]
     private static extern IntPtr DefSubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
+
+    // DWM 返回 HRESULT：>= 0 表示成功（SUCCEEDED），负数（如 E_INVALIDARG）表示失败。
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
 
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(IntPtr hWnd);
