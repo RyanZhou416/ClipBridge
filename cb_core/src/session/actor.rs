@@ -114,6 +114,34 @@ const FINALIZE_PLACEHOLDER_GRACE_MS: i64 = 35_000;
 /// 一个对端就能开出无限上传、耗尽 fd / 内存 / CPU。
 const MAX_CONCURRENT_SENDERS: usize = 8;
 
+/// 数据块发送超时的步进粒度：旧版 64 KiB 分块时代固定使用 500ms。
+const CHUNK_SEND_TIMEOUT_STEP_MS: u64 = 500;
+
+/// 每个 [`CHUNK_SEND_TIMEOUT_STEP_MS`] 预算覆盖的分块字节数（即旧分块大小 64 KiB）。
+const CHUNK_SEND_TIMEOUT_STEP_BYTES: usize = 64 * 1024;
+
+/// 数据块发送超时的硬上限（4s）。
+///
+/// 必须严格低于 [`HEARTBEAT_TIMEOUT`]（当前 6s）：chunk 发送发生在 actor 主循环里，
+/// 一次卡住的发送会让心跳 tick 最多推迟这么久。4s 留出 2s 余量（至少 1s），
+/// 保证不会把本端/对端的心跳判定拖到超时，从而把整条会话误判为死亡。
+const CHUNK_SEND_TIMEOUT_CAP: Duration = Duration::from_secs(4);
+
+/// 数据块发送超时：按分块大小缩放，保底 500ms、封顶 [`CHUNK_SEND_TIMEOUT_CAP`]。
+///
+/// 公式：`max(500ms, 500ms × ceil(chunk_len / 64 KiB))`，即"每 64 KiB（不足按
+/// 64 KiB 计）给 500ms 预算，至少给 500ms"。含义：
+/// - 64 KiB → 500ms，与旧版行为完全一致；
+/// - 256 KiB（[`UPLOAD_CHUNK_BYTES`]）→ 2s，吞吐下限 = 256 KiB / 2s = 128 KiB/s，
+///   与旧版 64 KiB / 500ms 的 128 KiB/s 下限相同，分块放大 4 倍不会再误杀慢速链路
+///   （移动网络、弱 Wi-Fi、小窗口 WAN）；
+/// - 超大分块（如协议允许的 10 MiB 单帧）→ 封顶 4s，仍低于心跳超时。
+fn chunk_send_timeout(chunk_len: usize) -> Duration {
+	let steps = chunk_len.div_ceil(CHUNK_SEND_TIMEOUT_STEP_BYTES).max(1);
+	let millis = (steps as u64).saturating_mul(CHUNK_SEND_TIMEOUT_STEP_MS);
+	Duration::from_millis(millis).min(CHUNK_SEND_TIMEOUT_CAP)
+}
+
 /// 认证前（尚未进入 Online）允许处理的消息白名单。
 ///
 /// 只放行握手、OPAQUE、心跳与会话控制消息；业务消息（内容读写、元数据、删除等）
@@ -1029,14 +1057,19 @@ impl SessionActor {
 	}
 
 	async fn send_data_chunk(&mut self, transfer_id: String, data: bytes::Bytes) -> Result<()> {
-		// [修改] 增加超时控制，防止网络拥塞阻塞心跳
-		// 如果 500ms 发不出去，认为网络拥塞严重，报错断开传输，保住连接
-		let data_size = data.len() as u64;
+		// 超时按分块大小缩放（见 [`chunk_send_timeout`]）：固定 500ms 在 256 KiB
+		// 分块下等价于 512 KiB/s 的吞吐下限，会误杀慢速链路；缩放后 256 KiB = 2s，
+		// 吞吐下限回到旧版的 128 KiB/s，同时仍低于心跳超时，避免拥塞拖垮连接。
+		// 超时即视为网络拥塞：主动中止本次传输（`send` future 被取消时可能已有部分帧
+		// 进入连接，重试不安全），但保住会话本身。
+		let chunk_bytes = data.len();
+		let timeout = chunk_send_timeout(chunk_bytes);
+		let data_size = chunk_bytes as u64;
 		let send_future = self.writer.send(CBFrame::Data {
 			transfer_id: transfer_id.clone(),
 			data,
 		});
-		match tokio::time::timeout(Duration::from_millis(500), send_future).await {
+		match tokio::time::timeout(timeout, send_future).await {
 			Ok(Ok(())) => {
 				// 逐块不写日志：这里只累加字节数，传输结束时写一条汇总，
 				// 否则 1GB 传输会产生约 1.6 万条 SQLite 日志行。
@@ -1051,10 +1084,11 @@ impl SessionActor {
 				if let Some(state) = self.senders.remove(&transfer_id) {
 					state.handle.abort();
 				}
+				let timeout_ms = timeout.as_millis();
 				self.log_sink.log_warn(
 						"Session",
-						&format!("Data chunk send timeout (network congestion): transfer_id={transfer_id}, cancelling transfer"),
-						Some(&format!("数据块发送超时（网络拥塞）: 传输ID={transfer_id}，正在取消传输")),
+						&format!("Data chunk send timeout (network congestion): transfer_id={transfer_id}, chunk_bytes={chunk_bytes}, timeout_ms={timeout_ms}, cancelling transfer"),
+						Some(&format!("数据块发送超时（网络拥塞）: 传输ID={transfer_id}，分块大小={chunk_bytes} 字节，超时={timeout_ms}ms，正在取消传输")),
 				);
 				// 尝试发一个 Cancel 包（尽力而为）
 				let _ = self
@@ -1063,7 +1097,9 @@ impl SessionActor {
 						reason: "Network congested/timeout".into(),
 					})
 					.await;
-				anyhow::bail!("Send data chunk timeout (network congestion)");
+				anyhow::bail!(
+					"Send data chunk timeout (network congestion): chunk_bytes={chunk_bytes}, timeout_ms={timeout_ms}"
+				);
 			}
 		}
 	}
@@ -3059,11 +3095,12 @@ mod transfer_guard_tests {
 	//! 可以独立于 QUIC 连接断言；需要真实连接的行为仍由 `session::tests` 里的
 	//! `#[ignore]` 网络用例覆盖。
 	use super::{
-		chunk_overrun, hard_cap_bytes, kind_from_mime, mark_item_content_cached,
-		receiver_idle_expired, receiver_slot_available, sender_admission, sender_slot_available,
-		PushOutcome, ReceiverInbox, ReceiverTaskMsg, SenderState, TerminatedGuard,
-		MAX_CONCURRENT_RECEIVERS, MAX_CONCURRENT_SENDERS, MAX_INFLIGHT_BYTES_PER_RECEIVER,
-		RECEIVER_IDLE_TIMEOUT_MS,
+		chunk_overrun, chunk_send_timeout, hard_cap_bytes, kind_from_mime,
+		mark_item_content_cached, receiver_idle_expired, receiver_slot_available, sender_admission,
+		sender_slot_available, PushOutcome, ReceiverInbox, ReceiverTaskMsg, SenderState,
+		TerminatedGuard, CHUNK_SEND_TIMEOUT_CAP, HEARTBEAT_TIMEOUT, MAX_CONCURRENT_RECEIVERS,
+		MAX_CONCURRENT_SENDERS, MAX_INFLIGHT_BYTES_PER_RECEIVER, RECEIVER_IDLE_TIMEOUT_MS,
+		UPLOAD_CHUNK_BYTES,
 	};
 	use crate::model::{FileMeta, ItemContent, ItemKind, ItemMeta};
 	use crate::policy::SizeLimits;
@@ -3137,6 +3174,36 @@ mod transfer_guard_tests {
 			now,
 			now - RECEIVER_IDLE_TIMEOUT_MS - 1
 		));
+	}
+
+	/// 数据块发送超时按分块大小缩放，而不是固定 500ms。
+	///
+	/// 旧版 64 KiB 分块 + 500ms ⇒ 128 KiB/s 吞吐下限；分块放大到 256 KiB 后必须给 2s
+	/// 才能保住同一下限，否则移动网络 / 弱 Wi-Fi / 小窗口 WAN 会被误判为拥塞而中止。
+	#[test]
+	fn chunk_send_timeout_scales_with_chunk_size_and_stays_below_heartbeat() {
+		// 64 KiB：与旧版一致，500ms（"≥500ms" 的保底语义）。
+		assert!(chunk_send_timeout(64 * 1024) >= Duration::from_millis(500));
+		assert_eq!(chunk_send_timeout(64 * 1024), Duration::from_millis(500));
+		// 空分块 / 不足一个步进也保底 500ms。
+		assert_eq!(chunk_send_timeout(0), Duration::from_millis(500));
+		assert_eq!(chunk_send_timeout(1), Duration::from_millis(500));
+
+		// 128 KiB → 1s；256 KiB（UPLOAD_CHUNK_BYTES）→ 2s，即 128 KiB/s，与旧版相同。
+		assert_eq!(chunk_send_timeout(128 * 1024), Duration::from_millis(1000));
+		assert_eq!(
+			chunk_send_timeout(UPLOAD_CHUNK_BYTES),
+			Duration::from_secs(2)
+		);
+
+		// 超大分块（含协议允许的 10 MiB 单帧、以及极端 usize 值）封顶。
+		assert_eq!(chunk_send_timeout(10 * 1024 * 1024), CHUNK_SEND_TIMEOUT_CAP);
+		assert_eq!(chunk_send_timeout(usize::MAX), CHUNK_SEND_TIMEOUT_CAP);
+
+		// 封顶必须严格低于心跳超时（当前 6s），且至少留 1s 余量：
+		// chunk 发送卡住时不能把心跳拖到超时，否则会误判整条会话死亡。
+		assert!(CHUNK_SEND_TIMEOUT_CAP < HEARTBEAT_TIMEOUT);
+		assert!(CHUNK_SEND_TIMEOUT_CAP + Duration::from_secs(1) <= HEARTBEAT_TIMEOUT);
 	}
 
 	/// 硬上限取自 policy.rs 的 size_limits，按 item 类型选择。
