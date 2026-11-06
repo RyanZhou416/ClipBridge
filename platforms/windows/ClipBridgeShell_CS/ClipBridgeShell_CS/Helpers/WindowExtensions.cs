@@ -80,6 +80,14 @@ internal static class WindowExtensions
     /// <see cref="DragSnapshot"/>），让拖拽期间屏幕上看到的是同一张位图，而不是每帧重画的
     /// hero 图/透明度遮罩/图表/亚克力卡片。
     ///
+    /// 但“缩放”不是拖拽：实测在关闭全部缓解措施（原生 Mica）的情况下做 6 秒边框缩放，
+    /// UI 线程只有 0.39ms/帧，p50 6.25ms（160Hz 满帧）、p99 7.12ms，只有 1 帧超过 12.5ms，
+    /// DWM GPU 3D 占用 2.81%（≈空闲）—— 缩放路径本来就不慢，DWM 不需要为它逐帧重合成
+    /// 整窗 Mica。继续在缩放期间挂“回退色填充 + DWMSBT_NONE”，只会让用户付出一整段手势的
+    /// 可见外观偏差，却换不到任何性能收益。所以本类在 WM_ENTERSIZEMOVE 仍按移动处理
+    /// （无法预知用户会拖标题栏还是拉边框），一旦在手势中检测到客户区尺寸变化（=缩放），
+    /// 就整段退场并 100% 还原外观（见 <see cref="BailOutOfGestureIfResized"/>）。
+    ///
     /// 机制：复用 <see cref="SetMinimumSize"/> 已经使用的 comctl32 SetWindowSubclass（不同的
     /// uIdSubclass），不替换窗口过程、也不需要自己向原 WndProc 转发；同一 HWND 上的多个子类化
     /// 会沿 DefSubclassProc 链依次调用，现有 WM_GETMINMAXINFO 最小尺寸逻辑不受影响。
@@ -113,8 +121,11 @@ internal static class WindowExtensions
     /// 失败回退：
     /// - 快照抓取/建位图失败（Shell 尚未构建、BitBlt 失败、写位图失败等）→ 本次拖拽只走填充；
     /// - 填充也失败且没有可用的快照 → 不关 backdrop，退化为“拖拽时仍挂 Mica”；
-    /// - 拖拽中途客户区尺寸变化（边框缩放）→ 第一次检测到尺寸变化就隐藏快照、改走填充，
-    ///   本段手势剩余时间不再重抓；退出时照常恢复 Mica；
+    /// - 拖拽中途客户区尺寸变化（边框缩放）→ 第一次检测到就完整退场：先同步恢复
+    ///   DWMWA_SYSTEMBACKDROP_TYPE / SystemBackdrop，再把覆盖层与填充排到下一轮 Low 撤销；
+    ///   本段手势剩余时间不再观察尺寸、也不再抓图或切换外观（WM_EXITSIZEMOVE 为空操作），
+    ///   下一次 WM_ENTERSIZEMOVE 重新开始；恢复失败时保留覆盖层/填充（绝不露壁纸）并记录，
+    ///   由 WM_EXITSIZEMOVE 再走一次常规恢复；
     /// - 有快照但填充失败时仍可安全关 backdrop（覆盖层已经证明能盖住整个客户区）。
     ///
     /// 幂等/安全性：重复或嵌套的进入只保留第一次保存的状态；没有配对的退出什么都不做；
@@ -327,8 +338,14 @@ internal static class WindowExtensions
     /// <summary>有快照但回退色铺不上：覆盖层仍可安全盖住整个客户区，因此继续关 backdrop。</summary>
     private const string DragSnapshotFillUnavailableTrace = "drag-snapshot-fill-unavailable";
 
-    /// <summary>拖拽中途客户区尺寸变了：隐藏快照，本段手势剩余时间退回填充路径。</summary>
-    private const string DragSnapshotDroppedResizeTrace = "drag-snapshot-dropped-resize";
+    /// <summary>
+    /// 拖拽中途客户区尺寸变了（=缩放）：完整恢复原外观后写一行，后缀表示恢复结果
+    /// （restored / restored-forced / restore-failed-keep）。
+    /// </summary>
+    private const string DragResizeBailoutTrace = "drag-resize-bailout";
+
+    /// <summary>缩放退场时 backdrop 实际走的恢复路径（dwm / systembackdrop / none），仅诊断用。</summary>
+    private const string DragResizeBailoutRestoreTrace = "drag-resize-bailout-restore";
 
     /// <summary>CB_FORCE_DRAG_SNAPSHOT=1 第一次真正进入“快照伪拖拽”状态时写一行。</summary>
     private const string DragSnapshotForcedTrace = "drag-snapshot-force";
@@ -418,6 +435,23 @@ internal static class WindowExtensions
     /// </summary>
     private static bool _dragFillApplied;
 
+    /// <summary>
+    /// 本段手势是否已经在“检测到缩放”时完整退场（backdrop 已恢复、覆盖层/填充已安排撤销）。
+    /// 为 true 时剩余时间不再做任何视觉切换，WM_EXITSIZEMOVE 对本段手势是空操作；
+    /// 下一次 WM_ENTERSIZEMOVE 会清掉它并重新抓快照/铺填充。
+    /// </summary>
+    private static bool _gestureUnmanaged;
+
+    /// <summary>本段手势是否已经尝试过缩放退场（无论成败），避免后续 WM_SIZE 反复恢复/切换。</summary>
+    private static bool _resizeBailoutAttempted;
+
+    /// <summary>
+    /// 进入手势时记下的客户区尺寸（物理像素）。快照路径可以拿快照尺寸比对；
+    /// CB_NO_DRAG_SNAPSHOT / CB_DRAG_FILL_ONLY 没有快照，必须靠它区分“纯移动”和“缩放”。
+    /// </summary>
+    private static int _gestureStartClientWidth;
+    private static int _gestureStartClientHeight;
+
     /// <summary>CB_FORCE_DRAG_SNAPSHOT 是否已经生效（生效后忽略真实进出消息，保持状态）。</summary>
     private static bool _forcedSnapshotActive;
 
@@ -457,6 +491,9 @@ internal static class WindowExtensions
                     break;
                 }
 
+                // 新手势：上一次“缩放退场”留下的标记必须清干净，保证重新抓快照/铺填充。
+                _gestureUnmanaged = false;
+                _resizeBailoutAttempted = false;
                 SuspendBackdropForDrag(dwRefData);
                 break;
 
@@ -467,6 +504,14 @@ internal static class WindowExtensions
                     break;
                 }
 
+                if (_gestureUnmanaged)
+                {
+                    // 本段手势已在缩放时完整恢复：退出必须是空操作，不能再切换一次外观。
+                    _gestureUnmanaged = false;
+                    _resizeBailoutAttempted = false;
+                    break;
+                }
+
                 // 松手 / Esc 取消 / Snap 结束都在这里恢复；没有配对的进入消息时是空操作。
                 RestoreBackdropAfterDrag(dwRefData);
                 break;
@@ -474,11 +519,17 @@ internal static class WindowExtensions
             case WM_SIZE:
             case WM_WINDOWPOSCHANGED:
                 // 边框缩放（以及最大化/DPI 变化）会让客户区尺寸在移动-缩放循环里变化：
-                // 快照会被 Stretch 拉花，第一次检测到就放弃快照，本段手势剩余时间退回填充。
-                // 强制快照是静态截图状态（不参与真实拖拽），这里不拆它。
-                if (_backdropSuspended && !_forcedSnapshotActive)
+                // 检测到尺寸变化就整段退场并还原外观；纯移动尺寸不变，不触发。
+                // 强制快照模式同样退场，避免把“伪拖拽”状态带着新尺寸留在屏幕上。
+                if (_gestureUnmanaged)
                 {
-                    DropSnapshotIfResized(dwRefData);
+                    // 本段手势已经退场：不再观察任何尺寸/位置变化，直到下一次进入手势。
+                    break;
+                }
+
+                if (_backdropSuspended || _forcedSnapshotActive)
+                {
+                    BailOutOfGestureIfResized(dwRefData);
                 }
 
                 break;
@@ -572,6 +623,16 @@ internal static class WindowExtensions
         _backdropSuspended = true;
         _dragSnapshotShown = false;
 
+        // 记下进入手势时的客户区尺寸：没有快照的路径（CB_NO_DRAG_SNAPSHOT / CB_DRAG_FILL_ONLY）
+        // 没有快照尺寸可比，仍要靠它区分“纯移动”和“缩放”。
+        _gestureStartClientWidth = 0;
+        _gestureStartClientHeight = 0;
+        if (GetClientRect(hwnd, out var startClient))
+        {
+            _gestureStartClientWidth = startClient.Right;
+            _gestureStartClientHeight = startClient.Bottom;
+        }
+
         // ① 先抓快照并显示覆盖层 —— 必须在 DWM backdrop 切到 NONE 之前：
         //    快照抓的是屏幕像素（含 Mica），切完 backdrop 再抓就只能抓到回退色了。
         //    抓取失败（Shell 还没构建 / BitBlt 失败 / 位图创建失败）只记录，不抛出。
@@ -580,8 +641,8 @@ internal static class WindowExtensions
             _dragSnapshotShown = DragSnapshot.TryCaptureAndShow(window);
         }
 
-        // ② 再铺回退色：它是覆盖层下面的兜底（覆盖层若因尺寸/重绘出现缝隙也不会露出壁纸），
-        //    也是尺寸变化后放弃快照时立即生效的降级外观。
+        // ② 再铺回退色：它是覆盖层下面的兜底（覆盖层若因尺寸/重绘出现缝隙也不会露出壁纸）；
+        //    检测到缩放并退场时，这层填充也会和覆盖层一起排到下一轮 Low 撤销。
         bool painted;
         try
         {
@@ -607,7 +668,7 @@ internal static class WindowExtensions
         if (!painted)
         {
             // 有快照时回退色铺不上是安全的：覆盖层已经证明能盖住整个客户区。
-            // 但尺寸变化必须放弃快照时，下面的 DropSnapshotIfResized 会先恢复 backdrop 再撤覆盖层。
+            // 检测到缩放需要退场时，BailOutOfGestureIfResized 会先恢复 backdrop 再撤覆盖层。
             StartupTrace.Mark(DragSnapshotFillUnavailableTrace);
         }
         else
@@ -720,14 +781,36 @@ internal static class WindowExtensions
     }
 
     /// <summary>
-    /// 拖拽中途检测客户区尺寸变化：第一次发现快照尺寸与当前客户区不一致时，隐藏快照并放弃，
-    /// 本段手势剩余时间退回“填充 + 无 backdrop”的旧路径（快照拉伸比重新渲染更难解释）。
-    /// 纯移动（尺寸不变）不会触发任何动作。
+    /// 拖拽中途检测客户区尺寸变化（=用户在拉边框缩放）：一旦确认，就把本段手势整段退场，
+    /// 让外观 100% 回到进入手势前的样子。
+    ///
+    /// 为什么要退场：实测纯移动很贵（UI 7.31ms/帧、82% 帧超预算，DWM 每帧重合成 Mica），
+    /// 所以移动期间值得用快照 + 关 backdrop 换流畅度；但边框缩放实测只有 0.39ms/帧、
+    /// p50 6.25ms（160Hz 满帧）、p99 7.12ms、仅 1 帧超 12.5ms，DWM 3D 2.81%（≈空闲）——
+    /// 缩放根本没有需要缓解的合成压力，继续挂着“填充 + DWMSBT_NONE”只会白白改变外观。
+    ///
+    /// 顺序（避免闪壁纸）：
+    /// ① 同步恢复 DWMWA_SYSTEMBACKDROP_TYPE（或兜底的 SystemBackdrop 实例）——此时覆盖层
+    ///    仍然盖在上面，所以即使 DWM 异步应用属性也看不到任何东西；
+    /// ② 复位托管状态，并把覆盖层隐藏 / 填充清除排到下一轮 DispatcherQueuePriority.Low，
+    ///    让 DWM 先应用恢复后的 Mica，再撤掉遮罩与回退色；
+    /// ③ 标记本段手势为 “unmanaged”：剩余时间不再观察尺寸、不再抓图、不再切换外观，
+    ///    WM_EXITSIZEMOVE 对本段手势直接空操作。
+    ///
+    /// 纯移动（客户区尺寸不变）不会触发任何动作。恢复失败时保留覆盖层/填充（绝不露壁纸），
+    /// 只记录失败；本段手势不再重试，由 WM_EXITSIZEMOVE 的常规恢复再试一次。
     /// </summary>
-    private static void DropSnapshotIfResized(IntPtr dwRefData)
+    private static void BailOutOfGestureIfResized(IntPtr dwRefData)
     {
-        if (!_dragSnapshotShown)
+        if (_gestureUnmanaged || _resizeBailoutAttempted)
         {
+            // 已经退场，或本段手势已经尝试过（成功/失败都不再重复）。
+            return;
+        }
+
+        if (!_backdropSuspended && !_forcedSnapshotActive)
+        {
+            // 本段手势没有被托管（没有可恢复的东西）。
             return;
         }
 
@@ -748,31 +831,62 @@ internal static class WindowExtensions
             return;
         }
 
-        if (client.Right == DragSnapshot.CapturedWidth && client.Bottom == DragSnapshot.CapturedHeight)
+        // 基线尺寸：有快照时用快照捕获尺寸（正常路径二者一致）；无快照
+        // （CB_NO_DRAG_SNAPSHOT / CB_DRAG_FILL_ONLY）时用进入手势时记下的客户区尺寸。
+        var baselineWidth = _dragSnapshotShown && DragSnapshot.CapturedWidth > 0
+            ? DragSnapshot.CapturedWidth
+            : _gestureStartClientWidth;
+        var baselineHeight = _dragSnapshotShown && DragSnapshot.CapturedHeight > 0
+            ? DragSnapshot.CapturedHeight
+            : _gestureStartClientHeight;
+
+        if (baselineWidth <= 0 || baselineHeight <= 0)
         {
+            // 连基线都拿不到：无法判断是移动还是缩放，保持原有（挂起）行为。
             return;
         }
 
-        if (!_dragFillApplied && !TryRestoreBackdropForResize(window, hwnd))
+        if (client.Right == baselineWidth && client.Bottom == baselineHeight)
         {
-            // 极罕见：回退色没铺上、原 backdrop 也恢复不了。此时撤掉覆盖层就会露出壁纸，
-            // 宁可让快照继续拉伸（视觉暂时变形），也不能出现空白/壁纸窗口。
-            StartupTrace.Mark($"{DragSnapshotDroppedResizeTrace}-no-fill-keep");
+            // 纯移动：客户区尺寸没变。
             return;
         }
 
-        // 先落状态再隐藏：隐藏动作可能同步触发布局/渲染回调，重入时不应再走一次。
-        _dragSnapshotShown = false;
-        DragSnapshot.HideNow();
-        StartupTrace.Mark(DragSnapshotDroppedResizeTrace);
+        // 本段手势只尝试一次：即使恢复失败也不要在每个 WM_SIZE 上反复切换。
+        _resizeBailoutAttempted = true;
+        var wasForcedSnapshot = _forcedSnapshotActive;
+
+        // ① 先恢复 backdrop（同步 DWM 调用）。失败时覆盖层/填充都还在，用户看不到壁纸。
+        if (!TryRestoreBackdropForBailout(window, hwnd))
+        {
+            StartupTrace.Mark($"{DragResizeBailoutTrace}=restore-failed-keep");
+            return;
+        }
+
+        // ② 复位托管状态（含“已挂起”标志），再记下本段手势已退场。
+        //    注意：ResetDragBackdropState 会清掉 unmanaged/attempted，所以随后重新置位。
+        _forcedSnapshotActive = false;
+        ResetDragBackdropState();
+        _gestureUnmanaged = true;
+        _resizeBailoutAttempted = true;
+
+        // ③ backdrop 已恢复，覆盖层/填充排到下一轮 Low 撤销：让 DWM 先应用 Mica 再撤遮罩，
+        //    与 WM_EXITSIZEMOVE 的常规恢复完全同一套顺序。位图缓存保留，下次拖拽可复用。
+        DragSnapshot.ScheduleHide(window);
+        DragBackdropFill.ScheduleClear(window);
+
+        StartupTrace.Mark(wasForcedSnapshot
+            ? $"{DragResizeBailoutTrace}=restored-forced"
+            : $"{DragResizeBailoutTrace}=restored");
     }
 
     /// <summary>
-    /// 尺寸变化放弃快照、但没有回退色可兜底时的补救：把本次拖拽关掉的 backdrop 先恢复，
-    /// 再让调用方隐藏覆盖层。恢复成功后退出路径不会再重复恢复（标志已清）。
-    /// 返回 false 表示两条恢复路径都失败，调用方必须保留覆盖层。
+    /// 缩放退场的第一步：把本次手势关掉的 backdrop 恢复成进入前的值。
+    /// 返回 true 表示屏幕上已经有安全的背景（原 backdrop 已恢复，或本来就没关掉），
+    /// 调用方可以撤掉覆盖层/填充；返回 false 表示恢复失败，调用方必须保留它们。
+    /// 恢复成功后会把“已关闭”标志清掉，后续 ResetDragBackdropState 不会重复恢复。
     /// </summary>
-    private static bool TryRestoreBackdropForResize(Window window, IntPtr hwnd)
+    private static bool TryRestoreBackdropForBailout(Window window, IntPtr hwnd)
     {
         try
         {
@@ -781,23 +895,24 @@ internal static class WindowExtensions
                 if (TrySetDwmBackdropType(hwnd, _savedBackdropType))
                 {
                     _dwmBackdropDisabled = false;
-                    StartupTrace.Mark("drag-snapshot-resize-restore-backdrop");
+                    StartupTrace.Mark($"{DragResizeBailoutRestoreTrace}=dwm");
                     return true;
                 }
 
-                // DWM 属性不可用：退回 SystemBackdrop 实例路径。
+                // DWM 属性恢复不可用：退回 SystemBackdrop 实例路径。
+                // 先置 null 再赋原实例：相同实例直接赋值可能被 setter 判成 no-op。
                 try
                 {
                     window.SystemBackdrop = null;
                     window.SystemBackdrop = _savedBackdrop;
                     _dwmBackdropDisabled = false;
                     _systemBackdropNulled = false;
-                    StartupTrace.Mark("drag-snapshot-resize-restore-backdrop");
+                    StartupTrace.Mark($"{DragResizeBailoutRestoreTrace}=systembackdrop");
                     return true;
                 }
                 catch (Exception ex)
                 {
-                    LogDragBackdropFailure("resize-restore", ex);
+                    LogDragBackdropFailure("resize-bailout", ex);
                     return false;
                 }
             }
@@ -808,22 +923,23 @@ internal static class WindowExtensions
                 {
                     window.SystemBackdrop = _savedBackdrop;
                     _systemBackdropNulled = false;
-                    StartupTrace.Mark("drag-snapshot-resize-restore-backdrop");
+                    StartupTrace.Mark($"{DragResizeBailoutRestoreTrace}=systembackdrop");
                     return true;
                 }
                 catch (Exception ex)
                 {
-                    LogDragBackdropFailure("resize-restore", ex);
+                    LogDragBackdropFailure("resize-bailout", ex);
                     return false;
                 }
             }
 
-            // 本来就没关 backdrop（例如两条关闭路径都失败）：撤覆盖层不会露壁纸。
+            // 本来就没关 backdrop（填充模式，或两条关闭路径都失败）：撤覆盖层不会露壁纸。
+            StartupTrace.Mark($"{DragResizeBailoutRestoreTrace}=none");
             return true;
         }
         catch (Exception ex)
         {
-            LogDragBackdropFailure("resize-restore", ex);
+            LogDragBackdropFailure("resize-bailout", ex);
             return false;
         }
     }
@@ -838,6 +954,12 @@ internal static class WindowExtensions
         _backdropSuspended = false;
         _dragSnapshotShown = false;
         _dragFillApplied = false;
+
+        // 手势级标记：新一次 WM_ENTERSIZEMOVE 会重新建立；缩放退场成功后会再置位。
+        _gestureUnmanaged = false;
+        _resizeBailoutAttempted = false;
+        _gestureStartClientWidth = 0;
+        _gestureStartClientHeight = 0;
     }
 
     /// <summary>CB_FORCE_DRAG_FILL 的周期应用：内容根/主题变化时重新铺色，DWM 只设一次。</summary>
@@ -1004,6 +1126,16 @@ internal static class WindowExtensions
             _dwmBackdropDisabled = false;
             _systemBackdropNulled = false;
             _backdropSuspended = true;
+
+            // 强制快照也有“手势基线尺寸”：出现真实缩放时同样走退场逻辑，
+            // 避免把“伪拖拽”状态带着新尺寸、半挂不挂地留在屏幕上。
+            _gestureStartClientWidth = 0;
+            _gestureStartClientHeight = 0;
+            if (GetClientRect(hwnd, out var forcedClient))
+            {
+                _gestureStartClientWidth = forcedClient.Right;
+                _gestureStartClientHeight = forcedClient.Bottom;
+            }
 
             if (TrySetDwmBackdropType(hwnd, DWMSBT_NONE))
             {
