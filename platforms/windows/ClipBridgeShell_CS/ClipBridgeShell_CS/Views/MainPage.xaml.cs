@@ -114,6 +114,14 @@ public sealed partial class MainPage : Page
     // 1600 可避免 UniformToFill 放大后出现明显糊化。
     private const int BackgroundDecodePixelWidth = 1600;
 
+    /// <summary>
+    /// 视差速度：卡片区相对页面滚动多移动的比例。
+    /// 1.1 表示页面滚 100px 时卡片区反向偏移 110px，形成"背景更慢、前景更快"的层感。
+    /// 历史上曾被性能提交移除（担心 ViewChanged 高频回调），现按原值恢复；
+    /// RenderTransform 不参与布局，单次仅一次 2D 平移。
+    /// </summary>
+    private const double ParallaxSpeed = 1.1;
+
     // 首绘是否还挂在合并重绘队列里（用于只打一次 mainpage-charts-deferred 标记）
     private bool _initialChartDrawPending;
 
@@ -148,6 +156,14 @@ public sealed partial class MainPage : Page
                 ViewModel.ActivitySeries.CollectionChanged += OnActivitySeriesChanged;
 
                 ViewModel.RecentItems.CollectionChanged += OnRecentItemsChanged;
+
+                // 视差滚动：用 RenderTransform 驱动（不影响布局），在 OnPageUnloaded 里配对退订。
+                // 注意：这里只订阅一次；重复进页面时先退订再订阅，避免重复回调。
+                if (ContentScrollViewer != null && ParallaxContentContainer != null)
+                {
+                    ContentScrollViewer.ViewChanged -= OnScrollViewChanged;
+                    ContentScrollViewer.ViewChanged += OnScrollViewChanged;
+                }
 
                 // 监听Canvas大小变化（重绘交由合并队列处理）
                 CacheChartCanvas.SizeChanged += OnChartCanvasSizeChanged;
@@ -274,6 +290,13 @@ public sealed partial class MainPage : Page
                 ViewModel.ActivitySeries.CollectionChanged -= OnActivitySeriesChanged;
                 ViewModel.RecentItems.CollectionChanged -= OnRecentItemsChanged;
 
+                // 视差订阅必须配对解除：ScrollViewer 的生命周期比页面长，
+                // 留着会让已卸载页面继续收到 ViewChanged 回调（此前正是因此被移除）。
+                if (ContentScrollViewer != null)
+                {
+                    ContentScrollViewer.ViewChanged -= OnScrollViewChanged;
+                }
+
                 CacheChartCanvas.SizeChanged -= OnChartCanvasSizeChanged;
                 NetworkChartCanvas.SizeChanged -= OnChartCanvasSizeChanged;
                 ActivityChartCanvas.SizeChanged -= OnChartCanvasSizeChanged;
@@ -302,6 +325,23 @@ public sealed partial class MainPage : Page
             DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
                 () => UpdateAllCardsLockIcon());
         }
+    }
+
+    /// <summary>
+    /// 页面滚动时更新卡片区的反向位移，形成视差层感。
+    ///
+    /// 只写 RenderTransform（TranslateTransform），不触发 Measure/Arrange；
+    /// 因此每帧成本是一次合成层平移，而不是重新布局。
+    /// </summary>
+    private void OnScrollViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        if (ContentScrollViewer is null || ParallaxContentContainer is null || ParallaxTransform is null)
+        {
+            return;
+        }
+
+        var parallaxOffset = ContentScrollViewer.VerticalOffset * ParallaxSpeed;
+        ParallaxTransform.Y = -parallaxOffset;
     }
 
     private void OnCacheSeriesChanged(object? sender, NotifyCollectionChangedEventArgs e)

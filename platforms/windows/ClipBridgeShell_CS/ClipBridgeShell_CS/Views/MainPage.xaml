@@ -159,8 +159,12 @@
                     </Grid>
                 </Grid>
                 
-                <!-- 卡片容器区域（已移除视差滚动：不再为整块内容设置 RenderTransform） -->
+                <!-- 卡片容器区域：由 OnScrollViewChanged 驱动 RenderTransform 做视差
+                     （只在代码里写 TranslateTransform.Y，不参与布局） -->
                 <Grid x:Name="ParallaxContentContainer" Margin="0,-298,0,0">
+                    <Grid.RenderTransform>
+                        <TranslateTransform x:Name="ParallaxTransform"/>
+                    </Grid.RenderTransform>
                     <StackPanel Spacing="12">
                         <!-- 横向滚动卡片容器 -->
                         <controls:HorizontalScrollContainer x:Name="RecentlyVisitedContainer" Margin="0,50,0,0">
