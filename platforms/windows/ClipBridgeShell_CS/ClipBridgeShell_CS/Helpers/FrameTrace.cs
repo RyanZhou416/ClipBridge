@@ -19,10 +19,15 @@ namespace ClipBridgeShell_CS.Helpers;
 ///
 /// 开关：
 /// - <c>CB_FRAME_TRACE=1</c> 启用（未设置时本类所有入口方法立即返回）；
-/// - <c>CB_FRAME_TRACE_SCENARIO=idle|scroll|drag|all</c> 选择场景，默认 <c>all</c>；
-/// - <c>CB_FRAME_TRACE_SECONDS=&lt;n&gt;</c> 覆盖各场景时长（默认 idle 3 秒、scroll 6 秒、drag 3 秒）；
+/// - <c>CB_FRAME_TRACE_SCENARIO=idle|scroll|drag|manual|all</c> 选择场景，默认 <c>all</c>；
+/// - <c>CB_FRAME_TRACE_SECONDS=&lt;n&gt;</c> 覆盖各场景时长（默认 idle 3 秒、scroll 6 秒、drag 3 秒、manual 5 秒）；
+/// - <c>CB_FRAME_TRACE_READY_SECONDS=&lt;n&gt;</c> manual 场景开始记录前的准备时长，默认 2 秒
+///   （留给操作者把手放到窗口上；0 表示立刻开始）；
 /// - <c>CB_FRAME_TRACE_ACRYLIC=0|1</c> 在场景开始前把首页卡片的亚克力开关切到指定状态
-///   （未设置时保持用户当前设置；只改运行时绑定的 ViewModel 属性，不落盘，进程退出即失效）。
+///   （未设置时保持用户当前设置；只改运行时绑定的 ViewModel 属性，不落盘，进程退出即失效）；
+/// - <c>CB_FRAME_TRACE_MICA=0|1</c> 在场景开始前把主窗口的 <see cref="Microsoft.UI.Xaml.Window.SystemBackdrop"/>
+///   在 <see cref="MicaBackdrop"/> 与 <c>null</c> 之间切换（未设置时保持现状；复用 MainWindow 构造里
+///   创建的同一个 MicaBackdrop 实例，不新增第二套 Mica 实现；请求状态与实际状态都写进汇总和 [cost] 行）。
 ///
 /// drag 场景：先把窗口临时缩到约 900x600 并挪到工作区右上角（留出 ±60px 轨迹边距），
 /// 再由 UI 线程在每个渲染节拍调用 <c>SetWindowPos</c>
@@ -30,6 +35,13 @@ namespace ClipBridgeShell_CS.Helpers;
 /// 使 DWM 每帧都要重新合成（亚克力/背景采样也随之每帧重做）。窗口始终留在工作区内、
 /// 不抢焦点；场景结束后还原原始位置与尺寸。帧间隔仍来自 <see cref="CompositionTarget.Rendering"/>，
 /// 因此能反映“拖拽窗口时合成是否把渲染节拍拖慢”。
+///
+/// manual 场景：应用完全不碰窗口 —— 不移动、不缩放、不激活、不重定位，也不调用
+/// <c>SetWindowPos</c>/<c>Activate()</c>；由人在准备提示后手动拖动窗口，我们只记录帧时序。
+/// 顺序为：打印准备提示 → 等待 <c>CB_FRAME_TRACE_READY_SECONDS</c>（默认 2 秒，带整秒倒计时）
+/// → 打印“记录中” → 采集 <c>CB_FRAME_TRACE_SECONDS</c>（默认 5 秒）→ 打印“记录结束”
+/// → 落盘汇总 → <see cref="Application.Exit"/>。它是判断“拖拽时应用自己是否慢”的唯一不被
+/// UI 线程 <c>SetWindowPos</c> 开销污染的口径（drag 场景的移动由本类驱动，只用于合成压力对照）。
 ///
 /// 采集四路数据，全部带场景标签：
 /// 1) 帧间隔：订阅 <see cref="CompositionTarget.Rendering"/>，用 <see cref="Stopwatch.GetTimestamp"/>
@@ -99,6 +111,15 @@ internal static class FrameTrace
     /// <summary>切换亚克力后留出的重绘稳定时间（毫秒），不属于任何场景的采样区间。</summary>
     private const int AcrylicSettleMs = 350;
 
+    /// <summary>切换 Mica 后留出的重绘稳定时间（毫秒），不属于任何场景的采样区间。</summary>
+    private const int MicaSettleMs = 350;
+
+    /// <summary>退出看门狗的基础等待：Exit 路径被窗口关闭钩子取消时，最多等这么久就强制结束进程。</summary>
+    private const int ExitWatchdogBaseMs = 8000;
+
+    /// <summary>退出看门狗在“准备 + 记录”之外的余量（毫秒）。</summary>
+    private const int ExitWatchdogMarginMs = 5000;
+
     /// <summary>SetWindowPos 只改位置：不改尺寸、不改 Z 序、不激活窗口。</summary>
     private const uint SwpNoSize = 0x0001;
 
@@ -128,7 +149,10 @@ internal static class FrameTrace
         Ended = 4,
 
         /// <summary>drag 结束后还原窗口尺寸/位置的收尾区间：单独标记，不计入 drag 的帧统计。</summary>
-        Teardown = 5
+        Teardown = 5,
+
+        /// <summary>manual 场景：应用不碰窗口，由人手动拖动，只记录帧时序。</summary>
+        Manual = 6
     }
 
     /// <summary>
@@ -175,6 +199,9 @@ internal static class FrameTrace
     private static double _idleSeconds = 3.0;
     private static double _scrollSeconds = 6.0;
     private static double _dragSeconds = 3.0;
+    private static double _manualSeconds = 5.0;
+    private static double _readySeconds = 2.0;
+    private static bool _doManual;
     private static bool _windowVisibleAtStart;
     private static bool _windowForegroundAtStart;
 
@@ -186,6 +213,21 @@ internal static class FrameTrace
 
     /// <summary>亚克力状态的来源，便于之后判断这轮用的到底是哪个开关。</summary>
     private static string _acrylicSource = "(not-read)";
+
+    /// <summary>CB_FRAME_TRACE_MICA 的原始值（unset / 0 / 1 / 其他非法值），写进汇总。</summary>
+    private static string _micaRequested = "unset";
+
+    /// <summary>实际生效的 Mica 状态（on / off / unknown / failed:...），写进 [cost] 与汇总。</summary>
+    private static string _micaEffective = "unknown";
+
+    /// <summary>Mica 状态的来源，便于之后判断这轮用的到底是哪个开关。</summary>
+    private static string _micaSource = "(not-read)";
+
+    /// <summary>
+    /// MainWindow 构造期创建的那个 MicaBackdrop 实例。A/B 关掉时先把实例存在这里，
+    /// 再打开时复用同一个对象（不在本类里新建第二套 Mica 实现）。只在 UI 线程上读写。
+    /// </summary>
+    private static SystemBackdrop? _micaOriginalBackdrop;
 
     // ---- drag 场景状态（StartWindowDrag 在 phase 翻到 Drag 之前写好，OnRendering 逐帧读取） ----
     private static bool _dragActive;
@@ -291,17 +333,26 @@ internal static class FrameTrace
         var doIdle = scenario is "idle" or "all" or "";
         var doScroll = scenario is "scroll" or "all" or "";
         var doDrag = scenario is "drag" or "all" or "";
-        if (!doIdle && !doScroll && !doDrag)
+        var doManual = scenario is "manual" or "all" or "";
+        if (!doIdle && !doScroll && !doDrag && !doManual)
         {
             doIdle = true;
             doScroll = true;
             doDrag = true;
+            doManual = true;
         }
-        _runTag = doIdle && doScroll && doDrag ? "all" : (doIdle ? "idle" : (doScroll ? "scroll" : "drag"));
+        _doManual = doManual;
+        _runTag = doIdle && doScroll && doDrag && doManual
+            ? "all"
+            : (doIdle ? "idle" : (doScroll ? "scroll" : (doDrag ? "drag" : "manual")));
 
         // 亚克力 A/B：只认 0/1；其他值（含未设置）一律不改变当前设置，但原始值会写进汇总。
         var acrylicText = (Environment.GetEnvironmentVariable("CB_FRAME_TRACE_ACRYLIC") ?? string.Empty).Trim();
         _acrylicRequested = acrylicText.Length == 0 ? "unset" : acrylicText;
+
+        // Mica A/B：同样只认 0/1；未设置时只读当前状态，不改变任何东西。
+        var micaText = (Environment.GetEnvironmentVariable("CB_FRAME_TRACE_MICA") ?? string.Empty).Trim();
+        _micaRequested = micaText.Length == 0 ? "unset" : micaText;
 
         // 时长覆盖：一个变量同时改所有场景，保持“采样预算可调”的简单语义。
         var secondsText = Environment.GetEnvironmentVariable("CB_FRAME_TRACE_SECONDS");
@@ -312,6 +363,16 @@ internal static class FrameTrace
             _idleSeconds = seconds;
             _scrollSeconds = seconds;
             _dragSeconds = seconds;
+            _manualSeconds = seconds;
+        }
+
+        // manual 的准备时长单独可调：它不参与任何采样，只是留给操作者握住窗口的时间。
+        var readySecondsText = Environment.GetEnvironmentVariable("CB_FRAME_TRACE_READY_SECONDS");
+        if (!string.IsNullOrWhiteSpace(readySecondsText)
+            && double.TryParse(readySecondsText, NumberStyles.Float, CultureInfo.InvariantCulture, out var readySeconds)
+            && readySeconds >= 0.0)
+        {
+            _readySeconds = readySeconds;
         }
 
         // 帧间隔采集：Rendering 每个渲染节拍在 UI 线程回调一次。
@@ -325,9 +386,9 @@ internal static class FrameTrace
         };
         _probeThread.Start();
 
-        // 场景编排：等主页面 → 应用亚克力 A/B → idle → scroll → drag → 落盘 → 退出。用独立线程而不是线程池，
-        // 保证即使 UI 线程完全卡死，它也能按时收尾并写文件。
-        var planThread = new Thread(() => RunPlan(doIdle, doScroll, doDrag))
+        // 场景编排：等主页面 → 应用亚克力/Mica A/B → idle → scroll → drag → manual → 落盘 → 退出。
+        // 用独立线程而不是线程池，保证即使 UI 线程完全卡死，它也能按时收尾并写文件。
+        var planThread = new Thread(() => RunPlan(doIdle, doScroll, doDrag, doManual))
         {
             IsBackground = true,
             Name = "CB.FrameTrace.Plan"
@@ -523,8 +584,8 @@ internal static class FrameTrace
         Interlocked.Decrement(ref _pendingProbes);
     }
 
-    /// <summary>场景编排：等主页面 → 应用亚克力 A/B → idle → scroll → drag → 收尾。</summary>
-    private static void RunPlan(bool doIdle, bool doScroll, bool doDrag)
+    /// <summary>场景编排：等主页面 → 应用亚克力/Mica A/B → idle → scroll → drag → manual → 收尾。</summary>
+    private static void RunPlan(bool doIdle, bool doScroll, bool doDrag, bool doManual)
     {
         try
         {
@@ -559,6 +620,9 @@ internal static class FrameTrace
             // 并留出重绘稳定时间，避免把切换本身的成本算进第一个场景。
             ApplyAcrylicSetting();
 
+            // Mica A/B 同理：只换主窗口的 SystemBackdrop，失败也只降级为“unknown/failed”，不打断测量。
+            ApplyMicaSetting();
+
             if (_minimizeAfterStart)
             {
                 // 隐藏窗口对照：只在本环境变量显式开启时最小化，正常行为完全不变。
@@ -578,6 +642,12 @@ internal static class FrameTrace
             if (doDrag)
             {
                 RunScenarioWithCost(Phase.Drag, _dragSeconds);
+            }
+
+            // manual 放最后：drag 的收尾（还原窗口）已经完成，操作者拿到的是一个静止、可拖的窗口。
+            if (doManual)
+            {
+                RunManualScenario();
             }
 
             SetPhase(Phase.Ended);
@@ -725,9 +795,168 @@ internal static class FrameTrace
     }
 
     /// <summary>
+    /// 把 CB_FRAME_TRACE_MICA 请求的状态落到主窗口的 SystemBackdrop 上，并读回实际状态。
+    /// 只复用 MainWindow 构造期创建的同一个 MicaBackdrop 实例（见 MainWindow.xaml.cs 的
+    /// <c>SystemBackdrop = new MicaBackdrop()</c>），不在本类里新增第二套 Mica 实现。
+    /// 未设置该变量时只读取当前状态，不改任何东西；整段包在 try/catch 里，
+    /// 切换失败只记录并继续，绝不让 A/B 开关打断测量。
+    /// </summary>
+    private static void ApplyMicaSetting()
+    {
+        try
+        {
+            if (_micaRequested is "0" or "1")
+            {
+                var enable = _micaRequested == "1";
+                var effective = SetMicaState(enable, out var error);
+                if (effective != enable)
+                {
+                    // 与亚克力一致：窗口/合成器可能刚完成上一轮设置，稍等后重试一次。
+                    Thread.Sleep(150);
+                    effective = SetMicaState(enable, out error);
+                }
+
+                _micaEffective = effective switch
+                {
+                    true => "on",
+                    false => "off",
+                    null => "failed:" + (string.IsNullOrEmpty(error) ? "unknown" : error)
+                };
+                _micaSource = "MainWindow.SystemBackdrop (MicaBackdrop)";
+                if (effective == null)
+                {
+                    WriteStatusLine(FormattableString.Invariant($"[mica] 切换失败，继续记录：{_micaEffective}"));
+                }
+                else
+                {
+                    Thread.Sleep(MicaSettleMs);
+                }
+
+                return;
+            }
+
+            var current = ReadMicaState(out var readError);
+            _micaEffective = current switch
+            {
+                true => "on",
+                false => "off",
+                null => "unknown:" + (string.IsNullOrEmpty(readError) ? "unavailable" : readError)
+            };
+            _micaSource = current == null ? "(not-read)" : "MainWindow.SystemBackdrop (MicaBackdrop)";
+        }
+        catch (Exception ex)
+        {
+            // 兜底：即使读状态本身抛异常，也只降级为 failed 并继续。
+            _micaEffective = "failed:" + ex.GetType().Name;
+            _micaSource = "MainWindow.SystemBackdrop (MicaBackdrop)";
+            WriteStatusLine(FormattableString.Invariant($"[mica] 切换异常，继续记录：{ex.GetType().Name}"));
+        }
+    }
+
+    /// <summary>在 UI 线程上把主窗口的 SystemBackdrop 切到 Mica 或 null，并读回是否处于 Mica 状态。</summary>
+    private static bool? SetMicaState(bool enable, out string error)
+    {
+        return RunOnUiThread(
+            () =>
+            {
+                var window = ClipBridgeShell_CS.App.MainWindow;
+                if (window == null)
+                {
+                    throw new InvalidOperationException("no-main-window");
+                }
+
+                if (enable)
+                {
+                    // 切走前先记下 MainWindow 构造期创建的那个 MicaBackdrop；切回时复用同一个对象。
+                    _micaOriginalBackdrop ??= window.SystemBackdrop as MicaBackdrop;
+                    if (_micaOriginalBackdrop == null)
+                    {
+                        throw new InvalidOperationException("no-mica-backdrop");
+                    }
+
+                    window.SystemBackdrop = _micaOriginalBackdrop;
+                }
+                else
+                {
+                    if (window.SystemBackdrop is MicaBackdrop mica)
+                    {
+                        _micaOriginalBackdrop = mica;
+                    }
+
+                    window.SystemBackdrop = null;
+                }
+
+                return window.SystemBackdrop is MicaBackdrop;
+            },
+            out error);
+    }
+
+    /// <summary>只读当前 Mica 状态（true=Mica 生效）；主窗口不可达时返回 null 并给出原因。</summary>
+    private static bool? ReadMicaState(out string error)
+    {
+        return RunOnUiThread(
+            () =>
+            {
+                var window = ClipBridgeShell_CS.App.MainWindow;
+                if (window == null)
+                {
+                    throw new InvalidOperationException("no-main-window");
+                }
+
+                return window.SystemBackdrop is MicaBackdrop;
+            },
+            out error);
+    }
+
+    /// <summary>
+    /// manual 场景：应用完全不碰窗口。先打印准备提示并倒计时，让操作者握住窗口；
+    /// 再按 CB_FRAME_TRACE_SECONDS（默认 5 秒）采集帧时序。期间不调用任何
+    /// SetWindowPos/Activate/缩放/重定位，窗口的位置与状态完全由人控制。
+    /// </summary>
+    private static void RunManualScenario()
+    {
+        WriteStatusLine(FormattableString.Invariant(
+            $"[manual] 准备 {_readySeconds:0.#} 秒后开始记录：请开始拖动窗口"));
+        WaitWithCountdown(_readySeconds);
+        WriteStatusLine(FormattableString.Invariant($"[manual] 记录中 {_manualSeconds:0.#} 秒…"));
+        RunScenarioWithCost(Phase.Manual, _manualSeconds);
+        WriteStatusLine("[manual] 记录结束");
+    }
+
+    /// <summary>准备阶段的等待：按整秒打印倒计时，结束时正好进入记录区间。</summary>
+    private static void WaitWithCountdown(double seconds)
+    {
+        if (seconds <= 0.0)
+        {
+            return;
+        }
+
+        var start = Stopwatch.GetTimestamp();
+        var lastRemaining = -1;
+        while (true)
+        {
+            var remaining = seconds - ((Stopwatch.GetTimestamp() - start) / (double)Stopwatch.Frequency);
+            if (remaining <= 0.0)
+            {
+                return;
+            }
+
+            var shown = (int)Math.Ceiling(remaining);
+            if (shown != lastRemaining)
+            {
+                WriteStatusLine(FormattableString.Invariant($"[manual] 倒计时 {shown}"));
+                lastRemaining = shown;
+            }
+
+            Thread.Sleep(50);
+        }
+    }
+
+    /// <summary>
     /// 跑一个场景：在场景起点、每个整秒、场景终点各采一次成本。采样点同时写入
     /// cost CSV 的逐秒时间序列与场景汇总。睡眠仍按 ≤50ms 分段，保证阶段切换足够及时。
-    /// drag 场景在该区间内由渲染回调逐帧移动窗口，采样口径与其它场景完全一致。
+    /// drag 场景在该区间内由渲染回调逐帧移动窗口，采样口径与其它场景完全一致；
+    /// manual 场景不驱动任何窗口动作，只把人的手动拖拽原样记录下来。
     /// </summary>
     private static void RunScenarioWithCost(Phase phase, double seconds)
     {
@@ -1224,6 +1453,9 @@ internal static class FrameTrace
             AcrylicRequested = _acrylicRequested,
             AcrylicEffective = _acrylicEffective,
             AcrylicSource = _acrylicSource,
+            MicaRequested = _micaRequested,
+            MicaEffective = _micaEffective,
+            MicaSource = _micaSource,
             DragStatus = phase == Phase.Drag ? _dragStatus : "not-run",
             DragMoves = phase == Phase.Drag ? _dragMoves : 0,
             DragActualHz = phase == Phase.Drag ? _dragActualHz : double.NaN,
@@ -1421,12 +1653,14 @@ internal static class FrameTrace
         var sb = new StringBuilder();
         sb.AppendLine("=== ClipBridge FrameTrace summary ===");
         sb.AppendLine(FormattableString.Invariant(
-            $"run={_runTag} started={_startedAtText} pid={Environment.ProcessId} scenario={_runTag} idle={_idleSeconds:F1}s scroll={_scrollSeconds:F1}s drag={_dragSeconds:F1}s"));
+            $"run={_runTag} started={_startedAtText} pid={Environment.ProcessId} scenario={_runTag} idle={_idleSeconds:F1}s scroll={_scrollSeconds:F1}s drag={_dragSeconds:F1}s manual={_manualSeconds:F1}s ready={_readySeconds:F1}s"));
         sb.AppendLine(FormattableString.Invariant(
             $"frames={snapshot.FrameSamples.Length} stalls={snapshot.StallSamples.Length} uiops={snapshot.OpSamples.Length} ffi_calls={Volatile.Read(ref _ffiCallCount)} ffi_on_ui_thread={Volatile.Read(ref _ffiUiThreadCallCount)} ffi_ui_over_5ms={Volatile.Read(ref _ffiOverThresholdCount)} scroll_ticks={Volatile.Read(ref _scrollTickCount)} scroll_target={_scrollTarget}"));
-        // 亚克力 A/B 与 drag 轨迹的自描述信息：看 [cost] 之前先能确认这轮到底测的是什么。
+        // 亚克力/Mica A/B 与 drag 轨迹的自描述信息：看 [cost] 之前先能确认这轮到底测的是什么。
         sb.AppendLine(FormattableString.Invariant(
             $"acrylic requested={_acrylicRequested} effective={_acrylicEffective} source={_acrylicSource}"));
+        sb.AppendLine(FormattableString.Invariant(
+            $"mica requested={_micaRequested} effective={_micaEffective} source={_micaSource}"));
         sb.AppendLine(FormattableString.Invariant(
             $"drag path=zigzag target_hz={DragTicksPerSecond} period_s={DragPeriodSeconds:F2} amplitude_px={_dragAmplitudeX}x{_dragAmplitudeY} window_px={_dragWindowWidth}x{_dragWindowHeight} base=({_dragBaseX},{_dragBaseY}) status={_dragStatus} moves={_dragMoves} actual_hz={FormatOrNa(_dragActualHz, "F1")} move_avg_ms={FormatOrNa(_dragMoveAvgMs, "F3")} rect_start={_dragRectStart} rect_end={_dragRectEnd}"));
         sb.AppendLine(FormattableString.Invariant(
@@ -1448,6 +1682,7 @@ internal static class FrameTrace
         sb.AppendLine("note: gpu_util_max_pct=max single-engine utilization over the 1s samples; gpu_util_sum_mean_pct=mean of summed per-engine utilization (can exceed 100)");
         sb.AppendLine("note: gpu_* only counts this process' PDH instances; dwm_gpu_* counts the desktop compositor (dwm.exe) of this session, where acrylic/mica composition actually happens. dwm_gpu is shared by every window on the desktop, so compare acrylic on/off within the same scenario rather than as an absolute cost");
         sb.AppendLine("note: drag = the window is temporarily shrunk to ~900x600 in the top-right corner and moved on the UI thread from the CompositionTarget.Rendering callback via SetWindowPos(SWP_NOZORDER|SWP_NOACTIVATE) at up to 120Hz, zig-zag +/-60px; every rendering tick that moves the window forces DWM to recompose, and the move call itself is included in drag_move_avg_ms / ui_cpu");
+        sb.AppendLine("note: manual = the app does NOT touch the window (no SetWindowPos/Activate/resize/reposition); after a ready countdown the human drags the window for requested_s, so frame timing is free of harness-driven window moves. ready_s comes from CB_FRAME_TRACE_READY_SECONDS (default 2s)");
         if (snapshot.CostScenarioSummaries.Length == 0)
         {
             sb.AppendLine("(no cost samples recorded)");
@@ -1465,7 +1700,7 @@ internal static class FrameTrace
 
         // 帧间隔：按场景分组统计（warmup 也列出，便于判断场景边界的污染程度）。
         sb.AppendLine("--- frame intervals (ms) ---");
-        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Ended })
+        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Manual, (int)Phase.Ended })
         {
             var deltas = new List<double>();
             foreach (var sample in snapshot.FrameSamples)
@@ -1486,7 +1721,7 @@ internal static class FrameTrace
         sb.AppendLine("--- frame tail / over-budget metrics (6.25ms budget at 160Hz) ---");
         sb.AppendLine("note: p1_low_ms = mean of the slowest ceil(n*1%) frame deltas (not a percentile); p01_low_ms = mean of slowest ceil(n*0.1%); worst_ms = worst single delta; over_* = count (share) of frames slower than 2/3/4 frames or 50ms");
         sb.AppendLine("note: tail sample counts are shown as k1/k01; with ~800 frames in a 5s scenario 1% is only 8 frames and 0.1% is 1 frame, so treat these numbers as indicative, not precise");
-        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Ended })
+        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Manual, (int)Phase.Ended })
         {
             var deltas = new List<double>();
             foreach (var sample in snapshot.FrameSamples)
@@ -1505,7 +1740,7 @@ internal static class FrameTrace
 
         sb.AppendLine();
         sb.AppendLine("--- ui-thread stall latency (ms; time from DispatcherQueue post to execution) ---");
-        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Ended })
+        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Manual, (int)Phase.Ended })
         {
             var latencies = new List<double>();
             var maxDepth = 0;
@@ -1530,7 +1765,7 @@ internal static class FrameTrace
         sb.AppendLine();
         sb.AppendLine("--- ui-thread stall tail metrics (slowest 1% / 0.1% of post-to-execution latencies) ---");
         sb.AppendLine("note: same tail definition as frame p1_low/p01_low; k1/k01 are the number of samples averaged");
-        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Ended })
+        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Manual, (int)Phase.Ended })
         {
             var latencies = new List<double>();
             foreach (var sample in snapshot.StallSamples)
@@ -1740,6 +1975,7 @@ internal static class FrameTrace
             (int)Phase.Drag => "drag",
             (int)Phase.Ended => "ended",
             (int)Phase.Teardown => "teardown",
+            (int)Phase.Manual => "manual",
             _ => "unknown"
         };
     }
@@ -1957,6 +2193,29 @@ internal static class FrameTrace
         }
     }
 
+    /// <summary>打印一行人工可读的进度（未重定向时安静失败，不影响测量）。</summary>
+    private static void WriteStatusLine(string line)
+    {
+        WriteConsole(line + Environment.NewLine);
+    }
+
+    /// <summary>
+    /// 退出看门狗的实际等待时长。基础是 8 秒；manual 场景额外覆盖
+    /// “准备 + 记录 + 5 秒余量”，使强制退出的计时预算绝不短于一次合法的人工拖拽记录
+    /// （否则一旦退出路径没有立即返回，新场景就会在记录中途被强杀）。
+    /// 未跑 manual 时保持原来的 8 秒，行为与改动前完全一致。
+    /// </summary>
+    private static int ExitWatchdogMs()
+    {
+        if (!_doManual)
+        {
+            return ExitWatchdogBaseMs;
+        }
+
+        var manualWindowMs = (int)Math.Ceiling((_readySeconds + _manualSeconds) * 1000.0) + ExitWatchdogMarginMs;
+        return Math.Max(ExitWatchdogBaseMs, manualWindowMs);
+    }
+
     /// <summary>
     /// 退出：走应用自己的退出路径（<see cref="Application.Exit"/>，必须在 UI 线程调用）。
     /// 另外挂一个看门狗线程：若窗口关闭钩子把退出取消掉，超时后强制结束进程，
@@ -1982,7 +2241,7 @@ internal static class FrameTrace
 
         var watchdog = new Thread(() =>
         {
-            Thread.Sleep(8000);
+            Thread.Sleep(ExitWatchdogMs());
             Environment.Exit(0);
         })
         {
@@ -2206,6 +2465,15 @@ internal static class FrameTrace
         /// <summary>亚克力状态来自哪个属性。</summary>
         public string AcrylicSource { get; set; } = "(not-read)";
 
+        /// <summary>本轮 CB_FRAME_TRACE_MICA 的原始值（unset/0/1）。</summary>
+        public string MicaRequested { get; set; } = "unset";
+
+        /// <summary>本轮实际生效的 Mica 状态（on/off/unknown/failed:...）。</summary>
+        public string MicaEffective { get; set; } = "unknown";
+
+        /// <summary>Mica 状态来自哪个对象。</summary>
+        public string MicaSource { get; set; } = "(not-read)";
+
         /// <summary>drag 场景执行状态（moved / no-move:... / unavailable:... / not-run）。</summary>
         public string DragStatus { get; set; } = "not-run";
 
@@ -2258,9 +2526,11 @@ internal static class FrameTrace
             // DWM 侧：亚克力/毛玻璃由桌面合成器完成，本进程的 GPU 计数不包含它。
             sb.Append(FormattableString.Invariant(
                 $" dwm_gpu_available={DwmGpuSampleCount > 0} dwm_gpu_util_max_pct={FormatOrNa(DwmGpuMaxPct, "F2")} dwm_gpu_util_sum_mean_pct={FormatOrNa(DwmGpuSumMeanPct, "F2")} dwm_gpu_engines={FormatEngines(DwmGpuEngineMaxPct, DwmGpuSampleCount)}"));
-            // 亚克力状态每轮都要自描述：A/B 结果必须能直接看出这一轮到底开没开。
+            // 亚克力/Mica 状态每轮都要自描述：A/B 结果必须能直接看出这一轮到底开没开。
             sb.Append(FormattableString.Invariant(
                 $" acrylic_requested={AcrylicRequested} acrylic_effective={AcrylicEffective} acrylic_source={AcrylicSource}"));
+            sb.Append(FormattableString.Invariant(
+                $" mica_requested={MicaRequested} mica_effective={MicaEffective} mica_source={MicaSource}"));
             if (string.Equals(PhaseName, "drag", StringComparison.Ordinal))
             {
                 sb.Append(FormattableString.Invariant(
