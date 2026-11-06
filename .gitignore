@@ -151,3 +151,9 @@ DerivedData/
 
 # Local Air IDE config
 .air/
+
+# IDE 与临时产物
+.cursor/
+artifacts/
+inspection_results/
+clippy_*.txt
