@@ -73,14 +73,22 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # 依赖缓存用 Swatinem/rust-cache，而不是 actions/cache 直接存 target/：
+      # - 冷 cargo 缓存下实测全量 debug 工作区构建 21 s（188 个单元；tokio 7.3 s、
+      #   syn 两代共 7.2 s、cb_core 5.7 s）。它只回填“第三方依赖”的 target 产物和
+      #   ~/.cargo（registry + bin），工作区 crate 每次照常重编（实测增量
+      #   check 1.2 s / build 2.8 s），所以省下的是依赖那 ~15 s，并非把 21 s 全清零。
+      # - 缓存 key 由 rustc 版本 + 仓库内 Cargo.lock/Cargo.toml/.cargo/config.toml
+      #   的哈希自动组成：Cargo.lock 或工具链一变 key 就变，旧缓存不会被错误复用；
+      #   需要手动整体失效时再改 prefix-key。
+      # - shared-key 每个 job 一个，Linux/Windows/Android 各占独立缓存条目，避免
+      #   互相驱逐（GitHub 缓存按条目 LRU 淘汰，体积大的 target 缓存最容易挤掉别人）。
+      # - 不用 actions/cache：它会把增量产物、已删依赖和未知 rustc 时代的产物一起存下来，
+      #   命中后可能拿到与当前依赖图不一致的产物；rust-cache 保存前会剔除这些。
+      - name: Cache cargo (rust-cache)
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: linux-rust
 
       - name: Format (rustfmt)
         run: cargo fmt --all -- --check
@@ -101,6 +109,11 @@ jobs:
 
       # Pinned on purpose: an unpinned `cargo install cargo-deny --locked` lets a new upstream
       # release break (or silently change) the supply-chain gate without a reviewable diff.
+      # 缓存交互：上面的 rust-cache 缓存 ~/.cargo（registry + bin），所以同一工具链/锁文件下
+      # 第二次起 cargo 会发现 0.20.2 已安装而直接跳过（<1 s 空操作）；首次仍需真实编译
+      # （本仓库未实测安装耗时）。cache-all-crates 保持默认 false，因为 `cargo install`
+      # 默认在临时 target 目录里编译（见 cargo help install），不写工作区 target/；打开它
+      # 只会把依赖图之外的 crate 产物也塞进缓存，对安装没有加速作用，只增加缓存体积。
       - name: Install cargo-deny
         run: cargo install cargo-deny --version 0.20.2 --locked
 
@@ -118,14 +131,19 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # 与 Linux rust job 同样的冷缓存成本：实测全量 debug 工作区构建 21 s（188 个
+      # 单元；tokio 7.3 s、syn 两代共 7.2 s、cb_core 5.7 s）。Windows runner 的依赖
+      # 编译只会更慢，缓存价值同样。rust-cache 只回填依赖的 target 产物 + ~/.cargo，
+      # 工作区 crate 仍重编（实测增量 check 1.2 s / build 2.8 s）；本 job 跑
+      # cargo check，因此每次约省依赖那 ~15 s。
+      # 缓存 key 含 rustc 版本与 Cargo.lock/Cargo.toml 哈希：工具链或锁文件变化时
+      # key 自动改变；shared-key: windows-rust 让它与 linux-rust/windows-csharp 隔离。
+      # 不用 actions/cache 直接存 target/，理由同 rust job（增量产物/过期依赖会被
+      # 一起存下，命中后可能与当前依赖图不一致）。
+      - name: Cache cargo (rust-cache, Windows)
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: windows-rust
 
       - name: Check workspace (Windows targets)
         run: cargo check --workspace --all-targets
@@ -177,16 +195,25 @@ jobs:
         with:
           targets: aarch64-linux-android,x86_64-linux-android
 
-      - name: Cache cargo (Android job)
-        uses: actions/cache@v4
+      # Android 交叉编译的依赖同样来自冷 cargo 缓存：这里每个 ABI 各编一次 release
+      # .so，对应实测 release FFI 构建 45 s（thin LTO + codegen-units=1）里的依赖
+      # 打底部分；rust-cache 回填后每个 ABI 只剩工作区 crate 要重编（实测增量
+      # build 2.8 s），两份合计每次省下数十秒。
+      # 目录：仓库没有设置 CARGO_TARGET_DIR（.cargo/config.toml 只有 CMAKE 相关 env），
+      # 这里又用 plain cargo（见下方说明），产物落在默认的
+      # target/aarch64-linux-android/release 与 target/x86_64-linux-android/release，
+      # 都在 rust-cache 默认缓存的 target/ 之内，因此 workspaces 保持默认 ". -> target"，
+      # 不需要额外 target-dir（rust-cache v2 也没有 target-dir 输入，要换目录得写
+      # workspaces: "<path> -> <target>"）。
+      # key：rust-cache 自动把 rustc 版本与 Cargo.lock/Cargo.toml 哈希算进 key，所以
+      # Cargo.lock 或工具链一变缓存自动失效；下面的 --locked 构建保证锁文件与缓存一致。
+      # shared-key: android-rust 与 linux-rust/windows-rust 分开，避免互相驱逐。
+      # cache-workspace-crates 保持默认 false（工作区 crate 每次都变，缓存它们没有收益），
+      # 缓存的是两个 triple 下的第三方依赖产物。
+      - name: Cache cargo (rust-cache, Android cross)
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-android-
+          shared-key: android-rust
 
       # 静态契约门禁：编译器只能证明 Java/AIDL 自洽，证明不了与平台/Rust 的契约。
       # 这里钉死 API 36 的 IClipboard 事务码顺序、检查 init JSON 覆盖 InitConfigDto
@@ -309,6 +336,26 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
+
+      # 本 job 的 dotnet build 会在 ClipBridgeShell_CS.csproj 的 BeforeBuild 里执行
+      # `cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc`。
+      # windows-latest 镜像自带 Rust stable（现有 job 就是靠它），所以这里不额外加
+      # rust-toolchain 步骤，但 rust-cache 需要 cargo/rustc 在 PATH 上。
+      # - 实测冷缓存 release FFI 构建 45 s（thin LTO + codegen-units=1）：缓存命中后
+      #   这部分依赖产物直接回填，每次省掉 45 s 里依赖编译的大头；工作区 crate 仍重编
+      #   （实测增量 build 2.8 s）。
+      # - 该构建带 --target，产物落在 target/x86_64-pc-windows-msvc/release；rust-cache
+      #   默认 cache-targets: true 缓存整个 target/，已覆盖这个三元组目录，仓库也没有
+      #   设置非默认 target 目录，所以无需 CARGO_TARGET_DIR/target-dir 覆盖。
+      # - key 含 rustc 版本 + Cargo.lock/Cargo.toml 哈希：锁文件或工具链变化时 key 自动
+      #   改变，旧 release 产物不会被错误复用；shared-key 与 Windows Rust job 分开。
+      - name: Cache cargo (rust-cache, C# job)
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-csharp
+          # 显式写出：这里必须连 target/ 一起缓存（release 产物在 target/<triple>/release），
+          # 只缓存 ~/.cargo 的话依赖仍要全量重编。
+          cache-targets: true
 
       # Build the concrete project files instead of the
       # platforms/windows/ClipBridgeShell_CS folder: that folder also contains the WiX installer
