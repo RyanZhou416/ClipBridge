@@ -13,8 +13,8 @@ using ClipBridgeShell_CS.Helpers;
 using ClipBridgeShell_CS.Interop;
 using ClipBridgeShell_CS.Models;
 using ClipBridgeShell_CS.Stores;
-using Windows.Storage;
 using Microsoft.Extensions.Logging;
+using Windows.Storage;
 using WinUI3Localizer;
 
 namespace ClipBridgeShell_CS.Services;
@@ -24,6 +24,11 @@ public sealed class CoreHostService : ICoreHostService
     // 壳侧期望的 FFI ABI 主版本：必须与 Rust 导出 cb_get_ffi_version 返回的 major 一致。
     // 依据：crates/cb_core_ffi/src/exports.rs 中 cb_get_ffi_version 返回 1，macOS 壳同样期望 1。
     private const uint ExpectedFfiAbiMajor = 1;
+
+    /// <summary>
+    /// 账号已配置但凭据不可读时展示给用户的降级提示（审计 F11）。
+    /// </summary>
+    private const string CredentialsUnavailableMessage = "无法读取账户凭据，请重新登录/重新设置密码";
 
     private readonly CoreConfigBuilder _cfgBuilder = new();
     private CoreInterop.CbOnEventFn? _onEventThunk;
@@ -51,7 +56,10 @@ public sealed class CoreHostService : ICoreHostService
     /// core 不启动 NetManager（不 bind 端口、不起 mDNS），避免 Windows 防火墙弹窗。
     /// 生产路径必须保持 false。
     /// </summary>
-    public static bool DisableNetwork { get; set; }
+    public static bool DisableNetwork
+    {
+        get; set;
+    }
 
     public CoreState State { get; private set; } = CoreState.NotLoaded;
     public CoreDiagnostics Diagnostics { get; } = new();
@@ -83,21 +91,43 @@ public sealed class CoreHostService : ICoreHostService
         LastError = null;
         SetState(CoreState.Loading);
 
-        // 检查是否有账号信息
-        if (_accountService != null)
+        // 账号凭据必须在初始化核心之前可用：core 用 account_password 注册 OPAQUE 账号，
+        // 空密码 = 任何 LAN peer 都能通过握手并被自动 TOFU 固定（审计 F11，fail-closed）。
+        string accountUid;
+        string accountPassword;
+
+        if (_accountService == null)
         {
-            var hasAccount = await _accountService.HasAccountAsync();
-            if (!hasAccount)
-            {
-                _logger?.LogInformation("No account found, waiting for account login");
-                LastError = "需要登录账号";
-                SetState(CoreState.NotLoaded);
-                return;
-            }
+            // 生产 DI 始终注入 IAccountService；缺失时无法证明凭据可用，绝不能回退到空密码。
+            FailClosedForCredentials("IAccountService is not available.");
+            return;
         }
 
+        var accountState = await _accountService.LoadAccountStateAsync();
+
+        if (!accountState.Configured)
+        {
+            // 用户名和密码都不存在 = 合法的首次运行：保持原有“等待登录”行为。
+            _logger?.LogInformation("No account configured, waiting for account login");
+            LastError = "需要登录账号";
+            SetState(CoreState.NotLoaded);
+            return;
+        }
+
+        if (!accountState.PasswordAvailable
+            || string.IsNullOrWhiteSpace(accountState.Username)
+            || string.IsNullOrWhiteSpace(accountState.Password))
+        {
+            // 账号存在但密码不可读（PasswordVault 被清空/迁移失败/Windows Hello 失败）。
+            FailClosedForCredentials("Account is configured but its password is unavailable.");
+            return;
+        }
+
+        accountUid = accountState.Username;
+        accountPassword = accountState.Password;
+
         var deviceId = await GetOrCreateDeviceIdAsync();
-        
+
         // 1. 路径构建
         var paths = _cfgBuilder.BuildPaths("ClipBridge");
         Diagnostics.AppDataDir = paths.AppDataDir;
@@ -121,22 +151,16 @@ public sealed class CoreHostService : ICoreHostService
             if (!Directory.Exists(cacheFolder)) Directory.CreateDirectory(cacheFolder);
         }
 
-        // 从AccountService获取账号信息
-        string accountUid = "default_user";
-        string accountPassword = "";
-        
-        if (_accountService != null)
-        {
-            var account = await _accountService.LoadAccountAsync();
-            if (account.HasValue)
-            {
-                accountUid = account.Value.username;
-                accountPassword = account.Value.password;
-            }
-        }
-
         // 更新当前账号 UID（用于后续检测账号切换）
         _currentAccountUid = accountUid;
+
+        // 防御性兜底：上面的分支已保证密码非空；这里再守一次 FFI 边界的不变量，
+        // 任何未来的改动都不得让空密码进入 core。
+        if (string.IsNullOrWhiteSpace(accountPassword))
+        {
+            FailClosedForCredentials("Account password became empty before core init.");
+            return;
+        }
 
         var config = new
         {
@@ -218,11 +242,11 @@ public sealed class CoreHostService : ICoreHostService
             // 记录初始化开始时间，用于写入"核心开"日志（使其时间戳早于核心初始化日志）
             // 注意：核心初始化日志是在 cb_init 调用时立即写入的，所以我们需要使用一个更早的时间戳
             var initStartTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 50; // 减去50ms，确保早于核心初始化日志
-            
+
             // [FIX] 必须使用 Task.Run 避免阻塞 UI 线程，虽然 init 应该很快
             await Task.Run(() =>
             {
-                IntPtr envelopePtr = CoreInterop.cb_init(configJson, _onEventThunk, userData);
+                var envelopePtr = CoreInterop.cb_init(configJson, _onEventThunk, userData);
                 var envelopeJson = CoreInterop.PtrToStringAndFree(envelopePtr);
                 Diagnostics.LastInitEnvelopeJson = envelopeJson;
 
@@ -255,7 +279,7 @@ public sealed class CoreHostService : ICoreHostService
             Diagnostics.LastInitSummary = "Init OK";
             SetState(CoreState.Ready);
             StartupTrace.Mark("core-ready");
-            
+
             // 写入"核心开"日志到核心（使用较早的时间戳，使其出现在核心初始化日志之前）
             try
             {
@@ -302,15 +326,15 @@ public sealed class CoreHostService : ICoreHostService
         string? newAccountUid = null;
         if (_accountService != null)
         {
-            var account = await _accountService.LoadAccountAsync();
-            if (account.HasValue)
+            var accountState = await _accountService.LoadAccountStateAsync();
+            if (accountState.Configured && accountState.PasswordAvailable)
             {
-                newAccountUid = account.Value.username;
+                newAccountUid = accountState.Username;
             }
         }
 
         // 检测账号是否改变
-        bool accountChanged = _currentAccountUid != null && newAccountUid != null && _currentAccountUid != newAccountUid;
+        var accountChanged = _currentAccountUid != null && newAccountUid != null && _currentAccountUid != newAccountUid;
 
         // 如果已经初始化，先关闭
         if (State == CoreState.Ready || State == CoreState.Loading)
@@ -348,9 +372,9 @@ public sealed class CoreHostService : ICoreHostService
             {
                 localFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
             }
-            
+
             var tlsDir = System.IO.Path.Combine(localFolder, "tls");
-            
+
             if (System.IO.Directory.Exists(tlsDir))
             {
                 await Task.Run(() =>
@@ -499,6 +523,18 @@ public sealed class CoreHostService : ICoreHostService
         }
     }
 
+    /// <summary>
+    /// 账号已配置但凭据不可用时的 fail-closed 出口：不初始化核心/NetManager，
+    /// 进入 UI 可展示的 Degraded 状态，并把可操作的原因写入 LastError。
+    /// </summary>
+    private void FailClosedForCredentials(string logReason)
+    {
+        _logger?.LogWarning("Refusing to initialize core: {Reason}", logReason);
+        LastError = CredentialsUnavailableMessage;
+        Diagnostics.LastInitSummary = "Core degraded: account credentials unavailable.";
+        SetState(CoreState.Degraded);
+    }
+
     private void SetState(CoreState s)
     {
         var oldState = State;
@@ -604,22 +640,40 @@ public sealed class CoreHostService : ICoreHostService
         }
 
         [JsonPropertyName("device_id")]
-        public string? DeviceId { get; set; }
+        public string? DeviceId
+        {
+            get; set;
+        }
 
         [JsonPropertyName("device_name")]
-        public string? DeviceName { get; set; }
+        public string? DeviceName
+        {
+            get; set;
+        }
 
         [JsonPropertyName("state")]
-        public string? State { get; set; }
+        public string? State
+        {
+            get; set;
+        }
 
         [JsonPropertyName("last_seen_ts_ms")]
-        public long? LastSeenTsMs { get; set; }
+        public long? LastSeenTsMs
+        {
+            get; set;
+        }
 
         [JsonPropertyName("share_to_peer")]
-        public bool? ShareToPeer { get; set; }
+        public bool? ShareToPeer
+        {
+            get; set;
+        }
 
         [JsonPropertyName("accept_from_peer")]
-        public bool? AcceptFromPeer { get; set; }
+        public bool? AcceptFromPeer
+        {
+            get; set;
+        }
     }
 
     // [FIX] 确保 FindCoreDll 被 InitializeAsync 调用
@@ -678,7 +732,8 @@ public sealed class CoreHostService : ICoreHostService
                 }
 
                 return true;
-            } catch (Exception ex)
+            }
+            catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "IngestLocalCopy failed");
                 System.Diagnostics.Debug.WriteLine($"IngestLocalCopy failed: {ex}");
@@ -718,7 +773,8 @@ public sealed class CoreHostService : ICoreHostService
                 return TryParseEnvelope<HistoryPage>(json, out var page, out _, out _) && page is not null
                     ? page
                     : new HistoryPage();
-            } catch (Exception ex)
+            }
+            catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"ListHistoryAsync failed: {ex.Message}");
                 return new HistoryPage();

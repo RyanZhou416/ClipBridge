@@ -244,6 +244,14 @@ pub fn parse_cfg(json: &str) -> anyhow::Result<cb_core::api::CoreConfig> {
 	// 1. 使用 InitConfigDto 进行反序列化 (支持 app_config 嵌套和数字类型的 GC 配置)
 	let dto: InitConfigDto = serde_json::from_str(json).context("invalid cfg_json")?;
 
+	// 1.1 拒绝空/纯空白密码（审计 F11，纵深防御）。
+	// 空密码会让 core 注册一个“空密码即可认证”的 OPAQUE 账号，任何 LAN peer 都能通过
+	// 握手并被自动 TOFU 固定。复杂度策略仍由壳侧负责，这里只做“绝不接受空凭据”的兜底，
+	// 且在 Core::init / OPAQUE setup / 证书初始化之前失败。
+	if dto.account_password.trim().is_empty() {
+		anyhow::bail!("account_password must not be empty");
+	}
+
 	// 2. 构造 AppConfig
 	let app_config = if let Some(app) = dto.app_config {
 		let policy = match app.global_policy.as_deref() {
@@ -314,4 +322,52 @@ pub fn parse_snapshot(json: &str) -> anyhow::Result<(ClipboardSnapshot, ShareMod
 	};
 
 	Ok((snap, dto.share_mode))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::parse_cfg;
+
+	/// 构造一份字段齐全、仅密码可变的合法 cfg JSON（parse_cfg 不访问文件系统）。
+	fn cfg_json(password: &str) -> String {
+		serde_json::json!({
+			"device_id": "dev-test",
+			"device_name": "test-device",
+			"account_uid": "acct-test",
+			"account_password": password,
+			"data_dir": "C:/tmp/clipbridge-test/data",
+			"cache_dir": "C:/tmp/clipbridge-test/cache",
+		})
+		.to_string()
+	}
+
+	#[test]
+	fn parse_cfg_rejects_empty_account_password() {
+		let err = parse_cfg(&cfg_json("")).expect_err("empty account_password must be rejected");
+		assert!(
+			err.to_string()
+				.contains("account_password must not be empty"),
+			"unexpected error: {err:#}"
+		);
+	}
+
+	#[test]
+	fn parse_cfg_rejects_whitespace_only_account_password() {
+		let err = parse_cfg(&cfg_json(" \t\r\n "))
+			.expect_err("whitespace-only password must be rejected");
+		assert!(
+			err.to_string()
+				.contains("account_password must not be empty"),
+			"unexpected error: {err:#}"
+		);
+	}
+
+	#[test]
+	fn parse_cfg_accepts_non_empty_account_password() {
+		let cfg = parse_cfg(&cfg_json("correct horse battery staple"))
+			.expect("non-empty account_password must be accepted");
+		assert_eq!(cfg.account_password, "correct horse battery staple");
+		assert_eq!(cfg.account_uid, "acct-test");
+		assert_eq!(cfg.device_id, "dev-test");
+	}
 }

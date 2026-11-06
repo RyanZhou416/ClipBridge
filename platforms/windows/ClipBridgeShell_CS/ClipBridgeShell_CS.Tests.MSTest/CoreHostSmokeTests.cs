@@ -1,3 +1,4 @@
+using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
 using ClipBridgeShell_CS.Core.Services;
 using ClipBridgeShell_CS.Models;
@@ -35,7 +36,11 @@ public class CoreHostSmokeTests
 
         var localSettingsService = new LocalSettingsService(fileService, options);
 
-        var coreHost = new CoreHostService(eventPump, localSettingsService);
+        // 审计 F11 之后，缺少可用账号凭据时 CoreHostService 会 fail-closed；
+        // 冒烟测试需要真实初始化核心，因此注入一组固定的可用凭据。
+        var accountService = new StubAccountService(AccountLoadResult.Available("smoke-test-user", "smoke-test-password"));
+
+        var coreHost = new CoreHostService(eventPump, localSettingsService, null, accountService);
 
         for (var i = 1; i <= 50; i++)
         {
