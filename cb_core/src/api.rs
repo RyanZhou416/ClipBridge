@@ -12,6 +12,19 @@ use crate::net::{NetCmd, NetManager};
 pub use crate::policy::{AppConfig, GlobalPolicy};
 use crate::{cas::Cas, logs::LogStore, store::Store, util::now_ms};
 
+/// CAS 缓存 GC 的“廉价预检”阈值：`content_cache` 的 SQL 账面占用低于
+/// 上限的 `1 - 1/GC_CAS_ACCOUNT_TRIGGER_DIVISOR`（即 90%）时，非启动路径
+/// 不再遍历缓存目录做账实核算（见 [`Core::run_gc`]）。
+const GC_CAS_ACCOUNT_TRIGGER_DIVISOR: i64 = 10;
+
+// 单元测试探针：本线程执行过多少次 `run_gc` 里的 CAS 整树遍历。
+// 用 thread-local 而不是全局原子：libtest 默认每个测试一个线程，这样并行
+// 测试之间不会互相污染计数。（macro 调用上不能写 `///`，否则是 unused doc comment。）
+#[cfg(test)]
+thread_local! {
+	pub(crate) static GC_CAS_FULL_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /**
  * Core 的配置项。
  *
@@ -577,7 +590,15 @@ impl Core {
 		Ok(meta_clone)
 	}
 
-	pub fn run_gc(&self, _reason: &str) -> anyhow::Result<()> {
+	/// 执行一次 GC：历史记录条数 + CAS 缓存容量。
+	///
+	/// `reason` 用于区分启动阶段：`"Startup"` 无条件做一次完整的 CAS 账实核算；
+	/// 其他调用先查 SQL 账面估算，只有接近上限（≥ 90%）才遍历缓存目录。
+	///
+	/// 这样每次剪贴板摄入都不再为整个缓存目录付出 O(文件数) 的
+	/// `total_size_bytes()` 成本，同时容量上限依然生效：SQL 估算只决定“要不要
+	/// 做昂贵核算”，真实字节数仍由按 inode 去重硬链接的整树遍历决定。
+	pub fn run_gc(&self, reason: &str) -> anyhow::Result<()> {
 		if self.inner.is_shutdown.load(Ordering::Acquire) {
 			anyhow::bail!("core already shutdown");
 		}
@@ -600,33 +621,68 @@ impl Core {
 		// 2) Cache GC（LRU）
 		let max_cas = self.inner.core_config.app_config.gc_cas_max_bytes;
 		if max_cas > 0 {
-			// 真实占用 = blobs + files/ 视图 + downloads/ 视图（按 inode 去重，硬链接只计一次）
-			let mut cur = self.inner.cas.total_size_bytes()?;
-			while cur > max_cas {
-				let sha = {
+			// 廉价预检：`SELECT SUM(total_bytes) FROM content_cache WHERE present=1`
+			// 走 idx_cache_size(present,total_bytes) 索引，不打开任何文件。它只是
+			// “是否值得做整树核算”的触发器，不是权威值：
+			// - 真实占用始终由 total_size_bytes() 的整树遍历（blobs/files/downloads，
+			//   按 inode 去重硬链接）在真正需要核算时决定；
+			// - 启动阶段无条件完整核算，同时兜底修复账实漂移；
+			// - 非启动路径只有账面估算达到上限的 90% 才完整核算。
+			// 漂移取舍：若 present=1 的行在磁盘上已丢失，估算偏高（多触发遍历，
+			// 方向安全）；若磁盘上有 content_cache 未记录的残留（present=0 的历史
+			// 行、孤儿 blob、无法追踪的复制视图），估算偏低，可能在本轮少触发一次
+			// 遍历。后者由启动对账 reconcile_cache_presence + 启动 GC 的完整遍历兜底。
+			let do_full_accounting = if reason == "Startup" {
+				true
+			} else {
+				let estimate = {
 					let store = self.inner.store.lock().unwrap();
-					let mut cands = store.select_lru_present(1)?;
-					let Some((sha, _bytes)) = cands.pop() else {
+					store.sum_present_bytes()?
+				};
+				// 留 10% 安全余量：低于上限的 90% 时不遍历磁盘。
+				estimate >= max_cas - max_cas / GC_CAS_ACCOUNT_TRIGGER_DIVISOR
+			};
+
+			if do_full_accounting {
+				#[cfg(test)]
+				GC_CAS_FULL_WALKS.with(|n| n.set(n.get() + 1));
+
+				// 权威值：真实占用 = blobs + files/ 视图 + downloads/ 视图（按 inode
+				// 去重，硬链接共享的 inode 只计一次）。
+				let mut cur = self.inner.cas.total_size_bytes()?;
+				while cur > max_cas {
+					let sha = {
+						let store = self.inner.store.lock().unwrap();
+						let mut cands = store.select_lru_present(1)?;
+						let Some((sha, _bytes)) = cands.pop() else {
+							break;
+						};
+						sha
+					};
+					// remove_blob 先删引用同一 inode 的 files/downloads 视图硬链接，
+					// 再删 blob 本身；它返回的 `i64` 是该 blob 文件的字节数，也就是
+					// 这个 inode 在所有链接消失时真正释放的字节数。因此可以直接从
+					// `cur` 扣减，无需再走一次整树遍历。
+					// 已知不足（只会让统计偏保守）：无法追踪的“复制回退”视图
+					// （非硬链接）被删掉时释放的字节不含在返回值里，于是 `cur` 只会
+					// 偏高、不会偏低 —— 最坏情况是多驱逐一点，而不会在真实占用仍超限
+					// 时误判为“已够小”。
+					// 删除报错（如 Windows 上视图被占用）时本轮直接放弃：不做第二次
+					// 整树重算，下一次完整核算（启动或再次接近上限）会重新核准。
+					let Ok(freed) = self.inner.cas.remove_blob(&sha) else {
 						break;
 					};
-					sha
-				};
-				// 删除 blob 时同步删除引用它的视图链接；视图被占用而删不掉时
-				// remove_blob 会报错并保留 blob，本轮直接放弃，避免死循环。
-				if self.inner.cas.remove_blob(&sha).is_err() {
-					break;
+					{
+						let mut store = self.inner.store.lock().unwrap();
+						store.mark_cache_missing(&sha, now)?;
+					}
+					if freed <= 0 {
+						// 账实漂移：blob 已不存在（或为空），没有可扣减的字节。
+						// 不猜、不重算，交给下一次完整核算。
+						break;
+					}
+					cur = cur.saturating_sub(freed);
 				}
-				{
-					let mut store = self.inner.store.lock().unwrap();
-					store.mark_cache_missing(&sha, now)?;
-				}
-				// 删除后重新核算真实占用，而不是相信一个“已释放字节数”的预估值：
-				// 硬链接共享 inode，只有最后一个链接消失时磁盘空间才真正下降。
-				let after = self.inner.cas.total_size_bytes()?;
-				if after >= cur {
-					break;
-				}
-				cur = after;
 			}
 		}
 		Ok(())
@@ -1399,5 +1455,138 @@ mod startup_reconciliation {
 			.unwrap();
 		assert!(!present, "blob 缺失的行必须在对账后 present=0");
 		reopened.shutdown();
+	}
+}
+
+/// 性能回归：摄入不再为每次拷贝做 O(缓存文件数) 的 CAS 整树遍历，
+/// 但“超过上限必须驱逐”的语义不能丢。
+#[cfg(test)]
+mod ingest_gc_walk_regression {
+	use super::*;
+
+	struct NoopSink;
+	impl CoreEventSink for NoopSink {
+		fn emit(&self, _event_json: String) {}
+	}
+
+	fn make_core(root: &std::path::Path, gc_cas_max_bytes: i64) -> Core {
+		let cfg = CoreConfig {
+			device_id: "dev-ingest-gc-walk".to_string(),
+			device_name: "dev".to_string(),
+			account_uid: "acct-ingest-gc-walk".to_string(),
+			account_password: "test_password".to_string(),
+			data_dir: root.join("data").to_string_lossy().into_owned(),
+			cache_dir: root.join("cache").to_string_lossy().into_owned(),
+			app_config: AppConfig {
+				gc_history_max_items: 50_000,
+				gc_cas_max_bytes,
+				..Default::default()
+			},
+			disable_network: true,
+		};
+		Core::init(cfg, Arc::new(NoopSink))
+	}
+
+	fn full_walk_count() -> usize {
+		GC_CAS_FULL_WALKS.with(std::cell::Cell::get)
+	}
+
+	/// 缓存远低于上限时，N 次摄入不应触发任何一次 CAS 整树遍历。
+	#[test]
+	fn ingest_under_limit_skips_full_cas_walk() {
+		let root = tempfile::tempdir().unwrap();
+		// 1 GiB 上限；20 条 ~120 B 文本的账面占用远低于 90% 阈值。
+		let core = make_core(root.path(), 1024 * 1024 * 1024);
+		let walks_after_init = full_walk_count();
+
+		for i in 0..20usize {
+			core.ingest_local_copy(ClipboardSnapshot::Text {
+				text_utf8: format!("gc-walk-under-limit {i:02} {}", "x".repeat(100)),
+				ts_ms: now_ms() + i as i64,
+			})
+			.unwrap();
+		}
+
+		let present_bytes = core
+			.inner
+			.store
+			.lock()
+			.unwrap()
+			.sum_present_bytes()
+			.unwrap();
+		assert!(present_bytes > 0, "ingest 之后缓存账面占用必须非零");
+		assert_eq!(
+			full_walk_count(),
+			walks_after_init,
+			"缓存远低于上限时 ingest 不应触发 run_gc 的整树遍历"
+		);
+
+		core.shutdown();
+	}
+
+	/// 上限很小、账面占用跨过 90% 阈值时，完整核算 + LRU 驱逐必须照常发生。
+	#[test]
+	fn tiny_cap_still_evicts_when_exceeded() {
+		let root = tempfile::tempdir().unwrap();
+		// 50 B 上限：第二条 40 B 内容摄入后账面 80 B >= 45 B（90%），必须触发
+		// 完整核算并驱逐 LRU，真实磁盘占用最终回到上限以内。
+		let core = make_core(root.path(), 50);
+		let walks_after_init = full_walk_count();
+
+		let b1 = vec![1u8; 40];
+		let b2 = vec![2u8; 40];
+		let sha1 = crate::util::sha256_hex(&b1);
+		let sha2 = crate::util::sha256_hex(&b2);
+
+		core.ingest_local_copy(ClipboardSnapshot::Image {
+			bytes: b1,
+			mime: "image/png".to_string(),
+			ts_ms: now_ms(),
+		})
+		.unwrap();
+		core.ingest_local_copy(ClipboardSnapshot::Image {
+			bytes: b2,
+			mime: "image/png".to_string(),
+			ts_ms: now_ms() + 1,
+		})
+		.unwrap();
+
+		assert!(
+			full_walk_count() > walks_after_init,
+			"接近/超过上限时 run_gc 必须做完整账实核算"
+		);
+
+		let real = core.inner.cas.total_size_bytes().unwrap();
+		assert!(
+			real <= 50,
+			"驱逐后真实磁盘占用必须回到上限内，实际 {real} B"
+		);
+
+		// LRU 时间戳可能同毫秒，具体驱逐哪一条由 sha 兜底排序决定：只断言
+		// 恰好留下一条，且 content_cache 的 present 与磁盘上的 blob 一致。
+		let present = {
+			let store = core.inner.store.lock().unwrap();
+			(
+				store.get_cache_present(&sha1).unwrap(),
+				store.get_cache_present(&sha2).unwrap(),
+			)
+		};
+		assert_eq!(
+			usize::from(present.0) + usize::from(present.1),
+			1,
+			"超限时必须驱逐到只剩一条 present"
+		);
+		assert_eq!(
+			core.inner.cas.blob_exists(&sha1),
+			present.0,
+			"sha1 的 present 必须与磁盘一致"
+		);
+		assert_eq!(
+			core.inner.cas.blob_exists(&sha2),
+			present.1,
+			"sha2 的 present 必须与磁盘一致"
+		);
+
+		core.shutdown();
 	}
 }
