@@ -277,9 +277,9 @@ async fn test_m3_3_file_fetch_success() {
 			.execute(
 				"INSERT INTO items (
                 item_id, kind, owner_device_id, created_ts_ms, size_bytes,
-                mime, sha256_hex, files_json, expires_ts_ms
+                mime, sha256_hex, files_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 				(
 					&meta.item_id,
 					"file_list",
@@ -289,7 +289,6 @@ async fn test_m3_3_file_fetch_success() {
 					&meta.content.mime,
 					&meta.content.sha256,
 					&files_json,
-					Option::<i64>::None,
 				),
 			)
 			.expect("Failed to insert meta into A's DB");

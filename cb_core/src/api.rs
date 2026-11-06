@@ -280,6 +280,42 @@ impl Core {
 			}
 		}
 
+		// 启动对账：`content_cache` 里声称 present=1、但 blob 文件已丢失的行改回 0。
+		// 只对“声称存在”的行做 N 次文件检查，不扫描整个 CAS 目录，启动成本与缓存条目数
+		// 成正比；这能修复崩溃/手动清理磁盘后 GC 仍以为内容还在的账实不符。
+		match reconcile_cache_presence(&store_arc, &cas, now_ms()) {
+			Ok(0) => {
+				let mut log_store = log_store_arc.lock().unwrap();
+				let _ = log_store.log_debug(
+					"Cache",
+					"Startup cache reconciliation: no present row is missing its blob",
+					Some("启动缓存对账：所有 present=1 的记录都能找到对应 blob"),
+				);
+			}
+			Ok(count) => {
+				let mut log_store = log_store_arc.lock().unwrap();
+				let _ = log_store.log_warn(
+					"Cache",
+					&format!(
+						"Startup cache reconciliation: {count} content_cache row(s) claimed present=1 \
+                         but their blob is missing -> present=0"
+					),
+					Some(&format!(
+						"启动缓存对账：{count} 条 content_cache 记录声称 present=1 但 blob 缺失，已改为 present=0"
+					)),
+				);
+			}
+			Err(e) => {
+				let mut log_store = log_store_arc.lock().unwrap();
+				let _ = log_store.log_error(
+					"Cache",
+					&format!("Startup cache reconciliation failed: {e}"),
+					Some(&format!("启动缓存对账失败: {e}")),
+					Some(&e.to_string()),
+				);
+			}
+		}
+
 		// --- M1 集成：启动网络管理器 ---
 		// 注意：这里假设 NetManager::spawn 是同步封装（内部 spawn 异步任务）
 		// 如果是在 FFI 环境且有 Tokio Runtime，这将正常工作。
@@ -1094,6 +1130,30 @@ impl Core {
 	}
 }
 
+/// 启动对账：把“声称 present=1 但 blob 文件缺失”的 `content_cache` 行改回 0。
+///
+/// 只读取 present=1 的行并逐条 `exists` 检查；不扫描整个 cache 目录，也不删除
+/// 任何 blob（没有元数据引用的孤儿由 schema 重建时的 CAS 清空处理）。
+/// 返回实际更新（present=0）的行数。
+fn reconcile_cache_presence(store: &Mutex<Store>, cas: &Cas, now_ms: i64) -> anyhow::Result<usize> {
+	let hashes = store.lock().unwrap().list_present_cache_hashes()?;
+	let missing: Vec<String> = hashes
+		.into_iter()
+		.filter(|sha| !cas.blob_exists(sha))
+		.collect();
+	if missing.is_empty() {
+		return Ok(0);
+	}
+
+	// 文件检查在锁外完成，避免阻塞其他 store 调用；写回时再短暂持锁。
+	let mut store = store.lock().unwrap();
+	let mut updated = 0usize;
+	for sha in &missing {
+		updated += store.mark_cache_missing(sha, now_ms)?;
+	}
+	Ok(updated)
+}
+
 #[cfg(test)]
 impl Core {
 	// 可以在这里添加针对 M1 的测试辅助方法
@@ -1287,5 +1347,57 @@ mod stats_reporting {
 		assert!(!data_dir.join("stats.db-shm").exists());
 
 		core.shutdown();
+	}
+}
+
+/// 启动对账回归：`present=1` 但 blob 丢失时，下次启动必须改回 `present=0`。
+#[cfg(test)]
+mod startup_reconciliation {
+	use super::*;
+
+	struct NoopSink;
+	impl CoreEventSink for NoopSink {
+		fn emit(&self, _event_json: String) {}
+	}
+
+	#[test]
+	fn missing_blob_is_marked_absent_on_next_startup() {
+		let root = tempfile::tempdir().unwrap();
+		let cfg = CoreConfig {
+			device_id: "dev-reconcile".to_string(),
+			device_name: "dev".to_string(),
+			account_uid: "acct-reconcile".to_string(),
+			account_password: "test_password".to_string(),
+			data_dir: root.path().join("data").to_string_lossy().into_owned(),
+			cache_dir: root.path().join("cache").to_string_lossy().into_owned(),
+			app_config: AppConfig::default(),
+			disable_network: true,
+		};
+
+		let core = Core::init(cfg.clone(), Arc::new(NoopSink));
+		let meta = core
+			.ingest_local_copy(ClipboardSnapshot::Text {
+				text_utf8: "reconcile me".to_string(),
+				ts_ms: now_ms(),
+			})
+			.unwrap();
+		let sha = meta.content.sha256.clone();
+		let blob = core.inner.cas.blob_path(&sha).unwrap();
+		assert!(blob.exists());
+		// 模拟崩溃/外部清理：元数据还在，blob 已丢失。
+		std::fs::remove_file(blob).unwrap();
+		core.shutdown();
+		drop(core);
+
+		let reopened = Core::init(cfg, Arc::new(NoopSink));
+		let present = reopened
+			.inner
+			.store
+			.lock()
+			.unwrap()
+			.get_cache_present(&sha)
+			.unwrap();
+		assert!(!present, "blob 缺失的行必须在对账后 present=0");
+		reopened.shutdown();
 	}
 }

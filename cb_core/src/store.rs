@@ -42,29 +42,37 @@ const DROP_OWNED_TABLES_DDL: &str = r"
 /// - `content_cache`：SHA-256 内容的体积与 `present` 状态（LRU/GC 依据）。
 /// - `trusted_peers`：TOFU 设备指纹（配对信任）。
 /// - `peer_rules`：每个设备的共享/接收策略。
+///
+/// 约束说明（v2 生成）：
+/// - `items.kind` 用 CHECK 限定为 `kind_to_str` 产出的三个值，防止脏数据。
+/// - `history.item_id` 外键到 `items.item_id` 并 `ON DELETE CASCADE`。现有删除路径
+///   都是软删除（只置 `is_deleted`），因此 cascade 只在未来做硬删除时兜底：
+///   删 items 行时不会留下悬空 history。`clear_core_db` 先删 history 再删 items，
+///   不依赖 cascade。
+/// - `items.expires_ts_ms` 已删除：全仓库没有任何 TTL 清理逻辑读取它，模型里的
+///   `ItemMeta.expires_ts_ms` 仍保留（对外 JSON 形状），读取时恒为 `None`。
 const SCHEMA_DDL: &str = r"
     -- items 表：存储项的元数据
     CREATE TABLE IF NOT EXISTS items (
       item_id TEXT PRIMARY KEY,
-      kind TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('text','image','file_list')),
       owner_device_id TEXT NOT NULL,
       created_ts_ms INTEGER NOT NULL,
       size_bytes INTEGER NOT NULL,
       mime TEXT NOT NULL,
       sha256_hex TEXT NOT NULL,
       preview_json TEXT,
-      files_json TEXT,
-      expires_ts_ms INTEGER
+      files_json TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_ts_ms);
     CREATE INDEX IF NOT EXISTS idx_items_sha256 ON items(sha256_hex);
     CREATE INDEX IF NOT EXISTS idx_items_owner_created ON items(owner_device_id, created_ts_ms);
 
-    -- history 表：追踪项的历史数据
+    -- history 表：追踪项的历史数据；item 被硬删除时级联清掉历史
     CREATE TABLE IF NOT EXISTS history (
       history_id INTEGER PRIMARY KEY AUTOINCREMENT,
       account_uid TEXT NOT NULL,
-      item_id TEXT NOT NULL,
+      item_id TEXT NOT NULL REFERENCES items(item_id) ON DELETE CASCADE,
       sort_ts_ms INTEGER NOT NULL,
       source_device_id TEXT,
       is_deleted INTEGER NOT NULL DEFAULT 0
@@ -213,18 +221,32 @@ impl Store {
 			}
 		}
 
-		// files_json 是当前一代 items 的关键列；旧 v2 没有它。
+		// 关键列指纹：旧 v2 没有 files_json；本代 v2 已删除 expires_ts_ms。
+		// 这样即使某个中间版本也写过 user_version=2，最终代码仍会重建它。
 		let mut stmt = conn.prepare("PRAGMA table_info(items)")?;
 		let mut rows = stmt.query([])?;
 		let mut has_files_json = false;
+		let mut has_expires = false;
 		while let Some(row) = rows.next()? {
 			let name: String = row.get(1)?;
-			if name == "files_json" {
-				has_files_json = true;
-				break;
+			match name.as_str() {
+				"files_json" => has_files_json = true,
+				"expires_ts_ms" => has_expires = true,
+				_ => {}
 			}
 		}
-		Ok(has_files_json)
+		if !has_files_json || has_expires {
+			return Ok(false);
+		}
+
+		// 外键指纹：v2 要求 history.item_id -> items.item_id ON DELETE CASCADE。
+		let fk_count: i64 = conn.query_row(
+			r#"SELECT COUNT(*) FROM pragma_foreign_key_list('history')
+               WHERE "table"='items' AND "from"='item_id' AND on_delete='CASCADE'"#,
+			[],
+			|r| r.get(0),
+		)?;
+		Ok(fk_count > 0)
 	}
 
 	fn kind_to_str(k: &ItemKind) -> &'static str {
@@ -321,8 +343,8 @@ impl Store {
 
 		tx.execute(
             r"INSERT INTO items
-               (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, files_json, expires_ts_ms)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+               (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, files_json)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 meta.item_id,
                 Self::kind_to_str(&meta.kind),
@@ -332,8 +354,7 @@ impl Store {
                 meta.content.mime,
                 meta.content.sha256,
                 preview_json,
-                files_json,
-                meta.expires_ts_ms
+                files_json
             ],
         )?;
 
@@ -442,7 +463,7 @@ impl Store {
 	/// 期望的列顺序：
 	/// 0: item_id, 1: kind, 2: owner_device_id, 3: created_ts_ms,
 	/// 4: size_bytes, 5: mime, 6: sha256_hex,
-	/// 7: preview_json, 8: files_json, 9: expires_ts_ms, 10: total_bytes
+	/// 7: preview_json, 8: files_json, 9: total_bytes
 	fn row_to_item_meta(r: &Row) -> rusqlite::Result<ItemMeta> {
 		let kind_s: String = r.get(1)?;
 		let kind = match kind_s.as_str() {
@@ -461,7 +482,7 @@ impl Store {
 			.and_then(|s| serde_json::from_str::<Vec<FileMeta>>(s).ok())
 			.unwrap_or_default();
 
-		let total_bytes: i64 = r.get(10)?;
+		let total_bytes: i64 = r.get(9)?;
 
 		Ok(ItemMeta {
 			ty: "ItemMeta".to_string(),
@@ -478,7 +499,8 @@ impl Store {
 				total_bytes,
 			},
 			files,
-			expires_ts_ms: r.get(9)?,
+			// 列已从 v2 DDL 删除；模型字段保留用于对外 JSON 形状，恒为 None。
+			expires_ts_ms: None,
 		})
 	}
 
@@ -489,7 +511,7 @@ impl Store {
             SELECT
                 i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
                 i.size_bytes, i.mime, i.sha256_hex,
-                i.preview_json, i.files_json, i.expires_ts_ms,
+                i.preview_json, i.files_json,
                 cc.total_bytes
             FROM items i
             JOIN content_cache cc ON i.sha256_hex = cc.sha256_hex
@@ -525,7 +547,7 @@ impl Store {
 	/// - `preview`: 表示项内容预览的数据结构。
 	/// - `content`: 关联的 `ItemContent` 对象，包含 MIME 类型、SHA-256 哈希和总字节数等额外元数据。
 	/// - `files`: 关联文件元数据的向量 (`FileMeta`)。
-	/// - `expires_ts_ms`: 项的过期时间戳（如果适用）。
+	/// - `expires_ts_ms`: 保留字段；v2 已删除该列，恒为 `None`。
 	///
 	/// # 数据库模式
 	///
@@ -537,7 +559,7 @@ impl Store {
 	/// 仅包含与指定账号关联且未删除 (`h.is_deleted=0`) 的历史记录。
 	/// 检索以下列：
 	/// - `item_id`, `kind`, `owner_device_id`, `created_ts_ms`, `size_bytes`, `mime`, `sha256_hex`,
-	///   `preview_json`, `files_json`, `expires_ts_ms` 和 `total_bytes`。
+	///   `preview_json`, `files_json` 和 `total_bytes`。
 	///
 	/// # 内部处理
 	///
@@ -577,7 +599,7 @@ impl Store {
             SELECT
                 i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
                 i.size_bytes, i.mime, i.sha256_hex,
-                i.preview_json, i.files_json, i.expires_ts_ms,
+                i.preview_json, i.files_json,
                 cc.total_bytes
             FROM history h
             JOIN items i ON h.item_id = i.item_id
@@ -613,7 +635,7 @@ impl Store {
                 SELECT
                     i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
                     i.size_bytes, i.mime, i.sha256_hex,
-                    i.preview_json, i.files_json, i.expires_ts_ms,
+                    i.preview_json, i.files_json,
                     cc.total_bytes
                 FROM history h
                 JOIN items i ON h.item_id = i.item_id
@@ -629,7 +651,7 @@ impl Store {
                 SELECT
                     i.item_id, i.kind, i.owner_device_id, i.created_ts_ms,
                     i.size_bytes, i.mime, i.sha256_hex,
-                    i.preview_json, i.files_json, i.expires_ts_ms,
+                    i.preview_json, i.files_json,
                     cc.total_bytes
                 FROM history h
                 JOIN items i ON h.item_id = i.item_id
@@ -738,6 +760,27 @@ impl Store {
             ",
 		)?;
 		let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+		let mut out = Vec::new();
+		for row in rows {
+			out.push(row?);
+		}
+		Ok(out)
+	}
+
+	/// 启动对账：列出所有声称 `present=1` 的 sha256。
+	///
+	/// 调用方再逐个检查 blob 是否存在，缺文件的用 [`Store::mark_cache_missing`] 改回 0；
+	/// 只遍历“声称存在”的行，不扫描整个 CAS 目录。
+	pub fn list_present_cache_hashes(&self) -> anyhow::Result<Vec<String>> {
+		let mut stmt = self.conn.prepare(
+			r"
+            SELECT sha256_hex
+            FROM content_cache
+            WHERE present=1
+            ORDER BY sha256_hex ASC
+            ",
+		)?;
+		let rows = stmt.query_map([], |r| r.get(0))?;
 		let mut out = Vec::new();
 		for row in rows {
 			out.push(row?);
@@ -952,8 +995,8 @@ impl Store {
 
 		tx.execute(
             r"INSERT OR IGNORE INTO items
-               (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, files_json, expires_ts_ms)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+               (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, files_json)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 meta.item_id,
                 Self::kind_to_str(&meta.kind),
@@ -963,8 +1006,7 @@ impl Store {
                 meta.content.mime,
                 meta.content.sha256,
                 preview_json,
-                files_json,
-                meta.expires_ts_ms
+                files_json
             ],
         )?;
 
@@ -1144,5 +1186,73 @@ mod schema_tests {
 		assert!(store.rebuilt, "旧 v2 结构指纹不符，必须整库重建");
 		assert!(item_columns(&store.conn).iter().any(|c| c == "files_json"));
 		assert_eq!(user_version(&store.conn), SCHEMA_VERSION);
+	}
+
+	#[test]
+	fn expires_column_is_gone_and_intermediate_v2_is_rebuilt() {
+		let dir = tempfile::tempdir().unwrap();
+		{
+			// 先让新代码建出最终 v2 结构。
+			let store = Store::open(dir.path()).unwrap();
+			assert!(!item_columns(&store.conn)
+				.iter()
+				.any(|c| c == "expires_ts_ms"));
+		}
+		{
+			// 模拟“Task 1 时代”的中间 v2：版本号相同，但 items 还留着 expires_ts_ms。
+			let conn = Connection::open(dir.path().join("core.db")).unwrap();
+			conn.execute_batch("ALTER TABLE items ADD COLUMN expires_ts_ms INTEGER;")
+				.unwrap();
+		}
+
+		let reopened = Store::open(dir.path()).unwrap();
+		assert!(reopened.rebuilt, "版本相同但结构指纹不符，仍必须重建");
+		assert!(!item_columns(&reopened.conn)
+			.iter()
+			.any(|c| c == "expires_ts_ms"));
+	}
+
+	#[test]
+	fn kind_check_and_history_cascade_are_enforced() {
+		let dir = tempfile::tempdir().unwrap();
+		let store = Store::open(dir.path()).unwrap();
+
+		store
+			.conn
+			.execute(
+				r"INSERT INTO items
+                   (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex)
+                   VALUES ('item-1', 'text', 'dev-1', 1, 1, 'text/plain', 'sha-1')",
+				[],
+			)
+			.unwrap();
+		// CHECK 只允许 kind_to_str 产出的三个值。
+		assert!(store
+			.conn
+			.execute(
+				r"INSERT INTO items
+                   (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex)
+                   VALUES ('item-2', 'video', 'dev-1', 1, 1, 'video/mp4', 'sha-2')",
+				[],
+			)
+			.is_err());
+
+		store
+			.conn
+			.execute(
+				"INSERT INTO history(account_uid, item_id, sort_ts_ms) VALUES ('acct', 'item-1', 1)",
+				[],
+			)
+			.unwrap();
+		// 现有删除路径都是软删除；这里验证硬删除时 FK cascade 不会留下悬空 history。
+		store
+			.conn
+			.execute("DELETE FROM items WHERE item_id='item-1'", [])
+			.unwrap();
+		let remaining: i64 = store
+			.conn
+			.query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))
+			.unwrap();
+		assert_eq!(remaining, 0);
 	}
 }
