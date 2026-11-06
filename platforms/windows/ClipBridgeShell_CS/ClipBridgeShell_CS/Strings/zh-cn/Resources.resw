@@ -764,6 +764,42 @@
   <data name="LoginDialog_ErrorFailed" xml:space="preserve">
     <value>登录失败: {0}</value>
   </data>
+  <data name="LoginDialog_PasswordHintWeak" xml:space="preserve">
+    <value>密码强度：弱（至少 12 个字符，并混合大小写字母、数字或符号）</value>
+  </data>
+  <data name="LoginDialog_PasswordHintOk" xml:space="preserve">
+    <value>密码强度：一般（可以创建，但建议使用“生成强密码”）</value>
+  </data>
+  <data name="LoginDialog_PasswordHintStrong" xml:space="preserve">
+    <value>密码强度：强</value>
+  </data>
+  <data name="LoginDialog_ErrorPasswordTooShort" xml:space="preserve">
+    <value>密码至少需要 12 个字符</value>
+  </data>
+  <data name="LoginDialog_ErrorPasswordSameAsUsername" xml:space="preserve">
+    <value>密码不能与账号相同</value>
+  </data>
+  <data name="LoginDialog_ErrorPasswordCommonPattern" xml:space="preserve">
+    <value>密码过于常见或规律（重复字符、连续数字/字母或常见密码），请更换</value>
+  </data>
+  <data name="LoginDialog_ErrorPasswordLowEntropy" xml:space="preserve">
+    <value>密码强度不足，请混合大小写字母、数字和符号，或使用“生成强密码”</value>
+  </data>
+  <data name="LoginDialog_GeneratePasswordButton.Content" xml:space="preserve">
+    <value>生成强密码</value>
+  </data>
+  <data name="LoginDialog_CopyPasswordButton.Content" xml:space="preserve">
+    <value>复制</value>
+  </data>
+  <data name="LoginDialog_Copied" xml:space="preserve">
+    <value>已复制</value>
+  </data>
+  <data name="LoginDialog_GeneratedPasswordHint.Text" xml:space="preserve">
+    <value>请把这个密码保存到安全位置：在其他设备上添加同一账号时需要输入它。密码丢失后无法找回，只能重新创建账号。</value>
+  </data>
+  <data name="LoginDialog_ErrorCopyFailed" xml:space="preserve">
+    <value>复制失败: {0}</value>
+  </data>
   <data name="AccountInfo_Title" xml:space="preserve">
     <value>账号信息</value>
   </data>

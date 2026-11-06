@@ -764,6 +764,42 @@
   <data name="LoginDialog_ErrorFailed" xml:space="preserve">
     <value>Login failed: {0}</value>
   </data>
+  <data name="LoginDialog_PasswordHintWeak" xml:space="preserve">
+    <value>Password strength: weak (use at least 12 characters with a mix of upper/lower case, digits, or symbols)</value>
+  </data>
+  <data name="LoginDialog_PasswordHintOk" xml:space="preserve">
+    <value>Password strength: OK (you can continue, but Generate strong password is safer)</value>
+  </data>
+  <data name="LoginDialog_PasswordHintStrong" xml:space="preserve">
+    <value>Password strength: strong</value>
+  </data>
+  <data name="LoginDialog_ErrorPasswordTooShort" xml:space="preserve">
+    <value>Password must be at least 12 characters</value>
+  </data>
+  <data name="LoginDialog_ErrorPasswordSameAsUsername" xml:space="preserve">
+    <value>Password cannot be the same as the account name</value>
+  </data>
+  <data name="LoginDialog_ErrorPasswordCommonPattern" xml:space="preserve">
+    <value>Password is too common or predictable (repeated characters, sequential digits/letters, or a common password). Choose another one.</value>
+  </data>
+  <data name="LoginDialog_ErrorPasswordLowEntropy" xml:space="preserve">
+    <value>Password entropy is too low. Mix upper/lower case letters, digits, and symbols, or use Generate strong password.</value>
+  </data>
+  <data name="LoginDialog_GeneratePasswordButton.Content" xml:space="preserve">
+    <value>Generate strong password</value>
+  </data>
+  <data name="LoginDialog_CopyPasswordButton.Content" xml:space="preserve">
+    <value>Copy</value>
+  </data>
+  <data name="LoginDialog_Copied" xml:space="preserve">
+    <value>Copied</value>
+  </data>
+  <data name="LoginDialog_GeneratedPasswordHint.Text" xml:space="preserve">
+    <value>Save this password somewhere safe: you will need to enter it to add the same account on other devices. It cannot be recovered if lost, and you would have to create a new account.</value>
+  </data>
+  <data name="LoginDialog_ErrorCopyFailed" xml:space="preserve">
+    <value>Copy failed: {0}</value>
+  </data>
   <data name="AccountInfo_Title" xml:space="preserve">
     <value>Account Information</value>
   </data>

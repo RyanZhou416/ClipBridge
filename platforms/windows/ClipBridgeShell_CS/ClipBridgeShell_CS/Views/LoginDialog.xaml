@@ -6,7 +6,7 @@
     l:Uids.Uid="LoginDialog"
     DefaultButton="Primary"
     PrimaryButtonClick="OnPrimaryButtonClick">
-    <StackPanel Spacing="16" Margin="0,8,0,0">
+    <StackPanel Spacing="12" Margin="0,8,0,0">
         <TextBox
             x:Name="UsernameTextBox"
             l:Uids.Uid="LoginDialog_UsernameTextBox"
@@ -15,6 +15,41 @@
             x:Name="PasswordBox"
             l:Uids.Uid="LoginDialog_PasswordBox"
             PasswordChanged="OnInputChanged"/>
+        <TextBlock
+            x:Name="PasswordHintTextBlock"
+            FontSize="12"
+            TextWrapping="Wrap"
+            Visibility="Collapsed"/>
+        <Button
+            x:Name="GeneratePasswordButton"
+            l:Uids.Uid="LoginDialog_GeneratePasswordButton"
+            Click="OnGeneratePasswordClick"/>
+        <StackPanel
+            x:Name="GeneratedPasswordPanel"
+            Spacing="6"
+            Visibility="Collapsed">
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBox
+                    x:Name="GeneratedPasswordBox"
+                    IsReadOnly="True"
+                    FontFamily="Consolas"
+                    TextWrapping="Wrap"/>
+                <Button
+                    x:Name="CopyGeneratedPasswordButton"
+                    Grid.Column="1"
+                    l:Uids.Uid="LoginDialog_CopyPasswordButton"
+                    Click="OnCopyGeneratedPasswordClick"/>
+            </Grid>
+            <TextBlock
+                l:Uids.Uid="LoginDialog_GeneratedPasswordHint"
+                FontSize="12"
+                Opacity="0.8"
+                TextWrapping="Wrap"/>
+        </StackPanel>
         <TextBlock
             x:Name="ErrorTextBlock"
             Foreground="Red"
