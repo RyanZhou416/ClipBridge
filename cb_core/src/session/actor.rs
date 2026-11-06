@@ -65,14 +65,34 @@ const MAX_CONCURRENT_RECEIVERS: usize = 8;
 /// 单个 receiver 就能占 320 MiB。这里用字节信号量计量在途字节，上限 12 MiB：
 /// 足以容纳单个最大帧（`proto::CBFrameCodec` 的 10 MiB 上限）再加少量小帧，
 /// 又不会让慢 writer 把内存撑爆。8 个 receiver 最坏约 96 MiB 在途。
+///
+/// 注：上传分块改为 [`UPLOAD_CHUNK_BYTES`]（256 KiB）后，channel 的 32 个槽位
+/// 实际只能装 32 × 256 KiB = 8 MiB，因此在途预算通常先被槽位（8 MiB）触顶，
+/// 12 MiB 只在协议允许的 10 MiB 单帧场景下才可能被一个帧用满。
 const MAX_INFLIGHT_BYTES_PER_RECEIVER: usize = 12 * 1024 * 1024;
+
+/// 上传任务每次读文件 / 每帧发送的分块大小（256 KiB）。
+///
+/// 旧值是 64 KiB；纯 QUIC 基线显示 64 KiB → 1 MiB 只提升 4-12%，但应用层还有
+/// 每帧的编码/拷贝与 `FramedWrite` 调度开销，256 KiB 在帧上限（10 MiB）与接收端
+/// 预算（见 [`MAX_INFLIGHT_BYTES_PER_RECEIVER`] / [`MAX_PENDING_BYTES_PER_RECEIVER`]）
+/// 之内能减少一半以上的帧数而无需改动协议。
+const UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
 
 /// writer 背压时，actor 侧允许暂存的字节数上限（帧已经从连接里读出来了，必须自己兜住）。
 ///
-/// 12 MiB 在途 + 1 MiB 暂存 = 每个 receiver 最坏约 13 MiB，8 个约 104 MiB。
+/// 取 4 MiB = 16 × [`UPLOAD_CHUNK_BYTES`]，与旧配置 1 MiB / 64 KiB 的 16 块突发
+/// 余量保持一致：分块变大后若仍只留 1 MiB（4 块），一次正常的 16 块突发就会被
+/// 误判为 writer 卡死并中止传输（`TRANSFER_BACKPRESSURE`）。
+///
+/// 内存边界（每个 receiver，正常对端）：在途 32 槽 × 256 KiB = 8 MiB（先于
+/// 12 MiB 预算触顶）+ 暂存 4 MiB + 当前正在处理的一帧 256 KiB ≈ 12.25 MiB；
+/// 8 个 receiver ≈ 98 MiB（旧配置为 12 MiB + 1 MiB + 64 KiB ≈ 13.06 MiB，
+/// 8 个约 104 MiB，因此这里反而更省）。恶意对端可发单个 ≤ 10 MiB 的帧，
+/// 另有最多一帧（帧上限，未变）的瞬时占用。
 /// 超出该预算说明 writer 完全跟不上而对端还在灌数据：在"不阻塞整条连接"的约束下
 /// 无法保住这条传输，只能让它失败（`TRANSFER_BACKPRESSURE`），而不是无限增长内存。
-const MAX_PENDING_BYTES_PER_RECEIVER: usize = 1024 * 1024;
+const MAX_PENDING_BYTES_PER_RECEIVER: usize = 4 * 1024 * 1024;
 
 /// 接收方空闲超时：超过该时长没有收到任何数据块就取消传输并清理 tmp 文件。
 ///
@@ -315,7 +335,6 @@ enum UploadMsg {
 	},
 	Done {
 		transfer_id: String,
-		sha256: String,
 	},
 	Error {
 		transfer_id: String,
@@ -326,7 +345,7 @@ enum UploadMsg {
 /// 发送中的传输：AbortHandle + 汇总统计。
 ///
 /// 统计只用于传输结束时写**一条**汇总日志。逐块日志已移除：
-/// 1GB 传输按 64KB 分块会写约 1.6 万条 SQLite 行，且都在 actor 主循环里同步插入。
+/// 1GB 传输按 256 KiB 分块会写约 4 千条 SQLite 行，且都在 actor 主循环里同步插入。
 struct SenderState {
 	handle: tokio::task::AbortHandle,
 	bytes_sent: u64,
@@ -879,9 +898,9 @@ impl SessionActor {
 							UploadMsg::Chunk { transfer_id, data } => {
 								actor.send_data_chunk(transfer_id, data).await?;
 							}
-							UploadMsg::Done { transfer_id, sha256: _ } => {
+							UploadMsg::Done { transfer_id } => {
 								actor.send_ctrl(CtrlMsg::ContentEnd { req_id: transfer_id.clone() }).await?;
-								// 每个传输只写一条汇总日志（替代原先每 64KB 一条的 debug 日志）
+								// 每个传输只写一条汇总日志（替代原先每 256 KiB 一条的 debug 日志）
 								if let Some(state) = actor.senders.remove(&transfer_id) {
 									let elapsed_ms = now_ms() - state.started_ts_ms;
 									actor.log_sink.log_info(
@@ -1882,8 +1901,8 @@ impl SessionActor {
 
 			match inbox.try_push(data) {
 				PushOutcome::Queued | PushOutcome::Paused => {
-					// 注意：这里绝不逐块写日志 —— 每 64KB 一条 SQLite 插入会在
-					// 1GB 传输中产生约 1.6 万行，且占用 actor 主循环的 std Mutex。
+					// 注意：这里绝不逐块写日志 —— 每 256 KiB 一条 SQLite 插入会在
+					// 1GB 传输中产生约 4 千行，且占用 actor 主循环的 std Mutex。
 					// 每个传输只在成功/失败/超时结束时写一条汇总。
 					if now - *last_progress_emit > 200 {
 						let progress_evt = serde_json::json!({
@@ -2427,16 +2446,21 @@ impl SessionActor {
 				}
 
 				let mut reader = BufReader::new(file);
-				let mut buf = vec![0u8; 64 * 1024]; // 64KB buffer
-				let mut hasher = Sha256::new();
+				let mut buf = vec![0u8; UPLOAD_CHUNK_BYTES];
 
+				// 这里刻意不再计算每个分块 / 整次传输的 SHA-256。
+				// 内容本身就是内容寻址的：blob 与 content_cache 都以 `ContentBegin.sha256`
+				// 里的整文件 hash 为键；接收端用同一个 `ContentBegin.sha256` 自己算并校验
+				// 收到的字节（见 ReceiverState::expected_sha256 → writer 的 Finish 校验），
+				// 发送端算出来的分块 hash 从未被读取（旧代码里 `UploadMsg::Done { sha256: _ }`
+				// 直接丢弃），也不再走 `ContentEnd`（它只有 req_id）。
+				// 因此在发送端 update Sha256 纯粹浪费 CPU：1 GiB 传输多算 1 GiB 的 hash。
+				// 校验职责留在接收端（唯一需要它的地方），发送端只负责搬字节。
 				loop {
 					match reader.read(&mut buf).await {
 						Ok(n) if n > 0 => {
-							hasher.update(&buf[..n]);
-							// 使用 Bytes::copy_from_slice 会发生一次内存拷贝，
-							// 但对于 64KB chunk 来说开销可控。
-							// 若极致优化可用 BytesMut，但此处保持简单即可。
+							// Bytes::copy_from_slice 会拷贝一次；对 256 KiB 分块而言，
+							// 相比每帧编码自身的拷贝只是小头，保持实现简单。
 							let data = bytes::Bytes::copy_from_slice(&buf[..n]);
 
 							if tx
@@ -2454,16 +2478,7 @@ impl SessionActor {
 					}
 				}
 
-				// 这里计算的是“本次传输部分”的 Hash
-				// 在 Resume 场景下，这与 ContentBegin 里的完整 Hash 不同
-				// 接收端需要根据协议逻辑决定如何校验（目前 V3 简化版接收端已适配校验片段 Hash）
-				let final_sha = hex::encode(hasher.finalize());
-				let _ = tx
-					.send(UploadMsg::Done {
-						transfer_id: tid,
-						sha256: final_sha,
-					})
-					.await;
+				let _ = tx.send(UploadMsg::Done { transfer_id: tid }).await;
 			});
 
 			self.senders.insert(

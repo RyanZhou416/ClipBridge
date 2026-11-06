@@ -179,13 +179,19 @@ impl NetManager {
 				// 超时即全体掉线）。这里改为多线程运行时，让不同会话的任务真正
 				// 并行推进。
 				//
-				// worker_threads 取值：min(available_parallelism, 4)，且不低于 2；
-				// 取不到并行度时回退 2。上限压到 4 的理由：本工作负载是 I/O 密集
-				// （QUIC 收发、磁盘 CAS、mDNS），线程再多也主要增加上下文切换与
-				// 栈内存，收益远小于成本；下限 2 保证“一个 worker 被慢任务占住时，
+				// worker_threads 取值：min(available_parallelism, 8)，且不低于 2；
+				// 取不到并行度时回退 2。
+				//
+				// 上限从 4 提到 8 的依据（release 构建、32 逻辑核、回环、纯 QUIC 基线）：
+				// - 4 条并发连接：4 workers = 402 MiB/s → 8 workers = 478 MiB/s（+19%）；
+				// - 4 个 endpoint：401 MiB/s → 534 MiB/s（+33%）；
+				// - 单连接：195 MiB/s → 210 MiB/s（+7%）；
+				// - 16 workers 相对 8 workers 无进一步收益，因此封顶 8（不取 16）。
+				// 上限仍与 min(available_parallelism, …) 结合：手机 / 低核设备并行度低，
+				// 会自然夹到更小的值；下限 2 保证“一个 worker 被慢任务占住时，
 				// 仍有另一个 worker 推进 accept / 发现 / 心跳”。
 				let worker_threads =
-					std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 4));
+					std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 8));
 				let rt = tokio::runtime::Builder::new_multi_thread()
 					.worker_threads(worker_threads)
 					.enable_all()
