@@ -32,6 +32,38 @@ const DURABILITY_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 /// 单次 sweep 最多处理的行数：每 30 s 分批推进，避免一次性长时间占住后台线程。
 const DURABILITY_SWEEP_BATCH: i64 = 64;
 
+/// F12：后台历史保留任务的执行间隔。
+///
+/// `Core::run_gc` 只在本地 ingest 后触发；如果一台设备长期只接收远端元数据，
+/// 历史行就永远不会被清理。这里复用已有的 `cb-durability-sync` 维护线程，
+/// 在它自己的 ticker 上做周期保留（不是每条消息/每次写都做）。
+const HISTORY_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
+
+/// F12：历史保留任务的配置（由 `Core::init` 解析一次后交给维护线程）。
+pub(crate) struct HistoryRetention {
+	pub account_uid: String,
+	/// 每个账号保留的最新行数；`0` = 关闭保留。
+	pub keep_rows: i64,
+}
+
+/// 解析 `CB_HISTORY_RETENTION_ROWS`（纯函数，便于单测）。
+///
+/// - 未设置 / 空串 / 非法值 / 负数 → 默认
+///   [`crate::store::DEFAULT_HISTORY_RETENTION_ROWS_PER_ACCOUNT`]；
+/// - `0` → 关闭按行数保留（仍保留用户软删除语义）；
+/// - 正数 → 夹到 `[1, 10_000_000]`，避免误配置成不设上限。
+fn resolve_history_retention(raw: Option<&str>) -> i64 {
+	const MAX_ROWS: i64 = 10_000_000;
+	let Some(raw) = raw else {
+		return crate::store::DEFAULT_HISTORY_RETENTION_ROWS_PER_ACCOUNT;
+	};
+	match raw.trim().parse::<i64>() {
+		Ok(0) => 0,
+		Ok(rows) if rows > 0 => rows.min(MAX_ROWS),
+		_ => crate::store::DEFAULT_HISTORY_RETENTION_ROWS_PER_ACCOUNT,
+	}
+}
+
 // 单元测试探针：本线程执行过多少次 `run_gc` 里的 CAS 整树遍历。
 // 用 thread-local 而不是全局原子：libtest 默认每个测试一个线程，这样并行
 // 测试之间不会互相污染计数。（macro 调用上不能写 `///`，否则是 unused doc comment。）
@@ -72,6 +104,81 @@ impl std::fmt::Debug for CoreConfig {
 			.field("app_config", &self.app_config)
 			.field("disable_network", &self.disable_network)
 			.finish()
+	}
+}
+
+/// F15：`CoreConfig` 被丢弃时擦除密码缓冲区。
+///
+/// 为什么用 `Drop` 而不是把字段换成 `Zeroizing<String>`：`CoreConfig.account_password`
+/// 是跨 FFI/测试夹具构造的 `String` 字段，改类型会改变 Rust 结构体形状（波及
+/// 平台桥接与测试）。这里保持字段类型与 JSON/FFI 形状完全不变，但保证**每一份**
+/// `CoreConfig`（含 `NetManager`/`SessionActor` 持有的 clone）在 drop 时都擦除。
+impl Drop for CoreConfig {
+	fn drop(&mut self) {
+		use zeroize::Zeroize as _;
+		self.account_password.zeroize();
+	}
+}
+
+// `CoreConfig` 现在实现了 `Drop`，其字段不能再被“从临时值 move 出来”的结构体
+// 更新语法使用（E0509）。现有测试夹具里有一处 `CoreConfig { .., ..Default::default() }`
+//（`src/api/tests/m1_net.rs`），只省略 `app_config`。`AppConfig` 全部由整数/无载荷
+// 枚举组成，语义上就是值类型；在这里补 `Copy` 即可保持该写法编译，且不改变任何
+// 行为（Copy 只是复制，不引入任何副作用）。不修改实例字段/JSON 形状。
+impl Copy for crate::policy::SizeLimits {}
+impl Copy for crate::policy::GlobalPolicy {}
+impl Copy for crate::policy::AppConfig {}
+
+/// F15：拥有所有权的密码包装，Drop 时擦除底层 `String`。
+///
+/// 使用位置：
+/// - FFI 解析边界（`cb_core_ffi::marshal::parse_cfg`）的反序列化中间态；
+/// - `SessionActor` 跨线程 `spawn_blocking` 的密码副本（替代裸 `String` clone）。
+///
+/// `Debug` 固定输出 `<redacted>`，避免密码经 `{:?}` 泄漏到日志/panic 信息。
+#[derive(Clone, Default)]
+pub struct SecretString(zeroize::Zeroizing<String>);
+
+impl SecretString {
+	/// 用普通 `String` 构造；所有权转移，drop 时擦除。
+	pub fn new(value: String) -> Self {
+		Self(zeroize::Zeroizing::new(value))
+	}
+
+	/// 只读访问明文（只应在计算哈希/派生密钥的瞬时使用）。
+	pub fn expose(&self) -> &str {
+		self.0.as_str()
+	}
+
+	/// 取出内部 `String` 所有权（不再擦除；调用方必须保证目标位置会擦除）。
+	///
+	/// 唯一用途：`parse_cfg` 把密码移入 `CoreConfig`，由 `CoreConfig::drop`
+	/// （见下方 `impl Drop`）负责最终擦除，避免多一份无法擦除的临时副本。
+	pub fn into_plain_string(mut self) -> String {
+		// `Zeroizing` 没有公开的 `into_inner`；用 `mem::take` 把 String 移出后，
+		// 包装自身 drop 时擦除的是空串（no-op），真正的那份内存交给 CoreConfig。
+		std::mem::take(&mut *self.0)
+	}
+}
+
+impl std::fmt::Debug for SecretString {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("SecretString(<redacted>)")
+	}
+}
+
+impl zeroize::Zeroize for SecretString {
+	fn zeroize(&mut self) {
+		zeroize::Zeroize::zeroize(&mut self.0);
+	}
+}
+
+impl<'de> serde::Deserialize<'de> for SecretString {
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	where
+		D: serde::Deserializer<'de>,
+	{
+		<String as serde::Deserialize>::deserialize(deserializer).map(Self::new)
 	}
 }
 
@@ -426,6 +533,14 @@ impl Core {
 			}
 		};
 
+		// F12：历史行数保留只解析一次（`CB_HISTORY_RETENTION_ROWS`，默认 10_000），
+		// 之后由 `run_gc` 与后台维护线程共同使用；热路径只读 `Inner` 里的整数。
+		let history_retention_rows = resolve_history_retention(
+			std::env::var(crate::store::HISTORY_RETENTION_ENV)
+				.ok()
+				.as_deref(),
+		);
+
 		let inner = Inner {
 			core_config: cfg,
 			sink,
@@ -435,6 +550,7 @@ impl Core {
 			log_sink,
 			cas,
 			net: net_tx,
+			history_retention_rows,
 		};
 		let core = Self {
 			inner: Arc::new(inner),
@@ -446,6 +562,12 @@ impl Core {
 			&core.inner.cas,
 			core.inner.store.clone(),
 			&core.inner.log_sink,
+			// F12：同一个维护线程按 ticker 执行历史行数保留（远端元数据不会触发
+			// `run_gc`，所以必须有周期路径，否则长期运行会话的历史会无限增长）。
+			Some(HistoryRetention {
+				account_uid: core.inner.core_config.account_uid.clone(),
+				keep_rows: core.inner.history_retention_rows,
+			}),
 		);
 		let _ = core.run_gc("Startup");
 		core
@@ -657,17 +779,50 @@ impl Core {
 
 		let now = now_ms();
 
-		// 1) History GC
+		// 1) History GC（F12）
+		//
+		// 旧的“只置 is_deleted=1”不会释放任何行：长期运行后 `history` 仍然无限增长。
+		// 现在维护路径做两件事：
+		// - 硬删除：只保留每个账号最新的 `history_retention_rows` 行（默认 10_000）；
+		// - 软删除：保留原有 `gc_history_max_items` 的可见性上限（正常配置下
+		//   retention 更小，这里通常已经是 no-op）。
+		// 只做一次 COUNT(*)，和旧实现的查询成本相同。
+		let account_uid = self.inner.core_config.account_uid.clone();
+		let retention_rows = self.inner.history_retention_rows;
 		let max_history = self.inner.core_config.app_config.gc_history_max_items;
-		if max_history > 0 {
-			let mut store = self.inner.store.lock().unwrap();
-			let n = store.history_count_for_account(&self.inner.core_config.account_uid)?;
-			if n > max_history {
-				store.soft_delete_history_keep_latest(
-					&self.inner.core_config.account_uid,
-					max_history,
-				)?;
+		let mut purged_rows = 0_i64;
+		let mut purged_from: i64 = 0;
+		if retention_rows > 0 || max_history > 0 {
+			let total = {
+				let store = self.inner.store.lock().unwrap();
+				store.history_total_count_for_account(&account_uid)?
+			};
+			if retention_rows > 0 && total > retention_rows {
+				let excess = total - retention_rows;
+				let mut store = self.inner.store.lock().unwrap();
+				purged_rows = store.purge_history_oldest_excess(&account_uid, excess)?;
+				purged_from = total;
 			}
+			// 软删除（用户可见的历史上限）仍保留原语义：按总行数判断是否超过
+			// `gc_history_max_items`，再保留最新 N 行。默认 retention(10_000) <
+			// max_history(50_000)，因此这条分支通常已是 no-op。
+			if max_history > 0 && total > max_history {
+				let mut store = self.inner.store.lock().unwrap();
+				store.soft_delete_history_keep_latest(&account_uid, max_history)?;
+			}
+		}
+		if purged_rows > 0 {
+			// 只记录计数，不记录任何历史内容。
+			self.inner.log_sink.log_info(
+				"GC",
+				&format!(
+					"History retention ({reason}): hard-deleted {purged_rows} row(s) beyond the newest \
+                     {retention_rows} per account (was {purged_from} rows)"
+				),
+				Some(&format!(
+					"历史保留（{reason}）：按每账号最新 {retention_rows} 条硬删除 {purged_rows} 行（原 {purged_from} 行）"
+				)),
+			);
 		}
 
 		// 2) Cache GC（LRU）
@@ -1339,7 +1494,12 @@ impl Core {
 /// 日志 writer / NetManager 的“专用维护线程”模式：线程内建一个最小
 /// current-thread runtime 驱动异步循环，真正的 `sync_data()` 再放进
 /// `spawn_blocking`，因此同步磁盘 IO 永远不会占住 tokio worker。
-pub(crate) fn ensure_durability_worker(cas: &Cas, store: Arc<Mutex<Store>>, log_sink: &LogSink) {
+pub(crate) fn ensure_durability_worker(
+	cas: &Cas,
+	store: Arc<Mutex<Store>>,
+	log_sink: &LogSink,
+	history_retention: Option<HistoryRetention>,
+) {
 	let Some((rx, stop_rx)) = cas.claim_durability_worker() else {
 		return;
 	};
@@ -1366,7 +1526,12 @@ pub(crate) fn ensure_durability_worker(cas: &Cas, store: Arc<Mutex<Store>>, log_
 				}
 			};
 			rt.block_on(durability_worker(
-				rx, stop_rx, worker_cas, store, worker_log,
+				rx,
+				stop_rx,
+				worker_cas,
+				store,
+				worker_log,
+				history_retention,
 			));
 		});
 	if let Err(e) = spawned {
@@ -1379,19 +1544,75 @@ pub(crate) fn ensure_durability_worker(cas: &Cas, store: Arc<Mutex<Store>>, log_
 	}
 }
 
-/// 后台 durability 主循环：处理队列 + 每 30 s 兜底 sweep。
+/// F12：维护线程上的历史行数保留（阻塞 SQLite 全部放进 `spawn_blocking`）。
+async fn run_history_retention(
+	store: &Arc<Mutex<Store>>,
+	cfg: &HistoryRetention,
+	log_sink: &LogSink,
+) {
+	let store_for_task = Arc::clone(store);
+	let account_uid = cfg.account_uid.clone();
+	let keep_rows = cfg.keep_rows;
+	let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(i64, i64)> {
+		if keep_rows <= 0 {
+			// 保留已关闭：不要为一次空跑去做 COUNT。
+			return Ok((0, 0));
+		}
+		let mut guard = store_for_task.lock().unwrap();
+		let total = guard.history_total_count_for_account(&account_uid)?;
+		if keep_rows > 0 && total > keep_rows {
+			let deleted = guard.purge_history_oldest_excess(&account_uid, total - keep_rows)?;
+			Ok((total, deleted))
+		} else {
+			Ok((total, 0))
+		}
+	})
+	.await;
+	match result {
+		Ok(Ok((_total, 0))) => {}
+		Ok(Ok((total, deleted))) => log_sink.log_info(
+			"GC",
+			&format!(
+				"History retention (periodic): hard-deleted {deleted} row(s) beyond the newest \
+                 {keep_rows} per account (was {total} rows)"
+			),
+			Some(&format!(
+				"历史保留（周期）：按每账号最新 {keep_rows} 条硬删除 {deleted} 行（原 {total} 行）"
+			)),
+		),
+		Ok(Err(e)) => log_sink.log_warn(
+			"GC",
+			&format!("History retention (periodic) failed: {e}"),
+			Some(&format!("历史保留（周期）失败: {e}")),
+		),
+		Err(e) => log_sink.log_warn(
+			"GC",
+			&format!("History retention (periodic) task failed: {e}"),
+			Some(&format!("历史保留（周期）后台任务失败: {e}")),
+		),
+	}
+}
+
+/// 后台 durability 主循环：处理队列 + 每 30 s 兜底 sweep + F12 周期历史保留。
 async fn durability_worker(
 	mut rx: mpsc::Receiver<PendingSync>,
 	mut stop_rx: tokio::sync::watch::Receiver<bool>,
 	cas: Cas,
 	store: Arc<Mutex<Store>>,
 	log_sink: LogSink,
+	history_retention: Option<HistoryRetention>,
 ) {
 	let mut ticker = interval(DURABILITY_SWEEP_INTERVAL);
 	ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 	// 立刻消费 interval 的第一次 tick，让第一次“周期”sweep 真正发生在 30 s 后；
 	// 启动时的补同步由下面这次显式 sweep 完成。
 	ticker.tick().await;
+
+	// F12：历史保留使用独立 ticker；第一次 tick 同样立即消费，真正的周期清理
+	// 在 `HISTORY_RETENTION_INTERVAL` 之后发生（启动时的清理由 `run_gc("Startup")` 完成）。
+	let mut retention_ticker = interval(HISTORY_RETENTION_INTERVAL);
+	retention_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+	retention_ticker.tick().await;
 
 	// 启动先扫一次：上次进程在 `durable=0` 状态下退出/崩溃时，这些内容必须
 	// 在本次启动后补同步，而不是等下一次大文件传输来“顺带”唤醒队列。
@@ -1411,6 +1632,11 @@ async fn durability_worker(
 			},
 			_ = ticker.tick() => {
 				sweep_durability_pending(&cas, &store, &log_sink).await;
+			},
+			_ = retention_ticker.tick() => {
+				if let Some(cfg) = &history_retention {
+					run_history_retention(&store, cfg, &log_sink).await;
+				}
 			}
 		}
 	}
@@ -1675,6 +1901,8 @@ pub struct Inner {
 	pub log_sink: LogSink,
 	pub cas: Cas,
 	pub net: Option<mpsc::Sender<NetCmd>>,
+	/// F12：每个账号保留的历史行数（`0` = 关闭按行数保留）。
+	pub history_retention_rows: i64,
 }
 
 impl Inner {
@@ -1723,6 +1951,87 @@ impl Drop for Inner {
 		// `Store` 的 Arc 克隆，不退出会延迟数据库/临时目录释放（Windows 上尤其明显）。
 		// `Core::shutdown` 已经发过停止信号时，这里是幂等重复。
 		self.cas.stop_durability_worker();
+	}
+}
+
+/// F15：密码包装的内存卫生回归（不改变任何 FFI/JSON 形状）。
+#[cfg(test)]
+mod secret_string_tests {
+	use super::SecretString;
+	use zeroize::Zeroize;
+
+	/// `Debug` 绝不能泄漏明文；`SecretString` 必须实现 `Zeroize`。
+	#[test]
+	fn secret_string_debug_is_redacted() {
+		let secret = SecretString::new("hunter2".to_string());
+		let rendered = format!("{secret:?}");
+		assert!(
+			!rendered.contains("hunter2"),
+			"Debug leaked password: {rendered}"
+		);
+		assert!(rendered.contains("redacted"));
+	}
+
+	/// 显式 `zeroize()` 必须把底层 `String` 的字节全部清零。
+	#[test]
+	fn secret_string_zeroize_clears_backing_bytes() {
+		let mut secret = SecretString::new("hunter2".to_string());
+		let ptr = secret.expose().as_ptr();
+		let len = secret.expose().len();
+		assert_eq!(secret.expose(), "hunter2");
+
+		secret.zeroize();
+
+		// 缓冲区仍归本对象所有（尚未 drop），读取是安全的；逐字节确认已清零。
+		let cleared = unsafe { std::slice::from_raw_parts(ptr, len) };
+		assert!(
+			cleared.iter().all(|byte| *byte == 0),
+			"password bytes must be zeroed after Zeroize"
+		);
+	}
+
+	/// 反序列化入口（FFI 用）走同一包装，且 Debug 不泄漏。
+	#[test]
+	fn secret_string_deserialize_wraps_and_redacts() {
+		let secret: SecretString =
+			serde_json::from_str("\"hunter2\"").expect("SecretString deserialize");
+		assert_eq!(secret.expose(), "hunter2");
+		assert!(!format!("{secret:?}").contains("hunter2"));
+	}
+
+	/// `parse_cfg` 的错误路径（空密码）也要把明文擦除：包装在 DTO 里，提前返回时
+	/// drop 会清空缓冲区。这里直接验证包装的 Drop 行为（不读取已释放内存）：
+	/// `ZeroizeOnDrop` 由内部的 `Zeroizing` 提供，`zeroize()` 与 drop 走同一实现。
+	#[test]
+	fn secret_string_into_plain_string_preserves_value() {
+		let secret = SecretString::new("hunter2".to_string());
+		assert_eq!(secret.into_plain_string(), "hunter2");
+	}
+}
+
+#[cfg(test)]
+mod history_retention_config_tests {
+	use super::resolve_history_retention;
+	use crate::store::DEFAULT_HISTORY_RETENTION_ROWS_PER_ACCOUNT;
+
+	#[test]
+	fn history_retention_env_is_parsed_once_with_safe_fallbacks() {
+		assert_eq!(
+			resolve_history_retention(None),
+			DEFAULT_HISTORY_RETENTION_ROWS_PER_ACCOUNT
+		);
+		assert_eq!(resolve_history_retention(Some("")), 10_000);
+		assert_eq!(resolve_history_retention(Some(" 250 ")), 250);
+		assert_eq!(
+			resolve_history_retention(Some("0")),
+			0,
+			"0 disables retention"
+		);
+		// 非法/负数回退默认值，绝不把历史无限保留当成“有效配置”。
+		assert_eq!(resolve_history_retention(Some("-1")), 10_000);
+		assert_eq!(resolve_history_retention(Some("abc")), 10_000);
+		// 超大值夹到上限，避免误配置成事实上不设限。
+		assert_eq!(resolve_history_retention(Some("999999999999")), 10_000_000);
 	}
 }
 

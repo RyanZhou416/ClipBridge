@@ -77,7 +77,9 @@ struct InitConfigDto {
 	device_id: String,
 	device_name: String,
 	account_uid: String,
-	account_password: String,
+	/// F15：密码在反序列化边界就进入可擦除包装；错误路径/提前返回时 drop 会
+	/// 擦除缓冲区，成功路径把它移入 `CoreConfig`（由 `CoreConfig::drop` 擦除）。
+	account_password: cb_core::api::SecretString,
 	data_dir: String,
 	cache_dir: String,
 
@@ -248,7 +250,7 @@ pub fn parse_cfg(json: &str) -> anyhow::Result<cb_core::api::CoreConfig> {
 	// 空密码会让 core 注册一个“空密码即可认证”的 OPAQUE 账号，任何 LAN peer 都能通过
 	// 握手并被自动 TOFU 固定。复杂度策略仍由壳侧负责，这里只做“绝不接受空凭据”的兜底，
 	// 且在 Core::init / OPAQUE setup / 证书初始化之前失败。
-	if dto.account_password.trim().is_empty() {
+	if dto.account_password.expose().trim().is_empty() {
 		anyhow::bail!("account_password must not be empty");
 	}
 
@@ -269,11 +271,13 @@ pub fn parse_cfg(json: &str) -> anyhow::Result<cb_core::api::CoreConfig> {
 	};
 
 	// 3. 返回 CoreConfig
+	// 密码从 SecretString 取出所有权后立刻移入 CoreConfig；中间不产生第三份副本。
+	let account_password = dto.account_password.into_plain_string();
 	Ok(CoreConfig {
 		device_id: dto.device_id,
 		device_name: dto.device_name,
 		account_uid: dto.account_uid,
-		account_password: dto.account_password,
+		account_password,
 		data_dir: dto.data_dir,
 		cache_dir: dto.cache_dir,
 		app_config,

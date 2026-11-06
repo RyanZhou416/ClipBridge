@@ -42,6 +42,44 @@ const LOG_SINK_IDLE_POLL: Duration = Duration::from_millis(500);
 /// writer 线程向 stderr 汇报丢弃率的间隔。
 const LOG_SINK_DROP_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 
+/// F12：运行期日志保留策略的定时触发间隔（5 分钟）。
+///
+/// 旧实现在 `LogStore::open` 里只清理一次；长驻进程永远不再 prune，`logs.db`
+/// 会一直涨到 [`LOG_MAX_ROWS`] 之上。现在由 `cb-log-writer` 线程按时间/计数
+/// 触发（见 [`PruneSchedule`]），调用方仍然只做 `try_send`。
+const LOG_PRUNE_INTERVAL: Duration = Duration::from_mins(5);
+
+/// F12：writer 每成功提交多少条记录触发一次保留策略。
+const LOG_PRUNE_WRITTEN_THRESHOLD: u64 = 10_000;
+
+/// 日志保留策略的触发条件（纯数据，便于单测注入很小的阈值）。
+///
+/// 两个条件取“或”：无论持续写入还是长期空闲，最多在
+/// `interval`/`written_threshold` 之后执行一次 `prune`。
+#[derive(Clone, Copy, Debug)]
+struct PruneSchedule {
+	/// 累计提交多少条记录后触发；`u64::MAX` = 只按时间触发。
+	written_threshold: u64,
+	/// 距上次 prune 的最长时间；`Duration::MAX` = 只按计数触发。
+	interval: Duration,
+}
+
+impl Default for PruneSchedule {
+	fn default() -> Self {
+		Self {
+			written_threshold: LOG_PRUNE_WRITTEN_THRESHOLD,
+			interval: LOG_PRUNE_INTERVAL,
+		}
+	}
+}
+
+impl PruneSchedule {
+	/// 当前是否该执行 prune。只读本地计数/时钟，无锁、无 syscall。
+	fn due(&self, written_since_prune: u64, last_prune: Instant) -> bool {
+		written_since_prune >= self.written_threshold || last_prune.elapsed() >= self.interval
+	}
+}
+
 /// 异步日志队列的关闭等待上限。
 ///
 /// writer 可能卡在 SQLite 的 `busy_timeout`（5 s）上，因此等待上限必须大于它；
@@ -956,6 +994,15 @@ impl LogSink {
 
 	/// 用指定队列容量创建 sink。
 	pub fn with_capacity(store: Arc<Mutex<LogStore>>, capacity: usize) -> Self {
+		Self::with_capacity_and_schedule(store, capacity, PruneSchedule::default())
+	}
+
+	/// 用指定队列容量与保留策略调度创建 sink（生产默认值见 [`PruneSchedule`]）。
+	fn with_capacity_and_schedule(
+		store: Arc<Mutex<LogStore>>,
+		capacity: usize,
+		schedule: PruneSchedule,
+	) -> Self {
 		let capacity = capacity.max(1);
 		let (tx, rx) = std::sync::mpsc::sync_channel(capacity);
 		let dropped = Arc::new(AtomicU64::new(0));
@@ -964,7 +1011,7 @@ impl LogSink {
 		let writer_written = Arc::clone(&written);
 		let writer = std::thread::Builder::new()
 			.name("cb-log-writer".to_string())
-			.spawn(move || writer_loop(&store, &rx, &writer_dropped, &writer_written))
+			.spawn(move || writer_loop(&store, &rx, &writer_dropped, &writer_written, schedule))
 			.expect("failed to spawn cb-log-writer thread");
 		Self {
 			inner: Arc::new(LogSinkInner {
@@ -975,6 +1022,16 @@ impl LogSink {
 				writer: Mutex::new(Some(writer)),
 			}),
 		}
+	}
+
+	/// 测试专用：用小阈值调度保留策略，验证 writer 线程会按计数/定时触发。
+	#[cfg(test)]
+	fn with_policy_for_test(
+		store: Arc<Mutex<LogStore>>,
+		capacity: usize,
+		schedule: PruneSchedule,
+	) -> Self {
+		Self::with_capacity_and_schedule(store, capacity, schedule)
 	}
 
 	/// 通用入口：指定 level / component，与 [`LogStore::write_multilang`] 等价。
@@ -1123,20 +1180,33 @@ impl LogSink {
 	}
 }
 
-/// `cb-log-writer` 主循环：批量取队列 → 一次事务写入 → 周期汇报丢弃率。
+/// `cb-log-writer` 主循环：批量取队列 → 一次事务写入 → 周期汇报丢弃率 →
+/// 按 [`PruneSchedule`] 执行日志保留策略。
+///
+/// F12：`prune` 只在**本线程**、批量提交之后/空闲超时分支里执行，调用方
+/// （Tokio worker）永远只做 `try_send`，不会因为保留策略被阻塞。
 fn writer_loop(
 	store: &Mutex<LogStore>,
 	rx: &Receiver<LogRecord>,
 	dropped: &AtomicU64,
 	written: &AtomicU64,
+	schedule: PruneSchedule,
 ) {
 	let mut reported_dropped = 0u64;
 	let mut last_report = Instant::now();
+	let mut written_since_prune = 0u64;
+	let mut last_prune = Instant::now();
 
 	loop {
 		let first = match rx.recv_timeout(LOG_SINK_IDLE_POLL) {
 			Ok(record) => record,
 			Err(RecvTimeoutError::Timeout) => {
+				// 空闲时也按时间触发（长期低日志量的进程同样需要兜底）。
+				if schedule.due(written_since_prune, last_prune) {
+					written_since_prune = 0;
+					last_prune = Instant::now();
+					prune_now(store, "timer");
+				}
 				report_dropped(dropped, &mut reported_dropped, &mut last_report);
 				continue;
 			}
@@ -1161,19 +1231,26 @@ fn writer_loop(
 		{
 			// 与 FFI 查询路径共享同一把锁：查询最多等一个事务，writer 不会在
 			// 持锁期间阻塞等待队列（队列由上面的循环排空）。
-			let guard = match store.lock() {
+			let mut guard = match store.lock() {
 				Ok(guard) => guard,
 				Err(poisoned) => poisoned.into_inner(),
 			};
 			match write_batch(&guard, &batch) {
 				Ok(()) => {
 					written.fetch_add(batch_len, Ordering::Relaxed);
+					written_since_prune = written_since_prune.saturating_add(batch_len);
 				}
 				Err(e) => {
 					// 整批回滚：计入丢弃，绝不在 writer 里重试（避免永久卡死）。
 					dropped.fetch_add(batch_len, Ordering::Relaxed);
 					eprintln!("[logs] async log batch write failed ({batch_len} records): {e}");
 				}
+			}
+			// 已经在持锁：直接在同一次临界区里做保留策略，避免二次加锁。
+			if schedule.due(written_since_prune, last_prune) {
+				written_since_prune = 0;
+				last_prune = Instant::now();
+				log_prune_locked(&mut guard, "counter");
 			}
 		}
 		report_dropped(dropped, &mut reported_dropped, &mut last_report);
@@ -1190,6 +1267,33 @@ fn writer_loop(
 			"[logs] log sink dropped {} record(s) before shutdown (cumulative={total})",
 			total - reported_dropped
 		);
+	}
+}
+
+/// 在 writer 线程的空闲分支里执行保留策略（自行加锁）。
+fn prune_now(store: &Mutex<LogStore>, reason: &str) {
+	let mut guard = match store.lock() {
+		Ok(guard) => guard,
+		Err(poisoned) => poisoned.into_inner(),
+	};
+	log_prune_locked(&mut guard, reason);
+}
+
+/// 执行一次保留策略并汇报结果；调用方必须已持有 `LogStore` 锁。
+///
+/// 只在 writer 线程调用。结果只打印计数（prune 失败也只打一次错误），不会回写
+/// 日志表（避免“为了一条 prune 日志再触发一次 prune”的递归）。
+fn log_prune_locked(store: &mut LogStore, reason: &str) {
+	match store.prune(crate::util::now_ms()) {
+		Ok(stats) => {
+			if stats.total_deleted() > 0 || stats.vacuumed {
+				eprintln!(
+					"[logs] runtime prune ({reason}): deleted_by_age={}, deleted_by_count={}, vacuumed={}",
+					stats.deleted_by_age, stats.deleted_by_count, stats.vacuumed
+				);
+			}
+		}
+		Err(e) => eprintln!("[logs] runtime prune ({reason}) failed: {e}"),
 	}
 }
 
@@ -1409,5 +1513,81 @@ mod tests {
 				entry.message
 			);
 		}
+	}
+
+	/// F12：writer 累计提交 N 条记录后必须自行触发一次 prune，且调用方
+	/// （`log_info`）在触发前后都不阻塞、不碰 SQLite。
+	#[test]
+	fn writer_prunes_after_written_threshold_without_blocking_callers() {
+		let dir = tempfile::tempdir().unwrap();
+		let store = Arc::new(Mutex::new(LogStore::open(dir.path()).unwrap()));
+		let now = crate::util::now_ms();
+		let expired = now - (LOG_RETENTION_DAYS + 1) * MS_PER_DAY;
+		{
+			let mut guard = store.lock().unwrap();
+			for _ in 0..3 {
+				write_at(&mut guard, expired);
+			}
+		}
+		assert_eq!(store.lock().unwrap().stats().unwrap().count, 3);
+
+		// 阈值 5 条：写入 5 条后 writer 必须顺带把 3 条过期记录 prune 掉。
+		let sink = LogSink::with_policy_for_test(
+			Arc::clone(&store),
+			16,
+			PruneSchedule {
+				written_threshold: 5,
+				interval: Duration::from_secs(3_600),
+			},
+		);
+		let started = Instant::now();
+		for i in 0..5 {
+			sink.log_info("PruneTest", &format!("record {i}"), None);
+		}
+		let elapsed = started.elapsed();
+		assert!(
+			elapsed < Duration::from_millis(500),
+			"log() 不得因保留策略阻塞调用方，5 次入队耗时 {elapsed:?}"
+		);
+
+		assert!(sink.flush_and_join(Duration::from_secs(5)));
+		let stats = store.lock().unwrap().stats().unwrap();
+		assert_eq!(
+			stats.count, 5,
+			"5 条新写入保留、3 条过期记录必须被 writer 线程 prune"
+		);
+	}
+
+	/// F12：长期空闲的进程也必须按时间触发 prune（不依赖写入计数）。
+	#[test]
+	fn writer_prunes_on_timer_while_idle() {
+		let dir = tempfile::tempdir().unwrap();
+		let store = Arc::new(Mutex::new(LogStore::open(dir.path()).unwrap()));
+		let now = crate::util::now_ms();
+		let expired = now - (LOG_RETENTION_DAYS + 1) * MS_PER_DAY;
+		{
+			let mut guard = store.lock().unwrap();
+			write_at(&mut guard, expired);
+		}
+		assert_eq!(store.lock().unwrap().stats().unwrap().count, 1);
+
+		let sink = LogSink::with_policy_for_test(
+			Arc::clone(&store),
+			8,
+			PruneSchedule {
+				written_threshold: u64::MAX,
+				interval: Duration::from_millis(10),
+			},
+		);
+		// writer 空闲轮询粒度是 LOG_SINK_IDLE_POLL（500 ms）；给足 3 个周期。
+		let deadline = Instant::now() + Duration::from_secs(3);
+		while store.lock().unwrap().stats().unwrap().count != 0 {
+			assert!(
+				Instant::now() < deadline,
+				"空闲 writer 未在截止时间内执行定时 prune"
+			);
+			std::thread::sleep(Duration::from_millis(25));
+		}
+		assert!(sink.flush_and_join(Duration::from_secs(5)));
 	}
 }

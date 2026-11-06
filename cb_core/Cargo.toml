@@ -65,6 +65,9 @@ rand_chacha = "0.3.1"
 # --- 加密与密钥派生 ---
 argon2 = "0.6"
 ring = "0.17"
+# F15：内存擦除。已在 Cargo.lock 里（opaque-ke / rustls / sec1 / generic-array 等
+# 传递依赖），这里只是把同一版本提升为直接依赖，不新增下载，也不改任何 KSF 参数。
+zeroize = "1.9"
 
 [dev-dependencies]
 # tempfile 只被测试用到（tests/m1_net.rs、m2_meta.rs），不应出现在 [dependencies]

@@ -23,6 +23,7 @@ use crate::crypto::{
 // 只引入存在的结构体
 use opaque_ke::{ClientLoginFinishParameters, ServerLoginParameters};
 use rand::rngs::OsRng;
+use zeroize::Zeroize;
 
 use super::{
 	HandshakeStep, SessionCmd, SessionHandle, SessionKind, SessionRole, SessionState, TransferLoad,
@@ -36,6 +37,7 @@ use crate::proto::{
 	PROTOCOL_VERSION, TRANSFER_HEADER_LEN_BYTES,
 };
 use crate::store::Store;
+use crate::store::{validate_inbound_item_meta, MetaLimitViolation};
 use crate::transport::{Connection, RecvStream, SendStream};
 use crate::util::{now_ms, sha256_hex};
 
@@ -616,6 +618,38 @@ fn sender_admission(senders: &HashMap<String, SenderState>, transfer_id: &str) -
 /// 接收空闲超时判定。
 fn receiver_idle_expired(now: i64, last_activity_ms: i64) -> bool {
 	now - last_activity_ms > RECEIVER_IDLE_TIMEOUT_MS
+}
+
+/// F12：构造“入站元数据被逻辑上限拒绝”的非致命事件（只含原因/长度计数）。
+///
+/// 独立成纯函数便于单测：事件里绝不能出现 `item_id`/`device_id`/`rel_name`
+/// 等对端可控字符串（超长/控制字符会污染外壳日志与事件总线）。
+fn item_meta_rejected_event(violation: &MetaLimitViolation) -> serde_json::Value {
+	let payload = crate::model::CoreErrorPayload {
+		code: "ITEM_META_REJECTED".to_string(),
+		message: format!(
+			"inbound ItemMeta rejected by metadata limits: reason={}",
+			violation.kind.as_str()
+		),
+		scope: "Session".to_string(),
+		retryable: false,
+		// 只丢弃这一条元数据：会话保持 Online，不会因为恶意 ItemMeta 断开。
+		affects_session: false,
+		detail: Some(serde_json::json!({
+			"reason": violation.kind.as_str(),
+			"item_id_len": violation.item_id_len,
+			"device_id_len": violation.device_id_len,
+			"files": violation.files,
+			"max_rel_name_len": violation.max_rel_name_len,
+			"preview_bytes": violation.preview_bytes,
+			"total_meta_bytes": violation.total_meta_bytes,
+		})),
+	};
+	serde_json::json!({
+		"type": "CORE_ERROR",
+		"ts_ms": now_ms(),
+		"payload": payload,
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -3573,6 +3607,41 @@ impl SessionActor {
 			CtrlMsg::ItemMeta {
 				mut item, msg_id, ..
 			} => {
+				// F1：`files[].local_path` 是 hostile input（会让本机把任意文件
+				// 流给对端，UNC 还会触发 SMB 认证）。先剥离再校验/落库/发事件；
+				// 同时记录警告，不打印攻击者可控的路径本身。
+				let stripped_local_paths = item.strip_local_paths();
+				// F12：peer-controlled 元数据在落库前做 O(1) 逻辑上限校验。
+				// 失败只丢弃这一条元数据（CORE_ERROR + 计数 warn），绝不 `?` ——
+				// 否则一条超大 ItemMeta 就能让整个会话断开。
+				if let Err(violation) = validate_inbound_item_meta(&item) {
+					self.log_sink.log_warn(
+						"Session",
+						&format!(
+							"Inbound ItemMeta rejected by metadata limits: reason={}, item_id_len={}, device_id_len={}, files={}, max_rel_name_len={}, preview_bytes={}, total_meta_bytes={}, msg_id_present={}",
+							violation.kind.as_str(),
+							violation.item_id_len,
+							violation.device_id_len,
+							violation.files,
+							violation.max_rel_name_len,
+							violation.preview_bytes,
+							violation.total_meta_bytes,
+							msg_id.is_some()
+						),
+						Some(&format!(
+							"入站元数据超出逻辑上限，已丢弃: 原因={}，item_id 长度={}，device_id 长度={}，文件数={}，最长文件名={}，preview 字节={}，总字节={}",
+							violation.kind.as_str(),
+							violation.item_id_len,
+							violation.device_id_len,
+							violation.files,
+							violation.max_rel_name_len,
+							violation.preview_bytes,
+							violation.total_meta_bytes
+						)),
+					);
+					self.emit_item_meta_rejected(&violation);
+					return Ok(());
+				}
 				let did = self.peer_identity.committed().map(str::to_string);
 				if let Some(did) = &did {
 					self.log_sink.log_info(
@@ -3587,10 +3656,6 @@ impl SessionActor {
 						)),
 					);
 				}
-				// F1：`files[].local_path` 是 hostile input（会让本机把任意文件
-				// 流给对端，UNC 还会触发 SMB 认证）。先剥离再落库/发事件；同时
-				// 记录警告，不打印攻击者可控的路径本身。
-				let stripped_local_paths = item.strip_local_paths();
 				if stripped_local_paths > 0 {
 					self.log_sink.log_warn(
 						"Session",
@@ -5194,10 +5259,13 @@ impl SessionActor {
 						.cas
 						.enqueue_background_sync(expected_sha256.clone(), marked_sha.clone());
 					// 无论入队成功与否都要确保 worker 存在（sweep 兜底路径）。
+					// 历史保留的周期任务只由 `Core::init` 启动的唯一 worker 承担，
+					// 这里传 None 避免第二个调用者覆盖配置。
 					crate::api::ensure_durability_worker(
 						&self.cas,
 						self.store.clone(),
 						&self.log_sink,
+						None,
 					);
 					if !queued {
 						self.log_sink.log_warn(
@@ -5295,6 +5363,16 @@ impl SessionActor {
 			});
 			self.sink.emit(evt.to_string());
 		}
+	}
+
+	/// F12：入站 `ItemMeta` 被逻辑上限拒绝时的**非致命**事件。
+	///
+	/// 只包含原因与长度/计数，绝不包含 `item_id`/`device_id`/`rel_name` 等对端
+	/// 可控字符串（避免超长/控制字符污染外壳日志与事件总线）。
+	/// `affects_session=false` 明确表示会话继续，仅这一条元数据被丢弃。
+	fn emit_item_meta_rejected(&self, violation: &MetaLimitViolation) {
+		let evt = item_meta_rejected_event(violation);
+		self.sink.emit(evt.to_string());
 	}
 
 	fn emit_transfer_failed(&self, tid: &str, code: &str, msg: &str) {
@@ -5627,10 +5705,11 @@ impl SessionActor {
 	// 本身较轻，但为了让四步共用同一条"CPU 在阻塞池"的边界也一并包进去。
 	async fn start_opaque_login(&mut self) -> Result<()> {
 		// 只跨线程传 owned 数据：密码 String 进，ClientLogin 状态 + 已序列化 KE1 出。
-		let password = self.config.account_password.clone();
+		// F15：跨线程副本用 `SecretString` 包装，闭包结束时（含错误路径）擦除。
+		let password = crate::api::SecretString::new(self.config.account_password.clone());
 		let (state, payload) = tokio::task::spawn_blocking(move || {
 			let mut rng = OsRng;
-			let start_result = CbClientLogin::start(&mut rng, password.as_bytes())
+			let start_result = CbClientLogin::start(&mut rng, password.expose().as_bytes())
 				.map_err(|e| anyhow::anyhow!("OPAQUE start failed: {e:?}"))?;
 			let payload = opaque_encode(&start_result.message)?;
 			Ok::<_, anyhow::Error>((start_result.state, payload))
@@ -5659,21 +5738,25 @@ impl SessionActor {
 			.take()
 			.ok_or_else(|| anyhow::anyhow!("Protocol error: Missing client state"))?;
 		// KSF 就在这里的 `finish` 里：状态/密码/服务端响应移进阻塞池，
-		// 只把序列化好的 KE3 字节带回来（session_key 在闭包内用完即 drop）。
-		let password = self.config.account_password.clone();
+		// 只把序列化好的 KE3 字节带回来（session_key 在闭包内用完即擦除）。
+		let password = crate::api::SecretString::new(self.config.account_password.clone());
 		let server_response: opaque_ke::CredentialResponse<DefaultCipherSuite> =
 			opaque_decode(response_bytes)
 				.map_err(|_| anyhow::anyhow!("Invalid OpaqueResponse bytes"))?;
 		let payload = tokio::task::spawn_blocking(move || {
 			let mut rng = OsRng;
-			let finish_result = client_state
+			let mut finish_result = client_state
 				.finish(
 					&mut rng,
-					password.as_bytes(),
+					password.expose().as_bytes(),
 					server_response,
 					ClientLoginFinishParameters::default(),
 				)
 				.map_err(|e| anyhow::anyhow!("OPAQUE finish failed: {e:?}"))?;
+			// F15：session_key / export_key 是明文密钥材料，用完立即擦除
+			// （`message` 还要发给对端，不能一起擦）。
+			finish_result.session_key.as_mut_slice().zeroize();
+			finish_result.export_key.as_mut_slice().zeroize();
 			opaque_encode(&finish_result.message)
 		})
 		.await
@@ -5693,11 +5776,12 @@ impl SessionActor {
 		ensure_handshake_step(&self.state, &HandshakeStep::OpaqueStart, "OpaqueStart")?;
 		// 首次登录的 80~120ms 主要花在 `p2p_get_server_registration`（内部跑 Argon2id）；
 		// 它和 `ServerLogin::start` 一起放进同一个阻塞任务，闭包内完成反序列化与 KE2 编码。
-		let password = self.config.account_password.clone();
+		// F15：密码副本用 `SecretString` 包装，闭包结束时擦除。
+		let password = crate::api::SecretString::new(self.config.account_password.clone());
 		let start_bytes = start_bytes.to_vec();
 		let (state, payload) = tokio::task::spawn_blocking(move || {
 			let identifier = b"clipbridge-user";
-			let (server_setup, server_rec) = p2p_get_server_registration(&password)?;
+			let (server_setup, server_rec) = p2p_get_server_registration(password.expose())?;
 			let client_message: opaque_ke::CredentialRequest<DefaultCipherSuite> =
 				opaque_decode(&start_bytes)
 					.map_err(|_| anyhow::anyhow!("Invalid OpaqueStart bytes"))?;
@@ -5735,15 +5819,17 @@ impl SessionActor {
 			.take()
 			.ok_or_else(|| anyhow::anyhow!("Protocol error: Missing server state"))?;
 		// 服务端 finish 不跑 KSF，但仍包含 HMAC/群运算；同样移出 worker。
-		// 会话密钥在闭包内生成并 drop，不跨线程。
+		// 会话密钥在闭包内生成，F15：用后立即擦除，而不是无痕 drop。
 		let finish_bytes = finish_bytes.to_vec();
 		tokio::task::spawn_blocking(move || -> Result<()> {
 			let client_message: opaque_ke::CredentialFinalization<DefaultCipherSuite> =
 				opaque_decode(&finish_bytes)
 					.map_err(|_| anyhow::anyhow!("Invalid OpaqueFinish bytes"))?;
-			let _session_key = server_state
+			let mut finish_result = server_state
 				.finish(client_message, ServerLoginParameters::default())
 				.map_err(|e| anyhow::anyhow!("Authentication failed: {e:?}"))?;
+			// F15：这是服务器侧唯一持有的 session_key，绝不能随普通 drop 留在内存里。
+			finish_result.session_key.as_mut_slice().zeroize();
 			Ok(())
 		})
 		.await
@@ -7665,5 +7751,64 @@ mod sender_auth_hardening_tests {
 		.unwrap()
 		.expect("local-owned item may use local_path");
 		assert_eq!(path, secret);
+	}
+}
+
+/// F12：入站元数据拒绝路径的事件契约（非致命 + 只含计数）。
+#[cfg(test)]
+mod inbound_meta_limit_tests {
+	use super::{item_meta_rejected_event, validate_inbound_item_meta};
+	use crate::model::{ItemContent, ItemKind, ItemMeta, ItemPreview};
+	use crate::store::{MetaLimitKind, MAX_ITEM_META_ID_BYTES};
+
+	fn oversize_meta() -> ItemMeta {
+		ItemMeta {
+			ty: "ItemMeta".to_string(),
+			// 攻击者字符串：既超长又带可识别的标记，用于断言事件不泄漏它。
+			item_id: format!("{}EVILMARK", "x".repeat(MAX_ITEM_META_ID_BYTES)),
+			kind: ItemKind::Text,
+			created_ts_ms: 1,
+			source_device_id: "peer".to_string(),
+			source_device_name: None,
+			size_bytes: 10,
+			preview: ItemPreview::default(),
+			content: ItemContent {
+				mime: "text/plain".to_string(),
+				sha256: "a".repeat(64),
+				total_bytes: 10,
+			},
+			files: Vec::new(),
+			expires_ts_ms: None,
+		}
+	}
+
+	#[test]
+	fn oversized_inbound_meta_rejection_is_non_fatal_and_count_only() {
+		let meta = oversize_meta();
+		let violation = validate_inbound_item_meta(&meta).expect_err("oversize meta must reject");
+		assert_eq!(violation.kind, MetaLimitKind::ItemIdLength);
+		assert_eq!(violation.item_id_len, MAX_ITEM_META_ID_BYTES + 8);
+
+		let evt = item_meta_rejected_event(&violation);
+		let json = evt.to_string();
+		assert_eq!(evt["type"], "CORE_ERROR");
+		assert_eq!(evt["payload"]["code"], "ITEM_META_REJECTED");
+		assert_eq!(
+			evt["payload"]["affects_session"], false,
+			"rejecting one ItemMeta must not affect the session"
+		);
+		assert_eq!(evt["payload"]["detail"]["reason"], "item_id_length");
+		assert_eq!(
+			evt["payload"]["detail"]["item_id_len"],
+			MAX_ITEM_META_ID_BYTES + 8
+		);
+		assert!(
+			!json.contains("EVILMARK"),
+			"attacker-controlled string leaked into rejection event: {json}"
+		);
+		assert!(
+			!json.contains(&"x".repeat(32)),
+			"attacker-controlled padding leaked into rejection event"
+		);
 	}
 }

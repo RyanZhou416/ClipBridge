@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::model::{FileMeta, ItemKind, ItemMeta};
+use crate::model::{FileMeta, ItemKind, ItemMeta, ItemPreview};
 
 pub struct Store {
 	pub(crate) conn: Connection,
@@ -26,6 +26,200 @@ pub struct Store {
 /// 旧库会走既有 drop-and-rebuild：内容/身份表全部重建，CAS 由 `Core::init` 一并清空，
 /// 磁盘对象不可恢复（这是已批准的重建策略，不是本列引入的额外风险）。
 pub const SCHEMA_VERSION: i64 = 3;
+
+// ---------------------------------------------------------------------------
+// F12：入站 `ItemMeta` 的逻辑上限
+//
+// 对端可以在 10 MiB 控制帧内塞入任意长/任意多的元数据字段。这些字段会原样
+// 进入 `items` / `history` / `files_json`，并在每个进程生命周期里被反复读取，
+// 因此必须在**落库之前**用 O(1) 的字符串/计数检查挡掉，而不是依赖帧大小上限。
+//
+// 这里定义的是“逻辑上限”，全部是常数，不读取环境变量、不做正则、不分配与
+// 字段总长度无关的内存；校验函数只遍历一遍文件列表。
+// ---------------------------------------------------------------------------
+
+/// `item_id` / `source_device_id` / `FileMeta.file_id` 允许的最大字节数。
+pub const MAX_ITEM_META_ID_BYTES: usize = 128;
+
+/// 单条 `ItemMeta` 允许携带的 `files[]` 数量。
+pub const MAX_ITEM_META_FILES: usize = 256;
+
+/// `FileMeta.rel_name` 允许的最大字节数。
+pub const MAX_ITEM_META_REL_NAME_BYTES: usize = 512;
+
+/// `ItemPreview` 序列化后的最大字节数（64 KiB）。
+pub const MAX_ITEM_META_PREVIEW_BYTES: usize = 64 * 1024;
+
+/// 单条 `ItemMeta` 所有字段长度求和后的逻辑上限（256 KiB）。
+///
+/// 10 MiB 帧上限只是传输层防线；这里把“一条元数据真正值得保存的大小”压到
+/// 256 KiB，使单条恶意元数据无法长期占据数据库/内存的大头。
+pub const MAX_ITEM_META_TOTAL_BYTES: usize = 256 * 1024;
+
+/// F12 历史保留：每个账号默认保留的历史行数（维护路径按此硬删除最旧行）。
+pub const DEFAULT_HISTORY_RETENTION_ROWS_PER_ACCOUNT: i64 = 10_000;
+
+/// F12 历史保留：覆盖默认保留行数的环境变量（`0` = 关闭保留，非法值回退默认）。
+pub const HISTORY_RETENTION_ENV: &str = "CB_HISTORY_RETENTION_ROWS";
+
+/// 入站元数据被拒绝的具体原因（只用于计数日志，不包含任何对端字符串）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetaLimitKind {
+	ItemIdLength,
+	ItemIdChars,
+	DeviceIdLength,
+	DeviceIdChars,
+	FileIdLength,
+	FileIdChars,
+	TooManyFiles,
+	RelNameLength,
+	PreviewTooLarge,
+	TotalTooLarge,
+}
+
+impl MetaLimitKind {
+	/// 稳定的短原因串（用于诊断日志 / 事件 payload，绝不拼接对端字符串）。
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::ItemIdLength => "item_id_length",
+			Self::ItemIdChars => "item_id_chars",
+			Self::DeviceIdLength => "device_id_length",
+			Self::DeviceIdChars => "device_id_chars",
+			Self::FileIdLength => "file_id_length",
+			Self::FileIdChars => "file_id_chars",
+			Self::TooManyFiles => "too_many_files",
+			Self::RelNameLength => "rel_name_length",
+			Self::PreviewTooLarge => "preview_too_large",
+			Self::TotalTooLarge => "total_too_large",
+		}
+	}
+}
+
+/// 一次元数据校验的计数快照 + 被触发的限制。
+///
+/// 所有字段都是长度/计数，**没有任何对端可控字符串**，因此可以安全地写入日志
+/// 或事件（避免攻击者用超长/控制字符污染诊断输出）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetaLimitViolation {
+	pub kind: MetaLimitKind,
+	pub item_id_len: usize,
+	pub device_id_len: usize,
+	pub files: usize,
+	pub max_rel_name_len: usize,
+	pub preview_bytes: usize,
+	pub total_meta_bytes: usize,
+}
+
+/// ID 类字段的白名单：可打印 ASCII（0x20-0x7E），且不含路径分隔符。
+///
+/// `:` 也一并拒绝：它是 Windows ADS/盘符分隔符，而 `file_id` 一旦被用于构造
+/// 路径就必须先通过同样的白名单（见 F14 的 `cas::validate_component`）。
+fn is_safe_meta_id(value: &str) -> bool {
+	value
+		.bytes()
+		.all(|b| (0x20..=0x7E).contains(&b) && !matches!(b, b'/' | b'\\' | b':'))
+}
+
+/// `preview` 的序列化大小；`text` 长度超过上限时直接返回 `usize::MAX`，
+/// 避免为一条注定被拒绝的元数据做最多 6 倍膨胀的 JSON 转义。
+fn preview_serialized_len(preview: &ItemPreview) -> usize {
+	if preview
+		.text
+		.as_ref()
+		.is_some_and(|text| text.len() > MAX_ITEM_META_PREVIEW_BYTES)
+	{
+		return usize::MAX;
+	}
+	serde_json::to_vec(preview).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// 元数据逻辑大小：所有字符串字段长度 + 序列化后的 `preview` 大小。
+///
+/// 这是“保存到数据库里的有效负载”的上界（数组/JSON 标点开销很小，不单独计量），
+/// 用饱和加法避免恶意长度造成整数溢出。
+fn meta_logical_size(meta: &ItemMeta, preview_bytes: usize) -> usize {
+	let mut total = preview_bytes
+		.saturating_add(meta.item_id.len())
+		.saturating_add(meta.source_device_id.len())
+		.saturating_add(meta.source_device_name.as_deref().map_or(0, str::len))
+		.saturating_add(meta.content.mime.len())
+		.saturating_add(meta.content.sha256.len());
+	for file in &meta.files {
+		total = total
+			.saturating_add(file.file_id.len())
+			.saturating_add(file.rel_name.len())
+			.saturating_add(file.sha256.as_deref().map_or(0, str::len))
+			.saturating_add(file.local_path.as_deref().map_or(0, str::len));
+	}
+	total
+}
+
+/// 校验一条**远端** `ItemMeta` 是否在 F12 的逻辑上限内。
+///
+/// 调用方：入站 `CtrlMsg::ItemMeta` 路径（先校验再落库/发事件）与
+/// [`Store::insert_remote_item`]（纵深防御）。函数是纯函数、只遍历一次文件列表，
+/// 不触碰 DB/磁盘，因此可以在解析完消息后立刻调用。
+///
+/// 返回 `Err(MetaLimitViolation)` 时调用方必须**非致命**地丢弃该元数据
+/// （`ContentDenied`/`CORE_ERROR` 事件 + 计数 warn），不能终止会话。
+pub fn validate_inbound_item_meta(meta: &ItemMeta) -> Result<(), MetaLimitViolation> {
+	let item_id_len = meta.item_id.len();
+	let device_id_len = meta.source_device_id.len();
+	let files = meta.files.len();
+	let max_rel_name_len = meta
+		.files
+		.iter()
+		.map(|file| file.rel_name.len())
+		.max()
+		.unwrap_or(0);
+	let preview_bytes = preview_serialized_len(&meta.preview);
+	let total_meta_bytes = meta_logical_size(meta, preview_bytes);
+
+	let stats = MetaLimitViolation {
+		kind: MetaLimitKind::ItemIdLength,
+		item_id_len,
+		device_id_len,
+		files,
+		max_rel_name_len,
+		preview_bytes,
+		total_meta_bytes,
+	};
+	let fail = |kind: MetaLimitKind| Err(MetaLimitViolation { kind, ..stats });
+
+	if item_id_len > MAX_ITEM_META_ID_BYTES {
+		return fail(MetaLimitKind::ItemIdLength);
+	}
+	if !is_safe_meta_id(&meta.item_id) {
+		return fail(MetaLimitKind::ItemIdChars);
+	}
+	if device_id_len > MAX_ITEM_META_ID_BYTES {
+		return fail(MetaLimitKind::DeviceIdLength);
+	}
+	if !is_safe_meta_id(&meta.source_device_id) {
+		return fail(MetaLimitKind::DeviceIdChars);
+	}
+	if files > MAX_ITEM_META_FILES {
+		return fail(MetaLimitKind::TooManyFiles);
+	}
+	for file in &meta.files {
+		if file.file_id.len() > MAX_ITEM_META_ID_BYTES {
+			return fail(MetaLimitKind::FileIdLength);
+		}
+		if !is_safe_meta_id(&file.file_id) {
+			return fail(MetaLimitKind::FileIdChars);
+		}
+	}
+	if max_rel_name_len > MAX_ITEM_META_REL_NAME_BYTES {
+		return fail(MetaLimitKind::RelNameLength);
+	}
+	if preview_bytes > MAX_ITEM_META_PREVIEW_BYTES {
+		return fail(MetaLimitKind::PreviewTooLarge);
+	}
+	if total_meta_bytes > MAX_ITEM_META_TOTAL_BYTES {
+		return fail(MetaLimitKind::TotalTooLarge);
+	}
+	Ok(())
+}
 
 /// 重建时先删除的表：本模块拥有的全部内容/身份表。
 ///
@@ -836,6 +1030,66 @@ impl Store {
 		Ok(n > 0)
 	}
 
+	/// F12：账号的历史总行数（含已软删除的行）。
+	///
+	/// 维护路径只做这一条 `COUNT(*)`（走 `(account_uid, sort_ts_ms)` 索引前缀），
+	/// 不再额外叠加 SUM/COUNT，避免在每次 ingest 后的 GC 里多付一次扫描。
+	pub fn history_total_count_for_account(&self, account_uid: &str) -> anyhow::Result<i64> {
+		let total: i64 = self.conn.query_row(
+			"SELECT COUNT(*) FROM history WHERE account_uid=?1",
+			params![account_uid],
+			|r| r.get(0),
+		)?;
+		Ok(total)
+	}
+
+	/// F12：硬删除账号最旧的 `excess` 行历史（维护路径专用）。
+	///
+	/// 只按 `sort_ts_ms`/`history_id` 删除最旧的行；用户发起的删除仍然是
+	/// [`Store::soft_delete_item`] 的软删除，不会被这里的维护逻辑替代。
+	/// `history.item_id` 的外键 `ON DELETE CASCADE` 只影响 items 硬删除，本函数
+	/// 删的是子表行，不触碰 `items` / `content_cache`。
+	pub fn purge_history_oldest_excess(
+		&mut self,
+		account_uid: &str,
+		excess: i64,
+	) -> anyhow::Result<i64> {
+		if excess <= 0 {
+			return Ok(0);
+		}
+		let deleted = self.conn.execute(
+			r"
+            DELETE FROM history
+            WHERE history_id IN (
+                SELECT history_id
+                FROM history
+                WHERE account_uid=?1
+                ORDER BY sort_ts_ms ASC, history_id ASC
+                LIMIT ?2
+            )
+            ",
+			params![account_uid, excess],
+		)?;
+		Ok(deleted as i64)
+	}
+
+	/// F12：把账号的历史行压到最新 `keep_latest` 行以内，返回硬删除的行数。
+	///
+	/// 保留策略是按行数（count）的硬删除：先数总行数，超出部分交给
+	/// [`Store::purge_history_oldest_excess`]。`keep_latest < 0` 表示不限制；
+	/// `keep_latest == 0` 删除该账号全部历史行（测试/显式清空用）。
+	pub fn purge_history_beyond_retention(
+		&mut self,
+		account_uid: &str,
+		keep_latest: i64,
+	) -> anyhow::Result<i64> {
+		if keep_latest < 0 {
+			return Ok(0);
+		}
+		let total = self.history_total_count_for_account(account_uid)?;
+		self.purge_history_oldest_excess(account_uid, total.saturating_sub(keep_latest))
+	}
+
 	/// Cache GC：挑 LRU（present=1）最旧的若干条
 	pub fn select_lru_present(&self, limit: i64) -> anyhow::Result<Vec<(String, i64)>> {
 		let mut stmt = self.conn.prepare(
@@ -1098,12 +1352,30 @@ impl Store {
 		let mut sanitized_meta = meta.clone();
 		let stripped_local_paths = sanitized_meta.strip_local_paths();
 		if stripped_local_paths > 0 {
+			// 只记计数：此时 item_id 尚未通过 F12 校验，可能是超长/控制字符，
+			// 绝不能写进日志。
 			eprintln!(
-				"[Store] WARNING: dropped {stripped_local_paths} peer-supplied local_path value(s) from remote item {} (untrusted input)",
-				sanitized_meta.item_id
+				"[Store] WARNING: dropped {stripped_local_paths} peer-supplied local_path value(s) from remote metadata (untrusted input)"
 			);
 		}
 		let meta = &sanitized_meta;
+
+		// 安全（F12）：纵深防御。入站 actor 已经先校验过一次，这里再校验一次，
+		// 保证任何直接调用 `insert_remote_item` 的路径（未来的转发/重放代码）
+		// 也无法把超长/带路径分隔符的 peer-controlled 元数据写进库。
+		// 错误信息只带长度/计数，不拼接对端字符串。
+		if let Err(violation) = validate_inbound_item_meta(meta) {
+			anyhow::bail!(
+				"remote ItemMeta rejected by metadata limits: reason={}, item_id_len={}, device_id_len={}, files={}, max_rel_name_len={}, preview_bytes={}, total_meta_bytes={}",
+				violation.kind.as_str(),
+				violation.item_id_len,
+				violation.device_id_len,
+				violation.files,
+				violation.max_rel_name_len,
+				violation.preview_bytes,
+				violation.total_meta_bytes
+			);
+		}
 
 		let tx = self.conn.transaction()?;
 
@@ -1785,5 +2057,234 @@ mod schema_tests {
 		assert!(!store
 			.has_other_live_content_reference(&shared, "item-b")
 			.unwrap());
+	}
+
+	// -----------------------------------------------------------------------
+	// F12：入站元数据上限 + 历史行数保留
+	// -----------------------------------------------------------------------
+
+	fn limit_meta(item_id: &str) -> ItemMeta {
+		use crate::model::{ItemContent, ItemPreview};
+		ItemMeta {
+			ty: "ItemMeta".to_string(),
+			item_id: item_id.to_string(),
+			kind: ItemKind::FileList,
+			created_ts_ms: 1,
+			source_device_id: "dev-a".to_string(),
+			source_device_name: None,
+			size_bytes: 10,
+			preview: ItemPreview::default(),
+			content: ItemContent {
+				mime: "application/x-clipbridge-filelist+json".to_string(),
+				sha256: "a".repeat(64),
+				total_bytes: 10,
+			},
+			files: Vec::new(),
+			expires_ts_ms: None,
+		}
+	}
+
+	fn limit_file(file_id: &str, rel_name: &str) -> FileMeta {
+		FileMeta {
+			file_id: file_id.to_string(),
+			rel_name: rel_name.to_string(),
+			size_bytes: 1,
+			sha256: None,
+			local_path: None,
+		}
+	}
+
+	/// 边界：恰好等于上限必须接受，超过 1 字节必须拒绝；ID 白名单只允许
+	/// 可打印 ASCII 且不含路径分隔符。
+	#[test]
+	fn inbound_meta_limits_accept_boundaries_and_reject_oversize() {
+		// 恰好达到所有单字段上限：128 / 128 / 128 / 512 / 1 个文件。
+		let mut meta = limit_meta(&"i".repeat(MAX_ITEM_META_ID_BYTES));
+		meta.source_device_id = "d".repeat(MAX_ITEM_META_ID_BYTES);
+		meta.files = vec![limit_file(
+			&"f".repeat(MAX_ITEM_META_ID_BYTES),
+			&"r".repeat(MAX_ITEM_META_REL_NAME_BYTES),
+		)];
+		assert!(validate_inbound_item_meta(&meta).is_ok());
+
+		// files.len() 恰好 256 可以接受。
+		meta.files = (0..MAX_ITEM_META_FILES)
+			.map(|i| limit_file(&format!("f{i}"), "r.txt"))
+			.collect();
+		assert!(validate_inbound_item_meta(&meta).is_ok());
+		meta.files.push(limit_file("f-extra", "r.txt"));
+		assert_eq!(
+			validate_inbound_item_meta(&meta).unwrap_err().kind,
+			MetaLimitKind::TooManyFiles
+		);
+
+		// 单字段 +1 字节必须拒绝。
+		let mut meta = limit_meta(&"i".repeat(MAX_ITEM_META_ID_BYTES + 1));
+		assert_eq!(
+			validate_inbound_item_meta(&meta).unwrap_err().kind,
+			MetaLimitKind::ItemIdLength
+		);
+		meta.item_id = "ok".to_string();
+		meta.source_device_id = "d".repeat(MAX_ITEM_META_ID_BYTES + 1);
+		assert_eq!(
+			validate_inbound_item_meta(&meta).unwrap_err().kind,
+			MetaLimitKind::DeviceIdLength
+		);
+		meta.source_device_id = "dev".to_string();
+		meta.files = vec![limit_file(&"f".repeat(MAX_ITEM_META_ID_BYTES + 1), "r")];
+		assert_eq!(
+			validate_inbound_item_meta(&meta).unwrap_err().kind,
+			MetaLimitKind::FileIdLength
+		);
+		meta.files = vec![limit_file(
+			"f",
+			&"r".repeat(MAX_ITEM_META_REL_NAME_BYTES + 1),
+		)];
+		assert_eq!(
+			validate_inbound_item_meta(&meta).unwrap_err().kind,
+			MetaLimitKind::RelNameLength
+		);
+	}
+
+	/// ID 白名单：控制字符 / 路径分隔符 / `:` 都拒绝（不记录对端字符串，只报原因）。
+	#[test]
+	fn inbound_meta_id_whitelist_rejects_control_and_path_chars() {
+		for bad in ["a/b", "a\\b", "C:evil", "evil\u{0}", "evil\u{1f}", "联想"] {
+			let mut meta = limit_meta(bad);
+			let err = validate_inbound_item_meta(&meta).unwrap_err();
+			assert_eq!(err.kind, MetaLimitKind::ItemIdChars, "item_id={bad:?}");
+			meta.item_id = "ok".to_string();
+			meta.source_device_id = bad.to_string();
+			assert_eq!(
+				validate_inbound_item_meta(&meta).unwrap_err().kind,
+				MetaLimitKind::DeviceIdChars,
+				"device_id={bad:?}"
+			);
+			meta.source_device_id = "dev".to_string();
+			meta.files = vec![limit_file(bad, "r.txt")];
+			assert_eq!(
+				validate_inbound_item_meta(&meta).unwrap_err().kind,
+				MetaLimitKind::FileIdChars,
+				"file_id={bad:?}"
+			);
+		}
+	}
+
+	/// `preview` 的序列化大小边界：恰好 64 KiB 接受，+1 字节拒绝。
+	#[test]
+	fn inbound_meta_preview_serialized_size_boundary() {
+		use crate::model::ItemPreview;
+
+		let overhead = serde_json::to_vec(&ItemPreview {
+			text: Some(String::new()),
+			..Default::default()
+		})
+		.unwrap()
+		.len();
+		let exact = MAX_ITEM_META_PREVIEW_BYTES - overhead;
+
+		let mut meta = limit_meta("item-preview");
+		meta.preview.text = Some("x".repeat(exact));
+		assert!(validate_inbound_item_meta(&meta).is_ok());
+
+		meta.preview.text = Some("x".repeat(exact + 1));
+		assert_eq!(
+			validate_inbound_item_meta(&meta).unwrap_err().kind,
+			MetaLimitKind::PreviewTooLarge
+		);
+
+		// 远大于上限的 text 走“长度下界”快速拒绝，不做 JSON 转义。
+		meta.preview.text = Some("x".repeat(MAX_ITEM_META_PREVIEW_BYTES * 2));
+		assert_eq!(
+			validate_inbound_item_meta(&meta).unwrap_err().kind,
+			MetaLimitKind::PreviewTooLarge
+		);
+	}
+
+	/// 总逻辑大小：每个字段都在上限内，但合起来超过 256 KiB 仍必须拒绝。
+	#[test]
+	fn inbound_meta_total_size_cap_rejects_oversize_aggregate() {
+		let mut meta = limit_meta("item-total");
+		meta.preview.text = Some("p".repeat(60 * 1024));
+		meta.source_device_name = Some("n".repeat(200 * 1024));
+		// 单字段都合法：text < 64 KiB、device_name 无独立上限、文件数为 0。
+		assert_eq!(
+			validate_inbound_item_meta(&meta).unwrap_err().kind,
+			MetaLimitKind::TotalTooLarge
+		);
+	}
+
+	/// 纵深防御：即使绕过 actor 直接调用 `insert_remote_item`，超限元数据也不得落库。
+	#[test]
+	fn insert_remote_item_rejects_oversize_meta() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+		let meta = limit_meta(&"i".repeat(MAX_ITEM_META_ID_BYTES + 1));
+
+		let err = store.insert_remote_item("acct", &meta, 1).unwrap_err();
+		assert!(
+			err.to_string().contains("item_id_length"),
+			"unexpected error: {err:#}"
+		);
+
+		let items: i64 = store
+			.conn
+			.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+			.unwrap();
+		let history: i64 = store
+			.conn
+			.query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))
+			.unwrap();
+		assert_eq!((items, history), (0, 0), "被拒绝的元数据不得写入任何表");
+	}
+
+	/// F12：按行数保留最新 N 条，且只影响目标账号；用户软删除的用户操作不变。
+	#[test]
+	fn history_retention_purges_oldest_rows_and_keeps_newest() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+
+		for i in 0..25_i64 {
+			let mut meta = test_item_meta(&format!("item-{i:03}"), &"5".repeat(64));
+			meta.created_ts_ms = i;
+			store.insert_remote_item("acct", &meta, i).unwrap();
+		}
+		// 另一个账号的数据绝不能被误删。
+		for i in 0..3_i64 {
+			let mut meta = test_item_meta(&format!("other-{i}"), &"6".repeat(64));
+			meta.created_ts_ms = i;
+			store.insert_remote_item("acct-other", &meta, i).unwrap();
+		}
+		assert_eq!(store.history_total_count_for_account("acct").unwrap(), 25);
+
+		// 保留最新 10 条：删除最旧 15 条。
+		let deleted = store.purge_history_beyond_retention("acct", 10).unwrap();
+		assert_eq!(deleted, 15);
+		assert_eq!(store.history_total_count_for_account("acct").unwrap(), 10);
+		assert_eq!(
+			store.history_total_count_for_account("acct-other").unwrap(),
+			3,
+			"其他账号的历史不得被保留策略删除"
+		);
+
+		// 留下的是最新的 10 条（item-015..item-024），按 sort_ts 倒序返回。
+		let metas = store.list_history_metas("acct", 100).unwrap();
+		assert_eq!(metas.len(), 10);
+		assert_eq!(metas.first().unwrap().item_id, "item-024");
+		assert_eq!(metas.last().unwrap().item_id, "item-015");
+
+		// 幂等：已经在上限以内时不再删除。
+		assert_eq!(store.purge_history_beyond_retention("acct", 10).unwrap(), 0);
+
+		// 软删除的行也属于“总行数”，同样会被最旧优先的保留策略清掉。
+		assert!(store.soft_delete_item("acct", "item-015").unwrap());
+		for i in 25..30_i64 {
+			let mut meta = test_item_meta(&format!("item-{i:03}"), &"7".repeat(64));
+			meta.created_ts_ms = i;
+			store.insert_remote_item("acct", &meta, i).unwrap();
+		}
+		assert_eq!(store.history_total_count_for_account("acct").unwrap(), 15);
+		assert_eq!(store.purge_history_beyond_retention("acct", 10).unwrap(), 5);
+		assert_eq!(store.history_total_count_for_account("acct").unwrap(), 10);
 	}
 }

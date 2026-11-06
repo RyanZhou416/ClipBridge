@@ -313,9 +313,47 @@ fn validate_hash(sha256_hex: &str) -> anyhow::Result<()> {
 	Ok(())
 }
 
+/// Windows 的 DOS 设备名（大小写不敏感；带任意扩展名同样被系统视为设备）。
+///
+/// 只列审计要求覆盖的集合：`CON`/`PRN`/`AUX`/`NUL` 与 `COM1`-`COM9`、
+/// `LPT1`-`LPT9`。`COM0`/`LPT0` 不是这里的目标（审计范围明确为 1-9）。
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+const WINDOWS_RESERVED_BASE_NAMES: [&str; 22] = [
+	"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+	"COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Windows 文件/目录名规则（F14）。
+///
+/// 这个函数在**所有平台**都编译，便于单元测试直接覆盖规则；是否由
+/// [`validate_component`] 强制执行取决于目标平台（见其 `#[cfg(windows)]` 分支）：
+/// Unix 仍允许 `:`、`CON`、结尾点等本身合法的文件名，只额外拒绝控制字符。
+///
+/// 拒绝：
+/// - `:`（NTFS 备用数据流/盘符分隔符，`a:b` 会被解释成 ADS）；
+/// - 结尾的 `.` 或空格（Win32 会静默裁剪，导致“校验的名字”和“实际落盘的名字”
+///   不一致，多个对端可控名字还能因此碰撞）；
+/// - DOS 设备名（大小写不敏感，带任意扩展名，如 `CON`、`con.txt`、`LPT1.foo.bar`）。
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn validate_windows_component_rules(name: &str) -> anyhow::Result<()> {
+	if name.contains(':') {
+		anyhow::bail!("windows path component must not contain ':' (ADS/drive): {name:?}");
+	}
+	if name.ends_with('.') || name.ends_with(' ') {
+		anyhow::bail!("windows path component must not end with '.' or space: {name:?}");
+	}
+	// Windows 把“第一个点之前的部分”当作设备名，扩展名不影响判定。
+	let base = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+	if WINDOWS_RESERVED_BASE_NAMES.contains(&base.as_str()) {
+		anyhow::bail!("windows reserved DOS device name: {name:?}");
+	}
+	Ok(())
+}
+
 /// 校验单个路径分量（文件名或目录名）。
 ///
-/// 拒绝：空串、`.`、`..`、绝对路径、任何路径分隔符。
+/// 拒绝：空串、`.`、`..`、绝对路径、任何路径分隔符、控制字符（所有平台）。
+/// 在 Windows 上额外拒绝：`:`（ADS）、DOS 设备名、结尾的 `.`/空格（F14）。
 fn validate_component(name: &str) -> anyhow::Result<()> {
 	if name.is_empty() || name == "." || name == ".." {
 		anyhow::bail!("invalid path component: {name:?}");
@@ -328,6 +366,12 @@ fn validate_component(name: &str) -> anyhow::Result<()> {
 	if path.file_name().and_then(|n| n.to_str()) != Some(name) {
 		anyhow::bail!("invalid path component: {name:?}");
 	}
+	// F14：控制字符（含 NUL）在任何平台都不允许进入文件系统路径。
+	if name.bytes().any(|b| b < 0x20) {
+		anyhow::bail!("path component contains control characters: {name:?}");
+	}
+	#[cfg(windows)]
+	validate_windows_component_rules(name)?;
 	Ok(())
 }
 
@@ -1196,6 +1240,105 @@ mod tests {
 				"expected component rejection: {bad:?}"
 			);
 		}
+	}
+
+	/// F14：Windows 保留设备名 / ADS / 结尾点或空格。
+	///
+	/// 规则函数在所有平台都编译，因此这里直接测试它本身；`validate_component`
+	/// 的强制执行只在 Windows 上断言（Unix 对这些名字保持宽松，见函数文档）。
+	#[test]
+	fn windows_component_rules_reject_reserved_ads_and_trailing_chars() {
+		let bad = [
+			"CON",
+			"con",
+			"PrN",
+			"AUX",
+			"NUL",
+			"COM1",
+			"com9",
+			"LPT1",
+			"lpt9",
+			"CON.txt",
+			"nul.tar.gz",
+			"aux.",
+			"a:b",
+			"report.pdf.",
+			"trailing ",
+			"report.txt ",
+		];
+		for name in bad {
+			assert!(
+				validate_windows_component_rules(name).is_err(),
+				"expected windows rule rejection: {name:?}"
+			);
+			#[cfg(windows)]
+			assert!(
+				validate_component(name).is_err(),
+				"Windows validate_component must reject: {name:?}"
+			);
+		}
+
+		// 非保留名/普通扩展名/Unicode 必须接受（Windows 上走完整校验）。
+		let good = [
+			"console",
+			"con_",
+			"com10",
+			"lpt10",
+			"a.txt",
+			"a.b.c",
+			"a-b_c",
+			"报告.pdf",
+			"café.txt",
+		];
+		for name in good {
+			assert!(
+				validate_windows_component_rules(name).is_ok(),
+				"unexpected windows rule rejection: {name:?}"
+			);
+			assert!(
+				validate_component(name).is_ok(),
+				"normal/Unicode component must be accepted: {name:?}"
+			);
+		}
+	}
+
+	/// F14：控制字符（含 NUL）在所有平台都必须拒绝，不能进入文件系统路径。
+	#[test]
+	fn control_characters_are_rejected_on_all_platforms() {
+		for bad in ["a\u{0}b", "a\u{1}b", "a\u{1f}b", "a\tb"] {
+			assert!(
+				validate_component(bad).is_err(),
+				"control characters must be rejected: {bad:?}"
+			);
+		}
+	}
+
+	/// F14：网络派生分量（tmp transfer id / materialize filename）在 Windows 上
+	/// 必须走同一套校验；普通与 Unicode 名字仍可 materialize。
+	#[cfg(windows)]
+	#[test]
+	fn materialize_file_and_tmp_reject_windows_unsafe_names() {
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path()).unwrap();
+		let sha = cas.put_blob(b"hello").unwrap();
+
+		for bad in ["CON", "NUL", "COM1", "a:b", "report.pdf.", "trailing "] {
+			assert!(
+				cas.materialize_file(&sha, "tid", bad).is_err(),
+				"materialize filename must reject: {bad:?}"
+			);
+			assert!(
+				cas.materialize_file(&sha, bad, "a.txt").is_err(),
+				"materialize transfer id must reject: {bad:?}"
+			);
+			assert!(
+				cas.get_tmp_path(bad).is_err(),
+				"get_tmp_path must reject: {bad:?}"
+			);
+		}
+
+		assert!(cas.materialize_file(&sha, "tid-1", "报告.txt").is_ok());
+		assert!(cas.get_tmp_path("transfer-1").is_ok());
 	}
 
 	#[test]
