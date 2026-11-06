@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncSeekExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -53,15 +53,46 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// 单个会话允许同时存在的入站传输数量。
 ///
-/// 每个 receiver 都会占用一个 32 槽 channel、一个 writer Task 和一个 tmp 文件 fd，
-/// 对端可以无限发 `ContentBegin`，因此必须设硬上限（超出的 Begin 直接用
+/// 每个 receiver 都会占用一个 writer channel、一个 writer Task、一个 tmp 文件 fd
+/// 和最多 [`MAX_INFLIGHT_BYTES_PER_RECEIVER`] + [`MAX_PENDING_BYTES_PER_RECEIVER`]
+/// 字节的内存，对端可以无限发 `ContentBegin`，因此必须设硬上限（超出的 Begin 直接用
 /// `ContentCancel` 拒绝，不分配任何资源）。
 const MAX_CONCURRENT_RECEIVERS: usize = 8;
+
+/// 单个入站传输允许同时"在途"（writer channel 中排队 + writer 正在写）的字节数。
+///
+/// 只限制 channel 槽位数量是不够的：32 个槽位若每槽都是协议允许的最大帧（10 MiB），
+/// 单个 receiver 就能占 320 MiB。这里用字节信号量计量在途字节，上限 12 MiB：
+/// 足以容纳单个最大帧（`proto::CBFrameCodec` 的 10 MiB 上限）再加少量小帧，
+/// 又不会让慢 writer 把内存撑爆。8 个 receiver 最坏约 96 MiB 在途。
+const MAX_INFLIGHT_BYTES_PER_RECEIVER: usize = 12 * 1024 * 1024;
+
+/// writer 背压时，actor 侧允许暂存的字节数上限（帧已经从连接里读出来了，必须自己兜住）。
+///
+/// 12 MiB 在途 + 1 MiB 暂存 = 每个 receiver 最坏约 13 MiB，8 个约 104 MiB。
+/// 超出该预算说明 writer 完全跟不上而对端还在灌数据：在"不阻塞整条连接"的约束下
+/// 无法保住这条传输，只能让它失败（`TRANSFER_BACKPRESSURE`），而不是无限增长内存。
+const MAX_PENDING_BYTES_PER_RECEIVER: usize = 1024 * 1024;
 
 /// 接收方空闲超时：超过该时长没有收到任何数据块就取消传输并清理 tmp 文件。
 ///
 /// 对端可以打开传输后保持心跳但不发数据；若不清理，tmp 文件与 fd 会一直泄漏。
 const RECEIVER_IDLE_TIMEOUT_MS: i64 = 30_000;
+
+/// `ContentEnd` 之后 flush / close / 校验 / commit / materialize 的总超时。
+///
+/// 2 GiB 的最终化本来就可能耗时；但磁盘卡死时不能让它永远占着 writer Task 与 tmp 文件，
+/// 超时后该传输以 COMMIT_TIMEOUT 失败并 abort writer Task。
+const CONTENT_END_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `Committing` 占位符的兜底回收时间（最终化任务自身已有 30s 超时，这里只防任务异常消失）。
+const FINALIZE_PLACEHOLDER_GRACE_MS: i64 = 35_000;
+
+/// 单个会话允许同时存在的出站传输数量（与入站 `MAX_CONCURRENT_RECEIVERS` 对称）。
+///
+/// 每个 `ContentGet` 都会 spawn 一个读文件任务；若不对认证对端设上限，
+/// 一个对端就能开出无限上传、耗尽 fd / 内存 / CPU。
+const MAX_CONCURRENT_SENDERS: usize = 8;
 
 /// 认证前（尚未进入 Online）允许处理的消息白名单。
 ///
@@ -143,6 +174,29 @@ fn receiver_slot_available(current_receivers: usize) -> bool {
 	current_receivers < MAX_CONCURRENT_RECEIVERS
 }
 
+/// 并发 sender 上限判定：第 9 个出站传输必须被拒绝（与入站对称）。
+fn sender_slot_available(current_senders: usize) -> bool {
+	current_senders < MAX_CONCURRENT_SENDERS
+}
+
+/// 出站并发闸门：满员时返回要回给对端的非致命拒绝消息，未满时返回 `None`。
+///
+/// **不会修改 `senders`**：调用方只有在拿到 `None` 且完成后续检查后才插入新条目，
+/// 拒绝路径绝不能凭空留下一个 `SenderState`。用 `ContentDenied` 而不是 `Error`：
+/// 对端把任何 `Error` 都当作致命错误并断开会话，一次并发拒绝不应引发断连。
+fn sender_admission(senders: &HashMap<String, SenderState>, transfer_id: &str) -> Option<CtrlMsg> {
+	if sender_slot_available(senders.len()) {
+		return None;
+	}
+	Some(CtrlMsg::ContentDenied {
+		req_id: transfer_id.to_string(),
+		code: "TOO_MANY_TRANSFERS".into(),
+		message: Some(format!(
+			"rejecting ContentGet: {MAX_CONCURRENT_SENDERS} concurrent outbound transfers already active"
+		)),
+	})
+}
+
 /// 接收空闲超时判定。
 fn receiver_idle_expired(now: i64, last_activity_ms: i64) -> bool {
 	now - last_activity_ms > RECEIVER_IDLE_TIMEOUT_MS
@@ -197,7 +251,10 @@ enum ReceiverState {
 		file_id: Option<String>, // 如果是 FileList 中的子文件
 		expected_sha256: String,
 		mime: String,
-		tx: mpsc::Sender<ReceiverTaskMsg>,
+		/// 非阻塞投递队列：actor 主循环绝不 `.await` writer 的有界 channel。
+		inbox: ReceiverInbox,
+		/// writer Task 的 abort 句柄：超时/取消/越界时直接终止并触发 tmp 清理。
+		handle: tokio::task::AbortHandle,
 		received_bytes: u64,
 		total_bytes: u64,
 		/// 本次传输适用的硬上限（来自 size_limits，按 item 类型选定）
@@ -209,6 +266,9 @@ enum ReceiverState {
 		last_progress_emit: i64, // 用于节流 progress 事件
 	},
 	// 已触发 Finish，等待落地结果（避免重复 Finish / 重复 End）
+	//
+	// 该占位符在最终化完成前一直占用 req_id：否则新到的同 req_id ContentBegin
+	// 会与仍在 commit 的旧传输竞争同一个 tmp 文件。
 	Committing {
 		transfer_id: String,
 		item_id: String,
@@ -217,6 +277,8 @@ enum ReceiverState {
 		mime: String,
 		total_bytes: u64,
 		started_ts_ms: i64,
+		/// 最终化任务开始时间（兜底回收占位符用）
+		finalize_started_ms: i64,
 	},
 
 	Done {
@@ -272,12 +334,206 @@ struct SenderState {
 }
 
 enum ReceiverTaskMsg {
-	Chunk(bytes::Bytes),
+	Chunk {
+		data: bytes::Bytes,
+		/// 在途字节预算许可：writer 写完（或消息被丢弃）才归还，从而把内存占用
+		/// 限制在 [`MAX_INFLIGHT_BYTES_PER_RECEIVER`] 以内。
+		permit: OwnedSemaphorePermit,
+	},
 	Finish {
 		expected_sha256: String,                    // 这里指本次传输片段的 Hash
 		reply_tx: oneshot::Sender<Result<PathBuf>>, // 返回最终文件路径
 	},
-	Cancel,
+}
+
+/// 单个入站传输的非阻塞投递队列（actor 主循环专用）。
+///
+/// 背景：所有传输的帧都复用同一条双向流，actor 只能逐个 `reader.next()` 读帧。
+/// 一旦在某个传输的 writer 有界 channel 上 `.await`，整条连接（其他传输、心跳、
+/// 本地命令）都会被队头阻塞。因此下泄路径改成：
+///
+/// 1. 优先 `try_send`；成功即完成，永不等待；
+/// 2. channel 满或 12 MiB 在途预算耗尽 → 把块放进 `pending` 并标记 `paused`，
+///    该传输自己的帧继续被读取（帧已经在内存里，无法"不读"），但不会阻塞别的帧；
+/// 3. writer 每写完一块就归还字节许可，后续到达的数据帧（或心跳 tick）重试
+///    [`ReceiverInbox::flush_pending`]，writer 恢复后 pending 会按原顺序补发；
+/// 4. `pending` 也超过 1 MiB → 判定 writer 完全跟不上，该传输失败（不丢数据、
+///    不静默损坏，也不把内存变成无界）。
+struct ReceiverInbox {
+	tx: mpsc::Sender<ReceiverTaskMsg>,
+	budget: Arc<Semaphore>,
+	pending: VecDeque<bytes::Bytes>,
+	pending_bytes: usize,
+	paused: bool,
+}
+
+/// [`ReceiverInbox::try_push`] / [`ReceiverInbox::flush_pending`] 的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushOutcome {
+	/// 已全部进入 writer channel（pending 也清空了）。
+	Queued,
+	/// 仍有积压，数据已暂存，等 writer 恢复后继续。
+	Paused,
+	/// pending 预算耗尽，该传输必须中止。
+	Overflow,
+	/// writer Task 已退出。
+	Closed,
+}
+
+impl ReceiverInbox {
+	fn new(tx: mpsc::Sender<ReceiverTaskMsg>, budget: Arc<Semaphore>) -> Self {
+		Self {
+			tx,
+			budget,
+			pending: VecDeque::new(),
+			pending_bytes: 0,
+			paused: false,
+		}
+	}
+
+	/// 把 pending 中的块按顺序推进 writer channel，**永不 await**。
+	fn flush_pending(&mut self) -> PushOutcome {
+		while let Some(front) = self.pending.front() {
+			// 单帧最大 10 MiB，一定放得进 u32；异常超大值按不可获取处理。
+			let len = u32::try_from(front.len()).unwrap_or(u32::MAX);
+			let Ok(permit) = self.budget.clone().try_acquire_many_owned(len) else {
+				return PushOutcome::Paused;
+			};
+			let data = self.pending.pop_front().expect("front() 刚刚确认队列非空");
+			self.pending_bytes -= data.len();
+			match self.tx.try_send(ReceiverTaskMsg::Chunk { data, permit }) {
+				Ok(()) => {}
+				Err(mpsc::error::TrySendError::Full(msg)) => {
+					// 槽位又被占满：原样放回队首，保证顺序；许可随消息一起 drop。
+					// 本方法只会发送 Chunk 变体，其他变体不可能出现。
+					if let ReceiverTaskMsg::Chunk { data, .. } = msg {
+						self.pending_bytes += data.len();
+						self.pending.push_front(data);
+					}
+					return PushOutcome::Paused;
+				}
+				Err(mpsc::error::TrySendError::Closed(_)) => {
+					self.pending.clear();
+					self.pending_bytes = 0;
+					return PushOutcome::Closed;
+				}
+			}
+		}
+		self.paused = false;
+		PushOutcome::Queued
+	}
+
+	/// 非阻塞投递一个数据块：先 flush 旧 pending，再直接入 channel。
+	fn try_push(&mut self, data: bytes::Bytes) -> PushOutcome {
+		if self.paused || !self.pending.is_empty() {
+			match self.flush_pending() {
+				PushOutcome::Closed => return PushOutcome::Closed,
+				PushOutcome::Paused => return self.push_pending(data),
+				// 积压已全部推进 channel，可以继续走下面的直发路径。
+				PushOutcome::Queued | PushOutcome::Overflow => {}
+			}
+		}
+
+		let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+		match self.budget.clone().try_acquire_many_owned(len) {
+			Ok(permit) => match self.tx.try_send(ReceiverTaskMsg::Chunk { data, permit }) {
+				Ok(()) => PushOutcome::Queued,
+				Err(mpsc::error::TrySendError::Full(msg)) => {
+					// 本方法只会发送 Chunk 变体，其他变体不可能出现。
+					if let ReceiverTaskMsg::Chunk { data, .. } = msg {
+						self.push_pending(data)
+					} else {
+						PushOutcome::Paused
+					}
+				}
+				Err(mpsc::error::TrySendError::Closed(_)) => PushOutcome::Closed,
+			},
+			// 在途字节预算耗尽（writer 慢）：暂存而不是等待。
+			Err(_) => self.push_pending(data),
+		}
+	}
+
+	fn push_pending(&mut self, data: bytes::Bytes) -> PushOutcome {
+		if self.pending_bytes.saturating_add(data.len()) > MAX_PENDING_BYTES_PER_RECEIVER {
+			return PushOutcome::Overflow;
+		}
+		self.pending_bytes += data.len();
+		self.pending.push_back(data);
+		self.paused = true;
+		PushOutcome::Paused
+	}
+
+	/// 最终化时在**独立任务**里排空 pending（这里允许 await，不占 actor 主循环）。
+	///
+	/// 必须先把 pending 按序送进 writer，再发 `Finish`，否则会丢块或校验失败。
+	async fn flush_all(&mut self) -> std::result::Result<(), String> {
+		while let Some(data) = self.pending.pop_front() {
+			self.pending_bytes -= data.len();
+			let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+			let permit = self
+				.budget
+				.clone()
+				.acquire_many_owned(len)
+				.await
+				.map_err(|_| "writer channel closed".to_string())?;
+			self.tx
+				.send(ReceiverTaskMsg::Chunk { data, permit })
+				.await
+				.map_err(|_| "writer channel closed".to_string())?;
+		}
+		self.paused = false;
+		Ok(())
+	}
+}
+
+/// 最终化任务回传给 actor 的完成事件（在 `tokio::select!` 分支里处理）。
+struct ReceiverDone {
+	transfer_id: String,
+	item_id: String,
+	file_id: Option<String>,
+	expected_sha256: String,
+	received_bytes: u64,
+	total_bytes: u64,
+	started_ts_ms: i64,
+	/// `Err((code, message))` 直接映射到 TRANSFER_FAILED。
+	result: std::result::Result<PathBuf, (String, String)>,
+}
+
+/// 在独立任务里驱动 writer 完成 flush / close / 校验 / commit / materialize。
+///
+/// 注意：这里的每一处 `.await` 都在 actor 主循环之外，因此慢磁盘只影响这条传输。
+async fn finalize_receiver(
+	mut inbox: ReceiverInbox,
+	expected_sha256: String,
+) -> std::result::Result<PathBuf, (String, String)> {
+	inbox
+		.flush_all()
+		.await
+		.map_err(|e| ("WRITE_TASK_DEAD".to_string(), e))?;
+
+	let (reply_tx, reply_rx) = oneshot::channel();
+	inbox
+		.tx
+		.send(ReceiverTaskMsg::Finish {
+			expected_sha256,
+			reply_tx,
+		})
+		.await
+		.map_err(|_| {
+			(
+				"WRITE_TASK_DEAD".to_string(),
+				"Writer task crashed".to_string(),
+			)
+		})?;
+
+	match reply_rx.await {
+		Ok(Ok(path)) => Ok(path),
+		Ok(Err(e)) => Err(("COMMIT_FAILED".to_string(), e.to_string())),
+		Err(_) => Err((
+			"COMMIT_TIMEOUT".to_string(),
+			"Writer task dropped reply".to_string(),
+		)),
+	}
 }
 
 /// 临时文件守护者 (RAII)，任务结束/Panic时自动删除残留文件
@@ -347,6 +603,8 @@ pub struct SessionActor {
 	senders: HashMap<String, SenderState>,
 	cas: crate::cas::Cas,
 	upload_tx: mpsc::Sender<UploadMsg>,
+	/// 最终化任务 → actor 的完成事件通道（ContentEnd 不再在 actor 主循环里等待）。
+	receiver_done_tx: mpsc::Sender<ReceiverDone>,
 }
 
 impl SessionActor {
@@ -498,6 +756,10 @@ impl SessionActor {
 			)),
 		);
 
+		// 最终化任务 → actor 的完成事件通道。容量足够覆盖 MAX_CONCURRENT_RECEIVERS
+		// 同时完成的情况；即使满了，发送端在独立任务里 await，也不会阻塞主循环。
+		let (receiver_done_tx, mut receiver_done_rx) = mpsc::channel::<ReceiverDone>(32);
+
 		let mut actor = Self {
 			role,
 			writer,
@@ -519,6 +781,7 @@ impl SessionActor {
 			senders: HashMap::new(),
 			cas,
 			upload_tx,
+			receiver_done_tx,
 		};
 
 		actor.start_handshake().await?;
@@ -660,6 +923,13 @@ impl SessionActor {
 						actor.tick_heartbeat().await?;
 						// 每 2s 顺带回收空闲超时的入站传输（避免 tmp 文件 / fd 泄漏）
 						actor.sweep_idle_receivers().await;
+						// 并重试被背压暂停的 receiver：writer 排空后继续投递积压块
+						actor.retry_paused_receivers();
+					}
+
+					// 4. 入站最终化完成事件（flush/close/commit/materialize 在独立任务里做）
+					Some(done) = receiver_done_rx.recv() => {
+						actor.handle_receiver_done(done).await?;
 					}
 				}
 			}
@@ -1195,7 +1465,7 @@ impl SessionActor {
 					.await?;
 			}
 			CtrlMsg::ContentEnd { req_id } => {
-				self.handle_content_end(req_id).await?;
+				self.handle_content_end(req_id);
 			}
 			CtrlMsg::ContentCancel { req_id, reason } => {
 				self.log_sink.log_info(
@@ -1209,7 +1479,7 @@ impl SessionActor {
 				}
 
 				// 2. 如果我是接收者：调用 handle_content_cancel
-				self.handle_content_cancel(req_id, reason).await?;
+				self.handle_content_cancel(&req_id, &reason);
 			}
 			CtrlMsg::ContentDenied {
 				req_id,
@@ -1392,7 +1662,12 @@ impl SessionActor {
 		}
 
 		// 启动独立的 Writer Task
+		//
+		// channel 槽位上限仍是 32（限制单条传输的排队消息数），但真正的内存边界是
+		// writer 每写完一块就归还的字节许可（MAX_INFLIGHT_BYTES_PER_RECEIVER）。
 		let (tx, mut rx) = mpsc::channel::<ReceiverTaskMsg>(32);
+		let budget = Arc::new(Semaphore::new(MAX_INFLIGHT_BYTES_PER_RECEIVER));
+		let inbox = ReceiverInbox::new(tx, budget);
 
 		// Clone 需要的数据传入 Task
 		let cas_clone = self.cas.clone();
@@ -1407,7 +1682,7 @@ impl SessionActor {
 		let resume_path = tmp_path.clone();
 		let is_resume = tokio::task::spawn_blocking(move || resume_path.exists()).await?;
 
-		tokio::spawn(async move {
+		let writer_task = tokio::spawn(async move {
 			// RAII Guard: 任务退出时如果没 commit，自动删除 tmp 文件
 			let mut guard = TempFileGuard {
 				path: tmp_path_clone.clone(),
@@ -1433,12 +1708,14 @@ impl SessionActor {
 
 			while let Some(msg) = rx.recv().await {
 				match msg {
-					ReceiverTaskMsg::Chunk(data) => {
+					ReceiverTaskMsg::Chunk { data, permit } => {
 						if let Err(e) = writer.write_all(&data).await {
 							eprintln!("[Session] Write failed: {e}");
 							return; // 触发 Drop 删除
 						}
 						hasher.update(&data);
+						// 写完后归还字节许可：actor 看到的"在途字节"因此随磁盘进度下降。
+						drop(permit);
 					}
 					ReceiverTaskMsg::Finish {
 						expected_sha256,
@@ -1517,12 +1794,11 @@ impl SessionActor {
 						let _ = reply_tx.send(res);
 						return; // 任务结束
 					}
-					ReceiverTaskMsg::Cancel => {
-						return; // 触发 Drop 删除
-					}
 				}
 			}
 		});
+		// 保留 abort 句柄：ContentEnd 超时 / 取消 / 越界时终止 writer，TempFileGuard 会删 tmp。
+		let writer_handle = writer_task.abort_handle();
 
 		// 注意：如果是 Resume，这里的 total_bytes 可能是剩余量或总量，
 		// 取决于协议约定；无论如何它都是本端允许写入的上限。
@@ -1533,7 +1809,8 @@ impl SessionActor {
 			file_id,
 			expected_sha256: file_sha256,
 			mime,
-			tx, // 保存 Sender
+			inbox,
+			handle: writer_handle,
 			received_bytes: 0,
 			total_bytes,
 			hard_cap_bytes: hard_cap,
@@ -1584,8 +1861,13 @@ impl SessionActor {
 			return Ok(());
 		}
 
+		// 非阻塞下泄：绝不在这里 `.await` 有界的 writer channel。
+		// writer 变慢时该块进入 per-transfer pending，actor 继续读其他帧；
+		// pending 也放不下时才让这一条传输失败（见 ReceiverInbox 的说明）。
+		let mut overflow_detail: Option<String> = None;
+		let mut writer_closed = false;
 		if let Some(ReceiverState::Receiving {
-			tx,
+			inbox,
 			item_id,
 			received_bytes,
 			total_bytes,
@@ -1598,39 +1880,84 @@ impl SessionActor {
 			let now = now_ms();
 			*last_activity_ms = now;
 
-			if tx.send(ReceiverTaskMsg::Chunk(data)).await.is_err() {
-				self.receivers.remove(&transfer_id);
-				return Ok(());
-			}
-
-			// 注意：这里绝不逐块写日志 —— 每 64KB 一条 SQLite 插入会在
-			// 1GB 传输中产生约 1.6 万行，且占用 actor 主循环的 std Mutex。
-			// 每个传输只在成功/失败/超时结束时写一条汇总。
-			if now - *last_progress_emit > 200 {
-				let progress_evt = serde_json::json!({
-					"type": "TRANSFER_PROGRESS",
-					"payload": {
-						"transfer_id": transfer_id,
-						"item_id": item_id.clone(),
-						"state": "downloading",
-						"received": *received_bytes,
-						"total": *total_bytes
+			match inbox.try_push(data) {
+				PushOutcome::Queued | PushOutcome::Paused => {
+					// 注意：这里绝不逐块写日志 —— 每 64KB 一条 SQLite 插入会在
+					// 1GB 传输中产生约 1.6 万行，且占用 actor 主循环的 std Mutex。
+					// 每个传输只在成功/失败/超时结束时写一条汇总。
+					if now - *last_progress_emit > 200 {
+						let progress_evt = serde_json::json!({
+							"type": "TRANSFER_PROGRESS",
+							"payload": {
+								"transfer_id": transfer_id,
+								"item_id": item_id.clone(),
+								"state": "downloading",
+								"received": *received_bytes,
+								"total": *total_bytes
+							}
+						});
+						self.sink.emit(progress_evt.to_string());
+						*last_progress_emit = now;
 					}
-				});
-				self.sink.emit(progress_evt.to_string());
-				*last_progress_emit = now;
+				}
+				PushOutcome::Overflow => {
+					overflow_detail = Some(format!(
+						"writer backpressure: pending buffer exceeded {MAX_PENDING_BYTES_PER_RECEIVER} bytes"
+					));
+				}
+				PushOutcome::Closed => writer_closed = true,
 			}
+		}
+
+		if writer_closed {
+			// writer Task 已退出（磁盘错误等）：清理 receiver，与旧行为一致。
+			self.receivers.remove(&transfer_id);
+			return Ok(());
+		}
+		if let Some(detail) = overflow_detail {
+			self.log_sink.log_error(
+				"Session",
+				&format!(
+					"Transfer aborted by receiver backpressure: transfer_id={transfer_id}, detail={detail}"
+				),
+				Some(&format!(
+					"接收方背压超限，已终止该传输: 传输ID={transfer_id}，详情={detail}"
+				)),
+				Some(&detail),
+			);
+			self.abort_receiver(
+				&transfer_id,
+				"TRANSFER_BACKPRESSURE",
+				&detail,
+				"receiver backpressure overflow",
+			)
+			.await;
 		}
 		Ok(())
 	}
 
-	/// 立即终止一条接收中的传输：通知 writer Task 退出（RAII 删除 tmp 文件），
+	/// 只取出 `Receiving` 状态；`Committing` 占位符必须留在 map 里，
+	/// 否则同 req_id 的新 Begin 会在旧 commit 尚未结束时开写同一个 tmp 文件。
+	fn take_receiving(&mut self, req_id: &str) -> Option<ReceiverState> {
+		if matches!(
+			self.receivers.get(req_id),
+			Some(ReceiverState::Receiving { .. })
+		) {
+			self.receivers.remove(req_id)
+		} else {
+			None
+		}
+	}
+
+	/// 立即终止一条接收中的传输：abort writer Task（RAII 删除 tmp 文件），
 	/// 上报 TRANSFER_FAILED，并尽力通知对端停止发送（ContentCancel 是非致命的）。
 	async fn abort_receiver(&mut self, req_id: &str, code: &str, detail: &str, peer_reason: &str) {
-		let Some(ReceiverState::Receiving { tx, .. }) = self.receivers.remove(req_id) else {
+		let Some(ReceiverState::Receiving { handle, .. }) = self.take_receiving(req_id) else {
 			return;
 		};
-		let _ = tx.send(ReceiverTaskMsg::Cancel).await;
+		// 直接 abort 而不是往有界 channel 里 await Cancel：这里同样不能阻塞 actor 主循环。
+		// writer Task 的 TempFileGuard 在 drop 时删除 tmp 文件。
+		handle.abort();
 		self.emit_transfer_failed(req_id, code, detail);
 		let _ = self
 			.send_ctrl(CtrlMsg::ContentCancel {
@@ -1638,6 +1965,27 @@ impl SessionActor {
 				reason: peer_reason.to_string(),
 			})
 			.await;
+	}
+
+	/// writer 排空后重试被背压暂停的 receiver（由数据帧或心跳 tick 驱动）。
+	fn retry_paused_receivers(&mut self) {
+		let paused: Vec<String> = self
+			.receivers
+			.iter()
+			.filter_map(|(id, st)| match st {
+				ReceiverState::Receiving { inbox, .. } if inbox.paused => Some(id.clone()),
+				_ => None,
+			})
+			.collect();
+		for id in paused {
+			let outcome = match self.receivers.get_mut(&id) {
+				Some(ReceiverState::Receiving { inbox, .. }) => inbox.flush_pending(),
+				_ => continue,
+			};
+			if outcome == PushOutcome::Closed {
+				self.receivers.remove(&id);
+			}
+		}
 	}
 
 	/// 回收空闲超时的 receiver：对端开传输后保持心跳却不发数据时，
@@ -1670,11 +2018,48 @@ impl SessionActor {
 			)
 			.await;
 		}
+
+		// 兜底：最终化任务若异常消失，Committing 占位符不能永久占着 req_id
+		// 和并发名额（任务自身已有 CONTENT_END_TIMEOUT，正常路径不会走到这里）。
+		let stale: Vec<String> = self
+			.receivers
+			.iter()
+			.filter_map(|(id, st)| match st {
+				ReceiverState::Committing {
+					finalize_started_ms,
+					..
+				} if now - *finalize_started_ms > FINALIZE_PLACEHOLDER_GRACE_MS => Some(id.clone()),
+				_ => None,
+			})
+			.collect();
+		for id in stale {
+			self.log_sink.log_error(
+				"Session",
+				&format!(
+					"Finalizing transfer placeholder expired without result: transfer_id={id}"
+				),
+				Some(&format!("最终化占位符超时未收到结果，已回收: 传输ID={id}")),
+				Some("FINALIZE_PLACEHOLDER_EXPIRED"),
+			);
+			self.receivers.remove(&id);
+		}
 	}
 
-	async fn handle_content_end(&mut self, req_id: String) -> Result<()> {
-		if let Some(ReceiverState::Receiving {
-			tx,
+	/// 处理对端的 `ContentEnd`。
+	///
+	/// 关键：actor 主循环只负责把"最终化"交给独立任务并登记 `Committing` 占位符，
+	/// 绝不在 select 循环里等待 flush/close/commit/materialize（2 GiB 文件或慢磁盘
+	/// 会阻塞整条连接的全部帧）。最终化任务完成后通过 `receiver_done_tx` 回报，
+	/// 由 select 的完成事件分支处理。
+	///
+	/// 顺序保证：`Committing` 占位符在最终化完成前一直占用 req_id ——
+	/// 期间同 req_id 的 `ContentBegin` 被当作重复 Begin 忽略，`ContentEnd` 也被忽略，
+	/// 不会有第二个 writer 与旧 commit 竞争同一个 tmp 文件。
+	fn handle_content_end(&mut self, req_id: String) {
+		// 只处理 Receiving；正在 commit 的重复 End 直接忽略。
+		let Some(ReceiverState::Receiving {
+			inbox,
+			handle,
 			item_id,
 			file_id,
 			transfer_id,
@@ -1682,133 +2067,173 @@ impl SessionActor {
 			received_bytes,
 			total_bytes,
 			started_ts_ms,
+			mime,
 			..
-		}) = self.receivers.remove(&req_id)
-		{
-			// 1. 创建回传通道
-			let (reply_tx, reply_rx) = oneshot::channel();
+		}) = self.take_receiving(&req_id)
+		else {
+			return;
+		};
 
-			// 2. 发送 Finish 指令给 Writer Task
-			// 注意：这里的 sha256 是发送端传来的“本次传输片段 Hash”
-			if tx
-				.send(ReceiverTaskMsg::Finish {
-					expected_sha256: expected_sha256.clone(),
-					reply_tx,
-				})
-				.await
-				.is_err()
+		// 占位：commit 期间保持 req_id 被占用（也计入并发名额，因为 tmp/fd/Task 还在）。
+		self.receivers.insert(
+			req_id,
+			ReceiverState::Committing {
+				transfer_id: transfer_id.clone(),
+				item_id: item_id.clone(),
+				file_id: file_id.clone(),
+				expected_sha256: expected_sha256.clone(),
+				mime,
+				total_bytes,
+				started_ts_ms,
+				finalize_started_ms: now_ms(),
+			},
+		);
+
+		let done_tx = self.receiver_done_tx.clone();
+		// 独立任务：flush pending → Finish → 等 writer 完成 flush/close/commit/materialize。
+		// 30s 超时保证卡死的磁盘不会永久占着 writer Task 与 tmp 文件。
+		tokio::spawn(async move {
+			let result = if let Ok(result) = tokio::time::timeout(
+				CONTENT_END_TIMEOUT,
+				finalize_receiver(inbox, expected_sha256.clone()),
+			)
+			.await
 			{
-				self.emit_transfer_failed(&req_id, "WRITE_TASK_DEAD", "Writer task crashed");
-				return Ok(());
-			}
+				result
+			} else {
+				// 尽力终止 writer；若它卡在 spawn_blocking 的磁盘调用里，abort 只能
+				// 释放外层任务，阻塞线程本身无法被取消（见最终报告的残余风险）。
+				handle.abort();
+				Err((
+					"COMMIT_TIMEOUT".to_string(),
+					format!("finalize exceeded {}ms", CONTENT_END_TIMEOUT.as_millis()),
+				))
+			};
+			let _ = done_tx
+				.send(ReceiverDone {
+					transfer_id,
+					item_id,
+					file_id,
+					expected_sha256,
+					received_bytes,
+					total_bytes,
+					started_ts_ms,
+					result,
+				})
+				.await;
+		});
+	}
 
-			// 3. 等待结果 (await 可能会短时间阻塞，但只是等待 flush/rename，比 write loop 快)
-			// 也可以 spawn 一个新的 task 去等，防止阻塞 Actor 处理其他消息，但这里简单处理即可
-			match reply_rx.await {
-				Ok(Ok(final_path)) => {
-					{
-						// 每个传输只写一条汇总（字节数 + 耗时），不再逐块记录
-						let elapsed_ms = now_ms() - started_ts_ms;
-						self.log_sink.log_info(
-							"Session",
-							&format!("Inbound transfer completed: transfer_id={transfer_id}, bytes={received_bytes}/{total_bytes}, elapsed_ms={elapsed_ms}, sha256={expected_sha256}"),
-							Some(&format!("入站传输成功完成: 传输ID={transfer_id}，字节数={received_bytes}/{total_bytes}，耗时={elapsed_ms}ms，SHA256={expected_sha256}")),
-						);
-					}
-					let store = self.store.clone();
-					// 注意：ContentBegin.sha256 是本次传输片段的 hash。FileList 传输时它只是
-					// 其中一个文件的 sha，不能用来标记 content_cache（见 mark_item_content_cached）。
-					let transfer_sha = expected_sha256.clone();
-					let iid = item_id.clone();
-					let fid = file_id.clone();
-					let final_path_str = final_path.to_string_lossy().to_string();
+	/// 处理最终化任务回报的结果（在 select 分支里调用，不阻塞读帧）。
+	async fn handle_receiver_done(&mut self, done: ReceiverDone) -> Result<()> {
+		// 无论成功失败都先清掉 Committing 占位符，释放 req_id。
+		self.receivers.remove(&done.transfer_id);
 
-					// 【新增】查询 DB 获取完整元数据
-					let meta_info = tokio::task::spawn_blocking(move || {
-						let mut guard = store.lock().unwrap();
-						// 按 item 自身 content.sha256 标记缓存并保留命中行数
-						let (marked_sha, marked_rows) =
-							mark_item_content_cached(&mut guard, &iid, &transfer_sha, now_ms())?;
+		match done.result {
+			Ok(final_path) => {
+				// 每个传输只写一条汇总（字节数 + 耗时），不再逐块记录
+				let elapsed_ms = now_ms() - done.started_ts_ms;
+				self.log_sink.log_info(
+					"Session",
+					&format!("Inbound transfer completed: transfer_id={}, bytes={}/{}, elapsed_ms={elapsed_ms}, sha256={}", done.transfer_id, done.received_bytes, done.total_bytes, done.expected_sha256),
+					Some(&format!("入站传输成功完成: 传输ID={}，字节数={}/{}，耗时={elapsed_ms}ms，SHA256={}", done.transfer_id, done.received_bytes, done.total_bytes, done.expected_sha256)),
+				);
 
-						// 补充查询
-						let mime = guard.get_item_mime(&iid)?.unwrap_or_default();
-						// 简单判断类型
-						let kind = if fid.is_some() {
-							"file"
-						} else if mime.starts_with("text/") {
-							"text"
-						} else if mime.starts_with("image/") {
-							"image"
-						} else {
-							"file" // 或 "binary"，但要和文档一致
-						};
+				let store = self.store.clone();
+				// 注意：ContentBegin.sha256 是本次传输片段的 hash。FileList 传输时它只是
+				// 其中一个文件的 sha，不能用来标记 content_cache（见 mark_item_content_cached）。
+				let transfer_sha = done.expected_sha256.clone();
+				let iid = done.item_id.clone();
+				let fid = done.file_id.clone();
+				let final_path_str = final_path.to_string_lossy().to_string();
+				let item_id = done.item_id.clone();
+				let file_id = done.file_id.clone();
+				let expected_sha256 = done.expected_sha256.clone();
 
-						Ok::<(String, String, String, usize), anyhow::Error>((
-							mime,
-							kind.to_string(),
-							marked_sha,
-							marked_rows,
-						))
-					})
-					.await??;
+				// 【新增】查询 DB 获取完整元数据
+				let meta_info = tokio::task::spawn_blocking(move || {
+					let mut guard = store.lock().unwrap();
+					// 按 item 自身 content.sha256 标记缓存并保留命中行数
+					let (marked_sha, marked_rows) =
+						mark_item_content_cached(&mut guard, &iid, &transfer_sha, now_ms())?;
 
-					let (mime, kind, marked_sha, marked_rows) = meta_info;
-					if marked_rows == 0 {
-						// 0 行说明 content_cache 里没有该 item 的记录（例如元数据已被删除）；
-						// 传输本身仍然成功，只记警告，不硬失败。
-						self.log_sink.log_warn(
-							"Session",
-							&format!(
-								"mark_cache_present matched 0 rows: item_id={item_id}, item_sha256={marked_sha}, transfer_sha256={expected_sha256}"
-							),
-							Some(&format!(
-								"缓存标记未命中任何行: 项目ID={item_id}，项目SHA256={marked_sha}，传输SHA256={expected_sha256}"
-							)),
-						);
-					}
+					// 补充查询
+					let mime = guard.get_item_mime(&iid)?.unwrap_or_default();
+					// 简单判断类型
+					let kind = if fid.is_some() {
+						"file"
+					} else if mime.starts_with("text/") {
+						"text"
+					} else if mime.starts_with("image/") {
+						"image"
+					} else {
+						"file" // 或 "binary"，但要和文档一致
+					};
 
-					// 【修改】构造符合文档的 local_ref
-					let local_ref = serde_json::json!({
-						"local_path": final_path_str,
-						"item_id": item_id,
-						"mime": mime,
-						"kind": kind,
-						"sha256": expected_sha256,
-						"total_bytes": total_bytes
-					});
+					Ok::<(String, String, String, usize), anyhow::Error>((
+						mime,
+						kind.to_string(),
+						marked_sha,
+						marked_rows,
+					))
+				})
+				.await??;
 
-					// 发送事件
-					let evt = serde_json::json!({
-						"type": "CONTENT_CACHED",
-						"payload": {
-							"transfer_id": transfer_id,
-							"item_id": item_id,
-							"file_id": file_id,
-							"local_ref": local_ref
-						}
-					});
-					self.sink.emit(evt.to_string());
+				let (mime, kind, marked_sha, marked_rows) = meta_info;
+				if marked_rows == 0 {
+					// 0 行说明 content_cache 里没有该 item 的记录（例如元数据已被删除）；
+					// 传输本身仍然成功，只记警告，不硬失败。
+					self.log_sink.log_warn(
+						"Session",
+						&format!(
+							"mark_cache_present matched 0 rows: item_id={item_id}, item_sha256={marked_sha}, transfer_sha256={expected_sha256}"
+						),
+						Some(&format!(
+							"缓存标记未命中任何行: 项目ID={item_id}，项目SHA256={marked_sha}，传输SHA256={expected_sha256}"
+						)),
+					);
 				}
-				Ok(Err(e)) => self.emit_transfer_failed(&req_id, "COMMIT_FAILED", &e.to_string()),
-				Err(_) => self.emit_transfer_failed(
-					&req_id,
-					"COMMIT_TIMEOUT",
-					"Writer task dropped reply",
-				),
+
+				// 【修改】构造符合文档的 local_ref
+				let local_ref = serde_json::json!({
+					"local_path": final_path_str,
+					"item_id": item_id,
+					"mime": mime,
+					"kind": kind,
+					"sha256": expected_sha256,
+					"total_bytes": done.total_bytes
+				});
+
+				// 发送事件
+				let evt = serde_json::json!({
+					"type": "CONTENT_CACHED",
+					"payload": {
+						"transfer_id": done.transfer_id,
+						"item_id": item_id,
+						"file_id": file_id,
+						"local_ref": local_ref
+					}
+				});
+				self.sink.emit(evt.to_string());
+			}
+			Err((code, message)) => {
+				self.emit_transfer_failed(&done.transfer_id, &code, &message);
 			}
 		}
 		Ok(())
 	}
 
-	async fn handle_content_cancel(&mut self, req_id: String, _reason: String) -> Result<()> {
+	fn handle_content_cancel(&mut self, req_id: &str, _reason: &str) {
+		// 只取消 Receiving；正在 finalize 的（Committing）保持占位并交给超时逻辑处理。
 		if let Some(ReceiverState::Receiving {
-			tx,
+			handle,
 			item_id,
 			transfer_id,
 			..
-		}) = self.receivers.remove(&req_id)
+		}) = self.take_receiving(req_id)
 		{
-			let _ = tx.send(ReceiverTaskMsg::Cancel).await;
+			// abort writer Task（TempFileGuard 删除 tmp 文件），不 await 有界 channel。
+			handle.abort();
 
 			let evt = serde_json::json!({
 				"type": "TRANSFER_CANCELLED",
@@ -1820,7 +2245,6 @@ impl SessionActor {
 			});
 			self.sink.emit(evt.to_string());
 		}
-		Ok(())
 	}
 
 	fn emit_transfer_failed(&self, tid: &str, code: &str, msg: &str) {
@@ -1876,6 +2300,26 @@ impl SessionActor {
 					message: Some("share_to_peer is disabled for this peer".into()),
 				})
 				.await;
+			return Ok(());
+		}
+
+		// 出站并发上限（与入站 MAX_CONCURRENT_RECEIVERS 对称）：每个 ContentGet 都会
+		// spawn 一个读文件任务并占用 fd，认证对端不能无限开上传。
+		// 用 ContentDenied 而不是 Error：并发拒绝是非致命的，不应断开会话。
+		if let Some(denial) = sender_admission(&self.senders, &transfer_id) {
+			self.log_sink.log_warn(
+				"Session",
+				&format!(
+					"Too many concurrent outbound transfers, rejected ContentGet: transfer_id={transfer_id}, item_id={item_id}, active={}",
+					self.senders.len()
+				),
+				Some(&format!(
+					"并发出站传输过多，已拒绝该内容请求: 传输ID={transfer_id}，项目ID={item_id}，当前并发={}",
+					self.senders.len()
+				)),
+			);
+			// 注意：此时绝不能先把条目插进 senders —— sender_admission 只做判定。
+			let _ = self.send_ctrl(denial).await;
 			return Ok(());
 		}
 
@@ -2082,8 +2526,12 @@ impl SessionActor {
 			return Ok(());
 		}
 
-		// 2. 尝试作为 Receiver 取消
-		if self.receivers.contains_key(&transfer_id) {
+		// 2. 尝试作为 Receiver 取消（finalize 中的 Committing 不在这里处理，
+		//    由最终化任务的 30s 超时兜底，避免对端收到已结束传输的 Cancel）。
+		if matches!(
+			self.receivers.get(&transfer_id),
+			Some(ReceiverState::Receiving { .. })
+		) {
 			self.send_ctrl(CtrlMsg::ContentCancel {
 				req_id: transfer_id.clone(),
 				reason: "User cancelled".into(),
@@ -2095,8 +2543,7 @@ impl SessionActor {
 				Some(&format!("传输已取消: 传输ID={transfer_id}，原因=用户取消")),
 			);
 			// 调用上面的处理函数清理资源
-			self.handle_content_cancel(transfer_id, "User cancelled".into())
-				.await?;
+			self.handle_content_cancel(&transfer_id, "User cancelled");
 		}
 		Ok(())
 	}
@@ -2484,16 +2931,21 @@ mod transfer_guard_tests {
 	//! `#[ignore]` 网络用例覆盖。
 	use super::{
 		chunk_overrun, hard_cap_bytes, kind_from_mime, mark_item_content_cached,
-		receiver_idle_expired, receiver_slot_available, TerminatedGuard, MAX_CONCURRENT_RECEIVERS,
+		receiver_idle_expired, receiver_slot_available, sender_admission, sender_slot_available,
+		PushOutcome, ReceiverInbox, ReceiverTaskMsg, SenderState, TerminatedGuard,
+		MAX_CONCURRENT_RECEIVERS, MAX_CONCURRENT_SENDERS, MAX_INFLIGHT_BYTES_PER_RECEIVER,
 		RECEIVER_IDLE_TIMEOUT_MS,
 	};
 	use crate::model::{FileMeta, ItemContent, ItemKind, ItemMeta};
 	use crate::policy::SizeLimits;
+	use crate::proto::CtrlMsg;
 	use crate::session::{HandshakeStep, SessionHandle, SessionState};
 	use crate::store::Store;
 	use crate::util::now_ms;
+	use std::collections::HashMap;
 	use std::sync::{Arc, Mutex};
-	use tokio::sync::mpsc;
+	use std::time::Duration;
+	use tokio::sync::{mpsc, Semaphore};
 
 	/// 接收方可写字节的上限 = min(声明值, 硬上限)：多出 1 字节就必须整条传输失败。
 	#[test]
@@ -2718,5 +3170,102 @@ mod transfer_guard_tests {
 			mark_item_content_cached(&mut store, "item-missing", &missing_sha, now_ms()).unwrap();
 		assert_eq!(marked_sha, missing_sha);
 		assert_eq!(rows, 0);
+	}
+
+	/// writer channel 满（慢磁盘 / 慢 writer）时，actor 的数据帧分支必须立刻返回，
+	/// 且同一轮 select 里的控制帧（Ping/ItemMeta）仍能被处理。
+	///
+	/// 旧实现是 `tx.send(chunk).await`：writer 一慢，actor 主循环就停在这里，
+	/// 心跳、命令和其他传输全部被队头阻塞。现在 `try_push` 是同步的：
+	/// channel 满 → 转入 per-transfer pending，并返回 `Paused`。
+	#[tokio::test]
+	async fn full_writer_channel_does_not_stall_actor() {
+		const CHUNK: usize = 64 * 1024;
+
+		// channel 只有 1 个槽位，字节预算充足：第二个块撞的是"槽位满"。
+		let (tx, mut rx) = mpsc::channel::<ReceiverTaskMsg>(1);
+		let budget = Arc::new(Semaphore::new(MAX_INFLIGHT_BYTES_PER_RECEIVER));
+		let mut inbox = ReceiverInbox::new(tx, budget);
+
+		assert_eq!(
+			inbox.try_push(bytes::Bytes::from(vec![0u8; CHUNK])),
+			PushOutcome::Queued
+		);
+		// 槽位已满：块转入 pending，paused=true；try_push 本身是同步的，不会等 writer。
+		assert_eq!(
+			inbox.try_push(bytes::Bytes::from(vec![0u8; CHUNK])),
+			PushOutcome::Paused
+		);
+		assert!(inbox.paused);
+
+		// 模拟 actor 循环的一轮：数据帧下发（同步）+ 控制帧处理。
+		// 50ms 超时证明下发路径没有阻塞在 writer 上。
+		let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<&'static str>(1);
+		ctrl_tx.send("Ping").await.unwrap();
+		let start = std::time::Instant::now();
+		let (outcome, ping) = tokio::time::timeout(Duration::from_millis(50), async {
+			let outcome = inbox.try_push(bytes::Bytes::from(vec![0u8; CHUNK]));
+			let ping = ctrl_rx.recv().await.expect("control message");
+			(outcome, ping)
+		})
+		.await
+		.expect("actor loop must not stall on a full writer channel");
+		assert_eq!(outcome, PushOutcome::Paused);
+		assert_eq!(ping, "Ping");
+		assert!(
+			start.elapsed() < Duration::from_millis(50),
+			"数据帧下发不能等待 writer"
+		);
+
+		// writer 排空一个块后：pending 只能按 channel 容量逐块补发（仍是同步调用，不阻塞）。
+		drop(rx.recv().await.expect("writer chunk")); // 排空 chunk1
+		assert_eq!(inbox.flush_pending(), PushOutcome::Paused);
+		drop(rx.recv().await.expect("writer chunk")); // 排空 chunk2
+		assert_eq!(inbox.flush_pending(), PushOutcome::Queued);
+		assert!(!inbox.paused);
+		// 再排空 channel 后，新块直接入队。
+		drop(rx.recv().await.expect("writer chunk")); // 排空 chunk3
+		assert_eq!(
+			inbox.try_push(bytes::Bytes::from(vec![0u8; CHUNK])),
+			PushOutcome::Queued
+		);
+	}
+
+	/// 出站并发闸门：`senders` 已满时，新的 ContentGet 走非致命 ContentDenied 拒绝，
+	/// 且拒绝路径不会把条目插进 `senders`（第 9 个上传不 spawn、不占 fd）。
+	#[tokio::test]
+	async fn outbound_cap_refuses_content_get_without_growing_senders() {
+		assert_eq!(MAX_CONCURRENT_SENDERS, MAX_CONCURRENT_RECEIVERS);
+
+		let mut senders: HashMap<String, SenderState> = HashMap::new();
+		for i in 0..MAX_CONCURRENT_SENDERS {
+			// 结束的占位任务只用于提供同类型的 AbortHandle。
+			let task = tokio::spawn(async {});
+			senders.insert(
+				format!("transfer-{i}"),
+				SenderState {
+					handle: task.abort_handle(),
+					bytes_sent: 0,
+					started_ts_ms: 0,
+				},
+			);
+		}
+		assert!(!sender_slot_available(senders.len()));
+
+		let before = senders.len();
+		let denial = sender_admission(&senders, "transfer-new").expect("满员时必须拒绝");
+		match denial {
+			CtrlMsg::ContentDenied { req_id, code, .. } => {
+				assert_eq!(req_id, "transfer-new");
+				assert_eq!(code, "TOO_MANY_TRANSFERS");
+			}
+			other => panic!("必须使用非致命的 ContentDenied，实际: {other:?}"),
+		}
+		// 拒绝路径不插入条目（senders 不会增长）。
+		assert_eq!(senders.len(), before);
+
+		// 空出一个名额后必须恢复接纳。
+		senders.remove("transfer-0");
+		assert!(sender_admission(&senders, "transfer-new").is_none());
 	}
 }
