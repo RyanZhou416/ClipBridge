@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1221,6 +1222,109 @@ impl Store {
 		Ok(None)
 	}
 
+	/// 返回**所有仍可能被引用的内容 sha256**（F5.2 孤儿 blob 清扫的判据）。
+	///
+	/// 并集：
+	/// - `content_cache.sha256_hex`（含 `present=0` 的历史行——行还在就说明这个
+	///   sha 曾被登记过，清扫阶段保守保留）；
+	/// - `items.sha256_hex`（Text/Image 内容、FileList manifest）；
+	/// - `items.files_json[].sha256`（FileList 子文件；这些 blob 没有独立的
+	///   `content_cache` 行，只看 content_cache 会把合法文件误判成孤儿）。
+	///
+	/// 注释里虽然以“content_cache 行”为审计口径，但只用它做判据会误删
+	/// FileList 子文件，因此这里把 `items` 的显式引用一并纳入。
+	pub fn list_referenced_content_hashes(&self) -> anyhow::Result<HashSet<String>> {
+		let mut out = HashSet::new();
+
+		{
+			let mut stmt = self.conn.prepare("SELECT sha256_hex FROM content_cache")?;
+			let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+			for row in rows {
+				let sha = row?;
+				if !sha.is_empty() {
+					out.insert(sha);
+				}
+			}
+		}
+
+		{
+			let mut stmt = self
+				.conn
+				.prepare("SELECT sha256_hex, files_json FROM items")?;
+			let mut rows = stmt.query([])?;
+			while let Some(row) = rows.next()? {
+				let item_sha: String = row.get(0)?;
+				if !item_sha.is_empty() {
+					out.insert(item_sha);
+				}
+				let files_json: Option<String> = row.get(1)?;
+				if let Some(json) = files_json {
+					if let Ok(files) = serde_json::from_str::<Vec<FileMeta>>(&json) {
+						for file in files {
+							if let Some(sha) = file.sha256.filter(|sha| !sha.is_empty()) {
+								out.insert(sha);
+							}
+						}
+					}
+				}
+			}
+		}
+
+		Ok(out)
+	}
+
+	/// F8：除 `exclude_item_id` 外，是否还有**未删除**的 item 引用该 sha。
+	///
+	/// “未删除”以 `history` 为准（items 本身只做软删除，行不会被移除）：
+	/// - 完全没有 history 行的 item 视为仍存在（保守保留 blob）；
+	/// - 有 history 行且至少一行 `is_deleted=0` 的 item 视为未删除；
+	/// - 有 history 行但全部已删除的 item 不算引用。
+	///
+	/// 被检查的引用包括 item 自身的 `sha256_hex` 与 FileList 的
+	/// `files_json[].sha256`（同一份内容可能被多个 item 共享）。
+	pub fn has_other_live_content_reference(
+		&self,
+		sha256_hex: &str,
+		exclude_item_id: &str,
+	) -> anyhow::Result<bool> {
+		if sha256_hex.is_empty() {
+			return Ok(false);
+		}
+		let mut stmt = self.conn.prepare(
+			r"
+            SELECT i.sha256_hex, i.files_json
+            FROM items i
+            WHERE i.item_id <> ?1
+              AND NOT (
+                  EXISTS (SELECT 1 FROM history h WHERE h.item_id = i.item_id)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM history h
+                      WHERE h.item_id = i.item_id AND h.is_deleted = 0
+                  )
+              )
+            ",
+		)?;
+		let mut rows = stmt.query(params![exclude_item_id])?;
+		while let Some(row) = rows.next()? {
+			let item_sha: String = row.get(0)?;
+			if item_sha == sha256_hex {
+				return Ok(true);
+			}
+			let files_json: Option<String> = row.get(1)?;
+			if let Some(json) = files_json {
+				if let Ok(files) = serde_json::from_str::<Vec<FileMeta>>(&json) {
+					if files
+						.iter()
+						.any(|file| file.sha256.as_deref() == Some(sha256_hex))
+					{
+						return Ok(true);
+					}
+				}
+			}
+		}
+		Ok(false)
+	}
+
 	/// 清空核心数据库的所有表
 	pub fn clear_core_db(&mut self) -> anyhow::Result<()> {
 		let tx = self.conn.transaction()?;
@@ -1561,5 +1665,125 @@ mod schema_tests {
 			store.get_item_owner("item-evil").unwrap().as_deref(),
 			Some("peer-evil")
 		);
+	}
+
+	fn test_item_meta(item_id: &str, sha: &str) -> ItemMeta {
+		use crate::model::{ItemContent, ItemPreview};
+		ItemMeta {
+			ty: "ItemMeta".to_string(),
+			item_id: item_id.to_string(),
+			kind: ItemKind::Text,
+			created_ts_ms: 1,
+			source_device_id: "peer-a".to_string(),
+			source_device_name: None,
+			size_bytes: 10,
+			preview: ItemPreview::default(),
+			content: ItemContent {
+				mime: "text/plain".to_string(),
+				sha256: sha.to_string(),
+				total_bytes: 10,
+			},
+			files: vec![],
+			expires_ts_ms: None,
+		}
+	}
+
+	/// F5.2：引用集合必须同时覆盖 content_cache、items 本体与 FileList 子文件
+	/// （子文件 blob 没有独立的 content_cache 行，漏掉就会被孤儿清扫误删）。
+	#[test]
+	fn referenced_hashes_include_cache_items_and_file_blobs() {
+		use crate::model::{ItemContent, ItemPreview};
+
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+
+		let item_sha = "1".repeat(64);
+		let file_sha = "2".repeat(64);
+		let cache_only_sha = "3".repeat(64);
+
+		let meta = ItemMeta {
+			ty: "ItemMeta".to_string(),
+			item_id: "item-files".to_string(),
+			kind: ItemKind::FileList,
+			created_ts_ms: 1,
+			source_device_id: "peer-a".to_string(),
+			source_device_name: None,
+			size_bytes: 10,
+			preview: ItemPreview::default(),
+			content: ItemContent {
+				mime: "application/x-clipbridge-filelist+json".to_string(),
+				sha256: item_sha.clone(),
+				total_bytes: 10,
+			},
+			files: vec![FileMeta {
+				file_id: "file-1".to_string(),
+				rel_name: "a.bin".to_string(),
+				size_bytes: 10,
+				sha256: Some(file_sha.clone()),
+				local_path: None,
+			}],
+			expires_ts_ms: None,
+		};
+		store.insert_remote_item("acct", &meta, 1).unwrap();
+		store
+			.conn
+			.execute(
+				r"INSERT OR IGNORE INTO content_cache
+                   (sha256_hex, total_bytes, present, last_access_ts_ms, created_ts_ms)
+                   VALUES (?1, 1, 0, 1, 1)",
+				params![cache_only_sha],
+			)
+			.unwrap();
+
+		let referenced = store.list_referenced_content_hashes().unwrap();
+		assert!(referenced.contains(&item_sha), "items.sha256_hex 必须计入");
+		assert!(
+			referenced.contains(&file_sha),
+			"files_json[].sha256 必须计入（否则清扫会误删 FileList 子文件）"
+		);
+		assert!(
+			referenced.contains(&cache_only_sha),
+			"content_cache 行必须计入"
+		);
+	}
+
+	/// F8：删除共享 blob 前必须确认没有其他“未删除”item 引用同一 sha。
+	#[test]
+	fn other_live_content_reference_respects_soft_delete() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+		let shared = "4".repeat(64);
+
+		store
+			.insert_remote_item("acct", &test_item_meta("item-a", &shared), 1)
+			.unwrap();
+		store
+			.insert_remote_item("acct", &test_item_meta("item-b", &shared), 2)
+			.unwrap();
+
+		assert!(
+			store
+				.has_other_live_content_reference(&shared, "item-a")
+				.unwrap(),
+			"item-b 仍存活时 item-a 的删除不得清掉共享 blob"
+		);
+
+		assert!(store.soft_delete_item("acct", "item-b").unwrap());
+		assert!(
+			!store
+				.has_other_live_content_reference(&shared, "item-a")
+				.unwrap(),
+			"除被删 item 之外没有存活引用时才允许清理 blob"
+		);
+
+		// item-b 视角：item-a 仍存活，必须保留。
+		assert!(store
+			.has_other_live_content_reference(&shared, "item-b")
+			.unwrap());
+		// 两个 item 都软删除后，谁再删都不应保留 blob。
+		assert!(store.soft_delete_item("acct", "item-a").unwrap());
+		assert!(!store
+			.has_other_live_content_reference(&shared, "item-b")
+			.unwrap());
 	}
 }

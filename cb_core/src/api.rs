@@ -382,6 +382,10 @@ impl Core {
 		}
 
 		// --- M1 集成：启动网络管理器 ---
+		// F5.2：启动时先做一次有界孤儿 blob 清扫。必须在 reconcile 之后、网络
+		// 启动之前：此时 content_cache 已与磁盘对账，且还没有新的入站 commit 竞争。
+		sweep_orphan_blobs_best_effort(&cas, &store_arc, &log_sink, "Startup");
+
 		// 注意：这里假设 NetManager::spawn 是同步封装（内部 spawn 异步任务）
 		// 如果是在 FFI 环境且有 Tokio Runtime，这将正常工作。
 		// 测试/CI 可通过 disable_network=true 完全跳过网络启动，避免 bind socket 触发防火墙弹窗。
@@ -1256,6 +1260,68 @@ fn reconcile_cache_presence(store: &Mutex<Store>, cas: &Cas, now_ms: i64) -> any
 		updated += store.mark_cache_missing(sha, now_ms)?;
 	}
 	Ok(updated)
+}
+
+/// F5.2：孤儿 blob 清扫（best-effort，绝不因清扫失败影响启动/传输）。
+///
+/// 判据由 [`Store::list_referenced_content_hashes`] 提供（content_cache +
+/// items + FileList 子文件）；只删除年龄超过
+/// [`crate::cas::ORPHAN_BLOB_MIN_AGE_MS`] 且无任何引用的 blob，单次最多
+/// [`crate::cas::ORPHAN_SWEEP_DELETE_BATCH`] 个。调用点：`Core::init` 启动时、
+/// 以及每次入站传输最终化成功后（actor 在阻塞池里调用）。
+pub(crate) fn sweep_orphan_blobs_best_effort(
+	cas: &Cas,
+	store: &Arc<Mutex<Store>>,
+	log_sink: &LogSink,
+	reason: &str,
+) {
+	let referenced = match store.lock().unwrap().list_referenced_content_hashes() {
+		Ok(referenced) => referenced,
+		Err(error) => {
+			log_sink.log_warn(
+				"Cache",
+				&format!(
+					"Orphan blob sweep skipped ({reason}): cannot list DB references: {error}"
+				),
+				Some(&format!(
+					"孤儿 blob 清扫已跳过（{reason}）：无法读取数据库引用: {error}"
+				)),
+			);
+			return;
+		}
+	};
+
+	match cas.sweep_orphan_blobs(
+		&referenced,
+		now_ms(),
+		crate::cas::ORPHAN_BLOB_MIN_AGE_MS,
+		crate::cas::ORPHAN_SWEEP_DELETE_BATCH,
+	) {
+		Ok(stats) => {
+			let detail = format!(
+				"scanned={}, deleted={}, kept_referenced={}, kept_recent={}, kept_unknown_age={}, failed={}, freed_bytes={}",
+				stats.scanned,
+				stats.deleted,
+				stats.kept_referenced,
+				stats.kept_recent,
+				stats.kept_unknown_age,
+				stats.failed,
+				stats.freed_bytes
+			);
+			log_sink.log_info(
+				"Cache",
+				&format!("Orphan blob sweep ({reason}): {detail}"),
+				Some(&format!("孤儿 blob 清扫（{reason}）：{detail}")),
+			);
+		}
+		Err(error) => {
+			log_sink.log_warn(
+				"Cache",
+				&format!("Orphan blob sweep failed ({reason}): {error}"),
+				Some(&format!("孤儿 blob 清扫失败（{reason}）: {error}")),
+			);
+		}
+	}
 }
 
 #[cfg(test)]

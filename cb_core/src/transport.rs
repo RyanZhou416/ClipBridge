@@ -176,6 +176,18 @@ const QUIC_MAX_IDLE_TIMEOUT_MS: u32 = 10_000;
 /// QUIC keep-alive 间隔：两端一致，避免空闲超时被误判 / 无谓重连。
 const QUIC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
 
+/// 单条连接允许对端同时打开的**双向流**上限（F4.4）。
+///
+/// 需要覆盖正常数据面：一个会话最多 [`MAX_PAYLOAD_STREAMS_PER_SESSION`] = 24 条
+/// 出站 payload 流（见 session/actor.rs），加上 1 条控制流，峰值 25。取 32 留出
+/// 重试/取消交叉的余量，同时把未认证对端能“停放”的流数量从 quinn 默认的 100
+/// 压到 32 —— 未认证连接在握手前不会有人消费这些流，这是最直接的资源上限。
+///
+/// 注意：这个值限制的是**对端**能向本端打开的流数，所以两端必须配置同一个值，
+/// 才能同时约束“本端作为发送方”和“本端作为接收方”两个方向。客户端与服务端
+/// 共用 [`quic_transport_config`]，天然一致。
+const QUIC_MAX_CONCURRENT_BIDI_STREAMS: u32 = 32;
+
 /// 单条 QUIC 流的接收窗口（8 MiB）。
 ///
 /// 旧实现沿用 quinn 默认的 1.25 MB：在 100 ms RTT 链路上，单流吞吐被 BDP 封顶
@@ -298,6 +310,10 @@ fn quic_transport_config(udp_payload: u16) -> TransportConfig {
 	transport_config.stream_receive_window(VarInt::from_u32(QUIC_STREAM_RECEIVE_WINDOW));
 	transport_config.receive_window(VarInt::from_u32(QUIC_RECEIVE_WINDOW));
 	transport_config.send_window(u64::from(QUIC_SEND_WINDOW));
+	// F4.4：限制对端可同时打开的双向流数量。数据面峰值 24 + 控制流 = 25，
+	// 32 足够正常传输；未认证连接只能停放到 32 条，而不是 quinn 默认的 100。
+	transport_config
+		.max_concurrent_bidi_streams(VarInt::from_u32(QUIC_MAX_CONCURRENT_BIDI_STREAMS));
 
 	// --- MTU / PMTU（依据见函数文档） ---
 	//
@@ -734,6 +750,37 @@ mod tests {
 			window_values(&server),
 			window_values(&client),
 			"server and client window values must match"
+		);
+	}
+
+	/// F4.4：客户端与服务端都必须携带同一个 `max_concurrent_bidi_streams`
+	/// 上限，且该值覆盖数据面峰值（24 条 payload + 1 条控制流）。
+	#[test]
+	fn quic_transport_config_bounds_concurrent_bidi_streams() {
+		let server = quic_transport_config(QUIC_DEFAULT_UDP_PAYLOAD);
+		let client = quic_transport_config(QUIC_DEFAULT_UDP_PAYLOAD);
+		let read = |config: &TransportConfig| -> u64 {
+			let debug = format!("{config:?}");
+			let needle = " max_concurrent_bidi_streams: ";
+			let start = debug
+				.find(needle)
+				.unwrap_or_else(|| panic!("TransportConfig 的 Debug 输出缺少 bidi 上限: {debug}"))
+				+ needle.len();
+			let rest = &debug[start..];
+			let end = rest
+				.find(|c: char| !c.is_ascii_digit())
+				.unwrap_or(rest.len());
+			rest[..end]
+				.parse()
+				.unwrap_or_else(|_| panic!("bidi 上限不是整数: {debug}"))
+		};
+
+		assert_eq!(read(&server), u64::from(QUIC_MAX_CONCURRENT_BIDI_STREAMS));
+		assert_eq!(read(&client), u64::from(QUIC_MAX_CONCURRENT_BIDI_STREAMS));
+		assert_eq!(
+			u64::from(QUIC_MAX_CONCURRENT_BIDI_STREAMS),
+			32,
+			"F4.4 的审计建议值是 32；调整时必须同时复核数据面峰值 24+1"
 		);
 	}
 

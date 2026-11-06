@@ -58,6 +58,85 @@ fn opaque_decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// 预认证握手的硬截止时间（默认 10 s）。
+///
+/// F4.2：未进入 Online 的会话必须在固定时间内结束。普通心跳只看
+/// `last_active_at`，而认证前的 `Ping` 是白名单消息、会刷新活动时间，因此
+/// 恶意对端可以靠 Ping 永远停在 Handshaking。预认证时钟只从
+/// [`SessionActor::auth_started_at`] 起算，任何帧（包括 Ping）都不能延长。
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 环境变量：覆盖预认证握手截止时间（秒）。
+const HANDSHAKE_TIMEOUT_ENV: &str = "CB_HANDSHAKE_TIMEOUT_SECS";
+
+/// 允许的预认证超时范围（秒）：过小会误杀慢速 WAN 上的正常 OPAQUE 握手，
+/// 过大则失去资源保护意义（审计要求 10 s 量级）。
+const HANDSHAKE_TIMEOUT_MIN_SECS: u64 = 1;
+const HANDSHAKE_TIMEOUT_MAX_SECS: u64 = 300;
+
+/// 解析 `CB_HANDSHAKE_TIMEOUT_SECS`（纯函数，便于单测）。
+///
+/// 未设置 / 空串 / 非法值 / 0 → 返回 `default`；合法值夹到
+/// `[1, 300]` 秒。与 `CB_QUIC_WORKERS` 的处理风格一致：配置错了不能默默
+/// 变成一个危险值，也不能让进程启动失败。
+fn resolve_handshake_timeout(raw: Option<&str>, default: Duration) -> Duration {
+	let Some(raw) = raw else {
+		return default;
+	};
+	let trimmed = raw.trim();
+	if trimmed.is_empty() {
+		return default;
+	}
+	match trimmed.parse::<u64>() {
+		Ok(0) | Err(_) => default,
+		Ok(secs) => {
+			Duration::from_secs(secs.clamp(HANDSHAKE_TIMEOUT_MIN_SECS, HANDSHAKE_TIMEOUT_MAX_SECS))
+		}
+	}
+}
+
+fn handshake_timeout_from_env() -> Duration {
+	let raw = std::env::var(HANDSHAKE_TIMEOUT_ENV).ok();
+	resolve_handshake_timeout(raw.as_deref(), DEFAULT_HANDSHAKE_TIMEOUT)
+}
+
+/// 预认证截止时间的决策结果（纯函数）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreAuthDeadline {
+	/// 已 Online：预认证时钟不再适用，由普通空闲超时策略接管。
+	Online,
+	/// 仍在预认证宽限内。
+	Alive,
+	/// 预认证超时，必须终止会话。
+	Expired,
+}
+
+/// 纯函数：预认证截止时间判定。
+///
+/// 关键安全性质：`last_activity_ms` **故意不参与**判定。认证前 `Ping`/`Pong`
+/// 是白名单消息，会刷新 actor 的 `last_active_at`；若这里使用活动时间，恶意
+/// 对端只需每 2 s 发一个 Ping 就能无限期停在 Handshaking（F4.2）。
+/// 只有 `auth_started_ms`（创建会话时固定）与 `timeout_ms` 决定是否超时。
+///
+/// 参数保留 `last_activity_ms` 是为了把“它被忽略”这件事写进签名与测试：
+/// 即使调用方传入刚刚刷新的活动时间，结果也只由预认证时钟决定。
+fn pre_auth_deadline_decision(
+	now_ms: i64,
+	auth_started_ms: i64,
+	_last_activity_ms: i64,
+	timeout_ms: i64,
+	online: bool,
+) -> PreAuthDeadline {
+	if online {
+		return PreAuthDeadline::Online;
+	}
+	if now_ms.saturating_sub(auth_started_ms) > timeout_ms {
+		PreAuthDeadline::Expired
+	} else {
+		PreAuthDeadline::Alive
+	}
+}
+
 /// 单个会话允许同时存在的入站传输数量。
 ///
 /// 每个 receiver 都会占用一个 writer channel、一个 writer Task、一个 tmp 文件 fd
@@ -620,9 +699,14 @@ fn initial_range_plan(offset: u64, total_bytes: u64, srtt: Duration) -> Vec<Tran
 
 /// 校验对端在 `ContentBegin` 里声明的完整区间计划。
 ///
-/// `total_bytes` 是整文件大小；计划必须从某个 `base_offset` 连续覆盖到
-/// `total_bytes`（公开 API 的起点是 0；断点续传时 `base_offset > 0`，接收端
-/// 仍要求一直覆盖到文件末尾，避免尾部缺段被静默接受）。
+/// `total_bytes` 是整文件大小；计划必须从**偏移 0** 连续覆盖到 `total_bytes`。
+///
+/// F6：断点续传（`base_offset > 0`）当前**不支持**。公开 API 从不请求 resume；
+/// 在引入“每区间 hash”之前，部分传输无法用 `ContentBegin.sha256` 校验整文件，
+/// 旧实现会因此跳过校验直接 commit —— 对端只要知道目标 sha，就能用
+/// “0 前缀 + 垃圾”抢先占住 blob，之后真实传输看到目标已存在便保留投毒内容。
+/// 因此这里直接拒绝任何非 0 起点，用明确错误码
+/// `TRANSFER_RANGE_UNSUPPORTED_OFFSET` 而非静默接受。
 ///
 /// 返回 `Err((error_code, detail))`，调用方直接映射为 TRANSFER_FAILED。
 fn validate_range_plan(
@@ -649,6 +733,15 @@ fn validate_range_plan(
 		));
 	};
 	let base = first.offset;
+	if base != 0 {
+		return Err((
+			"TRANSFER_RANGE_UNSUPPORTED_OFFSET",
+			format!(
+				"range plan starts at {base}; resume/partial transfers are unsupported until \
+				 per-range hashes exist"
+			),
+		));
+	}
 	if base >= total_bytes {
 		return Err((
 			"TRANSFER_RANGE_UNEXPECTED",
@@ -1100,7 +1193,201 @@ enum PayloadEvent {
 	},
 }
 
-/// 把 item 自身 `content.sha256` 对应的 content_cache 行标记为 present。
+/// `ContentBegin` 准入所需的本地 item 事实（DB 快照，F5.1）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContentBeginFacts {
+	/// `items.sha256_hex`（Text/Image 的内容 hash、FileList 的 manifest hash）。
+	item_sha256: String,
+	/// item 自身内容长度（来自 `content_cache.total_bytes`，不是 FileList 的文件总和）。
+	item_total_bytes: u64,
+	/// `items.owner_device_id`。
+	owner_device_id: String,
+	/// 当 `ContentBegin.file_id` 存在且能在 `files_json` 里找到时的子文件事实。
+	file: Option<ContentBeginFileFacts>,
+}
+
+/// FileList 子文件事实。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContentBeginFileFacts {
+	sha256: String,
+	size_bytes: u64,
+}
+
+/// 纯函数：`ContentBegin` 是否允许创建 tmp 文件并接收数据（F5.1）。
+///
+/// 允许的两种情况：
+/// - (a) item 存在，且 `content.sha256` 与 `ContentBegin.sha256` 一致、内容长度
+///   也与 `total_bytes` 一致。这是正常的“拉取自己元数据里登记过的内容”路径；
+/// - (b) 发送方就是 item 的 owner，且 `ContentBegin` 是 FileList 的子文件
+///   （`file_id` 存在），该文件的 sha 与长度都与 `files_json` 登记值一致。
+///   这是正常的“owner 推送 FileList 子文件”路径。
+///
+/// 其余情况一律拒绝：item 不存在（旧实现会静默 commit 一个永远没有
+/// `content_cache` 引用的孤儿 blob）、sha/长度不符（把合法 blob 的 sha 当
+/// “投递地址”）、或第三方试图为别人的 item 写内容。
+fn content_begin_admission(
+	facts: Option<&ContentBeginFacts>,
+	remote_device_id: &str,
+	begin_file_id: Option<&str>,
+	begin_sha256: &str,
+	begin_total_bytes: u64,
+) -> std::result::Result<(), (&'static str, String)> {
+	let Some(facts) = facts else {
+		return Err((
+			"CONTENT_ITEM_UNKNOWN",
+			"item_id is not present in the local metadata store".to_string(),
+		));
+	};
+
+	// (a) 内容自证：hash 与长度都对上，允许任何已认证对端投递这份内容
+	// （即使 item 的 owner 是第三方——能提供正确 preimage 本身不构成越权）。
+	if facts.item_sha256 == begin_sha256 && facts.item_total_bytes == begin_total_bytes {
+		return Ok(());
+	}
+
+	if let Some(file_id) = begin_file_id {
+		// (b) FileList 子文件：只允许 item owner 推送，且文件事实必须与元数据一致。
+		if facts.owner_device_id != remote_device_id {
+			return Err((
+				"CONTENT_OWNER_MISMATCH",
+				format!(
+					"item owner is {:?}, sender is {remote_device_id}; file transfer denied",
+					facts.owner_device_id
+				),
+			));
+		}
+		let Some(file) = facts.file.as_ref() else {
+			return Err((
+				"CONTENT_FILE_UNKNOWN",
+				format!("file_id={file_id} is not registered under this item"),
+			));
+		};
+		if file.sha256 != begin_sha256 {
+			return Err((
+				"CONTENT_FILE_SHA_MISMATCH",
+				format!(
+					"file_id={file_id} sha256 mismatch: metadata={}, begin={begin_sha256}",
+					file.sha256
+				),
+			));
+		}
+		if file.size_bytes != begin_total_bytes {
+			return Err((
+				"CONTENT_FILE_LENGTH_MISMATCH",
+				format!(
+					"file_id={file_id} size mismatch: metadata={}, begin={begin_total_bytes}",
+					file.size_bytes
+				),
+			));
+		}
+		return Ok(());
+	}
+
+	if facts.owner_device_id != remote_device_id {
+		return Err((
+			"CONTENT_OWNER_MISMATCH",
+			format!(
+				"item owner is {:?}, sender is {remote_device_id}; content rejected",
+				facts.owner_device_id
+			),
+		));
+	}
+	if facts.item_sha256 != begin_sha256 {
+		return Err((
+			"CONTENT_SHA_MISMATCH",
+			format!(
+				"item content sha256={}, begin={begin_sha256}",
+				facts.item_sha256
+			),
+		));
+	}
+	Err((
+		"CONTENT_LENGTH_MISMATCH",
+		format!(
+			"item content length={}, begin={begin_total_bytes}",
+			facts.item_total_bytes
+		),
+	))
+}
+
+/// 从 Store 读取 [`ContentBeginFacts`]（同步；调用方放进 `spawn_blocking`）。
+fn load_content_begin_facts(
+	store: &Store,
+	item_id: &str,
+	file_id: Option<&str>,
+) -> anyhow::Result<Option<ContentBeginFacts>> {
+	let Some(meta) = store.get_item_meta_by_id(item_id)? else {
+		return Ok(None);
+	};
+	let item_total_bytes = u64::try_from(meta.content.total_bytes).unwrap_or(0);
+	let file = file_id.and_then(|file_id| {
+		meta.files
+			.iter()
+			.find(|file| file.file_id == file_id)
+			.and_then(|file| {
+				let sha256 = file.sha256.as_ref()?.clone();
+				let size_bytes = u64::try_from(file.size_bytes).ok()?;
+				Some(ContentBeginFileFacts { sha256, size_bytes })
+			})
+	});
+	Ok(Some(ContentBeginFacts {
+		item_sha256: meta.content.sha256,
+		item_total_bytes,
+		owner_device_id: meta.source_device_id,
+		file,
+	}))
+}
+
+/// 提交前的整文件完整性闸门（纯函数，F6.2）。
+///
+/// 接收端只有在本次传输**确实覆盖整文件并重算过 SHA-256** 时才允许 commit：
+/// 部分区间（`base_offset > 0`）无法用 `ContentBegin.sha256` 校验，旧实现会
+/// 跳过校验直接 commit，于是“0 前缀 + 垃圾”可以抢在真实传输之前占住目标
+/// sha（投毒）。现在即使将来重新引入部分传输，也会在这里硬失败并删 tmp。
+fn commit_integrity_gate(
+	verify_whole_file: bool,
+	calculated_sha256: Option<&str>,
+	expected_sha256: &str,
+) -> std::result::Result<(), (&'static str, String)> {
+	if !verify_whole_file {
+		return Err((
+			"TRANSFER_HASH_UNVERIFIED",
+			"refusing to commit: transfer does not cover the whole file, so the \
+			 whole-file sha256 was not verified"
+				.to_string(),
+		));
+	}
+	match calculated_sha256 {
+		Some(calculated) if calculated == expected_sha256 => Ok(()),
+		Some(calculated) => Err((
+			"TRANSFER_CHECKSUM_MISMATCH",
+			format!("expected {expected_sha256}, calculated {calculated}"),
+		)),
+		None => Err((
+			"TRANSFER_HASH_UNVERIFIED",
+			"refusing to commit: whole-file sha256 was not calculated".to_string(),
+		)),
+	}
+}
+
+/// 删除归属判定（纯函数，F8）：只有 item 的 owner 设备才能删除它。
+fn item_delete_owner_allowed(owner_device_id: Option<&str>, remote_device_id: &str) -> bool {
+	owner_device_id == Some(remote_device_id)
+}
+
+/// `ItemDelete` 的处理决定（DB 阶段产出的纯数据，便于与磁盘删除分离）。
+enum ItemDeleteDecision {
+	/// 发送方不是 owner：拒绝，绝不软删除、绝不碰 blob。
+	RejectedOwner { owner: Option<String> },
+	/// item 不在库中（或对应的 history 行不存在）。
+	NotFound,
+	/// 已软删除；`remove_blob=true` 表示没有任何其他存活 item 引用该 sha。
+	Deleted {
+		sha256: Option<String>,
+		remove_blob: bool,
+	},
+}
+
 ///
 /// FileList 传输里 `ContentBegin.sha256` 只是**单个文件**的 hash，而 `content_cache`
 /// 以 item 的 `content.sha256` 为键；直接用它 UPDATE 会命中 0 行（旧代码还把结果丢弃）。
@@ -2326,6 +2613,10 @@ pub struct SessionActor {
 	peer_identity: PeerIdentity,
 	remote_fingerprint: String,
 	last_active_at: i64,
+	/// 会话创建时固定的预认证时钟起点（F4.2）。任何帧都不能刷新它。
+	auth_started_at: i64,
+	/// 预认证握手截止时间（`CB_HANDSHAKE_TIMEOUT_SECS`，默认 10 s）。
+	handshake_timeout: Duration,
 	cmd_rx: mpsc::Receiver<SessionCmd>,
 	store: Arc<Mutex<Store>>,
 	log_sink: crate::logs::LogSink,
@@ -2523,29 +2814,40 @@ impl SessionActor {
 		peer_data_ports: Arc<Mutex<Vec<u16>>>,
 		load: Arc<TransferLoad>,
 	) -> Result<()> {
-		let (send, recv) = match role {
-			SessionRole::Client => conn.open_bi().await.context("Client open_bi failed")?,
-			SessionRole::Server => conn.accept_bi().await.context("Server accept_bi failed")?,
-		};
+		// F4.2：预认证时钟从构造 actor 的那刻起算，覆盖“控制流建立 + Hello +
+		// OPAQUE + TOFU”全过程。第一步 `accept_bi` 也必须有时限：否则对端可以
+		// 完成 QUIC 握手后永不开控制流，把服务器卡在这个 await 上。
+		let auth_started_at = now_ms();
+		let handshake_timeout = handshake_timeout_from_env();
+		let (send, recv) = tokio::time::timeout(handshake_timeout, async {
+			match role {
+				SessionRole::Client => conn.open_bi().await.context("Client open_bi failed"),
+				SessionRole::Server => conn.accept_bi().await.context("Server accept_bi failed"),
+			}
+		})
+		.await
+		.map_err(|_| {
+			anyhow::anyhow!(
+				"Pre-auth handshake timeout: control stream not established within {}ms",
+				handshake_timeout.as_millis()
+			)
+		})??;
 
 		let writer = FramedWrite::new(send, CBFrameCodec);
 		let reader = FramedRead::new(recv, CBFrameCodec);
 
-		// B1：每传输独立数据流。控制流建立完成（上面的 open_bi/accept_bi）之后
-		// 才能启动 accept loop —— 否则 Server 端的 accept loop 可能抢走对端的第一条
-		// 流（控制流本身）。数据流只在握手完成后才会出现，因此这一顺序是安全的。
+		// B1：每传输独立数据流。**F4.3：accept loop 必须在认证完成（Online）后
+		// 才启动**：未认证对端可以在握手期间打开 bidi 流并停在那里，若提前
+		// accept，每条流都会占一个头部读取任务/流句柄；现在这些流最多停在
+		// QUIC 的 `max_concurrent_bidi_streams`（32）队列里，且不会分配任何
+		// 应用层资源。
 		//
 		// - `payload_open_rx`：已读到头部的数据流 → actor 路由；
 		// - `payload_event_rx`：接收任务的完成/失败事件 → actor 收尾；
-		// - `payload_accept_handle`：会话结束时 abort，让 accept loop 释放 Connection 引用。
+		// - `payload_accept_guard`：Online 后才创建；会话结束时 abort。
 		let (payload_open_tx, mut payload_open_rx) = mpsc::channel::<PayloadOpened>(16);
+		let mut payload_open_tx = Some(payload_open_tx);
 		let (payload_event_tx, mut payload_event_rx) = mpsc::channel::<PayloadEvent>(32);
-		// Guard：run_actor 从任何路径提前返回（握手失败等）时也终止 accept loop。
-		let _payload_accept_guard = TaskAbortGuard(spawn_payload_accept_loop(
-			conn.clone(),
-			payload_open_tx,
-			log_sink.clone(),
-		));
 
 		// 记录会话创建
 		log_sink.log_info(
@@ -2574,6 +2876,8 @@ impl SessionActor {
 			peer_identity: PeerIdentity::with_expected(expected_peer_id),
 			remote_fingerprint: fingerprint,
 			last_active_at: now_ms(),
+			auth_started_at,
+			handshake_timeout,
 			cmd_rx,
 			opaque_client_state: None,
 			opaque_server_state: None,
@@ -2597,6 +2901,11 @@ impl SessionActor {
 
 		let mut heartbeat_ticker = interval(HEARTBEAT_INTERVAL);
 		heartbeat_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+		// F4.3：Online 之前保持为 None；一旦认证完成，在 select 循环末尾启动
+		// payload accept loop（不是会话开始时）。Guard 保证无论 run_actor 从哪条
+		// 路径退出，accept loop 都会被 abort。
+		let mut payload_accept_guard: Option<TaskAbortGuard> = None;
 
 		let run_result: Result<()> = async {
 			loop {
@@ -2760,6 +3069,31 @@ impl SessionActor {
 					// 6. 接收任务的 FIN / 失败事件
 					Some(evt) = payload_event_rx.recv() => {
 						actor.handle_payload_event(evt).await?;
+					}
+				}
+
+				// F4.3：认证完成后的第一轮循环才启动数据流 accept loop。
+				// 未认证对端即使提前 open_bi，也只会停在 QUIC 层（受
+				// max_concurrent_bidi_streams=32 限制），不会占用这里的
+				// 头部读取任务/流句柄。
+				if actor.state == SessionState::Online && payload_accept_guard.is_none() {
+					if let Some(opened_tx) = payload_open_tx.take() {
+						payload_accept_guard = Some(TaskAbortGuard(spawn_payload_accept_loop(
+							actor.conn.clone(),
+							opened_tx,
+							actor.log_sink.clone(),
+						)));
+						actor.log_sink.log_info(
+							"Session",
+							&format!(
+								"Payload accept loop started after authentication: kind={:?}",
+								actor.kind
+							),
+							Some(&format!(
+								"认证完成后已启动数据流 accept loop: 会话类型={:?}",
+								actor.kind
+							)),
+						);
 					}
 				}
 
@@ -3410,40 +3744,137 @@ impl SessionActor {
 
 			CtrlMsg::ItemDelete { item_id, .. } => {
 				// 认证闸门已在 handle_control_msg 顶部保证此时必然 Online，无需重复判断。
+				//
+				// F8：ItemDelete 必须做归属校验。旧实现只按 item_id 软删除并删 blob，
+				// 任何在线 peer 都能删掉别人的 item，甚至把多个 item 共享的 blob
+				// 一起删掉。现在：owner 必须是发送方；blob 仅在没有其他存活 item
+				// 引用同一 sha 时才删除（共享内容保留）。
+				let Some(remote_device_id) = self.peer_identity.committed().map(str::to_string)
+				else {
+					// Online 状态必然已提交身份；防御性拒绝，不杀会话。
+					self.log_sink.log_warn(
+						"Session",
+						&format!(
+							"ItemDelete rejected: remote device id is not authenticated, item_id={item_id}"
+						),
+						Some(&format!("拒绝删除：对端身份未认证，项目ID={item_id}")),
+					);
+					return Ok(());
+				};
 				let account_uid = self.config.account_uid.clone();
 				let store = self.store.clone();
-				let cas = self.cas.clone();
-				let sink = self.sink.clone();
-				let item_id_emit = item_id.clone();
-				let deleted = tokio::task::spawn_blocking(move || {
-					let mut guard = store.lock().unwrap();
-					let ok = guard
-						.soft_delete_item(&account_uid, &item_id)
-						.ok()
-						.unwrap_or(false);
-					let sha = guard.get_item_sha256(&item_id).ok().flatten();
-					(ok, sha)
-				})
-				.await?;
-				let (ok, sha_opt) = deleted;
-				if ok {
-					if let Some(sha) = sha_opt {
-						// `remove_blob` 会遍历整个 downloads/ 树，`mark_cache_missing`
-						// 是 SQLite 写：两者都放进 spawn_blocking，避免占住 worker。
-						let store = self.store.clone();
-						tokio::task::spawn_blocking(move || {
-							let _ = cas.remove_blob(&sha);
-							let now = now_ms();
-							let mut guard = store.lock().unwrap();
-							let _ = guard.mark_cache_missing(&sha, now);
+				let item_id_for_db = item_id.clone();
+				let remote_for_db = remote_device_id.clone();
+				let decision =
+					match tokio::task::spawn_blocking(move || -> Result<ItemDeleteDecision> {
+						let mut guard = store.lock().unwrap();
+						let owner = guard.get_item_owner(&item_id_for_db)?;
+						if !item_delete_owner_allowed(owner.as_deref(), &remote_for_db) {
+							return Ok(ItemDeleteDecision::RejectedOwner { owner });
+						}
+						let sha256 = guard.get_item_sha256(&item_id_for_db).ok().flatten();
+						let deleted = guard
+							.soft_delete_item(&account_uid, &item_id_for_db)
+							.ok()
+							.unwrap_or(false);
+						if !deleted {
+							return Ok(ItemDeleteDecision::NotFound);
+						}
+						let remove_blob = match sha256.as_deref() {
+							Some(sha) if !sha.is_empty() => {
+								!guard.has_other_live_content_reference(sha, &item_id_for_db)?
+							}
+							_ => false,
+						};
+						Ok(ItemDeleteDecision::Deleted {
+							sha256,
+							remove_blob,
 						})
-						.await?;
+					})
+					.await
+					{
+						Ok(Ok(decision)) => decision,
+						Ok(Err(error)) => {
+							self.log_sink.log_warn(
+								"Session",
+								&format!(
+								"ItemDelete ignored after store error: item_id={item_id}, error={error}"
+							),
+								Some(&format!(
+									"存储错误，忽略删除请求: 项目ID={item_id}，错误={error}"
+								)),
+							);
+							return Ok(());
+						}
+						Err(error) => {
+							self.log_sink.log_warn(
+								"Session",
+								&format!(
+								"ItemDelete ignored after blocking task failure: item_id={item_id}, error={error}"
+							),
+								Some(&format!(
+									"删除任务失败，忽略请求: 项目ID={item_id}，错误={error}"
+								)),
+							);
+							return Ok(());
+						}
+					};
+
+				match decision {
+					ItemDeleteDecision::RejectedOwner { owner } => {
+						self.log_sink.log_warn(
+							"Session",
+							&format!(
+								"ItemDelete denied: sender={remote_device_id} is not the owner ({owner:?}) of item_id={item_id}"
+							),
+							Some(&format!(
+								"拒绝删除：发送方={remote_device_id} 不是项目属主（{owner:?}），项目ID={item_id}"
+							)),
+						);
 					}
-					let evt = serde_json::json!({
-						"type": "ITEM_DELETED",
-						"item_id": item_id_emit,
-					});
-					sink.emit(evt.to_string());
+					ItemDeleteDecision::NotFound => {
+						self.log_sink.log_debug(
+							"Session",
+							&format!("ItemDelete ignored: item_id={item_id} not found"),
+							Some(&format!("忽略删除：项目ID={item_id} 不存在")),
+						);
+					}
+					ItemDeleteDecision::Deleted {
+						sha256,
+						remove_blob,
+					} => {
+						if let Some(sha) = sha256 {
+							if remove_blob {
+								// `remove_blob` 会遍历整个 downloads/ 树，`mark_cache_missing`
+								// 是 SQLite 写：两者都放进 spawn_blocking，避免占住 worker。
+								let store = self.store.clone();
+								let cas = self.cas.clone();
+								let sha_for_disk = sha.clone();
+								tokio::task::spawn_blocking(move || {
+									let _ = cas.remove_blob(&sha_for_disk);
+									let now = now_ms();
+									let mut guard = store.lock().unwrap();
+									let _ = guard.mark_cache_missing(&sha_for_disk, now);
+								})
+								.await?;
+							} else {
+								self.log_sink.log_debug(
+									"Session",
+									&format!(
+										"ItemDelete kept shared blob: item_id={item_id}, sha256={sha} is still referenced by another live item"
+									),
+									Some(&format!(
+										"保留共享 blob：项目ID={item_id}，SHA256={sha} 仍被其他未删除项目引用"
+									)),
+								);
+							}
+						}
+						let evt = serde_json::json!({
+							"type": "ITEM_DELETED",
+							"item_id": item_id,
+						});
+						self.sink.emit(evt.to_string());
+					}
 				}
 			}
 		}
@@ -3577,8 +4008,92 @@ impl SessionActor {
 			return Ok(());
 		}
 
-		// 注：磁盘剩余空间检查需要平台无关的 statvfs 封装（当前工作区没有 fs2/sysinfo 依赖），
-		// 因此这一子项按任务说明跳过；写入失败仍会由 writer Task 以 COMMIT_FAILED 上报。
+		// 4) F5.1：内容准入。item 必须存在，且要么内容自证（sha+长度与本地
+		//    元数据一致），要么是 owner 推送的、与 files_json 一致的 FileList
+		//    子文件。拒绝时只结束本次传输（ContentDenied），不杀会话。
+		//
+		//    旧实现对 item_id/sha 完全不校验，最终化时 CAS 仍会把 blob 转正；
+		//    如果 item 是伪造的，`mark_item_content_cached` 命中 0 行，blob 就
+		//    成为永远没有 DB 引用、也永远不会被 LRU GC 回收的孤儿（磁盘耗尽）。
+		let remote_device_id = self
+			.peer_identity
+			.committed()
+			.unwrap_or("unknown")
+			.to_string();
+		let facts = {
+			let store = self.store.clone();
+			let item_id_bg = item_id.clone();
+			let file_id_bg = file_id.clone();
+			tokio::task::spawn_blocking(move || {
+				let store = store.lock().unwrap();
+				load_content_begin_facts(&store, &item_id_bg, file_id_bg.as_deref())
+			})
+			.await??
+		};
+		if let Err((code, detail)) = content_begin_admission(
+			facts.as_ref(),
+			&remote_device_id,
+			file_id.as_deref(),
+			&file_sha256,
+			total_bytes,
+		) {
+			self.log_sink.log_warn(
+				"Session",
+				&format!(
+					"ContentBegin denied: transfer_id={req_id}, item_id={item_id}, file_id={file_id:?}, code={code}, detail={detail}, sender={remote_device_id}"
+				),
+				Some(&format!(
+					"拒绝内容传输：传输ID={req_id}，项目ID={item_id}，文件ID={file_id:?}，错误码={code}，详情={detail}，发送方={remote_device_id}"
+				)),
+			);
+			// 让发起方看到本次传输失败（TRANSFER_FAILED），而不是会话级 Error。
+			self.emit_transfer_failed(&req_id, code, &detail);
+			self.drop_pending_payload(&req_id);
+			self.record_cancelled_payload(&req_id);
+			self.send_ctrl(CtrlMsg::ContentDenied {
+				req_id,
+				code: code.into(),
+				message: Some(detail),
+			})
+			.await?;
+			return Ok(());
+		}
+
+		// 5) F5.3：磁盘剩余空间守卫（best-effort）。在创建 tmp 文件之前拒绝明显
+		//    放不下的传输，避免先写一半再因 ENOSPC 失败；拿不到剩余空间时放行，
+		//    写盘错误仍由 writer Task 以 COMMIT_FAILED 上报。
+		let free_bytes = {
+			let cas = self.cas.clone();
+			tokio::task::spawn_blocking(move || cas.free_space_bytes()).await?
+		};
+		if !crate::cas::disk_space_allows(free_bytes, total_bytes) {
+			let detail = match free_bytes {
+				Some(free) => format!(
+					"declared total_bytes={total_bytes}, free={free}, reserve={}",
+					crate::cas::DISK_FREE_RESERVE_BYTES
+				),
+				None => format!("declared total_bytes={total_bytes}, free space unknown"),
+			};
+			self.log_sink.log_warn(
+				"Session",
+				&format!(
+					"Transfer refused: insufficient disk space: transfer_id={req_id}, item_id={item_id}, {detail}"
+				),
+				Some(&format!(
+					"拒绝传输：磁盘剩余空间不足: 传输ID={req_id}，项目ID={item_id}，{detail}"
+				)),
+			);
+			self.emit_transfer_failed(&req_id, "TRANSFER_DISK_FULL", &detail);
+			self.drop_pending_payload(&req_id);
+			self.record_cancelled_payload(&req_id);
+			self.send_ctrl(CtrlMsg::ContentDenied {
+				req_id,
+				code: "TRANSFER_DISK_FULL".into(),
+				message: Some(detail),
+			})
+			.await?;
+			return Ok(());
+		}
 
 		let tmp_path = match self.cas.get_tmp_path(&req_id) {
 			Ok(p) => p,
@@ -3716,13 +4231,30 @@ impl SessionActor {
 							//    比对。代价是一次顺序读（NVMe ~4.7 GiB/s）+ 与 B1 相同的
 							//    hash CPU；换来对整文件拼接顺序的校验（逐区间 hash 无法
 							//    证明整文件 hash 一致）。
-							if verify_whole_file {
-								let calculated = sha256_file_hex(&guard_path)?;
-								if calculated != expected_sha256 {
-									anyhow::bail!(
-										"Checksum mismatch: expected={expected_sha256}, calculated={calculated}"
-									);
+							//
+							// F6.2：**没有整文件校验就绝不 commit**。即使将来重新
+							// 引入部分传输（base_offset>0），这里也会硬失败并删 tmp，
+							// 避免“0 前缀 + 垃圾”占住目标 sha 的投毒。
+							let calculated = if verify_whole_file {
+								match sha256_file_hex(&guard_path) {
+									Ok(calculated) => Some(calculated),
+									Err(error) => {
+										let _ = std::fs::remove_file(&guard_path);
+										return Err(
+											error.context("failed to hash received temp file")
+										);
+									}
 								}
+							} else {
+								None
+							};
+							if let Err((code, detail)) = commit_integrity_gate(
+								verify_whole_file,
+								calculated.as_deref(),
+								&expected_sha256,
+							) {
+								let _ = std::fs::remove_file(&guard_path);
+								anyhow::bail!("{code}: {detail}");
 							}
 
 							// B. 转正 Blob (CAS)：blob id 来自 ContentBegin 的整文件
@@ -4706,6 +5238,24 @@ impl SessionActor {
 						"local_ref": local_ref
 					}
 				});
+				// F5.2：每次入站最终化成功后做一次有界孤儿 blob 清扫。此时
+				// content_cache 已标记 present，新 blob 一定在 referenced 集合里；
+				// 清扫只处理 >1h 且无任何 DB 引用的孤儿，放在阻塞池里、不阻塞 actor。
+				let sweep_cas = self.cas.clone();
+				let sweep_store = self.store.clone();
+				let sweep_log = self.log_sink.clone();
+				tokio::spawn(async move {
+					let _ = tokio::task::spawn_blocking(move || {
+						crate::api::sweep_orphan_blobs_best_effort(
+							&sweep_cas,
+							&sweep_store,
+							&sweep_log,
+							"AfterInboundFinalize",
+						);
+					})
+					.await;
+				});
+
 				self.sink.emit(evt.to_string());
 			}
 			Err((code, message)) => {
@@ -4798,6 +5348,33 @@ impl SessionActor {
 					req_id: transfer_id,
 					code: "PEER_POLICY_DENIED".into(),
 					message: Some("share_to_peer is disabled for this peer".into()),
+				})
+				.await;
+			return Ok(());
+		}
+
+		// F6：公开 API 从不请求断点续传；在“每区间 hash”落地之前，任何
+		// `offset > 0` 的 ContentGet 都无法被接收端用整文件 hash 校验。这里
+		// 直接拒绝（非致命 ContentDenied），避免发送端构造一个注定被对端拒绝、
+		// 或（旧实现下）跳过校验的区间计划。
+		if offset.unwrap_or(0) != 0 {
+			let detail = "resume/partial ContentGet (offset > 0) is unsupported until per-range \
+				hashes exist"
+				.to_string();
+			self.log_sink.log_warn(
+				"Session",
+				&format!(
+					"ContentGet denied: transfer_id={transfer_id}, item_id={item_id}, offset={offset:?}: {detail}"
+				),
+				Some(&format!(
+					"拒绝内容请求：传输ID={transfer_id}，项目ID={item_id}，偏移={offset:?}：{detail}"
+				)),
+			);
+			let _ = self
+				.send_ctrl(CtrlMsg::ContentDenied {
+					req_id: transfer_id,
+					code: "TRANSFER_RANGE_UNSUPPORTED_OFFSET".into(),
+					message: Some(detail),
 				})
 				.await;
 			return Ok(());
@@ -5217,7 +5794,46 @@ impl SessionActor {
 	}
 
 	async fn tick_heartbeat(&mut self) -> Result<()> {
-		if now_ms() - self.last_active_at > HEARTBEAT_TIMEOUT.as_millis() as i64 {
+		let now = now_ms();
+		// F4.2：认证完成前的硬截止时间。这里刻意传入 `last_active_at` 但纯函数
+		// 会忽略它 —— 认证前的 Ping 能刷新活动时间，却不能延长预认证时钟。
+		let timeout_ms = i64::try_from(self.handshake_timeout.as_millis()).unwrap_or(i64::MAX);
+		if pre_auth_deadline_decision(
+			now,
+			self.auth_started_at,
+			self.last_active_at,
+			timeout_ms,
+			self.state == SessionState::Online,
+		) == PreAuthDeadline::Expired
+		{
+			let state = format!("{:?}", self.state);
+			let device_id = self
+				.peer_identity
+				.display()
+				.unwrap_or("unknown")
+				.to_string();
+			self.log_sink.log_warn(
+				"Session",
+				&format!(
+					"Pre-auth handshake timeout, terminating session: device_id={device_id}, state={state}, \
+					 auth_started={}, timeout_ms={timeout_ms}",
+					self.auth_started_at
+				),
+				Some(&format!(
+					"预认证握手超时，终止会话: 设备ID={device_id}，状态={state}，认证开始={}，超时={timeout_ms}ms",
+					self.auth_started_at
+				)),
+			);
+			let _ = self
+				.send_ctrl(CtrlMsg::Error {
+					reply_to: None,
+					code: "HANDSHAKE_TIMEOUT".into(),
+					message: Some("Pre-authentication handshake deadline exceeded".into()),
+				})
+				.await;
+			anyhow::bail!("Pre-auth handshake timeout after {timeout_ms}ms (state={state})");
+		}
+		if now - self.last_active_at > HEARTBEAT_TIMEOUT.as_millis() as i64 {
 			if let Some(did) = self.peer_identity.committed() {
 				self.log_sink.log_warn(
 					"Session",
@@ -5542,18 +6158,22 @@ mod transfer_guard_tests {
 	//! 可以独立于 QUIC 连接断言；需要真实连接的行为仍由 `session::tests` 里的
 	//! `#[ignore]` 网络用例覆盖。
 	use super::{
-		chunk_overrun, chunk_send_timeout, content_end_route, decide_stream_count, hard_cap_bytes,
-		initial_range_plan, kind_from_mime, mark_item_content_cached, plan_ranges,
-		receiver_idle_expired, receiver_slot_available, route_payload_stream, route_range_header,
-		sender_admission, sender_slot_available, stream_probe_interval, validate_range_plan,
-		ContentEndRoute, PayloadRoute, PushOutcome, RangeRoute, RangeSlotState, ReceiverInbox,
-		ReceiverRanges, ReceiverTaskMsg, SenderState, SessionActor, StreamControllerInput,
-		StreamDecisionReason, TerminatedGuard, CHUNK_SEND_TIMEOUT_CAP, HEARTBEAT_TIMEOUT,
-		LAN_PROBE_SLICE_MAX_BYTES, MAX_CONCURRENT_RECEIVERS, MAX_CONCURRENT_SENDERS,
-		MAX_INFLIGHT_BYTES_PER_RECEIVER, MAX_PAYLOAD_STREAMS_PER_TRANSFER,
-		PROBE_MIN_REMAINING_BYTES, RECEIVER_IDLE_TIMEOUT_MS, UPLOAD_CHUNK_BYTES,
+		chunk_overrun, chunk_send_timeout, commit_integrity_gate, content_begin_admission,
+		content_end_route, decide_stream_count, hard_cap_bytes, initial_range_plan,
+		item_delete_owner_allowed, kind_from_mime, load_content_begin_facts,
+		mark_item_content_cached, plan_ranges, pre_auth_deadline_decision, receiver_idle_expired,
+		receiver_slot_available, resolve_handshake_timeout, route_payload_stream,
+		route_range_header, sender_admission, sender_slot_available, sha256_file_hex,
+		stream_probe_interval, validate_range_plan, ContentBeginFacts, ContentBeginFileFacts,
+		ContentEndRoute, PayloadRoute, PreAuthDeadline, PushOutcome, RangeRoute, RangeSlotState,
+		ReceiverInbox, ReceiverRanges, ReceiverTaskMsg, SenderState, SessionActor,
+		StreamControllerInput, StreamDecisionReason, TerminatedGuard, CHUNK_SEND_TIMEOUT_CAP,
+		DEFAULT_HANDSHAKE_TIMEOUT, HEARTBEAT_TIMEOUT, LAN_PROBE_SLICE_MAX_BYTES,
+		MAX_CONCURRENT_RECEIVERS, MAX_CONCURRENT_SENDERS, MAX_INFLIGHT_BYTES_PER_RECEIVER,
+		MAX_PAYLOAD_STREAMS_PER_TRANSFER, PROBE_MIN_REMAINING_BYTES, RECEIVER_IDLE_TIMEOUT_MS,
+		UPLOAD_CHUNK_BYTES,
 	};
-	use crate::model::{FileMeta, ItemContent, ItemKind, ItemMeta};
+	use crate::model::{FileMeta, ItemContent, ItemKind, ItemMeta, ItemPreview};
 	use crate::policy::SizeLimits;
 	use crate::proto::{CtrlMsg, TransferHeader, TransferRange};
 	use crate::session::{HandshakeStep, SessionHandle, SessionKind, SessionState, TransferLoad};
@@ -6414,6 +7034,309 @@ mod transfer_guard_tests {
 			&"b".repeat(64)
 		)
 		.is_err());
+	}
+
+	// ------------------------------------------------------------------
+	// F4.2：预认证截止时间
+	// ------------------------------------------------------------------
+
+	/// 认证前的 Ping 会刷新 `last_active_at`，但**不能**延长预认证截止时间。
+	/// `pre_auth_deadline_decision` 刻意接收活动时间却完全忽略它：结果只由
+	/// `auth_started_at` + timeout 决定。
+	#[test]
+	fn pre_auth_ping_does_not_extend_handshake_deadline() {
+		let started = 1_000_000i64;
+		let timeout_ms = 10_000i64;
+		// 对端每 2s 发一个 Ping：最后一次活动时间是 9.9s，看起来“刚刚活跃”。
+		let last_active_after_ping = started + 9_900;
+
+		assert_eq!(
+			pre_auth_deadline_decision(
+				started + 9_900,
+				started,
+				last_active_after_ping,
+				timeout_ms,
+				false
+			),
+			PreAuthDeadline::Alive
+		);
+		// 即使 1ms 前刚收过 Ping，超过 10s 的预认证时钟仍然到点。
+		assert_eq!(
+			pre_auth_deadline_decision(
+				started + 10_001,
+				started,
+				started + 10_000,
+				timeout_ms,
+				false
+			),
+			PreAuthDeadline::Expired,
+			"Ping 刷新活动时间不得延长预认证截止时间"
+		);
+		// Online 之后交给普通空闲策略：预认证时钟不再适用。
+		assert_eq!(
+			pre_auth_deadline_decision(
+				started + 20_000,
+				started,
+				started + 19_000,
+				timeout_ms,
+				true
+			),
+			PreAuthDeadline::Online
+		);
+	}
+
+	/// `CB_HANDSHAKE_TIMEOUT_SECS`：未设置/空/非法/0 → 10s；合法值夹到 1..=300s。
+	#[test]
+	fn handshake_timeout_env_parsing_clamps_and_defaults() {
+		assert_eq!(
+			resolve_handshake_timeout(None, DEFAULT_HANDSHAKE_TIMEOUT),
+			DEFAULT_HANDSHAKE_TIMEOUT
+		);
+		assert_eq!(
+			resolve_handshake_timeout(Some(""), DEFAULT_HANDSHAKE_TIMEOUT),
+			DEFAULT_HANDSHAKE_TIMEOUT
+		);
+		assert_eq!(
+			resolve_handshake_timeout(Some("nope"), DEFAULT_HANDSHAKE_TIMEOUT),
+			DEFAULT_HANDSHAKE_TIMEOUT
+		);
+		assert_eq!(
+			resolve_handshake_timeout(Some("0"), DEFAULT_HANDSHAKE_TIMEOUT),
+			DEFAULT_HANDSHAKE_TIMEOUT
+		);
+		assert_eq!(
+			resolve_handshake_timeout(Some(" 30 "), DEFAULT_HANDSHAKE_TIMEOUT),
+			Duration::from_secs(30)
+		);
+		assert_eq!(
+			resolve_handshake_timeout(Some("999"), DEFAULT_HANDSHAKE_TIMEOUT),
+			Duration::from_secs(300)
+		);
+		assert_eq!(DEFAULT_HANDSHAKE_TIMEOUT, Duration::from_secs(10));
+	}
+
+	// ------------------------------------------------------------------
+	// F5.1：ContentBegin 准入（fake item / sha 不匹配）
+	// ------------------------------------------------------------------
+
+	/// 纯函数层面：item 不存在、sha 不匹配、长度不匹配都必须拒绝；
+	/// 内容自证（sha+长度一致）才允许。
+	#[test]
+	fn content_begin_admission_rejects_unknown_item_and_mismatched_content() {
+		let begin_sha = "b".repeat(64);
+		assert_eq!(
+			content_begin_admission(None, "peer-a", None, &begin_sha, 10)
+				.unwrap_err()
+				.0,
+			"CONTENT_ITEM_UNKNOWN"
+		);
+
+		let real = ContentBeginFacts {
+			item_sha256: "a".repeat(64),
+			item_total_bytes: 10,
+			owner_device_id: "peer-a".to_string(),
+			file: None,
+		};
+		// item 存在但 sha 不匹配：拒绝（不能把合法 sha 当投递地址）。
+		assert_eq!(
+			content_begin_admission(Some(&real), "peer-a", None, &begin_sha, 10)
+				.unwrap_err()
+				.0,
+			"CONTENT_SHA_MISMATCH"
+		);
+		// sha 匹配但长度不匹配：拒绝。
+		assert_eq!(
+			content_begin_admission(Some(&real), "peer-a", None, &real.item_sha256, 11)
+				.unwrap_err()
+				.0,
+			"CONTENT_LENGTH_MISMATCH"
+		);
+		// 内容自证：允许（正常 pull 路径）。
+		assert!(
+			content_begin_admission(Some(&real), "peer-a", None, &real.item_sha256, 10).is_ok()
+		);
+
+		// FileList 子文件：只允许 owner 推送，且文件 sha/长度必须与元数据一致。
+		let file_facts = ContentBeginFacts {
+			item_sha256: "a".repeat(64),
+			item_total_bytes: 10,
+			owner_device_id: "peer-a".to_string(),
+			file: Some(ContentBeginFileFacts {
+				sha256: "c".repeat(64),
+				size_bytes: 20,
+			}),
+		};
+		assert!(content_begin_admission(
+			Some(&file_facts),
+			"peer-a",
+			Some("file-1"),
+			&"c".repeat(64),
+			20
+		)
+		.is_ok());
+		// 非 owner 不能为别人的 FileList 写子文件。
+		assert_eq!(
+			content_begin_admission(
+				Some(&file_facts),
+				"peer-evil",
+				Some("file-1"),
+				&"c".repeat(64),
+				20
+			)
+			.unwrap_err()
+			.0,
+			"CONTENT_OWNER_MISMATCH"
+		);
+		// 文件 sha 不匹配：拒绝。
+		assert_eq!(
+			content_begin_admission(
+				Some(&file_facts),
+				"peer-a",
+				Some("file-1"),
+				&"d".repeat(64),
+				20
+			)
+			.unwrap_err()
+			.0,
+			"CONTENT_FILE_SHA_MISMATCH"
+		);
+	}
+
+	/// Store 层：伪造 item_id 读不到事实（因此准入拒绝，不会创建 tmp/commit blob）；
+	/// 真实 item 的 sha 不匹配同样拒绝。
+	#[test]
+	fn content_begin_admission_uses_store_facts_and_rejects_fake_item() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+		let file_sha = "c".repeat(64);
+		let meta = ItemMeta {
+			ty: "ItemMeta".to_string(),
+			item_id: "item-real".to_string(),
+			kind: ItemKind::FileList,
+			created_ts_ms: 1,
+			source_device_id: "peer-a".to_string(),
+			source_device_name: None,
+			size_bytes: 20,
+			preview: ItemPreview::default(),
+			content: ItemContent {
+				mime: "application/x-clipbridge-filelist+json".to_string(),
+				sha256: "a".repeat(64),
+				total_bytes: 10,
+			},
+			files: vec![FileMeta {
+				file_id: "file-1".to_string(),
+				rel_name: "a.bin".to_string(),
+				size_bytes: 20,
+				sha256: Some(file_sha.clone()),
+				local_path: None,
+			}],
+			expires_ts_ms: None,
+		};
+		store.insert_remote_item("acct", &meta, 1).unwrap();
+
+		// 真实 item：文件事实与准入一致。
+		let facts = load_content_begin_facts(&store, "item-real", Some("file-1"))
+			.unwrap()
+			.expect("real item must be found");
+		assert!(
+			content_begin_admission(Some(&facts), "peer-a", Some("file-1"), &file_sha, 20).is_ok()
+		);
+		// sha 不匹配：拒绝。
+		assert_eq!(
+			content_begin_admission(Some(&facts), "peer-a", Some("file-1"), &"9".repeat(64), 20)
+				.unwrap_err()
+				.0,
+			"CONTENT_FILE_SHA_MISMATCH"
+		);
+
+		// 伪造 item_id：读不到事实 → 拒绝；CAS 中不会出现该 sha 的 blob。
+		assert!(load_content_begin_facts(&store, "item-fake", None)
+			.unwrap()
+			.is_none());
+		let fake_sha = "e".repeat(64);
+		assert_eq!(
+			content_begin_admission(None, "peer-a", None, &fake_sha, 10)
+				.unwrap_err()
+				.0,
+			"CONTENT_ITEM_UNKNOWN"
+		);
+		let cas = crate::cas::Cas::new(dir.path().join("cas")).unwrap();
+		assert!(!cas.blob_exists(&fake_sha), "拒绝路径绝不能产生 blob");
+	}
+
+	// ------------------------------------------------------------------
+	// F6：部分传输拒绝 + 提交前整文件校验闸门
+	// ------------------------------------------------------------------
+
+	/// 非 0 起点的区间计划必须在落盘前被拒绝（resume 暂不支持）。
+	#[test]
+	fn range_plan_rejects_nonzero_base_offset() {
+		let ranges = vec![TransferRange {
+			offset: 1024,
+			length: 1024,
+		}];
+		let (code, detail) = validate_range_plan(&ranges, 2048).unwrap_err();
+		assert_eq!(code, "TRANSFER_RANGE_UNSUPPORTED_OFFSET");
+		assert!(
+			detail.contains("unsupported"),
+			"detail 必须说明 resume 暂不支持: {detail}"
+		);
+	}
+
+	/// 提交闸门：没有整文件校验（false / None）或 hash 不匹配都硬失败。
+	#[test]
+	fn commit_integrity_gate_requires_verified_whole_file_hash() {
+		let expected = "a".repeat(64);
+		assert!(commit_integrity_gate(true, Some(&expected), &expected).is_ok());
+
+		assert_eq!(
+			commit_integrity_gate(false, None, &expected).unwrap_err().0,
+			"TRANSFER_HASH_UNVERIFIED"
+		);
+		assert_eq!(
+			commit_integrity_gate(true, None, &expected).unwrap_err().0,
+			"TRANSFER_HASH_UNVERIFIED"
+		);
+		assert_eq!(
+			commit_integrity_gate(true, Some(&"b".repeat(64)), &expected)
+				.unwrap_err()
+				.0,
+			"TRANSFER_CHECKSUM_MISMATCH"
+		);
+	}
+
+	/// 完整传输但内容与声称的 sha 不符：在 commit 之前被闸门拒绝。
+	#[test]
+	fn wrong_content_with_claimed_sha_is_rejected_before_commit() {
+		let dir = tempfile::tempdir().unwrap();
+		let tmp = dir.path().join("received.tmp");
+		std::fs::write(&tmp, b"0-prefix + garbage").unwrap();
+		let claimed_sha = "c".repeat(64);
+		let calculated = sha256_file_hex(&tmp).unwrap();
+		assert_ne!(
+			calculated, claimed_sha,
+			"测试前提：临时文件内容与声称 sha 不同"
+		);
+		let (code, _detail) =
+			commit_integrity_gate(true, Some(&calculated), &claimed_sha).unwrap_err();
+		assert_eq!(code, "TRANSFER_CHECKSUM_MISMATCH");
+		// 闸门在 CAS 之前执行：拒绝时不会出现目标 blob。
+		let cas = crate::cas::Cas::new(dir.path().join("cas")).unwrap();
+		assert!(!cas.blob_exists(&claimed_sha));
+	}
+
+	// ------------------------------------------------------------------
+	// F8：删除归属
+	// ------------------------------------------------------------------
+
+	#[test]
+	fn item_delete_requires_matching_owner_device() {
+		assert!(item_delete_owner_allowed(Some("peer-a"), "peer-a"));
+		assert!(
+			!item_delete_owner_allowed(Some("peer-a"), "peer-evil"),
+			"伪造远端设备 ID 不能删除别人的 item"
+		);
+		assert!(!item_delete_owner_allowed(None, "peer-a"));
 	}
 }
 

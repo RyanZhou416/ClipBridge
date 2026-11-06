@@ -38,6 +38,98 @@ pub const LARGE_FILE_FSYNC_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 /// 会兜底扫到它。这样后台同步永远不会反向阻塞接收路径。
 pub const DURABILITY_QUEUE_CAPACITY: usize = 64;
 
+/// F5：孤儿 blob 清扫的最小存活时间（1 小时）。
+///
+/// 只删除“在 `content_cache` / `items` 里没有任何引用、且修改时间早于该年龄”的
+/// blob。1 小时远大于一次正常传输的最终化窗口（`CONTENT_END_TIMEOUT` = 30 s），
+/// 因此不会与正在 commit 的 tmp→blob rename 竞争。
+pub const ORPHAN_BLOB_MIN_AGE_MS: i64 = 60 * 60 * 1000;
+
+/// F5：单次孤儿清扫最多删除的 blob 数量（有界批次，避免阻塞接收主循环）。
+pub const ORPHAN_SWEEP_DELETE_BATCH: usize = 64;
+
+/// F5.3：磁盘剩余空间保留量（512 MiB）。
+///
+/// 接收前只做“**best-effort**”检查：`total_bytes > free - 512 MiB` 时拒绝，
+/// 给操作系统/日志/其他进程留出余量。拿不到剩余空间（非 Windows 平台，或
+/// `GetDiskFreeSpaceExW` 失败）时不拒绝——这是防误伤，不是安全边界。
+pub const DISK_FREE_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// 一次孤儿 blob 清扫的计数（见 [`Cas::sweep_orphan_blobs`]）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OrphanSweepStats {
+	/// 遍历到的合法 sha256 blob 文件数。
+	pub scanned: usize,
+	/// 实际删除的 blob 数。
+	pub deleted: usize,
+	/// 因仍被 DB 引用而保留的数量。
+	pub kept_referenced: usize,
+	/// 因年龄不足 [`ORPHAN_BLOB_MIN_AGE_MS`] 而保留的数量。
+	pub kept_recent: usize,
+	/// 无法读取修改时间而保守保留的数量。
+	pub kept_unknown_age: usize,
+	/// 删除失败（例如 Windows 上视图仍被占用）的数量。
+	pub failed: usize,
+	/// 删除成功的 blob 自身字节数合计（不含无法追踪的复制视图）。
+	pub freed_bytes: u64,
+}
+
+/// 纯函数：在已知剩余空间时，是否允许接收 `total_bytes`。
+///
+/// 规则：`total_bytes <= free.saturating_sub(DISK_FREE_RESERVE_BYTES)`。
+/// `free_bytes == None`（平台不支持/查询失败）时放行：这是 best-effort 防护，
+/// 宁可让之后的写盘错误（`COMMIT_FAILED`）兜底，也不要因为拿不到 statfs 就
+/// 拒绝所有传输。
+pub(crate) fn disk_space_allows(free_bytes: Option<u64>, total_bytes: u64) -> bool {
+	match free_bytes {
+		Some(free) => total_bytes <= free.saturating_sub(DISK_FREE_RESERVE_BYTES),
+		None => true,
+	}
+}
+
+/// 查询 `path` 所在卷的“调用方可用”剩余字节数（best-effort）。
+///
+/// Windows 使用 `GetDiskFreeSpaceExW` 的第一个输出参数（`FreeBytesAvailableToCaller`，
+/// 已考虑配额）；其他平台返回 `None`，调用方按“未知即放行”处理。不引入
+/// `fs2` / `sysinfo` 依赖。
+#[cfg(windows)]
+fn available_disk_bytes(path: &Path) -> Option<u64> {
+	use std::os::windows::ffi::OsStrExt;
+
+	#[allow(non_snake_case)]
+	#[link(name = "kernel32")]
+	extern "system" {
+		fn GetDiskFreeSpaceExW(
+			lpDirectoryName: *const u16,
+			lpFreeBytesAvailableToCaller: *mut u64,
+			lpTotalNumberOfBytes: *mut u64,
+			lpTotalNumberOfFreeBytes: *mut u64,
+		) -> i32;
+	}
+
+	let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+	wide.push(0);
+	let mut available: u64 = 0;
+	// SAFETY: `wide` 以 NUL 结尾且在本调用期间保持有效；输出指针指向可写的
+	// 栈变量，`null_mut()` 是 API 允许的“不关心”参数。
+	let ok = unsafe {
+		GetDiskFreeSpaceExW(
+			wide.as_ptr(),
+			&raw mut available,
+			std::ptr::null_mut(),
+			std::ptr::null_mut(),
+		)
+	};
+	(ok != 0).then_some(available)
+}
+
+#[cfg(not(windows))]
+fn available_disk_bytes(_path: &Path) -> Option<u64> {
+	// 非 Windows 平台不引入 libc/statvfs 绑定（本项目主要目标平台是 Windows）。
+	// 返回 None 表示“未知”，接收路径会放行并由写盘错误兜底。
+	None
+}
+
 /// 接收完成路径的 fsync 策略（`CB_FSYNC_POLICY`）。
 ///
 /// # 决策表（详见 [`FsyncPolicy::decision`]）
@@ -541,6 +633,117 @@ impl Cas {
 		Ok(total as i64)
 	}
 
+	/// F5.3：本缓存目录所在卷的可用字节数（best-effort，`None` = 未知）。
+	pub fn free_space_bytes(&self) -> Option<u64> {
+		available_disk_bytes(&self.cache_dir)
+	}
+
+	/// F5.2：清扫 `blobs/sha256/**` 下没有任何 DB 引用、且已“足够老”的孤儿 blob。
+	///
+	/// 判定顺序（每个候选）：
+	/// 1. 文件名必须是合法小写 64 hex（否则不是本函数创建的 blob，跳过）；
+	/// 2. 在 `referenced` 集合里 → 保留（`content_cache` / `items` / `files_json`
+	///    的并集，由 `Store::list_referenced_content_hashes` 构造）；
+	/// 3. 修改时间不可读 → 保守保留；
+	/// 4. 年龄 < `min_age_ms` → 保留（避免与正在进行的 commit 竞争）；
+	/// 5. 否则 `remove_blob`（同时清掉 files/downloads 硬链接视图）。
+	///
+	/// 删除数量达到 `delete_batch` 后立即停止遍历：单次调用最多删这么多，剩下的
+	/// 留给下一次（启动/每次入站最终化都会触发）。函数没有跨调用状态，任意时刻
+	/// 被取消都只会留下“已删一部分”的结果，不会破坏一致性。
+	pub fn sweep_orphan_blobs(
+		&self,
+		referenced: &HashSet<String>,
+		now_ms: i64,
+		min_age_ms: i64,
+		delete_batch: usize,
+	) -> anyhow::Result<OrphanSweepStats> {
+		let mut stats = OrphanSweepStats::default();
+		let prefixes = match fs::read_dir(&self.blobs_dir) {
+			Ok(entries) => entries,
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(stats),
+			Err(e) => return Err(e.into()),
+		};
+
+		'prefixes: for prefix in prefixes {
+			let prefix = match prefix {
+				Ok(entry) => entry,
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+				Err(e) => return Err(e.into()),
+			};
+			let prefix_path = prefix.path();
+			if !prefix_path.is_dir() {
+				continue;
+			}
+			let blobs = match fs::read_dir(&prefix_path) {
+				Ok(entries) => entries,
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+				Err(e) => return Err(e.into()),
+			};
+			for blob in blobs {
+				let blob = match blob {
+					Ok(entry) => entry,
+					Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+					Err(e) => return Err(e.into()),
+				};
+				let path = blob.path();
+				let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+					continue;
+				};
+				// 只处理本 CAS 自己生成的 64 hex 文件名，绝不碰未知文件。
+				if validate_hash(name).is_err() {
+					continue;
+				}
+				stats.scanned += 1;
+				if referenced.contains(name) {
+					stats.kept_referenced += 1;
+					continue;
+				}
+				let meta = match fs::symlink_metadata(&path) {
+					Ok(meta) => meta,
+					Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+					Err(_) => {
+						stats.kept_unknown_age += 1;
+						continue;
+					}
+				};
+				if !meta.is_file() {
+					continue;
+				}
+				let Some(modified_ms) = meta
+					.modified()
+					.ok()
+					.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+					.and_then(|age| i64::try_from(age.as_millis()).ok())
+				else {
+					stats.kept_unknown_age += 1;
+					continue;
+				};
+				if now_ms.saturating_sub(modified_ms) < min_age_ms {
+					stats.kept_recent += 1;
+					continue;
+				}
+				if stats.deleted >= delete_batch {
+					// 已达到本次有界批次：停止遍历，未扫描到的留给下一次。
+					break 'prefixes;
+				}
+				match self.remove_blob(name) {
+					Ok(freed) => {
+						stats.deleted += 1;
+						stats.freed_bytes = stats
+							.freed_bytes
+							.saturating_add(u64::try_from(freed).unwrap_or(0));
+					}
+					Err(_) => {
+						// 例如 Windows 上 views 仍被外壳打开：保留，下次再试。
+						stats.failed += 1;
+					}
+				}
+			}
+		}
+		Ok(stats)
+	}
+
 	/// 删除 `files/` 下名字为 `<sha>.<ext>`（或 Windows 归一化后的 `<sha>`）的视图链接。
 	fn remove_files_views(&self, sha256_hex: &str) -> anyhow::Result<()> {
 		let entries = match fs::read_dir(self.files_dir()) {
@@ -689,6 +892,11 @@ impl Cas {
 	}
 
 	/// 实际的 rename 逻辑（带策略与不带策略的 commit 共用）。
+	///
+	/// **完整性契约**：本函数信任调用方传入的 `sha256` 已由调用方验证。
+	/// 接收路径（session/actor.rs）在调用前必须确认整文件 hash 已重算并匹配，
+	/// 且区间计划覆盖 `[0, total_bytes)`；否则“目标 blob 已存在”会保留旧内容，
+	/// 而新 tmp 会被静默删除，形成无法检测的投毒。
 	fn commit_tmp_file_inner(&self, tmp_path: &Path, sha256: &str) -> anyhow::Result<PathBuf> {
 		let dst = self.blob_path(sha256)?;
 
@@ -1305,5 +1513,109 @@ mod tests {
 			!cas.enqueue_background_sync("a".repeat(64), "b".repeat(64)),
 			"队列满时必须返回 false，让调用方依赖 sweep"
 		);
+	}
+
+	fn now_ms_for_test() -> i64 {
+		std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap()
+			.as_millis() as i64
+	}
+
+	fn set_blob_mtime(cas: &Cas, sha256: &str, time: std::time::SystemTime) {
+		let path = cas.blob_path(sha256).unwrap();
+		let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+		file.set_modified(time).unwrap();
+	}
+
+	/// F5.2：孤儿清扫只删除“无 DB 引用 + 足够老”的 blob；被引用或新鲜的必须保留。
+	#[test]
+	fn orphan_sweep_deletes_old_unreferenced_and_keeps_referenced_and_fresh() {
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path()).unwrap();
+		let old_orphan = cas.put_blob(b"old orphan payload").unwrap();
+		let fresh_orphan = cas.put_blob(b"fresh orphan payload").unwrap();
+		let referenced = cas.put_blob(b"referenced payload").unwrap();
+
+		let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_hours(2);
+		set_blob_mtime(&cas, &old_orphan, two_hours_ago);
+		set_blob_mtime(&cas, &referenced, two_hours_ago);
+		// fresh_orphan 保持“刚刚写入”的 mtime。
+
+		let referenced_set: HashSet<String> = [referenced.clone()].into_iter().collect();
+		let stats = cas
+			.sweep_orphan_blobs(
+				&referenced_set,
+				now_ms_for_test(),
+				ORPHAN_BLOB_MIN_AGE_MS,
+				ORPHAN_SWEEP_DELETE_BATCH,
+			)
+			.unwrap();
+
+		assert!(
+			!cas.blob_exists(&old_orphan),
+			"老的、无引用的孤儿 blob 必须被删除"
+		);
+		assert!(
+			cas.blob_exists(&referenced),
+			"仍被 content_cache/items 引用的 blob 必须保留"
+		);
+		assert!(
+			cas.blob_exists(&fresh_orphan),
+			"新鲜 blob 可能正在 commit，绝不能删"
+		);
+		assert_eq!(stats.deleted, 1);
+		assert_eq!(stats.kept_referenced, 1);
+		assert_eq!(stats.kept_recent, 1);
+		assert_eq!(stats.failed, 0);
+		assert!(stats.freed_bytes > 0);
+	}
+
+	/// 单次清扫的删除数量有上限，剩下的留给下一次（避免一次删太多阻塞接收路径）。
+	#[test]
+	fn orphan_sweep_respects_delete_batch() {
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path()).unwrap();
+		let first = cas.put_blob(b"first orphan").unwrap();
+		let second = cas.put_blob(b"second orphan").unwrap();
+		let old = std::time::SystemTime::now() - std::time::Duration::from_hours(2);
+		set_blob_mtime(&cas, &first, old);
+		set_blob_mtime(&cas, &second, old);
+
+		let stats = cas
+			.sweep_orphan_blobs(
+				&HashSet::new(),
+				now_ms_for_test(),
+				ORPHAN_BLOB_MIN_AGE_MS,
+				1,
+			)
+			.unwrap();
+		assert_eq!(stats.deleted, 1);
+		assert_eq!(
+			usize::from(cas.blob_exists(&first)) + usize::from(cas.blob_exists(&second)),
+			1,
+			"批次上限 1 时必须只删一个，另一个留给下一次"
+		);
+	}
+
+	/// F5.3：磁盘守卫是纯函数决策；未知剩余空间放行，已知时保留 512 MiB。
+	#[test]
+	fn disk_guard_requires_free_space_beyond_reserve() {
+		// 查询不到 statfs（非 Windows / API 失败）：放行，由写盘错误兜底。
+		assert!(disk_space_allows(None, u64::MAX));
+
+		// free - reserve 刚好等于 total：允许（边界）。
+		assert!(disk_space_allows(Some(DISK_FREE_RESERVE_BYTES + 100), 100));
+		// 少 1 字节：拒绝。
+		assert!(!disk_space_allows(Some(DISK_FREE_RESERVE_BYTES + 99), 100));
+		// 剩余空间本身低于保留量：除 0 字节外都拒绝。
+		assert!(!disk_space_allows(Some(100), 1));
+		assert!(disk_space_allows(Some(100), 0));
+
+		// 真实 Windows 卷上应能查到合理值（非 Windows 为 None）。
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path()).unwrap();
+		#[cfg(windows)]
+		assert!(cas.free_space_bytes().is_some());
 	}
 }

@@ -38,6 +38,46 @@ const DATA_LINK_ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 再加一道资源闸门：超过上限的新连接直接 close（不影响已有传输）。
 const MAX_INBOUND_DATA_SESSIONS: usize = 64;
 
+/// 本进程同时保留的**入站控制**会话上限（F4.1）。
+///
+/// 控制端口是公开监听的：旧实现把每个 accept 到的连接无条件塞进 `sessions`，
+/// 而认证前既不占数据会话配额，又能在 `Handshaking` 里停留任意久（Ping 会刷新
+/// 活动时间）。攻击者因此可以开 N 条 TCP/QUIC 连接耗尽 fd/内存/握手 CPU。
+/// 64 与数据会话同量级：正常家庭/办公场景的 peer 数远低于此，超出的新连接直接
+/// close，已有连接与已建立的数据传输不受影响。
+const MAX_INBOUND_CONTROL_SESSIONS: usize = 64;
+
+/// 环境变量：覆盖入站控制会话上限（`CB_MAX_CONTROL_SESSIONS`）。
+const MAX_CONTROL_SESSIONS_ENV: &str = "CB_MAX_CONTROL_SESSIONS";
+
+/// 环境变量可配置的上限范围：0 会被夹到 1（拒绝所有新连接没有意义且会锁死
+/// 网络），上限 1024 防止把保护配置成无界。
+const MAX_CONTROL_SESSIONS_MIN: usize = 1;
+const MAX_CONTROL_SESSIONS_MAX: usize = 1024;
+
+/// 解析 `CB_MAX_CONTROL_SESSIONS`（纯函数，便于单测）。
+///
+/// 未设置 / 空串 / 非法值 → `default`；合法整数夹到
+/// `[MAX_CONTROL_SESSIONS_MIN, MAX_CONTROL_SESSIONS_MAX]`。
+fn resolve_max_control_sessions(raw: Option<&str>, default: usize) -> usize {
+	let Some(raw) = raw else {
+		return default;
+	};
+	let trimmed = raw.trim();
+	if trimmed.is_empty() {
+		return default;
+	}
+	match trimmed.parse::<usize>() {
+		Ok(value) => value.clamp(MAX_CONTROL_SESSIONS_MIN, MAX_CONTROL_SESSIONS_MAX),
+		Err(_) => default,
+	}
+}
+
+/// 入站控制会话槽位判定：当前数量达到上限后必须拒绝新连接。
+fn control_session_slot_available(current: usize, max: usize) -> bool {
+	current < max
+}
+
 /// 入站数据连接：`(数据端点槽位, 已完成的 QUIC 连接)`。
 type AcceptedDataConnection = (usize, crate::transport::Connection);
 
@@ -113,6 +153,12 @@ pub struct NetManager {
 	store: Arc<Mutex<Store>>,
 	log_sink: LogSink,
 	sessions: Vec<SessionHandle>,
+	/// F4.1：本端 accept 到的控制会话（`sessions` 的子集，仅用于计数与上限
+	/// 判定；`sessions` 还包含本端主动拨号的连接）。保存 handle 的 clone 是为了
+	/// 在 `maintain_sessions` 中按同一套存活判定回收。
+	inbound_control_sessions: Vec<SessionHandle>,
+	/// F4.1：入站控制会话上限（`CB_MAX_CONTROL_SESSIONS`，默认 64）。
+	max_inbound_control_sessions: usize,
 
 	// 正在拨号中的集合 (防止并发拨号)
 	pending_dials: HashSet<String>,
@@ -602,6 +648,27 @@ impl NetManager {
 										)),
 									);
 
+									let max_inbound_control_sessions = {
+										let raw = std::env::var(MAX_CONTROL_SESSIONS_ENV).ok();
+										let max = resolve_max_control_sessions(
+											raw.as_deref(),
+											MAX_INBOUND_CONTROL_SESSIONS,
+										);
+										if let Some(raw) = raw.as_deref() {
+											log_sink.log_info(
+												"Network",
+												&format!(
+													"Inbound control session limit resolved: max={max}, \
+													 {MAX_CONTROL_SESSIONS_ENV}={raw:?}"
+												),
+												Some(&format!(
+													"入站控制会话上限: max={max}，{MAX_CONTROL_SESSIONS_ENV}={raw:?}"
+												)),
+											);
+										}
+										max
+									};
+
 									let manager = Self {
 										config,
 										transport,
@@ -610,6 +677,8 @@ impl NetManager {
 										log_sink,
 										cas,
 										sessions: Vec::new(),
+										inbound_control_sessions: Vec::new(),
+										max_inbound_control_sessions,
 										pending_dials: HashSet::new(),
 										backoff_map: HashMap::new(),
 										known_peers: HashMap::new(),
@@ -907,29 +976,52 @@ impl NetManager {
 				conn = self.transport.accept() => {
 					if let Some(conn) = conn {
 						let addr = conn.remote_address();
-						self.log_sink.log_info(
-							"Network",
-						&format!("Incoming connection accepted from: {addr}, spawning server session"),
-						Some(&format!("已接受入站连接: {addr}，正在创建服务器会话")),
-						);
+						// F4.1：控制端口是公开监听的，认证前的每条连接都会占用
+						// 会话槽位/握手 CPU。超过上限时直接 close，绝不 spawn actor。
+						if !control_session_slot_available(
+							self.inbound_control_sessions.len(),
+							self.max_inbound_control_sessions,
+						) {
+							self.log_sink.log_warn(
+								"Network",
+								&format!(
+									"Rejecting inbound control connection: limit reached ({}), from={addr}",
+									self.max_inbound_control_sessions
+								),
+								Some(&format!(
+									"拒绝入站控制连接：已达上限 {}，来源={addr}",
+									self.max_inbound_control_sessions
+								)),
+							);
+							conn.close(0u32.into(), b"too many inbound control sessions");
+						} else {
+							self.log_sink.log_info(
+								"Network",
+							&format!("Incoming connection accepted from: {addr}, spawning server session"),
+							Some(&format!("已接受入站连接: {addr}，正在创建服务器会话")),
+							);
 
-						// C1：控制连接的 server 端按接受顺序轮转自己通告的 endpoint
-						// 列表（含控制连接哨兵），让并发 peer 的第 0 条连接落到
-						// 不同的 endpoint。
-						let advertised = self.next_advertised_endpoints();
-						let handle = SessionActor::spawn_with_sink(
-							SessionRole::Server,
-							conn,
-							self.config.clone(),
-							self.event_sink.clone(),
-							self.store.clone(),
-							self.cas.clone(),
-							None,
-							self.log_sink.clone(),
-							SessionKind::Control,
-							advertised,
-						);
-						self.sessions.push(handle);
+							// C1：控制连接的 server 端按接受顺序轮转自己通告的 endpoint
+							// 列表（含控制连接哨兵），让并发 peer 的第 0 条连接落到
+							// 不同的 endpoint。
+							let advertised = self.next_advertised_endpoints();
+							let handle = SessionActor::spawn_with_sink(
+								SessionRole::Server,
+								conn,
+								self.config.clone(),
+								self.event_sink.clone(),
+								self.store.clone(),
+								self.cas.clone(),
+								None,
+								self.log_sink.clone(),
+								SessionKind::Control,
+								advertised,
+							);
+							// `sessions` 用于广播/list_peers；`inbound_control_sessions`
+							// 只保存 clone 用于上限计数与随会话死亡回收。
+							self.sessions.push(handle.clone());
+							self.inbound_control_sessions.push(handle);
+						}
 					}
 				}
 
@@ -1106,6 +1198,11 @@ impl NetManager {
 				true
 			}
 		});
+
+		// F4.1：入站控制会话计数必须随会话死亡回收，否则一次断连就会永久
+		// 占掉一个名额，最终让正常 peer 无法再连入。
+		self.inbound_control_sessions
+			.retain(|s| !(s.is_finished() || s.cmd_tx.is_closed()));
 
 		// C1：控制连接断开的 peer，其数据连接池一并回收（数据连接本身多半也
 		// 已经断了；留着只会让后续传输选中死连接）。连接池与实时数据会话是两套
@@ -1529,5 +1626,61 @@ mod tests {
 
 		// 默认值本身仍落在历史区间 2..=8 内（环境无关的不变量）。
 		assert!((2..=8).contains(&default_worker_threads()));
+	}
+
+	/// F4.1：`CB_MAX_CONTROL_SESSIONS` 解析契约（未设置/空/非法 → 默认，
+	/// 合法值夹到 1..=1024；0 不能被解释为“拒绝所有连接”）。
+	#[test]
+	fn max_control_sessions_env_parsing_defaults_and_clamps() {
+		assert_eq!(
+			resolve_max_control_sessions(None, MAX_INBOUND_CONTROL_SESSIONS),
+			MAX_INBOUND_CONTROL_SESSIONS
+		);
+		assert_eq!(
+			resolve_max_control_sessions(Some(""), MAX_INBOUND_CONTROL_SESSIONS),
+			MAX_INBOUND_CONTROL_SESSIONS
+		);
+		assert_eq!(
+			resolve_max_control_sessions(Some("  "), MAX_INBOUND_CONTROL_SESSIONS),
+			MAX_INBOUND_CONTROL_SESSIONS
+		);
+		assert_eq!(
+			resolve_max_control_sessions(Some("many"), MAX_INBOUND_CONTROL_SESSIONS),
+			MAX_INBOUND_CONTROL_SESSIONS
+		);
+		assert_eq!(
+			resolve_max_control_sessions(Some("-1"), MAX_INBOUND_CONTROL_SESSIONS),
+			MAX_INBOUND_CONTROL_SESSIONS
+		);
+
+		assert_eq!(resolve_max_control_sessions(Some("1"), 64), 1);
+		assert_eq!(resolve_max_control_sessions(Some(" 8 "), 64), 8);
+		assert_eq!(resolve_max_control_sessions(Some("64"), 64), 64);
+		// 0 与超大值都夹到安全范围：既不锁死网络，也不退化成无界。
+		assert_eq!(resolve_max_control_sessions(Some("0"), 64), 1);
+		assert_eq!(
+			resolve_max_control_sessions(Some("999999"), 64),
+			MAX_CONTROL_SESSIONS_MAX
+		);
+		assert_eq!(MAX_INBOUND_CONTROL_SESSIONS, 64);
+	}
+
+	/// F4.1：第 `max` 条入站控制连接必须被拒绝；死亡回收后名额重新可用。
+	#[test]
+	fn inbound_control_session_slot_is_capped_and_reusable() {
+		let max = MAX_INBOUND_CONTROL_SESSIONS;
+		for current in 0..max {
+			assert!(
+				control_session_slot_available(current, max),
+				"已有 {current} 条入站控制会话时应允许新连接"
+			);
+		}
+		assert!(
+			!control_session_slot_available(max, max),
+			"达到上限后必须拒绝新连接"
+		);
+		assert!(!control_session_slot_available(max + 1, max));
+		// 会话死亡后计数下降，名额可复用（retain 之后 current 会变小）。
+		assert!(control_session_slot_available(max - 1, max));
 	}
 }
