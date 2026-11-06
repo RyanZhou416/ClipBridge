@@ -19,8 +19,17 @@ namespace ClipBridgeShell_CS.Helpers;
 ///
 /// 开关：
 /// - <c>CB_FRAME_TRACE=1</c> 启用（未设置时本类所有入口方法立即返回）；
-/// - <c>CB_FRAME_TRACE_SCENARIO=idle|scroll|all</c> 选择场景，默认 <c>all</c>；
-/// - <c>CB_FRAME_TRACE_SECONDS=&lt;n&gt;</c> 覆盖两个场景各自的时长（默认 idle 5 秒、scroll 6 秒）。
+/// - <c>CB_FRAME_TRACE_SCENARIO=idle|scroll|drag|all</c> 选择场景，默认 <c>all</c>；
+/// - <c>CB_FRAME_TRACE_SECONDS=&lt;n&gt;</c> 覆盖各场景时长（默认 idle 3 秒、scroll 6 秒、drag 3 秒）；
+/// - <c>CB_FRAME_TRACE_ACRYLIC=0|1</c> 在场景开始前把首页卡片的亚克力开关切到指定状态
+///   （未设置时保持用户当前设置；只改运行时绑定的 ViewModel 属性，不落盘，进程退出即失效）。
+///
+/// drag 场景：先把窗口临时缩到约 900x600 并挪到工作区右上角（留出 ±60px 轨迹边距），
+/// 再由 UI 线程在每个渲染节拍调用 <c>SetWindowPos</c>
+/// （<c>SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE</c>）让窗口做 ±60px 的往复轨迹，
+/// 使 DWM 每帧都要重新合成（亚克力/背景采样也随之每帧重做）。窗口始终留在工作区内、
+/// 不抢焦点；场景结束后还原原始位置与尺寸。帧间隔仍来自 <see cref="CompositionTarget.Rendering"/>，
+/// 因此能反映“拖拽窗口时合成是否把渲染节拍拖慢”。
 ///
 /// 采集四路数据，全部带场景标签：
 /// 1) 帧间隔：订阅 <see cref="CompositionTarget.Rendering"/>，用 <see cref="Stopwatch.GetTimestamp"/>
@@ -67,6 +76,39 @@ internal static class FrameTrace
     /// <summary>成本采样周期（秒）。</summary>
     private const double CostSampleIntervalS = 1.0;
 
+    /// <summary>drag 场景轨迹的水平/垂直最大振幅（像素）。</summary>
+    private const double DragAmplitudePx = 60.0;
+
+    /// <summary>drag 场景临时把窗口缩到的小尺寸，避免测量时挡住屏幕中央。</summary>
+    private const int DragWindowWidthPx = 900;
+
+    private const int DragWindowHeightPx = 600;
+
+    /// <summary>drag 轨迹靠屏幕右上角时的边距：至少留出振幅 + 24px，保证整段轨迹都在屏内。</summary>
+    private const int DragCornerMarginPx = 84;
+
+    /// <summary>缩窗/挪位后留给 XAML 重新布局的时间（毫秒），不计入场景采样。</summary>
+    private const int DragResizeSettleMs = 300;
+
+    /// <summary>drag 场景一个完整往复的周期（秒）。</summary>
+    private const double DragPeriodSeconds = 1.2;
+
+    /// <summary>drag 场景目标移动频率上限（Hz）；实际频率受渲染节拍限制，会记录在汇总里。</summary>
+    private const int DragTicksPerSecond = 120;
+
+    /// <summary>切换亚克力后留出的重绘稳定时间（毫秒），不属于任何场景的采样区间。</summary>
+    private const int AcrylicSettleMs = 350;
+
+    /// <summary>SetWindowPos 只改位置：不改尺寸、不改 Z 序、不激活窗口。</summary>
+    private const uint SwpNoSize = 0x0001;
+
+    private const uint SwpNoZOrder = 0x0004;
+
+    private const uint SwpNoActivate = 0x0010;
+
+    /// <summary>SystemParametersInfo 的 SPI_GETWORKAREA：取主显示器工作区（不含任务栏）。</summary>
+    private const uint SpiGetWorkArea = 0x0030;
+
     /// <summary>GetThreadTimes/GetProcessTimes 的单位是 100ns，换算成毫秒要除以 10000。</summary>
     private const double MsPerCpuTick = 1.0 / 10_000.0;
 
@@ -82,7 +124,11 @@ internal static class FrameTrace
         Warmup = 0,
         Idle = 1,
         Scroll = 2,
-        Ended = 3
+        Drag = 3,
+        Ended = 4,
+
+        /// <summary>drag 结束后还原窗口尺寸/位置的收尾区间：单独标记，不计入 drag 的帧统计。</summary>
+        Teardown = 5
     }
 
     /// <summary>
@@ -126,10 +172,46 @@ internal static class FrameTrace
     private static string _runTag = "all";
     private static string _startedAtText = string.Empty;
     private static string _fileStamp = string.Empty;
-    private static double _idleSeconds = 5.0;
+    private static double _idleSeconds = 3.0;
     private static double _scrollSeconds = 6.0;
+    private static double _dragSeconds = 3.0;
     private static bool _windowVisibleAtStart;
     private static bool _windowForegroundAtStart;
+
+    /// <summary>CB_FRAME_TRACE_ACRYLIC 的原始值（unset / 0 / 1 / 其他非法值），写进汇总。</summary>
+    private static string _acrylicRequested = "unset";
+
+    /// <summary>实际生效的亚克力状态（on / off / unknown / failed:...），写进 [cost] 与汇总。</summary>
+    private static string _acrylicEffective = "unknown";
+
+    /// <summary>亚克力状态的来源，便于之后判断这轮用的到底是哪个开关。</summary>
+    private static string _acrylicSource = "(not-read)";
+
+    // ---- drag 场景状态（StartWindowDrag 在 phase 翻到 Drag 之前写好，OnRendering 逐帧读取） ----
+    private static bool _dragActive;
+    private static long _dragStartTimestamp;
+    private static long _dragLastMoveTimestamp;
+    private static int _dragMoveCount;
+    private static long _dragMoveTotalTicks;
+    private static double _dragMoveAvgMs = double.NaN;
+    private static int _dragMoves;
+    private static int _dragAmplitudeX;
+    private static int _dragAmplitudeY;
+    private static int _dragBaseX;
+    private static int _dragBaseY;
+    private static int _dragWorkLeft;
+    private static int _dragWorkTop;
+    private static int _dragWorkRight;
+    private static int _dragWorkBottom;
+    private static int _dragWindowWidth;
+    private static int _dragWindowHeight;
+    private static double _dragActualSeconds;
+    private static double _dragActualHz = double.NaN;
+    private static string _dragStatus = "not-run";
+    private static string _dragRectStart = "(none)";
+    private static string _dragRectEnd = "(none)";
+    private static Rect _dragOriginalRect;
+    private static bool _dragOriginalRectValid;
 
     /// <summary>UI 线程的原生线程句柄（在 UI 线程上 GetCurrentThread + DuplicateHandle 得到）。</summary>
     private static IntPtr _uiThreadHandle;
@@ -154,6 +236,15 @@ internal static class FrameTrace
 
     /// <summary>PDH GPU 探针；初始化失败时为 null，成本汇总里如实标注“不可用”。</summary>
     private static GpuProbe? _gpuProbe;
+
+    /// <summary>
+    /// 桌面合成器（dwm.exe）的 GPU 探针。亚克力/毛玻璃是 DWM 侧的合成工作，
+    /// 它的 GPU 成本不会记在本进程头上，所以 drag A/B 必须单独看这一路。
+    /// </summary>
+    private static GpuProbe? _dwmProbe;
+
+    /// <summary>dwm.exe 的进程 id（当前会话）；0 表示没找到。</summary>
+    private static int _dwmPid;
 
     /// <summary>
     /// QueryThreadCycleTime 的“每秒 cycle 数”，启动时用忙等标定（约 150ms）。
@@ -199,14 +290,20 @@ internal static class FrameTrace
         var scenario = (Environment.GetEnvironmentVariable("CB_FRAME_TRACE_SCENARIO") ?? "all").Trim().ToLowerInvariant();
         var doIdle = scenario is "idle" or "all" or "";
         var doScroll = scenario is "scroll" or "all" or "";
-        if (!doIdle && !doScroll)
+        var doDrag = scenario is "drag" or "all" or "";
+        if (!doIdle && !doScroll && !doDrag)
         {
             doIdle = true;
             doScroll = true;
+            doDrag = true;
         }
-        _runTag = doIdle && doScroll ? "all" : (doIdle ? "idle" : "scroll");
+        _runTag = doIdle && doScroll && doDrag ? "all" : (doIdle ? "idle" : (doScroll ? "scroll" : "drag"));
 
-        // 时长覆盖：一个变量同时改两个场景，保持“采样预算可调”的简单语义。
+        // 亚克力 A/B：只认 0/1；其他值（含未设置）一律不改变当前设置，但原始值会写进汇总。
+        var acrylicText = (Environment.GetEnvironmentVariable("CB_FRAME_TRACE_ACRYLIC") ?? string.Empty).Trim();
+        _acrylicRequested = acrylicText.Length == 0 ? "unset" : acrylicText;
+
+        // 时长覆盖：一个变量同时改所有场景，保持“采样预算可调”的简单语义。
         var secondsText = Environment.GetEnvironmentVariable("CB_FRAME_TRACE_SECONDS");
         if (!string.IsNullOrWhiteSpace(secondsText)
             && double.TryParse(secondsText, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
@@ -214,6 +311,7 @@ internal static class FrameTrace
         {
             _idleSeconds = seconds;
             _scrollSeconds = seconds;
+            _dragSeconds = seconds;
         }
 
         // 帧间隔采集：Rendering 每个渲染节拍在 UI 线程回调一次。
@@ -227,9 +325,9 @@ internal static class FrameTrace
         };
         _probeThread.Start();
 
-        // 场景编排：等主页面 → idle → scroll → 落盘 → 退出。用独立线程而不是线程池，
+        // 场景编排：等主页面 → 应用亚克力 A/B → idle → scroll → drag → 落盘 → 退出。用独立线程而不是线程池，
         // 保证即使 UI 线程完全卡死，它也能按时收尾并写文件。
-        var planThread = new Thread(() => RunPlan(doIdle, doScroll))
+        var planThread = new Thread(() => RunPlan(doIdle, doScroll, doDrag))
         {
             IsBackground = true,
             Name = "CB.FrameTrace.Plan"
@@ -362,6 +460,20 @@ internal static class FrameTrace
                 // 滚动驱动失败只影响该场景的可解释性，不能让整个测量崩掉。
             }
         }
+
+        // drag 场景：每个渲染节拍在 UI 线程推进一次窗口位置（与 scroll 相同的节拍来源），
+        // 窗口移动本身的开销也计入 UI 线程；移动失败只影响轨迹，不影响帧时序采集。
+        if (phase == (int)Phase.Drag && Volatile.Read(ref _dragActive))
+        {
+            try
+            {
+                DragStep();
+            }
+            catch
+            {
+                // 与滚动驱动一致：单个场景的驱动异常不能让整个测量崩掉。
+            }
+        }
     }
 
     /// <summary>探测线程：每约 16ms 投递一个最小工作项；UI 线程忙时延迟会直接变大。</summary>
@@ -411,8 +523,8 @@ internal static class FrameTrace
         Interlocked.Decrement(ref _pendingProbes);
     }
 
-    /// <summary>场景编排：等主页面 → idle → scroll → 收尾。</summary>
-    private static void RunPlan(bool doIdle, bool doScroll)
+    /// <summary>场景编排：等主页面 → 应用亚克力 A/B → idle → scroll → drag → 收尾。</summary>
+    private static void RunPlan(bool doIdle, bool doScroll, bool doDrag)
     {
         try
         {
@@ -428,12 +540,24 @@ internal static class FrameTrace
             Thread.Sleep(SettleAfterMainPageMs);
 
             // 成本探针在场景开始前初始化；PDH 失败也只降级，不影响帧时序采集。
-            _gpuProbe = new GpuProbe();
+            _gpuProbe = new GpuProbe(Environment.ProcessId);
             _gpuProbe.TryOpen();
+
+            // DWM 的 GPU 引擎利用率：亚克力合成发生在桌面合成器里，必须单独采一路。
+            _dwmPid = FindDwmProcessId();
+            if (_dwmPid > 0)
+            {
+                _dwmProbe = new GpuProbe(_dwmPid);
+                _dwmProbe.TryOpen();
+            }
 
             // 标定 cycle 时钟：GetThreadTimes 的记账粒度是系统时钟节拍（本机约 15.6ms），
             // 不足以刻画 6.25ms 帧预算；cycle 计数可以给出亚毫秒级的真实 UI 线程消耗。
             CalibrateCycleClock();
+
+            // 亚克力 A/B 必须落在所有场景开始之前：改的是运行时绑定属性（立即换画刷），
+            // 并留出重绘稳定时间，避免把切换本身的成本算进第一个场景。
+            ApplyAcrylicSetting();
 
             if (_minimizeAfterStart)
             {
@@ -451,6 +575,11 @@ internal static class FrameTrace
                 RunScenarioWithCost(Phase.Scroll, _scrollSeconds);
             }
 
+            if (doDrag)
+            {
+                RunScenarioWithCost(Phase.Drag, _dragSeconds);
+            }
+
             SetPhase(Phase.Ended);
             Thread.Sleep(120);
         }
@@ -466,11 +595,148 @@ internal static class FrameTrace
     }
 
     /// <summary>
+    /// 把 CB_FRAME_TRACE_ACRYLIC 请求的状态落到主页 ViewModel 的绑定属性上，并读回实际状态。
+    /// 未设置该变量时只读取当前状态（不改任何东西），让每轮数据都能自描述。
+    /// </summary>
+    private static void ApplyAcrylicSetting()
+    {
+        if (_acrylicRequested is "0" or "1")
+        {
+            var enable = _acrylicRequested == "1";
+            var effective = SetAcrylicState(enable, out var error);
+            if (effective != enable)
+            {
+                // 绑定的首次求值/异步设置加载可能刚好覆盖我们的写入；稍等后重试一次。
+                Thread.Sleep(150);
+                effective = SetAcrylicState(enable, out error);
+            }
+
+            _acrylicEffective = effective switch
+            {
+                true => "on",
+                false => "off",
+                null => "failed:" + (string.IsNullOrEmpty(error) ? "unknown" : error)
+            };
+            _acrylicSource = "MainViewModel.DisableAcrylicOnCards+DisableAcrylicOnStatsCards";
+            Thread.Sleep(AcrylicSettleMs);
+            return;
+        }
+
+        var current = ReadAcrylicState(out var readError);
+        _acrylicEffective = current switch
+        {
+            true => "on",
+            false => "off",
+            null => "unknown:" + (string.IsNullOrEmpty(readError) ? "unavailable" : readError)
+        };
+        _acrylicSource = current == null ? "(not-read)" : "MainViewModel.DisableAcrylicOnCards+DisableAcrylicOnStatsCards";
+    }
+
+    /// <summary>在 UI 线程上写入两个亚克力开关并读回是否生效（true=亚克力开启）。</summary>
+    private static bool? SetAcrylicState(bool enable, out string error)
+    {
+        return RunOnUiThread(
+            () =>
+            {
+                var viewModel = ClipBridgeShell_CS.App.GetService<ClipBridgeShell_CS.ViewModels.MainViewModel>();
+                // 实际驱动首页绑定的是 MainViewModel 的“关闭亚克力”反向属性；
+                // SettingsViewModel.EnableAcrylicOn* 只负责持久化，不参与首页绑定，改它需要重启。
+                viewModel.DisableAcrylicOnCards = !enable;
+                viewModel.DisableAcrylicOnStatsCards = !enable;
+                return ReadAcrylicStateFrom(viewModel);
+            },
+            out error);
+    }
+
+    /// <summary>只读当前亚克力状态（true=开启）；VM 不可达时返回 null 并给出原因。</summary>
+    private static bool? ReadAcrylicState(out string error)
+    {
+        return RunOnUiThread(
+            () => ReadAcrylicStateFrom(ClipBridgeShell_CS.App.GetService<ClipBridgeShell_CS.ViewModels.MainViewModel>()),
+            out error);
+    }
+
+    /// <summary>
+    /// 读取两处绑定源的合并状态：两处都为“启用”才是 on，都为“关闭”才是 off，
+    /// 不一致时返回 null（汇总里会标成 failed:state-mixed，避免把混合状态当成单值）。
+    /// </summary>
+    private static bool? ReadAcrylicStateFrom(ClipBridgeShell_CS.ViewModels.MainViewModel viewModel)
+    {
+        var cardsEnabled = !viewModel.DisableAcrylicOnCards;
+        var statsEnabled = !viewModel.DisableAcrylicOnStatsCards;
+        return cardsEnabled == statsEnabled ? cardsEnabled : null;
+    }
+
+    /// <summary>把委托投递到 UI 线程执行并等待结果；超时/异常都转为 null + 原因，不抛出。</summary>
+    private static bool? RunOnUiThread(Func<bool?> action, out string error)
+    {
+        var queue = _queue;
+        error = string.Empty;
+        if (queue == null)
+        {
+            error = "no-queue";
+            return null;
+        }
+
+        bool? result = null;
+        var errorText = string.Empty;
+        using var done = new ManualResetEventSlim(false);
+        var accepted = queue.TryEnqueue(() =>
+        {
+            try
+            {
+                result = action();
+            }
+            catch (Exception ex)
+            {
+                errorText = ex.GetType().Name;
+            }
+            finally
+            {
+                done.Set();
+            }
+        });
+
+        if (!accepted)
+        {
+            error = "enqueue-rejected";
+            return null;
+        }
+
+        if (!done.Wait(3000))
+        {
+            error = "ui-thread-timeout";
+            return null;
+        }
+
+        if (errorText.Length > 0)
+        {
+            error = errorText;
+            return null;
+        }
+
+        if (result == null)
+        {
+            error = "state-mixed";
+            return null;
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// 跑一个场景：在场景起点、每个整秒、场景终点各采一次成本。采样点同时写入
     /// cost CSV 的逐秒时间序列与场景汇总。睡眠仍按 ≤50ms 分段，保证阶段切换足够及时。
+    /// drag 场景在该区间内由渲染回调逐帧移动窗口，采样口径与其它场景完全一致。
     /// </summary>
     private static void RunScenarioWithCost(Phase phase, double seconds)
     {
+        // drag 的轨迹基准/振幅必须在 phase 翻到 Drag 之前写好，OnRendering 才能直接使用。
+        if (phase == Phase.Drag)
+        {
+            StartWindowDrag();
+        }
+
         SetPhase(phase);
 
         var scenarioSampleStart = CostSamples.Count;
@@ -479,6 +745,7 @@ internal static class FrameTrace
 
         // GPU 利用率需要两次 PdhCollectQueryData 才有区间值：场景起点先采一次作基线。
         _gpuProbe?.Prime();
+        _dwmProbe?.Prime();
 
         var prevTimestamp = startTimestamp;
         var prevUiTicks = ReadUiThreadCpuTicks();
@@ -488,39 +755,274 @@ internal static class FrameTrace
         var prevFrames = Volatile.Read(ref _renderingCount);
         var nextBoundaryUs = CostSampleIntervalS * 1_000_000.0;
 
-        while (true)
+        try
         {
-            var now = Stopwatch.GetTimestamp();
-            var elapsedUs = (now - startTimestamp) * UsPerTick;
-            if (elapsedUs >= targetUs)
+            while (true)
             {
-                // 场景终点：补最后一个区间；刚采过样时不再补一个 0 长度样本。
-                if ((now - prevTimestamp) * UsPerTick >= 250_000.0)
+                var now = Stopwatch.GetTimestamp();
+                var elapsedUs = (now - startTimestamp) * UsPerTick;
+                if (elapsedUs >= targetUs)
+                {
+                    // 场景终点：补最后一个区间；刚采过样时不再补一个 0 长度样本。
+                    if ((now - prevTimestamp) * UsPerTick >= 250_000.0)
+                    {
+                        SampleCost(phase, now, ref prevTimestamp, ref prevUiTicks, ref prevProcTicks, ref prevUiCycles, ref prevProcCycles, ref prevFrames);
+                    }
+
+                    break;
+                }
+
+                var remainingUs = nextBoundaryUs - elapsedUs;
+                if (remainingUs <= 0)
                 {
                     SampleCost(phase, now, ref prevTimestamp, ref prevUiTicks, ref prevProcTicks, ref prevUiCycles, ref prevProcCycles, ref prevFrames);
+                    do
+                    {
+                        nextBoundaryUs += CostSampleIntervalS * 1_000_000.0;
+                    }
+                    while (nextBoundaryUs <= elapsedUs);
+
+                    continue;
                 }
 
-                break;
+                // 50ms 上限保证阶段边界与采样点都足够准，同时不忙等。
+                Thread.Sleep((int)Math.Clamp(remainingUs / 1000.0, 1.0, 50.0));
             }
-
-            var remainingUs = nextBoundaryUs - elapsedUs;
-            if (remainingUs <= 0)
+        }
+        finally
+        {
+            if (phase == Phase.Drag)
             {
-                SampleCost(phase, now, ref prevTimestamp, ref prevUiTicks, ref prevProcTicks, ref prevUiCycles, ref prevProcCycles, ref prevFrames);
-                do
-                {
-                    nextBoundaryUs += CostSampleIntervalS * 1_000_000.0;
-                }
-                while (nextBoundaryUs <= elapsedUs);
-
-                continue;
+                // 还原窗口尺寸/位置会触发一次重排，可能产生大帧间隔；单独标成 teardown，
+                // 不让收尾成本污染 drag 的尾部指标（CSV 里仍能看到这些样本）。
+                SetPhase(Phase.Teardown);
+                StopWindowDrag();
             }
-
-            // 50ms 上限保证阶段边界与采样点都足够准，同时不忙等。
-            Thread.Sleep((int)Math.Clamp(remainingUs / 1000.0, 1.0, 50.0));
         }
 
         BuildCostScenario(phase, scenarioSampleStart, seconds);
+    }
+
+    /// <summary>
+    /// 准备 drag 场景：把窗口临时缩到约 900x600 并停在主屏右上角（留出边距），
+    /// 再在该点周围做水平/垂直 ±60px 的往复轨迹（三角波，x/y 相位差 90°，形成斜向折返）。
+    /// 真正的移动由 <see cref="OnRendering"/> 在 UI 线程逐帧驱动（和 scroll 场景同样的节拍来源），
+    /// 保证每个渲染周期窗口都换位置、DWM 必须重新合成。全程只用 SWP_NOZORDER|SWP_NOACTIVATE
+    /// （不抢焦点、不改 Z 序），轨迹始终留在工作区内；场景结束后窗口还原到原始位置与尺寸。
+    /// </summary>
+    private static void StartWindowDrag()
+    {
+        Interlocked.Exchange(ref _dragMoveCount, 0);
+        Interlocked.Exchange(ref _dragMoveTotalTicks, 0L);
+        _dragMoves = 0;
+        _dragActualSeconds = 0.0;
+        _dragActualHz = double.NaN;
+        _dragMoveAvgMs = double.NaN;
+        _dragRectStart = "(none)";
+        _dragRectEnd = "(none)";
+        _dragOriginalRectValid = false;
+        _dragStatus = "started";
+        Volatile.Write(ref _dragActive, false);
+
+        if (_hwnd == IntPtr.Zero)
+        {
+            _dragStatus = "unavailable:no-hwnd";
+            return;
+        }
+
+        if (!GetWindowRect(_hwnd, out var rect) || rect.Right <= rect.Left || rect.Bottom <= rect.Top)
+        {
+            _dragStatus = "unavailable:getwindowrect";
+            return;
+        }
+
+        var originalWidth = rect.Right - rect.Left;
+        var originalHeight = rect.Bottom - rect.Top;
+
+        // 工作区（不含任务栏）；SystemParametersInfo 失败时退回整屏，仍然保证不会离屏。
+        var workLeft = 0;
+        var workTop = 0;
+        var workRight = Math.Max(1, GetSystemMetrics(SmCxScreen));
+        var workBottom = Math.Max(1, GetSystemMetrics(SmCyScreen));
+        if (SystemParametersInfoW(SpiGetWorkArea, 0, out var work, 0)
+            && work.Right > work.Left
+            && work.Bottom > work.Top)
+        {
+            workLeft = work.Left;
+            workTop = work.Top;
+            workRight = work.Right;
+            workBottom = work.Bottom;
+        }
+
+        // 临时缩到小尺寸并停在右上角：不挡屏幕中央，同时留出 ±振幅的边距保证整段轨迹都在屏内。
+        // 窗口尺寸只在 drag 场景内改动，结束后连同位置一起还原。
+        var targetWidth = Math.Min(DragWindowWidthPx, Math.Max(320, workRight - workLeft));
+        var targetHeight = Math.Min(DragWindowHeightPx, Math.Max(240, workBottom - workTop));
+        var maxX = Math.Max(workLeft, workRight - targetWidth);
+        var maxY = Math.Max(workTop, workBottom - targetHeight);
+        var baseX = Math.Max(workLeft, maxX - DragCornerMarginPx);
+        var baseY = Math.Min(maxY, workTop + DragCornerMarginPx);
+
+        var amplitudeX = (int)Math.Max(0.0, Math.Min(DragAmplitudePx, Math.Min(baseX - workLeft, maxX - baseX)));
+        var amplitudeY = (int)Math.Max(0.0, Math.Min(DragAmplitudePx, Math.Min(baseY - workTop, maxY - baseY)));
+
+        _dragOriginalRect = rect;
+        _dragOriginalRectValid = true;
+        _dragAmplitudeX = amplitudeX;
+        _dragAmplitudeY = amplitudeY;
+        _dragBaseX = baseX;
+        _dragBaseY = baseY;
+        _dragWorkLeft = workLeft;
+        _dragWorkTop = workTop;
+        _dragWorkRight = workRight;
+        _dragWorkBottom = workBottom;
+        _dragWindowWidth = targetWidth;
+        _dragWindowHeight = targetHeight;
+        _dragRectStart = DescribeRect(rect);
+
+        if (amplitudeX <= 0 && amplitudeY <= 0)
+        {
+            _dragStatus = "no-move:window-fills-workarea";
+            return;
+        }
+
+        // 位置+尺寸一次改完；缩窗会触发 XAML 重新布局，留出一小段稳定时间（尚不属于任何场景采样）。
+        if (targetWidth != originalWidth
+            || targetHeight != originalHeight
+            || baseX != rect.Left
+            || baseY != rect.Top)
+        {
+            _ = SetWindowPos(
+                _hwnd,
+                IntPtr.Zero,
+                baseX,
+                baseY,
+                targetWidth,
+                targetHeight,
+                SwpNoZOrder | SwpNoActivate);
+            Thread.Sleep(DragResizeSettleMs);
+        }
+
+        // 起点/振幅在 phase 翻到 Drag 之前就写好（StartWindowDrag 在 SetPhase 之前调用），
+        // OnRendering 只读这些已经稳定的值。
+        _dragStartTimestamp = Stopwatch.GetTimestamp();
+        _dragLastMoveTimestamp = 0L;
+        Volatile.Write(ref _dragActive, true);
+    }
+
+    /// <summary>
+    /// 每个渲染节拍在 UI 线程推进一次 drag 轨迹（目标 ~120Hz，显示刷新更快时按最小间隔节流）。
+    /// 移动与渲染回调同线程，所以“移动窗口”本身的耗时也计入本场景的 UI CPU。
+    /// </summary>
+    private static void DragStep()
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (_dragLastMoveTimestamp != 0L
+            && (now - _dragLastMoveTimestamp) / (double)Stopwatch.Frequency < 1.0 / DragTicksPerSecond)
+        {
+            return;
+        }
+
+        _dragLastMoveTimestamp = now;
+
+        var elapsedS = (now - _dragStartTimestamp) / (double)Stopwatch.Frequency;
+        var phase = 2.0 * Math.PI * elapsedS / DragPeriodSeconds;
+
+        var x = _dragBaseX + (int)Math.Round(_dragAmplitudeX * TriangleWave(phase));
+        var y = _dragBaseY + (int)Math.Round(_dragAmplitudeY * TriangleWave(phase + (Math.PI / 2.0)));
+
+        // 轨迹本身已在工作区内；这里再夹一次，避免 DPI 取整把窗口边缘推出屏幕。
+        x = Math.Clamp(x, _dragWorkLeft, Math.Max(_dragWorkLeft, _dragWorkRight - _dragWindowWidth));
+        y = Math.Clamp(y, _dragWorkTop, Math.Max(_dragWorkTop, _dragWorkBottom - _dragWindowHeight));
+
+        var moveStart = Stopwatch.GetTimestamp();
+        if (SetWindowPos(_hwnd, IntPtr.Zero, x, y, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate))
+        {
+            Interlocked.Increment(ref _dragMoveCount);
+        }
+
+        Interlocked.Add(ref _dragMoveTotalTicks, Stopwatch.GetTimestamp() - moveStart);
+    }
+
+    /// <summary>结束 drag：停止逐帧移动、统计实际移动频率、把窗口还原到起始位置。</summary>
+    private static void StopWindowDrag()
+    {
+        Volatile.Write(ref _dragActive, false);
+
+        _dragActualSeconds = (Stopwatch.GetTimestamp() - _dragStartTimestamp) / (double)Stopwatch.Frequency;
+        _dragMoves = Volatile.Read(ref _dragMoveCount);
+        var moveTotalTicks = Interlocked.Read(ref _dragMoveTotalTicks);
+        _dragMoveAvgMs = _dragMoves > 0 ? moveTotalTicks * UsPerTick / 1000.0 / _dragMoves : double.NaN;
+        _dragActualHz = _dragActualSeconds > 0 ? _dragMoves / _dragActualSeconds : double.NaN;
+        if (_dragMoves <= 0 && _dragStatus == "started")
+        {
+            _dragStatus = "no-move:setwindowpos-failed";
+        }
+
+        // 还原原始位置与尺寸（drag 场景临时缩成了小窗）；程序随后就会退出，这里主要是保持窗口状态干净。
+        if (_dragOriginalRectValid)
+        {
+            _ = SetWindowPos(
+                _hwnd,
+                IntPtr.Zero,
+                _dragOriginalRect.Left,
+                _dragOriginalRect.Top,
+                _dragOriginalRect.Right - _dragOriginalRect.Left,
+                _dragOriginalRect.Bottom - _dragOriginalRect.Top,
+                SwpNoZOrder | SwpNoActivate);
+            _dragOriginalRectValid = false;
+        }
+
+        _dragRectEnd = DescribeWindowRect();
+        if (_dragStatus == "started" && _dragMoves > 0)
+        {
+            _dragStatus = "moved";
+        }
+    }
+
+    /// <summary>
+    /// 相位到 [-1,1] 的三角波：phase=0 时为 0，随后向负方向折返。
+    /// 用折返而不是正弦，轨迹速度恒定，更接近用户持续拖拽时窗口的移动方式。
+    /// </summary>
+    private static double TriangleWave(double phase)
+    {
+        var t = (phase / (2.0 * Math.PI)) + 0.25;
+        t -= Math.Floor(t);
+        return (4.0 * Math.Abs(t - 0.5)) - 1.0;
+    }
+
+    private static string DescribeRect(Rect rect)
+    {
+        return FormattableString.Invariant($"{rect.Right - rect.Left}x{rect.Bottom - rect.Top} at ({rect.Left},{rect.Top})");
+    }
+
+    /// <summary>找当前会话的桌面合成器进程（dwm.exe）。找不到时返回 0，DWM 指标降级为不可用。</summary>
+    private static int FindDwmProcessId()
+    {
+        try
+        {
+            var sessionId = Process.GetCurrentProcess().SessionId;
+            foreach (var process in Process.GetProcessesByName("dwm"))
+            {
+                try
+                {
+                    if (process.SessionId == sessionId)
+                    {
+                        return process.Id;
+                    }
+                }
+                catch
+                {
+                    // 单个进程读不到 SessionId 时跳过即可。
+                }
+            }
+        }
+        catch
+        {
+            // 枚举失败只影响 DWM 指标，不影响主测量。
+        }
+
+        return 0;
     }
 
     /// <summary>
@@ -543,6 +1045,7 @@ internal static class FrameTrace
         var procCycles = ReadProcessCycles();
         var frames = Volatile.Read(ref _renderingCount);
         var gpu = _gpuProbe?.Read() ?? GpuReading.Unavailable();
+        var dwmGpu = _dwmProbe?.Read() ?? GpuReading.Unavailable();
 
         var wallDeltaS = (nowTimestamp - prevTimestamp) / (double)Stopwatch.Frequency;
         var uiDeltaMs = prevUiTicks >= 0 && uiTicks >= 0 ? (uiTicks - prevUiTicks) * MsPerCpuTick : -1.0;
@@ -558,6 +1061,7 @@ internal static class FrameTrace
             procDeltaMs,
             frames - prevFrames,
             gpu,
+            dwmGpu,
             uiCycleMs,
             procCycleMs));
 
@@ -600,6 +1104,10 @@ internal static class FrameTrace
         var engineMax = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
         var dedicatedBytes = -1L;
         var committedBytes = -1L;
+        var dwmSamples = 0;
+        var dwmSumPct = 0.0;
+        var dwmMaxPct = double.NaN;
+        var dwmEngineMax = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = sampleStart; i < CostSamples.Count; i++)
         {
@@ -673,6 +1181,22 @@ internal static class FrameTrace
             {
                 committedBytes = gpu.CommittedBytes;
             }
+
+            // DWM：亚克力合成发生在桌面合成器里，本进程的 GPU 计数看不到这部分。
+            var dwmGpu = sample.DwmGpu;
+            if (dwmGpu.EngineAvailable)
+            {
+                dwmSamples++;
+                dwmSumPct += dwmGpu.SumPct;
+                dwmMaxPct = double.IsNaN(dwmMaxPct) ? dwmGpu.MaxPct : Math.Max(dwmMaxPct, dwmGpu.MaxPct);
+                foreach (var pair in dwmGpu.EnginePct)
+                {
+                    if (!dwmEngineMax.TryGetValue(pair.Key, out var existing) || pair.Value > existing)
+                    {
+                        dwmEngineMax[pair.Key] = pair.Value;
+                    }
+                }
+            }
         }
 
         CostScenarios.Add(new CostScenario
@@ -692,7 +1216,22 @@ internal static class FrameTrace
             GpuEngineMaxPct = engineMax,
             GpuDedicatedBytes = dedicatedBytes,
             GpuCommittedBytes = committedBytes,
-            DisplayRefreshHz = _displayRefreshHz
+            DwmGpuSampleCount = dwmSamples,
+            DwmGpuSumMeanPct = dwmSamples > 0 ? dwmSumPct / dwmSamples : double.NaN,
+            DwmGpuMaxPct = dwmMaxPct,
+            DwmGpuEngineMaxPct = dwmEngineMax,
+            DisplayRefreshHz = _displayRefreshHz,
+            AcrylicRequested = _acrylicRequested,
+            AcrylicEffective = _acrylicEffective,
+            AcrylicSource = _acrylicSource,
+            DragStatus = phase == Phase.Drag ? _dragStatus : "not-run",
+            DragMoves = phase == Phase.Drag ? _dragMoves : 0,
+            DragActualHz = phase == Phase.Drag ? _dragActualHz : double.NaN,
+            DragMoveAvgMs = phase == Phase.Drag ? _dragMoveAvgMs : double.NaN,
+            DragAmplitudeX = phase == Phase.Drag ? _dragAmplitudeX : 0,
+            DragAmplitudeY = phase == Phase.Drag ? _dragAmplitudeY : 0,
+            DragRectStart = phase == Phase.Drag ? _dragRectStart : "(none)",
+            DragRectEnd = phase == Phase.Drag ? _dragRectEnd : "(none)"
         });
     }
 
@@ -764,6 +1303,8 @@ internal static class FrameTrace
             // 释放诊断句柄/PDH 查询；即使进程马上退出，也保持资源释放的对称性。
             _gpuProbe?.Dispose();
             _gpuProbe = null;
+            _dwmProbe?.Dispose();
+            _dwmProbe = null;
             if (_uiThreadHandle != IntPtr.Zero)
             {
                 _ = CloseHandle(_uiThreadHandle);
@@ -880,9 +1421,14 @@ internal static class FrameTrace
         var sb = new StringBuilder();
         sb.AppendLine("=== ClipBridge FrameTrace summary ===");
         sb.AppendLine(FormattableString.Invariant(
-            $"run={_runTag} started={_startedAtText} pid={Environment.ProcessId} scenario={_runTag} idle={_idleSeconds:F1}s scroll={_scrollSeconds:F1}s"));
+            $"run={_runTag} started={_startedAtText} pid={Environment.ProcessId} scenario={_runTag} idle={_idleSeconds:F1}s scroll={_scrollSeconds:F1}s drag={_dragSeconds:F1}s"));
         sb.AppendLine(FormattableString.Invariant(
             $"frames={snapshot.FrameSamples.Length} stalls={snapshot.StallSamples.Length} uiops={snapshot.OpSamples.Length} ffi_calls={Volatile.Read(ref _ffiCallCount)} ffi_on_ui_thread={Volatile.Read(ref _ffiUiThreadCallCount)} ffi_ui_over_5ms={Volatile.Read(ref _ffiOverThresholdCount)} scroll_ticks={Volatile.Read(ref _scrollTickCount)} scroll_target={_scrollTarget}"));
+        // 亚克力 A/B 与 drag 轨迹的自描述信息：看 [cost] 之前先能确认这轮到底测的是什么。
+        sb.AppendLine(FormattableString.Invariant(
+            $"acrylic requested={_acrylicRequested} effective={_acrylicEffective} source={_acrylicSource}"));
+        sb.AppendLine(FormattableString.Invariant(
+            $"drag path=zigzag target_hz={DragTicksPerSecond} period_s={DragPeriodSeconds:F2} amplitude_px={_dragAmplitudeX}x{_dragAmplitudeY} window_px={_dragWindowWidth}x{_dragWindowHeight} base=({_dragBaseX},{_dragBaseY}) status={_dragStatus} moves={_dragMoves} actual_hz={FormatOrNa(_dragActualHz, "F1")} move_avg_ms={FormatOrNa(_dragMoveAvgMs, "F3")} rect_start={_dragRectStart} rect_end={_dragRectEnd}"));
         sb.AppendLine(FormattableString.Invariant(
             $"machine={Environment.MachineName} cpus={Environment.ProcessorCount} os={Environment.OSVersion.VersionString}"));
         sb.AppendLine(FormattableString.Invariant(
@@ -900,6 +1446,8 @@ internal static class FrameTrace
         sb.AppendLine("note: ui_cpu_* / proc_cpu_* are the calibrated QueryThreadCycleTime measurement (fine-grained, use these for per-frame cost); ui_getthreadtimes_* are the same intervals read with GetThreadTimes/GetProcessTimes, which on this machine mis-account frequently-waking threads, so treat them only as a noisy cross-check");
         sb.AppendLine("note: in cost-*.csv the ui_cpu_ms_delta / proc_cpu_ms_delta columns use the calibrated cycle values when available (fallback: GetThreadTimes)");
         sb.AppendLine("note: gpu_util_max_pct=max single-engine utilization over the 1s samples; gpu_util_sum_mean_pct=mean of summed per-engine utilization (can exceed 100)");
+        sb.AppendLine("note: gpu_* only counts this process' PDH instances; dwm_gpu_* counts the desktop compositor (dwm.exe) of this session, where acrylic/mica composition actually happens. dwm_gpu is shared by every window on the desktop, so compare acrylic on/off within the same scenario rather than as an absolute cost");
+        sb.AppendLine("note: drag = the window is temporarily shrunk to ~900x600 in the top-right corner and moved on the UI thread from the CompositionTarget.Rendering callback via SetWindowPos(SWP_NOZORDER|SWP_NOACTIVATE) at up to 120Hz, zig-zag +/-60px; every rendering tick that moves the window forces DWM to recompose, and the move call itself is included in drag_move_avg_ms / ui_cpu");
         if (snapshot.CostScenarioSummaries.Length == 0)
         {
             sb.AppendLine("(no cost samples recorded)");
@@ -911,13 +1459,13 @@ internal static class FrameTrace
         }
 
         sb.AppendLine(FormattableString.Invariant(
-            $"[cost] cycles_calibration={_cyclesStatus} gpu_probe_status={_gpuProbe?.Status ?? "unavailable"} ui_thread_native_id={_uiThreadNativeId} ui_thread_handle_tid={GetThreadId(_uiThreadHandle)}"));
+            $"[cost] cycles_calibration={_cyclesStatus} gpu_probe_status={_gpuProbe?.Status ?? "unavailable"} dwm_pid={_dwmPid} dwm_probe_status={(_dwmProbe?.Status ?? "unavailable")} ui_thread_native_id={_uiThreadNativeId} ui_thread_handle_tid={GetThreadId(_uiThreadHandle)}"));
 
         sb.AppendLine();
 
         // 帧间隔：按场景分组统计（warmup 也列出，便于判断场景边界的污染程度）。
         sb.AppendLine("--- frame intervals (ms) ---");
-        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Ended })
+        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Ended })
         {
             var deltas = new List<double>();
             foreach (var sample in snapshot.FrameSamples)
@@ -938,7 +1486,7 @@ internal static class FrameTrace
         sb.AppendLine("--- frame tail / over-budget metrics (6.25ms budget at 160Hz) ---");
         sb.AppendLine("note: p1_low_ms = mean of the slowest ceil(n*1%) frame deltas (not a percentile); p01_low_ms = mean of slowest ceil(n*0.1%); worst_ms = worst single delta; over_* = count (share) of frames slower than 2/3/4 frames or 50ms");
         sb.AppendLine("note: tail sample counts are shown as k1/k01; with ~800 frames in a 5s scenario 1% is only 8 frames and 0.1% is 1 frame, so treat these numbers as indicative, not precise");
-        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Ended })
+        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Ended })
         {
             var deltas = new List<double>();
             foreach (var sample in snapshot.FrameSamples)
@@ -957,7 +1505,7 @@ internal static class FrameTrace
 
         sb.AppendLine();
         sb.AppendLine("--- ui-thread stall latency (ms; time from DispatcherQueue post to execution) ---");
-        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Ended })
+        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Ended })
         {
             var latencies = new List<double>();
             var maxDepth = 0;
@@ -982,7 +1530,7 @@ internal static class FrameTrace
         sb.AppendLine();
         sb.AppendLine("--- ui-thread stall tail metrics (slowest 1% / 0.1% of post-to-execution latencies) ---");
         sb.AppendLine("note: same tail definition as frame p1_low/p01_low; k1/k01 are the number of samples averaged");
-        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Ended })
+        foreach (var phase in new[] { (int)Phase.Warmup, (int)Phase.Idle, (int)Phase.Scroll, (int)Phase.Drag, (int)Phase.Ended })
         {
             var latencies = new List<double>();
             foreach (var sample in snapshot.StallSamples)
@@ -1189,7 +1737,9 @@ internal static class FrameTrace
             (int)Phase.Warmup => "warmup",
             (int)Phase.Idle => "idle",
             (int)Phase.Scroll => "scroll",
+            (int)Phase.Drag => "drag",
             (int)Phase.Ended => "ended",
+            (int)Phase.Teardown => "teardown",
             _ => "unknown"
         };
     }
@@ -1516,6 +2066,7 @@ internal static class FrameTrace
             double procCpuMsDelta,
             int framesDelta,
             GpuReading gpu,
+            GpuReading dwmGpu,
             double uiCycleMsDelta,
             double procCycleMsDelta)
         {
@@ -1526,6 +2077,7 @@ internal static class FrameTrace
             ProcCpuMsDelta = procCpuMsDelta;
             FramesDelta = framesDelta;
             Gpu = gpu;
+            DwmGpu = dwmGpu;
             UiCycleMsDelta = uiCycleMsDelta;
             ProcCycleMsDelta = procCycleMsDelta;
         }
@@ -1545,6 +2097,9 @@ internal static class FrameTrace
         public int FramesDelta { get; }
 
         public GpuReading Gpu { get; }
+
+        /// <summary>本区间 DWM（桌面合成器）的 GPU 读数；不可用时 EngineAvailable=false。</summary>
+        public GpuReading DwmGpu { get; }
 
         /// <summary>UI 线程本区间 CPU 毫秒（QueryThreadCycleTime 标定换算，细粒度）；-1 表示没采到。</summary>
         public double UiCycleMsDelta { get; }
@@ -1631,7 +2186,45 @@ internal static class FrameTrace
 
         public long GpuCommittedBytes { get; set; } = -1;
 
+        /// <summary>DWM（桌面合成器）GPU 引擎采样次数。</summary>
+        public int DwmGpuSampleCount { get; set; }
+
+        public double DwmGpuSumMeanPct { get; set; } = double.NaN;
+
+        public double DwmGpuMaxPct { get; set; } = double.NaN;
+
+        public Dictionary<string, double> DwmGpuEngineMaxPct { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
         public int DisplayRefreshHz { get; set; }
+
+        /// <summary>本轮 CB_FRAME_TRACE_ACRYLIC 的原始值（unset/0/1）。</summary>
+        public string AcrylicRequested { get; set; } = "unset";
+
+        /// <summary>本轮实际生效的亚克力状态（on/off/unknown/failed:...）。</summary>
+        public string AcrylicEffective { get; set; } = "unknown";
+
+        /// <summary>亚克力状态来自哪个属性。</summary>
+        public string AcrylicSource { get; set; } = "(not-read)";
+
+        /// <summary>drag 场景执行状态（moved / no-move:... / unavailable:... / not-run）。</summary>
+        public string DragStatus { get; set; } = "not-run";
+
+        /// <summary>drag 场景实际成功的 SetWindowPos 次数。</summary>
+        public int DragMoves { get; set; }
+
+        /// <summary>drag 场景实测移动频率（Hz），moves / 场景持续时长。</summary>
+        public double DragActualHz { get; set; } = double.NaN;
+
+        /// <summary>单次 SetWindowPos 的平均耗时（毫秒）；用于从 UI CPU 里分离“移动窗口”本身的开销。</summary>
+        public double DragMoveAvgMs { get; set; } = double.NaN;
+
+        public int DragAmplitudeX { get; set; }
+
+        public int DragAmplitudeY { get; set; }
+
+        public string DragRectStart { get; set; } = "(none)";
+
+        public string DragRectEnd { get; set; } = "(none)";
 
         public string FormatLine()
         {
@@ -1661,23 +2254,35 @@ internal static class FrameTrace
             sb.Append(FormattableString.Invariant(
                 $" proc_cpu_ms={FormatOrNa(procCpuMs, "F3")} proc_cpu_ms_per_s={FormatOrNa(procPerS, "F3")} proc_cpu_pct_onecore={FormatOrNa(procOneCore, "F2")} proc_cpu_pct_allcores={FormatOrNa(procAllCores, "F3")} proc_getthreadtimes_ms={FormatOrNa(ProcCpuMs, "F3")} proc_gt_pct_onecore={FormatOrNa(gtProcOneCore, "F2")}"));
             sb.Append(FormattableString.Invariant(
-                $" gpu_available={GpuSampleCount > 0} gpu_util_max_pct={FormatOrNa(GpuMaxPct, "F2")} gpu_util_sum_mean_pct={FormatOrNa(GpuSumMeanPct, "F2")} gpu_engines={FormatEngines()} gpu_mem_dedicated_mb={FormatBytes(GpuDedicatedBytes)} gpu_mem_committed_mb={FormatBytes(GpuCommittedBytes)}"));
+                $" gpu_available={GpuSampleCount > 0} gpu_util_max_pct={FormatOrNa(GpuMaxPct, "F2")} gpu_util_sum_mean_pct={FormatOrNa(GpuSumMeanPct, "F2")} gpu_engines={FormatEngines(GpuEngineMaxPct, GpuSampleCount)} gpu_mem_dedicated_mb={FormatBytes(GpuDedicatedBytes)} gpu_mem_committed_mb={FormatBytes(GpuCommittedBytes)}"));
+            // DWM 侧：亚克力/毛玻璃由桌面合成器完成，本进程的 GPU 计数不包含它。
+            sb.Append(FormattableString.Invariant(
+                $" dwm_gpu_available={DwmGpuSampleCount > 0} dwm_gpu_util_max_pct={FormatOrNa(DwmGpuMaxPct, "F2")} dwm_gpu_util_sum_mean_pct={FormatOrNa(DwmGpuSumMeanPct, "F2")} dwm_gpu_engines={FormatEngines(DwmGpuEngineMaxPct, DwmGpuSampleCount)}"));
+            // 亚克力状态每轮都要自描述：A/B 结果必须能直接看出这一轮到底开没开。
+            sb.Append(FormattableString.Invariant(
+                $" acrylic_requested={AcrylicRequested} acrylic_effective={AcrylicEffective} acrylic_source={AcrylicSource}"));
+            if (string.Equals(PhaseName, "drag", StringComparison.Ordinal))
+            {
+                sb.Append(FormattableString.Invariant(
+                    $" drag_status={DragStatus} drag_moves={DragMoves} drag_hz={FormatOrNa(DragActualHz, "F1")} drag_amp_px={DragAmplitudeX}x{DragAmplitudeY} drag_move_avg_ms={FormatOrNa(DragMoveAvgMs, "F3")} drag_rect_start={DragRectStart} drag_rect_end={DragRectEnd}"));
+            }
+
             return sb.ToString();
         }
 
-        private string FormatEngines()
+        private static string FormatEngines(Dictionary<string, double> engineMap, int sampleCount)
         {
-            if (GpuEngineMaxPct.Count == 0)
+            if (engineMap.Count == 0)
             {
-                return GpuSampleCount > 0 ? "(none-matched)" : "(unavailable)";
+                return sampleCount > 0 ? "(none-matched)" : "(unavailable)";
             }
 
-            var keys = new List<string>(GpuEngineMaxPct.Keys);
+            var keys = new List<string>(engineMap.Keys);
             keys.Sort(StringComparer.OrdinalIgnoreCase);
             var parts = new List<string>(keys.Count);
             foreach (var key in keys)
             {
-                parts.Add(key + "=" + GpuEngineMaxPct[key].ToString("F2", CultureInfo.InvariantCulture));
+                parts.Add(key + "=" + engineMap[key].ToString("F2", CultureInfo.InvariantCulture));
             }
 
             return string.Join("|", parts);
@@ -1705,13 +2310,18 @@ internal static class FrameTrace
         private const uint PdhCStatusValidData = 0x00000000;
         private const uint PdhCStatusNewData = 0x00000001;
 
-        private readonly int _pid = Environment.ProcessId;
+        private readonly int _pid;
         private IntPtr _query;
         private IntPtr _engineCounter;
         private IntPtr _dedicatedCounter;
         private IntPtr _committedCounter;
         private bool _engineAvailable;
         private string _status = "not-initialized";
+
+        public GpuProbe(int pid)
+        {
+            _pid = pid;
+        }
 
         public string Status => _status;
 
@@ -1968,7 +2578,7 @@ internal static class FrameTrace
         public CostScenario[] CostScenarioSummaries { get; set; } = Array.Empty<CostScenario>();
     }
 
-    // ---- Win32：只用于记录运行条件（窗口可见/前台、屏幕、DPI、刷新率），不改变任何窗口行为 ----
+    // ---- Win32：记录运行条件（窗口可见/前台、屏幕、DPI、刷新率）与 drag 场景的窗口移动 ----
     private const int SmCxScreen = 0;
     private const int SmCyScreen = 1;
     private const int VRefresh = 116;
@@ -1989,6 +2599,16 @@ internal static class FrameTrace
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
+
+    /// <summary>drag 场景专用：只改窗口位置（不改尺寸/Z 序/激活状态）。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+    /// <summary>取主显示器工作区（不含任务栏），用于保证 drag 轨迹不把窗口推出屏幕。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SystemParametersInfoW(uint uiAction, uint uiParam, out Rect pvParam, uint fWinIni);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetDC(IntPtr hWnd);
