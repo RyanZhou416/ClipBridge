@@ -659,13 +659,16 @@ pub extern "C" fn cb_clear_logs_db(h: *mut cb_handle) -> *const c_char {
 }
 
 /// 清空统计数据库。
+///
+/// 统计已改为按需计算，`stats.db` 被彻底移除；本函数为保持 33 函数 ABI 不变而
+/// 保留：句柄有效时直接返回成功，没有可清空的持久化数据。
 #[no_mangle]
 pub extern "C" fn cb_clear_stats_db(h: *mut cb_handle) -> *const c_char {
 	let run = panic::catch_unwind(AssertUnwindSafe(|| -> anyhow::Result<String> {
 		let _guard = enter(h)?;
 		let handle = unsafe { &mut *h };
-		let mut stats_store = handle.core_mut()?.inner.stats_store.lock().unwrap();
-		stats_store.clear_stats_db()?;
+		// 仍然校验句柄/core 存活，保持旧入口的 CORE_SHUTDOWN 语义。
+		let _core = handle.core_mut()?;
 		Ok(ok_json(serde_json::json!({ "ok": true })))
 	}));
 
@@ -697,45 +700,15 @@ pub extern "C" fn cb_query_cache_stats(
 		let query_str = cstr_to_str(query_json)?;
 
 		let query: CacheStatsQueryDto = serde_json::from_str(query_str)?;
-		let start_ts = if query.start_ts_ms == 0 && query.end_ts_ms == 0 {
-			// 默认窗口：最近60分钟
-			cb_core::util::now_ms() - 60 * 60 * 1000
-		} else {
-			query.start_ts_ms
-		};
-		let end_ts = if query.end_ts_ms == 0 {
-			cb_core::util::now_ms()
-		} else {
-			query.end_ts_ms
-		};
 
-		let core = handle.core_mut()?;
-		let stats_store = core.inner.stats_store.lock().unwrap();
-		let entries = stats_store.query_cache_stats(start_ts, end_ts, query.bucket_sec)?;
+		// 统计从 core.db / content_cache 现算；JSON 形状与旧 stats_store 版本一致。
+		let data = handle.core_mut()?.query_cache_stats(
+			query.start_ts_ms,
+			query.end_ts_ms,
+			query.bucket_sec,
+		)?;
 
-		// 解析 data_json 并构建 series
-		let mut series = Vec::new();
-		for entry in entries {
-			let data: serde_json::Value = serde_json::from_str(&entry.data_json)?;
-			series.push(serde_json::json!({
-				"ts_ms": entry.ts_ms,
-				"cache_bytes": data.get("cache_bytes").and_then(|v| v.as_i64()).unwrap_or(0)
-			}));
-		}
-
-		// 获取当前缓存大小（从 store）
-		let store = core.inner.store.lock().unwrap();
-		let current_cache_bytes = store.sum_present_bytes().unwrap_or(0);
-
-		Ok(ok_json(serde_json::json!({
-			"window": {
-				"start_ts_ms": start_ts,
-				"end_ts_ms": end_ts,
-				"bucket_sec": query.bucket_sec
-			},
-			"series": series,
-			"current_cache_bytes": current_cache_bytes
-		})))
+		Ok(ok_json(data))
 	}));
 
 	ffi_result("QUERY_FAILED", run)
@@ -753,38 +726,15 @@ pub extern "C" fn cb_query_net_stats(
 		let query_str = cstr_to_str(query_json)?;
 
 		let query: NetStatsQueryDto = serde_json::from_str(query_str)?;
-		let start_ts = if query.start_ts_ms == 0 && query.end_ts_ms == 0 {
-			cb_core::util::now_ms() - 60 * 60 * 1000
-		} else {
-			query.start_ts_ms
-		};
-		let end_ts = if query.end_ts_ms == 0 {
-			cb_core::util::now_ms()
-		} else {
-			query.end_ts_ms
-		};
 
-		let stats_store = handle.core_mut()?.inner.stats_store.lock().unwrap();
-		let entries = stats_store.query_net_stats(start_ts, end_ts, query.bucket_sec)?;
+		// 无线字节计数器：Core 返回显式 0 点，不伪造吞吐趋势（详见 core 注释）。
+		let data = handle.core_mut()?.query_net_stats(
+			query.start_ts_ms,
+			query.end_ts_ms,
+			query.bucket_sec,
+		)?;
 
-		let mut series = Vec::new();
-		for entry in entries {
-			let data: serde_json::Value = serde_json::from_str(&entry.data_json)?;
-			series.push(serde_json::json!({
-				"ts_ms": entry.ts_ms,
-				"bytes_sent": data.get("bytes_sent").and_then(|v| v.as_i64()).unwrap_or(0),
-				"bytes_recv": data.get("bytes_recv").and_then(|v| v.as_i64()).unwrap_or(0)
-			}));
-		}
-
-		Ok(ok_json(serde_json::json!({
-			"window": {
-				"start_ts_ms": start_ts,
-				"end_ts_ms": end_ts,
-				"bucket_sec": query.bucket_sec
-			},
-			"series": series
-		})))
+		Ok(ok_json(data))
 	}));
 
 	ffi_result("QUERY_FAILED", run)
@@ -802,40 +752,15 @@ pub extern "C" fn cb_query_activity_stats(
 		let query_str = cstr_to_str(query_json)?;
 
 		let query: ActivityStatsQueryDto = serde_json::from_str(query_str)?;
-		let start_ts = if query.start_ts_ms == 0 && query.end_ts_ms == 0 {
-			// 默认窗口：最近24小时
-			cb_core::util::now_ms() - 24 * 60 * 60 * 1000
-		} else {
-			query.start_ts_ms
-		};
-		let end_ts = if query.end_ts_ms == 0 {
-			cb_core::util::now_ms()
-		} else {
-			query.end_ts_ms
-		};
 
-		let stats_store = handle.core_mut()?.inner.stats_store.lock().unwrap();
-		let entries = stats_store.query_activity_stats(start_ts, end_ts, query.bucket_sec)?;
+		// 从 history 行现算，桶宽/窗口沿用请求；JSON 形状与旧接口一致。
+		let data = handle.core_mut()?.query_activity_stats(
+			query.start_ts_ms,
+			query.end_ts_ms,
+			query.bucket_sec,
+		)?;
 
-		let mut series = Vec::new();
-		for entry in entries {
-			let data: serde_json::Value = serde_json::from_str(&entry.data_json)?;
-			series.push(serde_json::json!({
-				"ts_ms": entry.ts_ms,
-				"text_count": data.get("text_count").and_then(|v| v.as_i64()).unwrap_or(0),
-				"image_count": data.get("image_count").and_then(|v| v.as_i64()).unwrap_or(0),
-				"files_count": data.get("files_count").and_then(|v| v.as_i64()).unwrap_or(0)
-			}));
-		}
-
-		Ok(ok_json(serde_json::json!({
-			"window": {
-				"start_ts_ms": start_ts,
-				"end_ts_ms": end_ts,
-				"bucket_sec": query.bucket_sec
-			},
-			"series": series
-		})))
+		Ok(ok_json(data))
 	}));
 
 	ffi_result("QUERY_FAILED", run)

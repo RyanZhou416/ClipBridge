@@ -10,7 +10,7 @@ use crate::clipboard::{make_ingest_plan, ClipboardSnapshot, IngestPlan, LocalIng
 pub(crate) use crate::model::ItemMeta;
 use crate::net::{NetCmd, NetManager};
 pub use crate::policy::{AppConfig, GlobalPolicy};
-use crate::{cas::Cas, logs::LogStore, stats::StatsStore, store::Store, util::now_ms};
+use crate::{cas::Cas, logs::LogStore, store::Store, util::now_ms};
 
 /**
  * Core 的配置项。
@@ -142,6 +142,42 @@ impl Core {
 			}
 		}
 
+		// `stats.db` 是已移除的死子系统：它从未被写入过，三个统计接口改为按需从
+		// `core.db` / CAS / `history` 计算。这里尽力删除旧版本留下的文件（含 WAL/SHM
+		// 边车文件），失败只记录、不阻断启动。
+		let stats_db = std::path::Path::new(&cfg.data_dir).join("stats.db");
+		for path in [
+			stats_db.clone(),
+			stats_db.with_file_name("stats.db-wal"),
+			stats_db.with_file_name("stats.db-shm"),
+		] {
+			match std::fs::remove_file(&path) {
+				Ok(()) => {
+					let mut log_store = log_store_arc.lock().unwrap();
+					let _ = log_store.log_info(
+						"Init",
+						&format!("Removed obsolete stats.db file: {}", path.display()),
+						Some(&format!("已删除废弃的 stats.db 文件: {}", path.display())),
+					);
+				}
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+				Err(e) => {
+					let mut log_store = log_store_arc.lock().unwrap();
+					let _ = log_store.log_warn(
+						"Init",
+						&format!(
+							"Failed to remove obsolete stats.db file {}: {e}",
+							path.display()
+						),
+						Some(&format!(
+							"删除废弃的 stats.db 文件失败 {}: {e}",
+							path.display()
+						)),
+					);
+				}
+			}
+		}
+
 		// 初始化各个组件
 		let store = match Store::open(&cfg.data_dir) {
 			Ok(s) => {
@@ -185,29 +221,6 @@ impl Core {
 		};
 		let store_rebuilt = store.rebuilt;
 		let store_arc = Arc::new(Mutex::new(store));
-
-		let stats_store = match StatsStore::open(&cfg.data_dir) {
-			Ok(s) => {
-				let mut log_store = log_store_arc.lock().unwrap();
-				let _ = log_store.log_info(
-					"Init",
-					"StatsStore initialized successfully",
-					Some("统计存储初始化成功"),
-				);
-				s
-			}
-			Err(e) => {
-				let mut log_store = log_store_arc.lock().unwrap();
-				let _ = log_store.log_error(
-					"Init",
-					&format!("Failed to initialize StatsStore: {e}"),
-					Some(&format!("统计存储初始化失败: {e}")),
-					Some(&e.to_string()),
-				);
-				panic!("Failed to open stats store: {e}");
-			}
-		};
-		let stats_store_arc = Arc::new(Mutex::new(stats_store));
 
 		let cas = match Cas::new(&cfg.cache_dir) {
 			Ok(c) => {
@@ -314,7 +327,6 @@ impl Core {
 			is_shutdown: AtomicBool::new(false),
 			store: store_arc,
 			log_store: log_store_arc,
-			stats_store: stats_store_arc,
 			cas,
 			net: net_tx,
 		};
@@ -923,6 +935,163 @@ impl Core {
 			.map_err(|_| anyhow::anyhow!("store mutex poisoned"))?;
 		store.get_item_meta_by_id(item_id)
 	}
+
+	/// 统计窗口归一化，保持旧 FFI 行为：`end_ts_ms==0` 取当前时间；
+	/// 只有 start/end 都为 0 时 start 才使用默认跨度（1h 或 24h）。
+	fn stats_window(start_ts_ms: i64, end_ts_ms: i64, default_span_ms: i64) -> (i64, i64) {
+		let use_default_start = start_ts_ms == 0 && end_ts_ms == 0;
+		let end_ts = if end_ts_ms == 0 { now_ms() } else { end_ts_ms };
+		let start_ts = if use_default_start {
+			end_ts - default_span_ms
+		} else {
+			start_ts_ms
+		};
+		(start_ts, end_ts)
+	}
+
+	fn normalize_bucket_sec(bucket_sec: i32, default_sec: i32) -> i32 {
+		if bucket_sec > 0 {
+			bucket_sec
+		} else {
+			default_sec
+		}
+	}
+
+	/// 缓存统计：从 `content_cache` 现算，不再依赖已删除的 `stats.db`。
+	///
+	/// - `current_cache_bytes` = `SUM(total_bytes) WHERE present=1`（与 GC 的账面口径一致）。
+	/// - `series`：把 `present=1` 的行按 `created_ts_ms` 归桶、累加成“截至该桶的缓存占用”。
+	///   窗口之前的行作为基线并入第一个点；没有历史指标表，所以这是能从现存数据
+	///   诚实还原的全部信息（`created_ts_ms` 是内容创建时间，不是 blob 落盘时间）。
+	pub fn query_cache_stats(
+		&self,
+		start_ts_ms: i64,
+		end_ts_ms: i64,
+		bucket_sec: i32,
+	) -> anyhow::Result<serde_json::Value> {
+		let (start_ts, end_ts) = Self::stats_window(start_ts_ms, end_ts_ms, 60 * 60 * 1000);
+		let bucket_sec = Self::normalize_bucket_sec(bucket_sec, 10);
+		let bucket_ms = i64::from(bucket_sec) * 1000;
+
+		let (rows, current_cache_bytes) = {
+			let store = self.inner.store.lock().unwrap();
+			(store.list_present_cache_rows()?, store.sum_present_bytes()?)
+		};
+
+		let mut baseline = 0i64;
+		let mut buckets: Vec<(i64, i64)> = Vec::new();
+		for (created_ts_ms, bytes) in rows {
+			if created_ts_ms > end_ts {
+				// 创建时间在未来（时钟漂移）：不计入当前窗口。
+				continue;
+			}
+			if created_ts_ms < start_ts {
+				baseline += bytes;
+				continue;
+			}
+			let bucket_ts = (created_ts_ms / bucket_ms) * bucket_ms;
+			match buckets.last_mut() {
+				Some((ts, sum)) if *ts == bucket_ts => *sum += bytes,
+				_ => buckets.push((bucket_ts, bytes)),
+			}
+		}
+
+		let mut series = Vec::with_capacity(buckets.len() + 1);
+		if baseline > 0 {
+			series.push(serde_json::json!({
+				"ts_ms": start_ts,
+				"cache_bytes": baseline
+			}));
+		}
+		let mut cumulative = baseline;
+		for (ts_ms, bytes) in buckets {
+			cumulative += bytes;
+			series.push(serde_json::json!({
+				"ts_ms": ts_ms,
+				"cache_bytes": cumulative
+			}));
+		}
+
+		Ok(serde_json::json!({
+			"window": {
+				"start_ts_ms": start_ts,
+				"end_ts_ms": end_ts,
+				"bucket_sec": bucket_sec
+			},
+			"series": series,
+			"current_cache_bytes": current_cache_bytes
+		}))
+	}
+
+	/// 网络统计：核心从未记录线上字节计数器（`Session` 的 `bytes_sent` 只活在单次
+	/// 传输对象里，传输结束即释放；也没有历史采样表），因此 `bytes_sent` /
+	/// `bytes_recv` 无法被如实计算。
+	///
+	/// 这里只返回一个显式的 0 点（字段按契约给 0），不生成整段假的零曲线，也不把
+	/// 设备数/在线数硬塞进字节字段——那会是伪造趋势。设备列表请走 `cb_list_peers`。
+	pub fn query_net_stats(
+		&self,
+		start_ts_ms: i64,
+		end_ts_ms: i64,
+		bucket_sec: i32,
+	) -> anyhow::Result<serde_json::Value> {
+		let (start_ts, end_ts) = Self::stats_window(start_ts_ms, end_ts_ms, 60 * 60 * 1000);
+		let bucket_sec = Self::normalize_bucket_sec(bucket_sec, 10);
+
+		Ok(serde_json::json!({
+			"window": {
+				"start_ts_ms": start_ts,
+				"end_ts_ms": end_ts,
+				"bucket_sec": bucket_sec
+			},
+			"series": [{
+				"ts_ms": end_ts,
+				"bytes_sent": 0,
+				"bytes_recv": 0
+			}]
+		}))
+	}
+
+	/// 活动统计：把 `history` 行按时间桶聚合，返回每个桶的 text/image/file_list 计数。
+	///
+	/// 默认窗口最近 24 小时、桶宽 60s（与旧 FFI 默认值一致）；图表因此能显示真实
+	/// 摄入活动，而不是永远为空。
+	pub fn query_activity_stats(
+		&self,
+		start_ts_ms: i64,
+		end_ts_ms: i64,
+		bucket_sec: i32,
+	) -> anyhow::Result<serde_json::Value> {
+		let (start_ts, end_ts) = Self::stats_window(start_ts_ms, end_ts_ms, 24 * 60 * 60 * 1000);
+		let bucket_sec = Self::normalize_bucket_sec(bucket_sec, 60);
+		let bucket_ms = i64::from(bucket_sec) * 1000;
+
+		let buckets = {
+			let store = self.inner.store.lock().unwrap();
+			store.activity_buckets(start_ts, end_ts, bucket_ms)?
+		};
+
+		let series: Vec<serde_json::Value> = buckets
+			.iter()
+			.map(|b| {
+				serde_json::json!({
+					"ts_ms": b.ts_ms,
+					"text_count": b.text_count,
+					"image_count": b.image_count,
+					"files_count": b.file_list_count
+				})
+			})
+			.collect();
+
+		Ok(serde_json::json!({
+			"window": {
+				"start_ts_ms": start_ts,
+				"end_ts_ms": end_ts,
+				"bucket_sec": bucket_sec
+			},
+			"series": series
+		}))
+	}
 }
 
 #[cfg(test)]
@@ -943,7 +1112,6 @@ pub struct Inner {
 	pub is_shutdown: AtomicBool,
 	pub store: Arc<Mutex<Store>>,
 	pub log_store: Arc<Mutex<LogStore>>,
-	pub stats_store: Arc<Mutex<StatsStore>>,
 	pub cas: Cas,
 	pub net: Option<mpsc::Sender<NetCmd>>,
 }
@@ -1031,6 +1199,92 @@ mod clear_cache_regression {
 			core.get_item_meta(&meta.item_id).unwrap().is_some(),
 			"clear_cache 之后 get_item_meta 不应返回 None"
 		);
+
+		core.shutdown();
+	}
+}
+
+/// 统计接口回归：`stats.db` 已移除，三个查询必须从现存数据现算出真实内容。
+#[cfg(test)]
+mod stats_reporting {
+	use super::*;
+
+	struct NoopSink;
+	impl CoreEventSink for NoopSink {
+		fn emit(&self, _event_json: String) {}
+	}
+
+	#[test]
+	fn computed_stats_are_non_empty_and_no_stats_db_is_created() {
+		let root = tempfile::tempdir().unwrap();
+		let data_dir = root.path().join("data");
+		std::fs::create_dir_all(&data_dir).unwrap();
+		// 模拟旧版本遗留文件：启动时应被尽力删除。
+		std::fs::write(data_dir.join("stats.db"), b"legacy").unwrap();
+
+		let cfg = CoreConfig {
+			device_id: "dev-stats".to_string(),
+			device_name: "dev".to_string(),
+			account_uid: "acct-stats".to_string(),
+			account_password: "test_password".to_string(),
+			data_dir: data_dir.to_string_lossy().into_owned(),
+			cache_dir: root.path().join("cache").to_string_lossy().into_owned(),
+			app_config: AppConfig::default(),
+			disable_network: true,
+		};
+		let core = Core::init(cfg, Arc::new(NoopSink));
+
+		let ts = now_ms();
+		core.ingest_local_copy(ClipboardSnapshot::Text {
+			text_utf8: "stats item one".to_string(),
+			ts_ms: ts,
+		})
+		.unwrap();
+		core.ingest_local_copy(ClipboardSnapshot::Text {
+			text_utf8: "stats item two".to_string(),
+			ts_ms: ts,
+		})
+		.unwrap();
+
+		// cache_stats：当前占用非零，series 结构化且为累计字节。
+		let cache = core.query_cache_stats(0, 0, 10).unwrap();
+		assert!(
+			cache["current_cache_bytes"].as_i64().unwrap() > 0,
+			"ingest 之后 current_cache_bytes 必须大于 0"
+		);
+		let cache_series = cache["series"].as_array().unwrap();
+		assert!(!cache_series.is_empty(), "cache series 不应为空");
+		assert!(
+			cache_series
+				.iter()
+				.all(|p| p["ts_ms"].is_i64() && p["cache_bytes"].as_i64().is_some_and(|b| b > 0)),
+			"cache series 每个点都必须带 ts_ms 与正的 cache_bytes"
+		);
+
+		// activity_stats：两次 text ingest 的计数必须能对上。
+		let activity = core.query_activity_stats(0, 0, 60).unwrap();
+		let activity_series = activity["series"].as_array().unwrap();
+		assert!(!activity_series.is_empty(), "activity series 不应为空");
+		let text_total: i64 = activity_series
+			.iter()
+			.map(|p| p["text_count"].as_i64().unwrap())
+			.sum();
+		assert_eq!(text_total, 2);
+		assert!(activity_series
+			.iter()
+			.all(|p| p["image_count"].is_i64() && p["files_count"].is_i64()));
+
+		// net_stats：没有字节计数器，字段按契约给 0（不伪造趋势）。
+		let net = core.query_net_stats(0, 0, 10).unwrap();
+		let net_series = net["series"].as_array().unwrap();
+		assert!(!net_series.is_empty(), "net series 应返回显式 0 点");
+		assert_eq!(net_series[0]["bytes_sent"].as_i64(), Some(0));
+		assert_eq!(net_series[0]["bytes_recv"].as_i64(), Some(0));
+
+		// stats.db 不应再被创建，旧的也应被删除。
+		assert!(!data_dir.join("stats.db").exists(), "stats.db 不应存在");
+		assert!(!data_dir.join("stats.db-wal").exists());
+		assert!(!data_dir.join("stats.db-shm").exists());
 
 		core.shutdown();
 	}

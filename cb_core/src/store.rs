@@ -108,6 +108,16 @@ pub struct CacheRow {
 	pub present: bool,
 }
 
+/// 活动统计的一个时间桶（`history` 按 `sort_ts_ms` 归桶后的条目数）。
+#[derive(Debug, Clone, Copy)]
+pub struct ActivityBucket {
+	/// 桶起点（毫秒时间戳，向下取整到 `bucket_ms` 的整数倍）。
+	pub ts_ms: i64,
+	pub text_count: i64,
+	pub image_count: i64,
+	pub file_list_count: i64,
+}
+
 /// PeerRule 结构体：设备共享策略规则
 pub struct PeerRule {
 	pub account_uid: String,
@@ -713,6 +723,67 @@ impl Store {
 			|r| r.get(0),
 		)?;
 		Ok(s)
+	}
+
+	/// 缓存统计：`present=1` 的 (created_ts_ms, total_bytes)，按时间升序。
+	///
+	/// 只返回“声称仍存在”的行；`present=0` 的内容已被 GC/删除，不算当前占用。
+	pub fn list_present_cache_rows(&self) -> anyhow::Result<Vec<(i64, i64)>> {
+		let mut stmt = self.conn.prepare(
+			r"
+            SELECT created_ts_ms, total_bytes
+            FROM content_cache
+            WHERE present=1
+            ORDER BY created_ts_ms ASC, sha256_hex ASC
+            ",
+		)?;
+		let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+		let mut out = Vec::new();
+		for row in rows {
+			out.push(row?);
+		}
+		Ok(out)
+	}
+
+	/// 活动统计：把 `history` 行按 `bucket_ms` 归桶，统计各 kind 的条目数。
+	///
+	/// 用 `history.sort_ts_ms`（入历史的时间）而不是 `items.created_ts_ms`：
+	/// 远端条目可能由对端更早创建，但“本机何时看到它”才是本机活动。
+	/// 已软删除的行也计入——活动确实发生过，图表反映的是历史流量而非当前列表。
+	pub fn activity_buckets(
+		&self,
+		start_ts_ms: i64,
+		end_ts_ms: i64,
+		bucket_ms: i64,
+	) -> anyhow::Result<Vec<ActivityBucket>> {
+		let bucket_ms = bucket_ms.max(1);
+		let mut stmt = self.conn.prepare(
+			r"
+            SELECT
+                (h.sort_ts_ms / ?3) * ?3 AS bucket_ts,
+                SUM(CASE WHEN i.kind='text' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN i.kind='image' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN i.kind='file_list' THEN 1 ELSE 0 END)
+            FROM history h
+            JOIN items i ON h.item_id = i.item_id
+            WHERE h.sort_ts_ms >= ?1 AND h.sort_ts_ms <= ?2
+            GROUP BY bucket_ts
+            ORDER BY bucket_ts ASC
+            ",
+		)?;
+		let rows = stmt.query_map(params![start_ts_ms, end_ts_ms, bucket_ms], |r| {
+			Ok(ActivityBucket {
+				ts_ms: r.get(0)?,
+				text_count: r.get(1)?,
+				image_count: r.get(2)?,
+				file_list_count: r.get(3)?,
+			})
+		})?;
+		let mut out = Vec::new();
+		for row in rows {
+			out.push(row?);
+		}
+		Ok(out)
 	}
 
 	/// 获取已保存的设备指纹

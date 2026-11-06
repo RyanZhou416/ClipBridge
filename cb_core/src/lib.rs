@@ -29,7 +29,6 @@ pub mod prelude;
 pub mod proto;
 pub mod runtime;
 pub mod session;
-pub mod stats;
 pub mod store;
 pub mod testsupport;
 pub mod transport;
