@@ -340,7 +340,7 @@ pub struct SessionActor {
 	last_active_at: i64,
 	cmd_rx: mpsc::Receiver<SessionCmd>,
 	store: Arc<Mutex<Store>>,
-	log_store: Arc<Mutex<crate::logs::LogStore>>,
+	log_sink: crate::logs::LogSink,
 	opaque_client_state: Option<CbClientLoginState>,
 	opaque_server_state: Option<CbServerLoginState>,
 	receivers: HashMap<String, ReceiverState>,
@@ -350,6 +350,10 @@ pub struct SessionActor {
 }
 
 impl SessionActor {
+	/// 兼容入口：用现有 `LogStore` 构造一个**独占** sink（会启动一条 writer 线程）。
+	///
+	/// 生产路径（`net.rs`）使用 [`SessionActor::spawn_with_sink`]，让所有会话共享
+	/// `Core` 的同一个 writer；这里保留给直接持有 `LogStore` 的调用方/测试。
 	#[allow(clippy::too_many_arguments)]
 	pub fn spawn(
 		role: SessionRole,
@@ -360,6 +364,30 @@ impl SessionActor {
 		cas: crate::cas::Cas,
 		expected_peer_id: Option<String>,
 		log_store: Arc<Mutex<crate::logs::LogStore>>,
+	) -> SessionHandle {
+		Self::spawn_with_sink(
+			role,
+			conn,
+			config,
+			sink,
+			store,
+			cas,
+			expected_peer_id,
+			crate::logs::LogSink::new(log_store),
+		)
+	}
+
+	/// 用共享的 [`crate::logs::LogSink`] 启动会话 actor（生产路径）。
+	#[allow(clippy::too_many_arguments)]
+	pub fn spawn_with_sink(
+		role: SessionRole,
+		conn: Connection,
+		config: CoreConfig,
+		sink: Arc<dyn CoreEventSink>,
+		store: Arc<Mutex<Store>>,
+		cas: crate::cas::Cas,
+		expected_peer_id: Option<String>,
+		log_sink: crate::logs::LogSink,
 	) -> SessionHandle {
 		let (cmd_tx, cmd_rx) = mpsc::channel(32);
 		let state_ref = Arc::new(Mutex::new(SessionState::TransportReady));
@@ -412,7 +440,7 @@ impl SessionActor {
 				fingerprint,
 				upload_tx,
 				upload_rx,
-				log_store,
+				log_sink,
 			)
 			.await
 			{
@@ -451,7 +479,7 @@ impl SessionActor {
 		fingerprint: String,
 		upload_tx: mpsc::Sender<UploadMsg>,
 		mut upload_rx: mpsc::Receiver<UploadMsg>,
-		log_store: Arc<Mutex<crate::logs::LogStore>>,
+		log_sink: crate::logs::LogSink,
 	) -> Result<()> {
 		let (send, recv) = match role {
 			SessionRole::Client => conn.open_bi().await.context("Client open_bi failed")?,
@@ -462,16 +490,13 @@ impl SessionActor {
 		let reader = FramedRead::new(recv, CBFrameCodec);
 
 		// 记录会话创建
-		{
-			let mut log_store = log_store.lock().unwrap();
-			let _ = log_store.log_info(
-				"Session",
-				&format!("Session actor spawned: role={role:?}, fingerprint={fingerprint}"),
-				Some(&format!(
-					"会话执行器已创建: 角色={role:?}，指纹={fingerprint}"
-				)),
-			);
-		}
+		log_sink.log_info(
+			"Session",
+			&format!("Session actor spawned: role={role:?}, fingerprint={fingerprint}"),
+			Some(&format!(
+				"会话执行器已创建: 角色={role:?}，指纹={fingerprint}"
+			)),
+		);
 
 		let mut actor = Self {
 			role,
@@ -480,7 +505,7 @@ impl SessionActor {
 			config,
 			sink,
 			store,
-			log_store,
+			log_sink,
 			state_ref,
 			peer_id_ref,
 			state: SessionState::TransportReady,
@@ -532,8 +557,7 @@ impl SessionActor {
 											.remote_device_id
 											.clone()
 											.unwrap_or_else(|| "unknown".to_string());
-										let mut log_store = actor.log_store.lock().unwrap();
-										let _ = log_store.log_warn(
+										actor.log_sink.log_warn(
 											"Session",
 											&format!("Metadata broadcast skipped by share_to_peer policy: device_id={device_id}, item_id={}", meta.item_id),
 											Some(&format!("共享策略禁止向该设备广播元数据: 设备ID={device_id}，项目ID={}", meta.item_id)),
@@ -548,14 +572,11 @@ impl SessionActor {
 											f.local_path = None;
 										}
 
-										{
-											let mut log_store = actor.log_store.lock().unwrap();
-											let _ = log_store.log_info(
+										actor.log_sink.log_info(
 												"Session",
 												&format!("Metadata sent to peer: device_id={device_id}, item_id={item_id}, msg_id={msg_id}"),
 												Some(&format!("元数据已发送至对等设备: 设备ID={device_id}，项目ID={item_id}，消息ID={msg_id}")),
-											);
-										}
+										);
 
 										actor.send_ctrl(CtrlMsg::ItemMeta {
 											msg_id: Some(msg_id),
@@ -600,8 +621,7 @@ impl SessionActor {
 								// 每个传输只写一条汇总日志（替代原先每 64KB 一条的 debug 日志）
 								if let Some(state) = actor.senders.remove(&transfer_id) {
 									let elapsed_ms = now_ms() - state.started_ts_ms;
-									let mut log_store = actor.log_store.lock().unwrap();
-									let _ = log_store.log_info(
+									actor.log_sink.log_info(
 										"Session",
 										&format!(
 											"Outbound transfer completed: transfer_id={transfer_id}, bytes={}, elapsed_ms={elapsed_ms}",
@@ -618,8 +638,7 @@ impl SessionActor {
 								// 每个传输只写一条（失败）日志
 								if let Some(state) = actor.senders.remove(&transfer_id) {
 									let elapsed_ms = now_ms() - state.started_ts_ms;
-									let mut log_store = actor.log_store.lock().unwrap();
-									let _ = log_store.log_warn(
+									actor.log_sink.log_warn(
 										"Session",
 										&format!(
 											"Outbound transfer aborted: transfer_id={transfer_id}, bytes={}, elapsed_ms={elapsed_ms}, error={err}",
@@ -655,16 +674,15 @@ impl SessionActor {
 				Err(e) => format!("Error: {e}"),
 			};
 			{
-				let mut log_store = actor.log_store.lock().unwrap();
 				let log_level = if run_result.is_ok() { 2 } else { 4 }; // Info or Error
 				if log_level == 2 {
-					let _ = log_store.log_info(
+					actor.log_sink.log_info(
 						"Session",
 						&format!("Session terminated: device_id={did}, reason={reason}"),
 						Some(&format!("会话已终止: 设备ID={did}，原因={reason}")),
 					);
 				} else {
-					let _ = log_store.log_error(
+					actor.log_sink.log_error(
 						"Session",
 						&format!(
 							"Session terminated due to error: device_id={did}, error={reason}"
@@ -694,8 +712,7 @@ impl SessionActor {
 
 		// 记录状态转换
 		if let Some(device_id) = &self.remote_device_id {
-			let mut log_store = self.log_store.lock().unwrap();
-			let _ = log_store.log_info(
+			self.log_sink.log_info(
 				"Session",
 				&format!(
 					"Session state changed: device_id={device_id}, old_state={old_state:?}, new_state={:?}",
@@ -745,14 +762,11 @@ impl SessionActor {
 				if let Some(state) = self.senders.remove(&transfer_id) {
 					state.handle.abort();
 				}
-				{
-					let mut log_store = self.log_store.lock().unwrap();
-					let _ = log_store.log_warn(
+				self.log_sink.log_warn(
 						"Session",
 						&format!("Data chunk send timeout (network congestion): transfer_id={transfer_id}, cancelling transfer"),
 						Some(&format!("数据块发送超时（网络拥塞）: 传输ID={transfer_id}，正在取消传输")),
-					);
-				}
+				);
 				// 尝试发一个 Cancel 包（尽力而为）
 				let _ = self
 					.send_ctrl(CtrlMsg::ContentCancel {
@@ -766,20 +780,17 @@ impl SessionActor {
 	}
 
 	async fn start_handshake(&mut self) -> Result<()> {
-		{
-			let mut log_store = self.log_store.lock().unwrap();
-			let _ = log_store.log_info(
-				"Session",
-				&format!(
-					"Handshake started: role={:?}, protocol_version={}",
-					self.role, PROTOCOL_VERSION
-				),
-				Some(&format!(
-					"握手已开始: 角色={:?}，协议版本={}",
-					self.role, PROTOCOL_VERSION
-				)),
-			);
-		}
+		self.log_sink.log_info(
+			"Session",
+			&format!(
+				"Handshake started: role={:?}, protocol_version={}",
+				self.role, PROTOCOL_VERSION
+			),
+			Some(&format!(
+				"握手已开始: 角色={:?}，协议版本={}",
+				self.role, PROTOCOL_VERSION
+			)),
+		);
 
 		match self.role {
 			SessionRole::Client => {
@@ -792,20 +803,17 @@ impl SessionActor {
 					capabilities: vec!["text".into(), "image".into(), "file".into()],
 					client_nonce: Some(uuid::Uuid::new_v4().to_string()),
 				};
-				{
-					let mut log_store = self.log_store.lock().unwrap();
-					let _ = log_store.log_info(
-						"Session",
-						&format!(
-							"Hello message sent: device_id={}, account_uid={}",
-							self.config.device_id, self.config.account_uid
-						),
-						Some(&format!(
-							"Hello 消息已发送: 设备ID={}，账号={}",
-							self.config.device_id, self.config.account_uid
-						)),
-					);
-				}
+				self.log_sink.log_info(
+					"Session",
+					&format!(
+						"Hello message sent: device_id={}, account_uid={}",
+						self.config.device_id, self.config.account_uid
+					),
+					Some(&format!(
+						"Hello 消息已发送: 设备ID={}，账号={}",
+						self.config.device_id, self.config.account_uid
+					)),
+				);
 				self.send_ctrl(msg).await?;
 				self.update_state(SessionState::Handshaking(HandshakeStep::WaitingForHelloAck));
 			}
@@ -892,7 +900,9 @@ impl SessionActor {
 	/// - `file_id` 非空：FileList 的子文件传输，按 file 上限处理；
 	/// - 否则优先用本地 item 的 mime（本地元数据比对端声明更可信），
 	///   查不到才回退到 `ContentBegin.mime`。
-	fn inbound_item_kind(
+	///
+	/// DB 查询走 `spawn_blocking`，不在 Tokio worker 上持有 `store` 锁。
+	async fn inbound_item_kind(
 		&self,
 		item_id: &str,
 		file_id: Option<&str>,
@@ -901,10 +911,14 @@ impl SessionActor {
 		if file_id.is_some() {
 			return ItemKind::FileList;
 		}
-		let local_mime = {
-			let store = self.store.lock().unwrap();
-			store.get_item_mime(item_id).ok().flatten()
-		};
+		let store = self.store.clone();
+		let item_id = item_id.to_string();
+		let local_mime = tokio::task::spawn_blocking(move || {
+			let store = store.lock().unwrap();
+			store.get_item_mime(&item_id).ok().flatten()
+		})
+		.await
+		.unwrap_or(None);
 		kind_from_mime(local_mime.as_deref().unwrap_or(declared_mime))
 	}
 
@@ -954,26 +968,20 @@ impl SessionActor {
 							.await;
 						anyhow::bail!("Unexpected Hello in state {:?}", self.state);
 					}
-					{
-						let mut log_store = self.log_store.lock().unwrap();
-						let _ = log_store.log_info(
+					self.log_sink.log_info(
                             "Session",
                             &format!("Hello message received: remote_device_id={device_id}, remote_account_uid={account_uid}"),
                             Some(&format!("Hello 消息已接收: 远程设备ID={device_id}，远程账号={account_uid}")),
-                        );
-					}
+					);
 					if account_uid != self.config.account_uid {
-						{
-							let mut log_store = self.log_store.lock().unwrap();
-							let _ = log_store.log_error(
+						self.log_sink.log_error(
                                 "Session",
                                 &format!("Account verification failed (uid mismatch): remote_device_id={device_id}, remote_uid={account_uid}, local_uid={}",
                                         self.config.account_uid),
                                 Some(&format!("账号验证失败（账号不匹配）: 远程设备ID={device_id}，远程账号={account_uid}，本地账号={}",
                                         self.config.account_uid)),
                                 Some("AUTH_ACCOUNT_UID_MISMATCH"),
-                            );
-						}
+						);
 						let _ = self
 							.send_ctrl(CtrlMsg::AuthFail {
 								reply_to: msg_id.clone(),
@@ -989,14 +997,11 @@ impl SessionActor {
 						anyhow::bail!("Auth failed: uid mismatch");
 					}
 					self.update_remote_id(device_id.clone());
-					{
-						let mut log_store = self.log_store.lock().unwrap();
-						let _ = log_store.log_info(
+					self.log_sink.log_info(
                             "Session",
                             &format!("Account verification completed: remote_device_id={device_id}, verified=true"),
                             Some(&format!("账号验证已完成: 远程设备ID={device_id}，已验证=true")),
-                        );
-					}
+					);
 					self.send_ctrl(CtrlMsg::HelloAck {
 						reply_to: msg_id,
 						server_device_id: self.config.device_id.clone(),
@@ -1027,14 +1032,11 @@ impl SessionActor {
 							"Protocol version mismatch: local={PROTOCOL_VERSION}, remote={protocol_version}"
 						);
 					}
-					{
-						let mut log_store = self.log_store.lock().unwrap();
-						let _ = log_store.log_info(
+					self.log_sink.log_info(
                             "Session",
                             &format!("Hello message received: remote_device_id={server_device_id}, remote_account_uid=N/A"),
                             Some(&format!("Hello 消息已接收: 远程设备ID={server_device_id}，远程账号=N/A")),
-                        );
-					}
+					);
 					self.update_remote_id(server_device_id.clone());
 					self.start_opaque_login().await?;
 				}
@@ -1094,8 +1096,7 @@ impl SessionActor {
 			CtrlMsg::Pong { .. } => {}
 			CtrlMsg::ItemMeta { item, msg_id, .. } => {
 				if let Some(did) = &self.remote_device_id {
-					let mut log_store = self.log_store.lock().unwrap();
-					let _ = log_store.log_info(
+					self.log_sink.log_info(
 						"Session",
 						&format!(
 							"Metadata received from peer: device_id={did}, item_id={}, msg_id={msg_id:?}",
@@ -1134,8 +1135,7 @@ impl SessionActor {
 				if !accepted {
 					// 这里不回 CtrlMsg::Error：对端收到 Error 会直接终止会话，
 					// 而共享策略开关不应误杀正常连接，丢弃并记录日志即可。
-					let mut log_store = self.log_store.lock().unwrap();
-					let _ = log_store.log_warn(
+					self.log_sink.log_warn(
 						"Session",
 						&format!(
 							"Metadata rejected by accept_from_peer policy: item_id={}",
@@ -1198,14 +1198,11 @@ impl SessionActor {
 				self.handle_content_end(req_id).await?;
 			}
 			CtrlMsg::ContentCancel { req_id, reason } => {
-				{
-					let mut log_store = self.log_store.lock().unwrap();
-					let _ = log_store.log_info(
-						"Session",
-						&format!("Transfer cancelled: transfer_id={req_id}, reason={reason}"),
-						Some(&format!("传输已取消: 传输ID={req_id}，原因={reason}")),
-					);
-				}
+				self.log_sink.log_info(
+					"Session",
+					&format!("Transfer cancelled: transfer_id={req_id}, reason={reason}"),
+					Some(&format!("传输已取消: 传输ID={req_id}，原因={reason}")),
+				);
 				// 1. 如果我是发送者：在 senders map 里找
 				if let Some(state) = self.senders.remove(&req_id) {
 					state.handle.abort(); // 终止发送任务
@@ -1223,18 +1220,15 @@ impl SessionActor {
 				// 否则用户切换一次共享开关会导致会话反复断开/重连。
 				let detail =
 					message.unwrap_or_else(|| format!("peer denied content request ({code})"));
-				{
-					let mut log_store = self.log_store.lock().unwrap();
-					let _ = log_store.log_warn(
-						"Session",
-						&format!(
+				self.log_sink.log_warn(
+					"Session",
+					&format!(
 							"Content request denied by peer: transfer_id={req_id}, code={code}, message={detail}"
 						),
-						Some(&format!(
-							"对端拒绝内容请求: 传输ID={req_id}，错误码={code}，信息={detail}"
-						)),
-					);
-				}
+					Some(&format!(
+						"对端拒绝内容请求: 传输ID={req_id}，错误码={code}，信息={detail}"
+					)),
+				);
 				// 清理可能残留的同 req_id 发送任务（正常路径下此时还没有 Sender）
 				if let Some(state) = self.senders.remove(&req_id) {
 					state.handle.abort();
@@ -1262,11 +1256,17 @@ impl SessionActor {
 				.await?;
 				let (ok, sha_opt) = deleted;
 				if ok {
-					if let Some(sha) = &sha_opt {
-						let _ = cas.remove_blob(sha);
-						let now = now_ms();
-						let mut guard = self.store.lock().unwrap();
-						let _ = guard.mark_cache_missing(sha, now);
+					if let Some(sha) = sha_opt {
+						// `remove_blob` 会遍历整个 downloads/ 树，`mark_cache_missing`
+						// 是 SQLite 写：两者都放进 spawn_blocking，避免占住 worker。
+						let store = self.store.clone();
+						tokio::task::spawn_blocking(move || {
+							let _ = cas.remove_blob(&sha);
+							let now = now_ms();
+							let mut guard = store.lock().unwrap();
+							let _ = guard.mark_cache_missing(&sha, now);
+						})
+						.await?;
 					}
 					let evt = serde_json::json!({
 						"type": "ITEM_DELETED",
@@ -1292,14 +1292,11 @@ impl SessionActor {
 		// 入站策略：accept_from_peer=false（或对端身份未知）时拒绝接收内容。
 		// 用 ContentCancel 而非 Error 通知对端：Error 会被对端视为致命错误并断开会话。
 		if !self.inbound_accept_allowed().await? {
-			{
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_warn(
+			self.log_sink.log_warn(
 					"Session",
 					&format!("Transfer rejected by accept_from_peer policy: transfer_id={req_id}, item_id={item_id}"),
 					Some(&format!("接收策略禁止接收内容: 传输ID={req_id}，项目ID={item_id}")),
-				);
-			}
+			);
 			self.send_ctrl(CtrlMsg::ContentCancel {
 				req_id,
 				reason: "accept_from_peer disabled".into(),
@@ -1308,14 +1305,11 @@ impl SessionActor {
 			return Ok(());
 		}
 
-		{
-			let mut log_store = self.log_store.lock().unwrap();
-			let _ = log_store.log_info(
+		self.log_sink.log_info(
 				"Session",
 				&format!("Transfer request received: transfer_id={req_id}, item_id={item_id}, file_id={file_id:?}"),
 				Some(&format!("传输请求已接收: 传输ID={req_id}，项目ID={item_id}，文件ID={file_id:?}")),
-			);
-		}
+		);
 
 		if self.receivers.contains_key(&req_id) {
 			// 幂等处理：如果是重复的 Begin，忽略即可
@@ -1325,9 +1319,7 @@ impl SessionActor {
 		// 1) 并发上限：已存在 MAX_CONCURRENT_RECEIVERS 个接收时直接拒绝，
 		//    不分配 channel / Task / tmp 文件，避免对端刷 ContentBegin 撑爆资源。
 		if !receiver_slot_available(self.receivers.len()) {
-			{
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_warn(
+			self.log_sink.log_warn(
 					"Session",
 					&format!(
 						"Too many concurrent transfers, rejected ContentBegin: transfer_id={req_id}, item_id={item_id}, active={}",
@@ -1337,8 +1329,7 @@ impl SessionActor {
 						"并发传输过多，已拒绝该传输请求: 传输ID={req_id}，项目ID={item_id}，当前并发={}",
 						self.receivers.len()
 					)),
-				);
-			}
+			);
 			self.emit_transfer_failed(
 				&req_id,
 				"TOO_MANY_TRANSFERS",
@@ -1356,12 +1347,12 @@ impl SessionActor {
 
 		// 2) 硬上限：对端声明的 total_bytes 超过 size_limits 中对应类型的硬上限时，
 		//    在落盘前就拒绝（按 item 实际类型选 text/image/file；FileList 单文件用 file 上限）。
-		let item_kind = self.inbound_item_kind(&item_id, file_id.as_deref(), &mime);
+		let item_kind = self
+			.inbound_item_kind(&item_id, file_id.as_deref(), &mime)
+			.await;
 		let hard_cap = hard_cap_bytes(&item_kind, &self.config.app_config.size_limits);
 		if total_bytes > hard_cap {
-			{
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_warn(
+			self.log_sink.log_warn(
 					"Session",
 					&format!(
 						"Transfer rejected by hard size limit: transfer_id={req_id}, item_id={item_id}, kind={item_kind:?}, declared_bytes={total_bytes}, hard_cap={hard_cap}"
@@ -1369,8 +1360,7 @@ impl SessionActor {
 					Some(&format!(
 						"传输因超出硬上限被拒绝: 传输ID={req_id}，项目ID={item_id}，类型={item_kind:?}，声明字节={total_bytes}，硬上限={hard_cap}"
 					)),
-				);
-			}
+			);
 			self.emit_transfer_failed(
 				&req_id,
 				"ITEM_TOO_LARGE",
@@ -1412,8 +1402,10 @@ impl SessionActor {
 		let iid = item_id.clone();
 		let fid = file_id.clone();
 		let mime_clone = mime.clone();
-		// 如果 CAS 中存在该文件，说明是断点续传，需要以 Append 模式打开
-		let is_resume = tmp_path.exists();
+		// 如果 CAS 中存在该文件，说明是断点续传，需要以 Append 模式打开。
+		// `Path::exists` 是同步文件 IO，放进 spawn_blocking，避免运行时线程等磁盘。
+		let resume_path = tmp_path.clone();
+		let is_resume = tokio::task::spawn_blocking(move || resume_path.exists()).await?;
 
 		tokio::spawn(async move {
 			// RAII Guard: 任务退出时如果没 commit，自动删除 tmp 文件
@@ -1577,9 +1569,7 @@ impl SessionActor {
 			_ => None,
 		};
 		if let Some((code, detail)) = overrun {
-			{
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_error(
+			self.log_sink.log_error(
 					"Session",
 					&format!(
 						"Transfer aborted for exceeding declared size: transfer_id={transfer_id}, code={code}, {detail}"
@@ -1588,8 +1578,7 @@ impl SessionActor {
 						"传输写出声明大小之外的数据，已终止: 传输ID={transfer_id}，错误码={code}，{detail}"
 					)),
 					Some(&detail),
-				);
-			}
+			);
 			self.abort_receiver(&transfer_id, code, &detail, "size limit exceeded")
 				.await;
 			return Ok(());
@@ -1666,16 +1655,13 @@ impl SessionActor {
 			})
 			.collect();
 		for id in idle {
-			{
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_warn(
-					"Session",
-					&format!("Receiver idle timeout, cancelling transfer: transfer_id={id}"),
-					Some(&format!(
-						"接收方空闲超时，正在取消传输: 传输ID={id}，超时={RECEIVER_IDLE_TIMEOUT_MS}ms"
-					)),
-				);
-			}
+			self.log_sink.log_warn(
+				"Session",
+				&format!("Receiver idle timeout, cancelling transfer: transfer_id={id}"),
+				Some(&format!(
+					"接收方空闲超时，正在取消传输: 传输ID={id}，超时={RECEIVER_IDLE_TIMEOUT_MS}ms"
+				)),
+			);
 			self.abort_receiver(
 				&id,
 				"TRANSFER_IDLE_TIMEOUT",
@@ -1723,8 +1709,7 @@ impl SessionActor {
 					{
 						// 每个传输只写一条汇总（字节数 + 耗时），不再逐块记录
 						let elapsed_ms = now_ms() - started_ts_ms;
-						let mut log_store = self.log_store.lock().unwrap();
-						let _ = log_store.log_info(
+						self.log_sink.log_info(
 							"Session",
 							&format!("Inbound transfer completed: transfer_id={transfer_id}, bytes={received_bytes}/{total_bytes}, elapsed_ms={elapsed_ms}, sha256={expected_sha256}"),
 							Some(&format!("入站传输成功完成: 传输ID={transfer_id}，字节数={received_bytes}/{total_bytes}，耗时={elapsed_ms}ms，SHA256={expected_sha256}")),
@@ -1771,8 +1756,7 @@ impl SessionActor {
 					if marked_rows == 0 {
 						// 0 行说明 content_cache 里没有该 item 的记录（例如元数据已被删除）；
 						// 传输本身仍然成功，只记警告，不硬失败。
-						let mut log_store = self.log_store.lock().unwrap();
-						let _ = log_store.log_warn(
+						self.log_sink.log_warn(
 							"Session",
 							&format!(
 								"mark_cache_present matched 0 rows: item_id={item_id}, item_sha256={marked_sha}, transfer_sha256={expected_sha256}"
@@ -1841,15 +1825,12 @@ impl SessionActor {
 
 	fn emit_transfer_failed(&self, tid: &str, code: &str, msg: &str) {
 		// 记录传输失败日志
-		{
-			let mut log_store = self.log_store.lock().unwrap();
-			let _ = log_store.log_error(
-				"Session",
-				&format!("Transfer failed: transfer_id={tid}, error={msg}"),
-				Some(&format!("传输失败: 传输ID={tid}，错误={msg}")),
-				Some(msg),
-			);
-		}
+		self.log_sink.log_error(
+			"Session",
+			&format!("Transfer failed: transfer_id={tid}, error={msg}"),
+			Some(&format!("传输失败: 传输ID={tid}，错误={msg}")),
+			Some(msg),
+		);
 
 		// 根据文档规则硬编码属性
 		let (retryable, affects_session) = match code {
@@ -1899,53 +1880,63 @@ impl SessionActor {
 		}
 
 		// [修改] 1. 查找文件路径 (补全了 CAS 和 Local Path 的双重查找)
-		let (file_path_res, mime_val) = {
-			let store = self.store.lock().unwrap();
+		//
+		// DB 查询与 `Path::exists` 都是同步阻塞操作，整体放进 spawn_blocking：
+		// 大目录 / 慢磁盘 / SQLite busy 都不能占住 Tokio worker。错误传播保持原样
+		// （`?` 把 DB / CAS 错误原样返回给 handle_control_msg）。
+		let store = self.store.clone();
+		let cas = self.cas.clone();
+		let item_id_bg = item_id.clone();
+		let file_id_bg = file_id.clone();
+		let (file_path_res, mime_val) =
+			tokio::task::spawn_blocking(move || -> Result<(Option<(PathBuf, String)>, String)> {
+				let store = store.lock().unwrap();
 
-			// A. 获取目标的 SHA256 和 (可选的) 本地路径
-			//    如果是 FileList 子文件，查 files_json；如果是 Text/Image，查 item 主表
-			let (target_sha, local_path_opt) = if let Some(fid) = &file_id {
-				// Case 1: FileList 中的子文件
-				if let Some(fmeta) = store.get_file_meta(&item_id, fid)? {
-					(fmeta.sha256.unwrap_or_default(), fmeta.local_path)
+				// A. 获取目标的 SHA256 和 (可选的) 本地路径
+				//    如果是 FileList 子文件，查 files_json；如果是 Text/Image，查 item 主表
+				let (target_sha, local_path_opt) = if let Some(fid) = &file_id_bg {
+					// Case 1: FileList 中的子文件
+					if let Some(fmeta) = store.get_file_meta(&item_id_bg, fid)? {
+						(fmeta.sha256.unwrap_or_default(), fmeta.local_path)
+					} else {
+						(String::new(), None)
+					}
 				} else {
-					(String::new(), None)
+					// Case 2: Text/Image (Item 本身就是内容)
+					let sha = store.get_item_sha256(&item_id_bg)?.unwrap_or_default();
+					// Text/Image 通常没有 local_path，除非是极少数情况，这里暂定 None
+					(sha, None)
+				};
+
+				// B. 获取 MIME (用于通知接收端)
+				let mime = store
+					.get_item_mime(&item_id_bg)?
+					.unwrap_or("application/octet-stream".to_string());
+
+				// C. 决定最终读取路径
+				let mut final_path = None;
+
+				// 优先级 1: 本地原始文件 (Local Path)
+				// 场景: 用户刚复制了一个 2GB 视频，还没进 CAS，或者为了支持 tail/resuming
+				if let Some(lp_str) = local_path_opt {
+					let p = PathBuf::from(lp_str);
+					if p.exists() {
+						final_path = Some((p, target_sha.clone()));
+					}
 				}
-			} else {
-				// Case 2: Text/Image (Item 本身就是内容)
-				let sha = store.get_item_sha256(&item_id)?.unwrap_or_default();
-				// Text/Image 通常没有 local_path，除非是极少数情况，这里暂定 None
-				(sha, None)
-			};
 
-			// B. 获取 MIME (用于通知接收端)
-			let mime = store
-				.get_item_mime(&item_id)?
-				.unwrap_or("application/octet-stream".to_string());
-
-			// C. 决定最终读取路径
-			let mut final_path = None;
-
-			// 优先级 1: 本地原始文件 (Local Path)
-			// 场景: 用户刚复制了一个 2GB 视频，还没进 CAS，或者为了支持 tail/resuming
-			if let Some(lp_str) = local_path_opt {
-				let p = PathBuf::from(lp_str);
-				if p.exists() {
-					final_path = Some((p, target_sha.clone()));
+				// 优先级 2: CAS Blob
+				// 场景: 图片、文本、或者已经被归档的文件，以及 **测试用例** (测试通常只写 CAS)
+				if final_path.is_none() && !target_sha.is_empty() {
+					let blob_path = cas.blob_path(&target_sha)?;
+					if blob_path.exists() {
+						final_path = Some((blob_path, target_sha));
+					}
 				}
-			}
 
-			// 优先级 2: CAS Blob
-			// 场景: 图片、文本、或者已经被归档的文件，以及 **测试用例** (测试通常只写 CAS)
-			if final_path.is_none() && !target_sha.is_empty() {
-				let blob_path = self.cas.blob_path(&target_sha)?;
-				if blob_path.exists() {
-					final_path = Some((blob_path, target_sha));
-				}
-			}
-
-			(final_path, mime)
-		};
+				Ok((final_path, mime))
+			})
+			.await??;
 
 		if let Some((path, sha256)) = file_path_res {
 			let file = File::open(&path).await?;
@@ -2058,14 +2049,11 @@ impl SessionActor {
 		reply_tx: oneshot::Sender<Result<String>>,
 	) -> Result<()> {
 		let transfer_id = uuid::Uuid::new_v4().to_string();
-		{
-			let mut log_store = self.log_store.lock().unwrap();
-			let _ = log_store.log_info(
+		self.log_sink.log_info(
 				"Session",
 				&format!("Transfer request initiated: transfer_id={transfer_id}, item_id={item_id}, file_id={file_id:?}"),
 				Some(&format!("传输请求已发起: 传输ID={transfer_id}，项目ID={item_id}，文件ID={file_id:?}")),
-			);
-		}
+		);
 		self.send_ctrl(CtrlMsg::ContentGet {
 			msg_id: Some(transfer_id.clone()),
 			item_id,
@@ -2086,16 +2074,11 @@ impl SessionActor {
 				reason: "User cancelled".into(),
 			})
 			.await?;
-			{
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_info(
-					"Session",
-					&format!(
-						"Transfer cancelled: transfer_id={transfer_id}, reason=User cancelled"
-					),
-					Some(&format!("传输已取消: 传输ID={transfer_id}，原因=用户取消")),
-				);
-			}
+			self.log_sink.log_info(
+				"Session",
+				&format!("Transfer cancelled: transfer_id={transfer_id}, reason=User cancelled"),
+				Some(&format!("传输已取消: 传输ID={transfer_id}，原因=用户取消")),
+			);
 			return Ok(());
 		}
 
@@ -2106,16 +2089,11 @@ impl SessionActor {
 				reason: "User cancelled".into(),
 			})
 			.await?;
-			{
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_info(
-					"Session",
-					&format!(
-						"Transfer cancelled: transfer_id={transfer_id}, reason=User cancelled"
-					),
-					Some(&format!("传输已取消: 传输ID={transfer_id}，原因=用户取消")),
-				);
-			}
+			self.log_sink.log_info(
+				"Session",
+				&format!("Transfer cancelled: transfer_id={transfer_id}, reason=User cancelled"),
+				Some(&format!("传输已取消: 传输ID={transfer_id}，原因=用户取消")),
+			);
 			// 调用上面的处理函数清理资源
 			self.handle_content_cancel(transfer_id, "User cancelled".into())
 				.await?;
@@ -2244,15 +2222,12 @@ impl SessionActor {
 	fn transition_to_online(&mut self) {
 		self.update_state(SessionState::Online);
 		if let Some(did) = &self.remote_device_id {
-			{
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_info(
-					"Session",
-					&format!("Handshake completed, session online: remote_device_id={did}"),
-					Some(&format!("握手已完成，会话在线: 远程设备ID={did}")),
-				);
-			}
-			// 事件回调必须在释放 log_store 锁之后触发，避免重入死锁
+			self.log_sink.log_info(
+				"Session",
+				&format!("Handshake completed, session online: remote_device_id={did}"),
+				Some(&format!("握手已完成，会话在线: 远程设备ID={did}")),
+			);
+			// 日志只入队（非阻塞），随后触发回调，不存在持锁重入问题
 			let json = serde_json::json!({
 				"type": "PEER_ONLINE",
 				"ts_ms": now_ms(),
@@ -2265,8 +2240,7 @@ impl SessionActor {
 	async fn tick_heartbeat(&mut self) -> Result<()> {
 		if now_ms() - self.last_active_at > HEARTBEAT_TIMEOUT.as_millis() as i64 {
 			if let Some(did) = &self.remote_device_id {
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_warn(
+				self.log_sink.log_warn(
 					"Session",
 					&format!(
 						"Heartbeat timeout, session may be dead: device_id={did}, last_active={}",
@@ -2290,8 +2264,7 @@ impl SessionActor {
 		if self.state == SessionState::Online {
 			// 心跳发送（Debug 级别，避免日志过多）
 			if let Some(did) = &self.remote_device_id {
-				let mut log_store = self.log_store.lock().unwrap();
-				let _ = log_store.log_debug(
+				self.log_sink.log_debug(
 					"Session",
 					&format!("Heartbeat sent: device_id={did}"),
 					Some(&format!("心跳已发送: 设备ID={did}")),

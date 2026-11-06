@@ -10,7 +10,7 @@ use crate::clipboard::{make_ingest_plan, ClipboardSnapshot, IngestPlan, LocalIng
 pub(crate) use crate::model::ItemMeta;
 use crate::net::{NetCmd, NetManager};
 pub use crate::policy::{AppConfig, GlobalPolicy};
-use crate::{cas::Cas, logs::LogStore, store::Store, util::now_ms};
+use crate::{cas::Cas, logs::LogSink, logs::LogStore, store::Store, util::now_ms};
 
 /// CAS 缓存 GC 的“廉价预检”阈值：`content_cache` 的 SQL 账面占用低于
 /// 上限的 `1 - 1/GC_CAS_ACCOUNT_TRIGGER_DIVISOR`（即 90%）时，非启动路径
@@ -129,6 +129,12 @@ impl Core {
 		let log_store = LogStore::open(&cfg.data_dir).expect("open log store");
 		let logs_rebuilt = log_store.rebuilt;
 		let log_store_arc = Arc::new(Mutex::new(log_store));
+		// 专用日志 writer 线程：运行时（NetManager / SessionActor）只调用
+		// `log_sink.log_*`（try_send，永不阻塞），查询路径继续共享
+		// `log_store_arc`（FFI 线程阻塞等待 SQLite 是可接受的）。
+		// 顺序：writer 线程在 Core 初始化期间启动，`Core::shutdown` 负责
+		// 关闭队列、排空并 join（见 `Inner::shutdown`）。
+		let log_sink = LogSink::new(Arc::clone(&log_store_arc));
 
 		// 记录初始化开始日志
 		{
@@ -347,7 +353,7 @@ impl Core {
 				sink.clone(),
 				store_arc.clone(),
 				cas.clone(),
-				log_store_arc.clone(),
+				log_sink.clone(),
 			) {
 				Ok(tx) => {
 					let mut log_store = log_store_arc.lock().unwrap();
@@ -376,6 +382,7 @@ impl Core {
 			is_shutdown: AtomicBool::new(false),
 			store: store_arc,
 			log_store: log_store_arc,
+			log_sink,
 			cas,
 			net: net_tx,
 		};
@@ -400,14 +407,12 @@ impl Core {
 		let plan = match self.plan_local_ingest(&snapshot, false) {
 			Ok(p) => p,
 			Err(e) => {
-				if let Ok(mut log_store) = self.inner.log_store.lock() {
-					let _ = log_store.log_error(
-						"Ingest",
-						&format!("Ingest planning failed: {e}"),
-						Some(&format!("内容摄入规划失败: {e}")),
-						Some(&e.to_string()),
-					);
-				}
+				self.inner.log_sink.log_error(
+					"Ingest",
+					&format!("Ingest planning failed: {e}"),
+					Some(&format!("内容摄入规划失败: {e}")),
+					Some(&e.to_string()),
+				);
 				return Err(e);
 			}
 		};
@@ -415,14 +420,12 @@ impl Core {
 		match self.apply_ingest(&plan) {
 			Ok(meta) => Ok(meta),
 			Err(e) => {
-				if let Ok(mut log_store) = self.inner.log_store.lock() {
-					let _ = log_store.log_error(
-						"Ingest",
-						&format!("Ingest failed: {e}"),
-						Some(&format!("内容摄入失败: {e}")),
-						Some(&e.to_string()),
-					);
-				}
+				self.inner.log_sink.log_error(
+					"Ingest",
+					&format!("Ingest failed: {e}"),
+					Some(&format!("内容摄入失败: {e}")),
+					Some(&e.to_string()),
+				);
 				Err(e)
 			}
 		}
@@ -474,19 +477,16 @@ impl Core {
 			}
 		};
 
-		// 记录规划日志
-		{
-			let mut log_store = self.inner.log_store.lock().unwrap();
-			let _ = log_store.log_info(
-				"Ingest",
-				&format!(
-					"Planning ingest for clipboard content, type: {content_type}, size: {size_bytes} bytes"
-				),
-				Some(&format!(
-					"正在规划剪贴板内容摄入，类型: {content_type}，大小: {size_bytes} 字节"
-				)),
-			);
-		}
+		// 记录规划日志（非阻塞入队，不占 FFI 线程的 SQLite 锁）
+		self.inner.log_sink.log_info(
+			"Ingest",
+			&format!(
+				"Planning ingest for clipboard content, type: {content_type}, size: {size_bytes} bytes"
+			),
+			Some(&format!(
+				"正在规划剪贴板内容摄入，类型: {content_type}，大小: {size_bytes} 字节"
+			)),
+		);
 
 		let deps = LocalIngestDeps {
 			device_id: &self.inner.core_config.device_id,
@@ -528,15 +528,13 @@ impl Core {
 				store.mark_cache_present(&sha, now)?;
 
 				// 记录 CAS 写入成功
-				let mut log_store = self.inner.log_store.lock().unwrap();
-				let _ = log_store.log_info(
+				self.inner.log_sink.log_info(
 					"Ingest",
 					&format!("CAS blob written successfully: {sha}"),
 					Some(&format!("CAS 对象写入成功: {sha}")),
 				);
 			} else {
-				let mut log_store = self.inner.log_store.lock().unwrap();
-				let _ = log_store.log_error(
+				self.inner.log_sink.log_error(
 					"Ingest",
 					"CAS write failed: blob missing after put_if_absent",
 					Some("CAS 写入失败: put_if_absent 后对象缺失"),
@@ -549,8 +547,7 @@ impl Core {
 			store.touch_cache(&sha, now)?;
 
 			// 记录 CAS 去重命中
-			let mut log_store = self.inner.log_store.lock().unwrap();
-			let _ = log_store.log_debug(
+			self.inner.log_sink.log_debug(
 				"Ingest",
 				&format!("CAS blob already exists, skipping write: {sha}"),
 				Some(&format!("CAS 对象已存在，跳过写入: {sha}")),
@@ -569,14 +566,11 @@ impl Core {
 		self.inner.emit(meta_evt.to_string());
 
 		// 记录摄入成功
-		{
-			let mut log_store = self.inner.log_store.lock().unwrap();
-			let _ = log_store.log_info(
-				"Ingest",
-				&format!("Ingest applied successfully, item_id: {item_id}"),
-				Some(&format!("内容摄入成功，项目 ID: {item_id}")),
-			);
-		}
+		self.inner.log_sink.log_info(
+			"Ingest",
+			&format!("Ingest applied successfully, item_id: {item_id}"),
+			Some(&format!("内容摄入成功，项目 ID: {item_id}")),
+		);
 
 		// --- M1 集成：广播元数据到网络 ---
 		if let Some(net_tx) = &self.inner.net {
@@ -1227,7 +1221,10 @@ pub struct Inner {
 	pub sink: Arc<dyn CoreEventSink>,
 	pub is_shutdown: AtomicBool,
 	pub store: Arc<Mutex<Store>>,
+	/// 查询/删除路径共享的同步 LogStore（FFI 线程使用，允许阻塞）。
 	pub log_store: Arc<Mutex<LogStore>>,
+	/// 运行时路径使用的非阻塞日志入口（内部有专用 writer 线程）。
+	pub log_sink: LogSink,
 	pub cas: Cas,
 	pub net: Option<mpsc::Sender<NetCmd>>,
 }
@@ -1252,6 +1249,19 @@ impl Inner {
 		if let Some(tx) = &self.net {
 			let _ = tx.try_send(NetCmd::Shutdown);
 		}
+
+		// 顺序：先通知 NetManager 停机（此后它多数日志会自然减少），再关闭 sink。
+		// `flush_and_join` 先停止接收新记录，再让 writer 排空已入队的记录并
+		// 在超时内 join。因此 shutdown 返回时，所有在关闭前成功入队的日志都已
+		// 提交；NetManager 停机过程中仍可能并发调用 log_*，这些记录会被丢弃
+		// 并计入 sink 的 dropped 计数，绝不会让关闭流程阻塞。
+		//
+		// 不能反过来先 flush 再通知 NetManager：那样停机期间的日志会落在
+		// 已关闭的队列上，丢失更多。这里的取舍是“保证调用方已入队日志不丢”，
+		// 而不是“等待 NetManager 完全停止”（它没有 join handle）。
+		let _ = self
+			.log_sink
+			.flush_and_join(crate::logs::LOG_SINK_JOIN_TIMEOUT);
 	}
 }
 
@@ -1317,6 +1327,56 @@ mod clear_cache_regression {
 		);
 
 		core.shutdown();
+	}
+}
+
+/// 关闭顺序回归：sink 中已入队的日志必须在 `Core::shutdown` 返回前落库。
+#[cfg(test)]
+mod log_sink_shutdown {
+	use super::*;
+
+	struct NoopSink;
+	impl CoreEventSink for NoopSink {
+		fn emit(&self, _event_json: String) {}
+	}
+
+	#[test]
+	fn shutdown_flushes_sink_queued_logs() {
+		let root = tempfile::tempdir().unwrap();
+		let data_dir = root.path().join("data");
+		let cfg = CoreConfig {
+			device_id: "dev-log-flush".to_string(),
+			device_name: "dev".to_string(),
+			account_uid: "acct-log-flush".to_string(),
+			account_password: "test_password".to_string(),
+			data_dir: data_dir.to_string_lossy().into_owned(),
+			cache_dir: root.path().join("cache").to_string_lossy().into_owned(),
+			app_config: AppConfig::default(),
+			disable_network: true,
+		};
+		let core = Core::init(cfg, Arc::new(NoopSink));
+
+		let marker = format!("shutdown-flush-{}", now_ms());
+		core.inner.log_sink.log_info(
+			"Test",
+			&format!("record queued before shutdown: {marker}"),
+			Some(&format!("关闭前入队的记录: {marker}")),
+		);
+		assert_eq!(
+			core.inner.log_sink.dropped_count(),
+			0,
+			"小批量入队不应触发丢弃"
+		);
+
+		// shutdown 内部会关闭队列、排空并 join writer；返回即代表已落库。
+		core.shutdown();
+		drop(core);
+
+		// writer 已退出、连接已释放，重新打开日志库必须能看到该记录。
+		let store = LogStore::open(&data_dir).unwrap();
+		let entries = store.query_latest(0, Some(&marker), 10, None).unwrap();
+		assert_eq!(entries.len(), 1, "shutdown 前入队的日志必须已落库");
+		assert!(entries[0].message.contains(&marker));
 	}
 }
 

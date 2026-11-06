@@ -1,6 +1,10 @@
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// 日志保留天数：打开数据库时删除早于该天数的记录。
 const LOG_RETENTION_DAYS: i64 = 7;
@@ -15,6 +19,41 @@ const LOG_MAX_ROWS: i64 = 200_000;
 const LOG_VACUUM_MIN_DELETED: i64 = 10_000;
 
 const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
+
+/// [`LogSink`] 的默认队列容量（条）。
+///
+/// 4096 条诊断日志足够吸收一次突发（例如握手 + 传输状态密集切换），同时把
+/// 最坏情况下的内存占用限制在几百 KB 量级。队列满时绝不阻塞调用方，只丢弃
+/// 并计数（见 [`LogSink::dropped_count`]）。
+pub const LOG_SINK_CAPACITY: usize = 4096;
+
+/// 一次事务最多写入的记录数。
+///
+/// 批处理把「每条日志一次 INSERT + 一次 `LogStore` 锁」压低到「每 N 条一次
+/// 事务 + 一次锁」，又不至于让查询路径等太久（单批是微秒级）。
+const LOG_SINK_BATCH_MAX: usize = 256;
+
+/// writer 线程空闲时轮询 drop 计数的间隔。
+///
+/// 有记录时 writer 阻塞在 `recv` 上立即被唤醒；该间隔只决定「空闲时多久
+/// 检查一次丢弃率」，不引入任何调用方等待。
+const LOG_SINK_IDLE_POLL: Duration = Duration::from_millis(500);
+
+/// writer 线程向 stderr 汇报丢弃率的间隔。
+const LOG_SINK_DROP_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// 异步日志队列的关闭等待上限。
+///
+/// writer 可能卡在 SQLite 的 `busy_timeout`（5 s）上，因此等待上限必须大于它；
+/// 超时后只记录错误并放弃 join（writer 会在 SQLite 释放后自行退出），
+/// 绝不让关闭流程无限挂起。
+pub const LOG_SINK_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `logs` 表 INSERT 语句（单语言与多语言共用的列）。
+const INSERT_LOG_ROW_SQL: &str = r"
+    INSERT INTO logs (ts_utc, level, component, category, message, exception, props_json)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+    ";
 
 /// 日志保留策略的执行结果。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -242,27 +281,16 @@ impl LogStore {
 		exception: Option<&str>,
 		props_json: Option<&str>,
 	) -> anyhow::Result<i64> {
-		// 使用结构体构建多语言消息（类型安全，易于扩展）
-		let msg = MultilingualMessage {
-			en: message_en.to_string(),
-			zh_cn: message_zh_cn.map(ToString::to_string),
-		};
-		let message_json = serde_json::to_string(&msg)?;
-
-		let _id = self.conn.execute(
-			r"
-            INSERT INTO logs (ts_utc, level, component, category, message, exception, props_json)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            ",
-			params![
-				ts_utc,
-				level,
-				component,
-				category,
-				message_json,
-				exception,
-				props_json
-			],
+		insert_multilang_row(
+			&self.conn,
+			ts_utc,
+			level,
+			component,
+			category,
+			message_en,
+			message_zh_cn,
+			exception,
+			props_json,
 		)?;
 		Ok(self.conn.last_insert_rowid())
 	}
@@ -807,6 +835,402 @@ impl LogStore {
 	}
 }
 
+/// 把一条多语言日志编码成 `logs` 表行并插入。
+///
+/// [`LogStore::write_multilang`] 与异步 writer 线程共用这一段，保证两条写入
+/// 路径生成的 `message` JSON 完全一致（日志 UI 依赖该格式）。
+#[allow(clippy::too_many_arguments)]
+fn insert_multilang_row(
+	conn: &Connection,
+	ts_utc: i64,
+	level: i32,
+	component: &str,
+	category: &str,
+	message_en: &str,
+	message_zh_cn: Option<&str>,
+	exception: Option<&str>,
+	props_json: Option<&str>,
+) -> anyhow::Result<()> {
+	// 使用结构体构建多语言消息（类型安全，易于扩展）
+	let msg = MultilingualMessage {
+		en: message_en.to_string(),
+		zh_cn: message_zh_cn.map(ToString::to_string),
+	};
+	let message_json = serde_json::to_string(&msg)?;
+	conn.execute(
+		INSERT_LOG_ROW_SQL,
+		params![
+			ts_utc,
+			level,
+			component,
+			category,
+			message_json,
+			exception,
+			props_json
+		],
+	)?;
+	Ok(())
+}
+
+/// 队列中的一条待写日志。
+///
+/// 所有字段都是拥有所有权的 `String`：调用方（Tokio worker）只做字符串复制与
+/// `try_send`，真正的 JSON 编码 / SQLite INSERT 全部发生在 `cb-log-writer` 线程。
+#[derive(Debug)]
+struct LogRecord {
+	ts_utc: i64,
+	level: i32,
+	component: String,
+	category: String,
+	message_en: String,
+	message_zh_cn: Option<String>,
+	exception: Option<String>,
+	props_json: Option<String>,
+}
+
+impl LogRecord {
+	fn new(
+		level: i32,
+		component: &str,
+		category: &str,
+		message_en: &str,
+		message_zh_cn: Option<&str>,
+		exception: Option<&str>,
+	) -> Self {
+		Self {
+			ts_utc: crate::util::now_ms(),
+			level,
+			component: component.to_string(),
+			category: category.to_string(),
+			message_en: message_en.to_string(),
+			message_zh_cn: message_zh_cn.map(ToString::to_string),
+			exception: exception.map(ToString::to_string),
+			props_json: None,
+		}
+	}
+}
+
+/// `LogSink` 的内部共享状态：所有克隆共享同一个队列、计数器和 writer handle。
+struct LogSinkInner {
+	/// 有界队列的发送端。`shutdown` 会把它取走并 drop，writer 据此退出。
+	tx: Mutex<Option<SyncSender<LogRecord>>>,
+	/// 是否已停止接收（writer 退出后所有 `log*` 调用都只累加丢弃计数）。
+	closed: AtomicBool,
+	/// 因队列满 / 已关闭而丢弃的记录数（调用方只做原子递增，绝不再写 DB）。
+	dropped: Arc<AtomicU64>,
+	/// writer 已成功提交的记录数。
+	written: Arc<AtomicU64>,
+	/// `cb-log-writer` 的 join handle。`shutdown` 取走后等待其退出。
+	writer: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+/// 非阻塞日志接收端：异步运行时只调用 `try_send`，SQLite 写入由专用线程完成。
+///
+/// # 为什么需要它
+///
+/// P1 之后 NetManager 使用多线程 Tokio runtime，但会话路径仍直接
+/// `log_store.lock()` + INSERT：一次慢 INSERT / WAL checkpoint / `busy_timeout`
+/// 就能占住一个 worker，严重时连 2 s 心跳都发不出去。`LogSink` 把日志写入
+/// 从运行时线程完全剥离。
+///
+/// # 设计
+///
+/// - 有界 `std::sync::mpsc::SyncSender<LogRecord>`（默认容量 [`LOG_SINK_CAPACITY`]）；
+/// - 调用方只做 `try_send`：`Full` / `Disconnected` 时原子递增丢弃计数并立即返回；
+/// - 专用 OS 线程 `cb-log-writer` 持有 `Arc<Mutex<LogStore>>`，按批（最多
+///   [`LOG_SINK_BATCH_MAX`] 条）在**一个事务**里写入；该锁与 FFI 查询路径
+///   （`cb_logs_query_*` / `cb_logs_stats`）共享，查询因此能看到已提交的日志；
+/// - 顺序：队列 FIFO + 单 writer + 单事务，SQLite `id` 单调递增，提交顺序与
+///   `log*` 调用顺序一致（跨批次也一致）；
+/// - 丢弃率只在 writer 线程周期性写 stderr，调用方永远不会因为统计而写 DB。
+#[derive(Clone)]
+pub struct LogSink {
+	inner: Arc<LogSinkInner>,
+}
+
+impl LogSink {
+	/// 用默认容量创建 sink，并启动 `cb-log-writer` 线程。
+	pub fn new(store: Arc<Mutex<LogStore>>) -> Self {
+		Self::with_capacity(store, LOG_SINK_CAPACITY)
+	}
+
+	/// 用指定队列容量创建 sink。
+	pub fn with_capacity(store: Arc<Mutex<LogStore>>, capacity: usize) -> Self {
+		let capacity = capacity.max(1);
+		let (tx, rx) = std::sync::mpsc::sync_channel(capacity);
+		let dropped = Arc::new(AtomicU64::new(0));
+		let written = Arc::new(AtomicU64::new(0));
+		let writer_dropped = Arc::clone(&dropped);
+		let writer_written = Arc::clone(&written);
+		let writer = std::thread::Builder::new()
+			.name("cb-log-writer".to_string())
+			.spawn(move || writer_loop(&store, &rx, &writer_dropped, &writer_written))
+			.expect("failed to spawn cb-log-writer thread");
+		Self {
+			inner: Arc::new(LogSinkInner {
+				tx: Mutex::new(Some(tx)),
+				closed: AtomicBool::new(false),
+				dropped,
+				written,
+				writer: Mutex::new(Some(writer)),
+			}),
+		}
+	}
+
+	/// 通用入口：指定 level / component，与 [`LogStore::write_multilang`] 等价。
+	#[allow(clippy::too_many_arguments)]
+	pub fn log(
+		&self,
+		level: i32,
+		component: &str,
+		category: &str,
+		message_en: &str,
+		message_zh_cn: Option<&str>,
+		exception: Option<&str>,
+	) {
+		self.enqueue(LogRecord::new(
+			level,
+			component,
+			category,
+			message_en,
+			message_zh_cn,
+			exception,
+		));
+	}
+
+	/// 非阻塞 Info 日志（component 固定为 `Core`，与 [`LogStore::log_info`] 一致）。
+	pub fn log_info(&self, category: &str, message_en: &str, message_zh_cn: Option<&str>) {
+		self.log(2, "Core", category, message_en, message_zh_cn, None);
+	}
+
+	/// 非阻塞 Warn 日志。
+	pub fn log_warn(&self, category: &str, message_en: &str, message_zh_cn: Option<&str>) {
+		self.log(3, "Core", category, message_en, message_zh_cn, None);
+	}
+
+	/// 非阻塞 Error 日志。
+	pub fn log_error(
+		&self,
+		category: &str,
+		message_en: &str,
+		message_zh_cn: Option<&str>,
+		error: Option<&str>,
+	) {
+		self.log(4, "Core", category, message_en, message_zh_cn, error);
+	}
+
+	/// 非阻塞 Debug 日志。
+	pub fn log_debug(&self, category: &str, message_en: &str, message_zh_cn: Option<&str>) {
+		self.log(1, "Core", category, message_en, message_zh_cn, None);
+	}
+
+	/// 已丢弃（队列满 / 已关闭）的记录数。
+	pub fn dropped_count(&self) -> u64 {
+		self.inner.dropped.load(Ordering::Relaxed)
+	}
+
+	/// writer 已成功提交的记录数。
+	pub fn written_count(&self) -> u64 {
+		self.inner.written.load(Ordering::Relaxed)
+	}
+
+	/// 入队；**任何情况下都不阻塞、不写 DB**。
+	fn enqueue(&self, record: LogRecord) {
+		if self.inner.closed.load(Ordering::Relaxed) {
+			self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+			return;
+		}
+		let guard = match self.inner.tx.lock() {
+			Ok(guard) => guard,
+			Err(poisoned) => poisoned.into_inner(),
+		};
+		let Some(tx) = guard.as_ref() else {
+			self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+			return;
+		};
+		match tx.try_send(record) {
+			Ok(()) => {}
+			Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+				self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+	}
+
+	/// 停止接收、排空队列并等待 writer 退出（有界等待，返回是否成功 join）。
+	///
+	/// 顺序保证：
+	/// 1. 先置 `closed`，之后所有 `log*` 调用直接计入丢弃计数（不碰队列）；
+	/// 2. 取走并 drop `SyncSender`：writer 在收到 `Disconnected` 之前会先排空
+	///    已入队的记录，因此不会丢失“关闭前成功入队”的日志；
+	/// 3. 以 `timeout` 为上限轮询 writer 是否结束，结束后 `join` 回收线程。
+	///
+	/// 调用方是 `Core::shutdown`（FFI 线程），允许短暂阻塞；运行时线程从不调用。
+	pub fn flush_and_join(&self, timeout: Duration) -> bool {
+		self.inner.closed.store(true, Ordering::SeqCst);
+		let sender = {
+			let mut guard = match self.inner.tx.lock() {
+				Ok(guard) => guard,
+				Err(poisoned) => poisoned.into_inner(),
+			};
+			guard.take()
+		};
+		drop(sender);
+
+		let writer = {
+			let mut guard = match self.inner.writer.lock() {
+				Ok(guard) => guard,
+				Err(poisoned) => poisoned.into_inner(),
+			};
+			guard.take()
+		};
+		let Some(handle) = writer else {
+			return true; // 已关闭或该 sink 没有 writer（测试构造）
+		};
+
+		let deadline = Instant::now() + timeout;
+		while !handle.is_finished() && Instant::now() < deadline {
+			std::thread::sleep(Duration::from_millis(2));
+		}
+		if handle.is_finished() {
+			let _ = handle.join();
+			true
+		} else {
+			eprintln!(
+				"[logs] cb-log-writer did not exit within {timeout:?}; detaching \
+                 (SQLite is likely blocked; queued logs may be lost)"
+			);
+			false
+		}
+	}
+
+	/// 测试专用：构造一个**没有 writer** 的 sink（等效于 writer 永久停滞）。
+	///
+	/// 返回的 receiver 必须被测试持有，否则队列会立即变成 `Disconnected`；
+	/// 持有它就能确定性地验证「第一次入队成功、后续入队因队列满而丢弃」。
+	#[cfg(test)]
+	fn new_stalled_for_test(capacity: usize) -> (Self, Receiver<LogRecord>) {
+		let (tx, rx) = std::sync::mpsc::sync_channel(capacity.max(1));
+		let sink = Self {
+			inner: Arc::new(LogSinkInner {
+				tx: Mutex::new(Some(tx)),
+				closed: AtomicBool::new(false),
+				dropped: Arc::new(AtomicU64::new(0)),
+				written: Arc::new(AtomicU64::new(0)),
+				writer: Mutex::new(None),
+			}),
+		};
+		(sink, rx)
+	}
+}
+
+/// `cb-log-writer` 主循环：批量取队列 → 一次事务写入 → 周期汇报丢弃率。
+fn writer_loop(
+	store: &Mutex<LogStore>,
+	rx: &Receiver<LogRecord>,
+	dropped: &AtomicU64,
+	written: &AtomicU64,
+) {
+	let mut reported_dropped = 0u64;
+	let mut last_report = Instant::now();
+
+	loop {
+		let first = match rx.recv_timeout(LOG_SINK_IDLE_POLL) {
+			Ok(record) => record,
+			Err(RecvTimeoutError::Timeout) => {
+				report_dropped(dropped, &mut reported_dropped, &mut last_report);
+				continue;
+			}
+			Err(RecvTimeoutError::Disconnected) => break,
+		};
+
+		let mut batch = Vec::with_capacity(LOG_SINK_BATCH_MAX);
+		batch.push(first);
+		let mut disconnected = false;
+		while batch.len() < LOG_SINK_BATCH_MAX {
+			match rx.try_recv() {
+				Ok(record) => batch.push(record),
+				Err(TryRecvError::Empty) => break,
+				Err(TryRecvError::Disconnected) => {
+					disconnected = true;
+					break;
+				}
+			}
+		}
+
+		let batch_len = batch.len() as u64;
+		{
+			// 与 FFI 查询路径共享同一把锁：查询最多等一个事务，writer 不会在
+			// 持锁期间阻塞等待队列（队列由上面的循环排空）。
+			let guard = match store.lock() {
+				Ok(guard) => guard,
+				Err(poisoned) => poisoned.into_inner(),
+			};
+			match write_batch(&guard, &batch) {
+				Ok(()) => {
+					written.fetch_add(batch_len, Ordering::Relaxed);
+				}
+				Err(e) => {
+					// 整批回滚：计入丢弃，绝不在 writer 里重试（避免永久卡死）。
+					dropped.fetch_add(batch_len, Ordering::Relaxed);
+					eprintln!("[logs] async log batch write failed ({batch_len} records): {e}");
+				}
+			}
+		}
+		report_dropped(dropped, &mut reported_dropped, &mut last_report);
+
+		if disconnected {
+			break;
+		}
+	}
+
+	// 退出前做最后一次汇报，避免最后一段丢弃静默丢失。
+	let total = dropped.load(Ordering::Relaxed);
+	if total > reported_dropped {
+		eprintln!(
+			"[logs] log sink dropped {} record(s) before shutdown (cumulative={total})",
+			total - reported_dropped
+		);
+	}
+}
+
+/// 在一个事务里写入一批记录；失败时整批回滚。
+fn write_batch(store: &LogStore, batch: &[LogRecord]) -> anyhow::Result<()> {
+	let tx = store.conn.unchecked_transaction()?;
+	for record in batch {
+		insert_multilang_row(
+			&tx,
+			record.ts_utc,
+			record.level,
+			&record.component,
+			&record.category,
+			&record.message_en,
+			record.message_zh_cn.as_deref(),
+			record.exception.as_deref(),
+			record.props_json.as_deref(),
+		)?;
+	}
+	tx.commit()?;
+	Ok(())
+}
+
+/// 周期性汇报被丢弃的日志条数；只在 writer 线程调用。
+fn report_dropped(dropped: &AtomicU64, reported: &mut u64, last_report: &mut Instant) {
+	if last_report.elapsed() < LOG_SINK_DROP_REPORT_INTERVAL {
+		return;
+	}
+	let total = dropped.load(Ordering::Relaxed);
+	if total > *reported {
+		eprintln!(
+			"[logs] log sink dropped {} record(s) in the last {:?} \
+             (writer is behind; cumulative={total})",
+			total - *reported,
+			last_report.elapsed()
+		);
+	}
+	*reported = total;
+	*last_report = Instant::now();
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LogStats {
 	pub count: i64,
@@ -814,7 +1238,6 @@ pub struct LogStats {
 	pub last_ms: Option<i64>,
 	pub by_level: [i64; 7],
 }
-
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SourceStats {
 	pub components: std::collections::HashMap<String, i64>,
@@ -925,5 +1348,66 @@ mod tests {
 		// 重新打开时应自动清理过期记录，仅保留新鲜记录。
 		let reopened = LogStore::open(dir.path()).unwrap();
 		assert_eq!(reopened.stats().unwrap().count, 1);
+	}
+
+	/// 队列满时 `log*` 必须立即返回并计入丢弃计数，绝不阻塞调用方。
+	///
+	/// 用一个没有 writer 的 sink（等价于 writer 永久停滞）把容量 1 的队列瞬间
+	/// 填满：第一次入队成功，其余全部因 `Full` 被丢弃。只要实现里出现任何
+	/// 阻塞式 `send` / SQLite 调用，1000 次循环就会卡住或超时。
+	#[test]
+	fn sink_never_blocks_when_writer_is_stalled() {
+		let (sink, _rx) = LogSink::new_stalled_for_test(1);
+		let started = Instant::now();
+		for i in 0..1_000 {
+			sink.log_info("SinkTest", &format!("queued message {i}"), None);
+		}
+		let elapsed = started.elapsed();
+
+		assert_eq!(
+			sink.dropped_count(),
+			999,
+			"capacity=1 只接收第一条，其余 999 条应被丢弃"
+		);
+		assert!(
+			elapsed < Duration::from_millis(500),
+			"log() 不得阻塞调用方，1000 次入队耗时 {elapsed:?}"
+		);
+	}
+
+	/// 真实 writer：入队后 flush，记录必须全部落库且顺序/内容不变。
+	#[test]
+	fn sink_writer_commits_batches_and_flushes() {
+		let dir = tempfile::tempdir().unwrap();
+		let store = Arc::new(Mutex::new(LogStore::open(dir.path()).unwrap()));
+		let sink = LogSink::with_capacity(Arc::clone(&store), 8);
+		for i in 0..5 {
+			sink.log_info("SinkTest", &format!("flush record {i}"), None);
+		}
+
+		assert!(
+			sink.flush_and_join(Duration::from_secs(5)),
+			"writer 必须正常退出"
+		);
+		assert!(
+			sink.flush_and_join(Duration::from_secs(5)),
+			"重复关闭必须幂等"
+		);
+		assert_eq!(sink.written_count(), 5);
+		assert_eq!(sink.dropped_count(), 0);
+
+		let entries = store
+			.lock()
+			.unwrap()
+			.query_latest(0, Some("flush record"), 10, None)
+			.unwrap();
+		assert_eq!(entries.len(), 5, "flush 后 5 条记录都必须落库");
+		for (i, entry) in entries.iter().rev().enumerate() {
+			assert!(
+				entry.message.contains(&format!("flush record {i}")),
+				"记录顺序/内容必须保持: {}",
+				entry.message
+			);
+		}
 	}
 }
