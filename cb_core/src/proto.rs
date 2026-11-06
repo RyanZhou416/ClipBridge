@@ -14,7 +14,14 @@ use serde::{Deserialize, Serialize};
 //      `[u32 LE header_len][postcard(TransferHeader)]`，随后直接写文件字节，
 //      最后 FIN。旧的 `CBFrame::Data` 帧类型从线格式中删除（版本号已 +1，
 //      两端必须同版本，无需兼容旧对端）。
-pub const PROTOCOL_VERSION: u32 = 4;
+// - 5（ADR-002 阶段 B2）：一个传输拆成 N 个互不重叠、连续覆盖的子区间，每个
+//      子区间一条数据流。`ContentBegin` 增加 `ranges`（发送端的完整区间计划），
+//      接收端据此检测缺段/重叠/未声明区间，并在 `ContentEnd` 时确认所有区间
+//      都已 FIN。`TransferHeader` 的 `offset` / `length` 语义从"整文件"变为
+//      "本子区间"；`sha256` 仍是整文件 hash（与 `ContentBegin.sha256` 一致）。
+//      整文件的完整性在接收端 finalize 时按顺序重读临时文件校验（见 ADR-002
+//      §4.2 的两种方案与 actor.rs 的注释）。两端必须同版本。
+pub const PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Debug)]
 pub enum CBFrame {
@@ -139,6 +146,13 @@ pub enum CtrlMsg {
 		total_bytes: u64,
 		sha256: String,
 		mime: String,
+		/// B2：本传输的完整区间计划。发送端保证这些区间两两不重叠、按 `offset`
+		/// 升序连续覆盖 `[ranges[0].offset, total_bytes)`；接收端在登记时校验
+		/// 空洞/重叠/上限，并在 `ContentEnd` 时要求所有区间都已 FIN。
+		///
+		/// 空文件（`total_bytes == 0`）计划为空。该字段是 B2 新增的线格式，
+		/// `PROTOCOL_VERSION` 已升到 5。
+		ranges: Vec<TransferRange>,
 	},
 	/// 内容传输结束 (A -> B)
 	ContentEnd {
@@ -161,7 +175,39 @@ pub enum CtrlMsg {
 	},
 }
 
-/// 每传输独立数据流的头（ADR-002 阶段 B1）。
+/// 一个传输子区间（ADR-002 阶段 B2）。
+///
+/// 同一次传输的所有 `TransferRange` 必须：
+/// - 按 `offset` 严格升序；
+/// - 两两不重叠（`offset >= 前一个 end`）；
+/// - 连续无空洞，并一直覆盖到 `ContentBegin.total_bytes`；
+/// - 数量不超过 `MAX_PAYLOAD_STREAMS_PER_TRANSFER`（6）。
+///
+/// 每个区间由一条独立 bidi 数据流承载，流头里的 `offset` / `length` 必须与
+/// 计划中的某一条**完全一致**（接收端按 offset 精确匹配；不匹配按重叠/空洞/
+/// 未声明区间拒绝）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferRange {
+	pub offset: u64,
+	pub length: u64,
+}
+
+impl TransferRange {
+	/// 区间结束偏移（不含）。饱和加法：恶意超大 `offset+length` 不会溢出。
+	pub fn end(&self) -> u64 {
+		self.offset.saturating_add(self.length)
+	}
+
+	/// `[self.offset, self.end())` 与另一个区间是否重叠（零长度区间不重叠）。
+	pub fn overlaps(&self, other: &TransferRange) -> bool {
+		self.length > 0
+			&& other.length > 0
+			&& self.offset < other.end()
+			&& other.offset < self.end()
+	}
+}
+
+/// 每传输独立数据流的头（ADR-002 阶段 B1，B2 扩展为"每个子区间一条流"）。
 ///
 /// 线格式（由发送端在数据流上写入）：
 ///
@@ -174,9 +220,12 @@ pub enum CtrlMsg {
 /// 也能据此完成路由与校验，不会丢信息：
 ///
 /// - `req_id`：等于 `ContentGet.msg_id` / `ContentBegin.req_id`，即 transfer_id；
-/// - `offset` / `length`：本段数据的起点与长度（B1 固定 `offset=0`、
-///   `length=ContentBegin.total_bytes`；B2 的并行子流/续传会用到非零 offset）；
-/// - `sha256`：与 `ContentBegin.sha256` 相同的期望 hash（整次传输片段的 hash）；
+/// - `offset` / `length`：本子区间在**整个传输**中的起点与长度，必须与
+///   `ContentBegin.ranges` 中某一条完全一致（B2）；
+/// - `sha256`：与 `ContentBegin.sha256` 相同的**整文件** hash（不是本区间的
+///   hash）。区间会乱序完成，因此接收端不逐区间比较整文件 hash，而是在所有区间
+///   FIN + `ContentEnd` 之后按偏移顺序重读临时文件、重算整文件 hash 再 commit
+///   （见 actor.rs 的 `Finish` 分支与 ADR-002 §4.2 的取舍说明）；
 /// - `mime` / `item_id` / `file_id`：与 `ContentBegin` 相同，便于独立核对。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferHeader {
@@ -187,7 +236,7 @@ pub struct TransferHeader {
 	pub offset: u64,
 	/// 本数据流头部之后跟随的负载字节数。
 	pub length: u64,
-	/// 期望的 SHA-256（与 `ContentBegin.sha256` 一致）。
+	/// 整文件期望 SHA-256（与 `ContentBegin.sha256` 一致）。
 	pub sha256: String,
 	/// MIME（与 `ContentBegin.mime` 一致）。
 	pub mime: String,
@@ -418,6 +467,93 @@ mod tests {
 		assert!(
 			codec.decode(&mut legacy).is_err(),
 			"legacy Data frames must be rejected on the control stream"
+		);
+	}
+
+	/// B2 的区间计划必须能随 `ContentBegin` 走控制流 JSON 无损往返；`TransferRange`
+	/// 自身的 postcard 编解码（数据流头之外的潜在用途）同样要稳定。
+	#[test]
+	fn content_begin_range_plan_roundtrips() {
+		let ranges = vec![
+			TransferRange {
+				offset: 0,
+				length: 1024,
+			},
+			TransferRange {
+				offset: 1024,
+				length: 2048,
+			},
+		];
+		let msg = CtrlMsg::ContentBegin {
+			req_id: "transfer-2".to_string(),
+			item_id: "item-2".to_string(),
+			file_id: None,
+			total_bytes: 3072,
+			sha256: "b".repeat(64),
+			mime: "application/octet-stream".to_string(),
+			ranges: ranges.clone(),
+		};
+
+		let json = serde_json::to_vec(&msg).expect("serialize ContentBegin");
+		let decoded: CtrlMsg = serde_json::from_slice(&json).expect("deserialize ContentBegin");
+		match decoded {
+			CtrlMsg::ContentBegin {
+				ranges: decoded_ranges,
+				total_bytes,
+				..
+			} => {
+				assert_eq!(decoded_ranges, ranges);
+				assert_eq!(total_bytes, 3072);
+			}
+			other => panic!("expected ContentBegin, got {other:?}"),
+		}
+
+		let bytes = postcard_encode(&ranges).expect("postcard encode ranges");
+		let decoded_ranges: Vec<TransferRange> =
+			postcard_decode(&bytes).expect("postcard decode ranges");
+		assert_eq!(decoded_ranges, ranges);
+	}
+
+	/// 区间重叠判定：相邻边界不算重叠、零长度区间不算重叠、包含/部分交叉都算。
+	#[test]
+	fn transfer_range_overlap_boundaries() {
+		let a = TransferRange {
+			offset: 10,
+			length: 10,
+		};
+		assert!(!a.overlaps(&TransferRange {
+			offset: 20,
+			length: 10
+		}));
+		assert!(!a.overlaps(&TransferRange {
+			offset: 0,
+			length: 10
+		}));
+		assert!(!a.overlaps(&TransferRange {
+			offset: 12,
+			length: 0
+		}));
+		assert!(a.overlaps(&TransferRange {
+			offset: 19,
+			length: 2
+		}));
+		assert!(a.overlaps(&TransferRange {
+			offset: 11,
+			length: 1
+		}));
+		assert!(a.overlaps(&TransferRange {
+			offset: 0,
+			length: 100
+		}));
+		assert_eq!(a.end(), 20);
+		assert_eq!(
+			TransferRange {
+				offset: u64::MAX,
+				length: 1
+			}
+			.end(),
+			u64::MAX,
+			"offset+length 必须饱和，不能溢出"
 		);
 	}
 }

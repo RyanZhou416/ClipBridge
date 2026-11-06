@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::io::SeekFrom;
 use std::path::PathBuf;
@@ -31,8 +30,8 @@ use crate::model::ItemKind;
 use crate::policy::SizeLimits;
 use crate::proto::{
 	encode_transfer_header_frame, postcard_decode, postcard_encode, AuthSessionFlags, CBFrame,
-	CBFrameCodec, CtrlMsg, TransferHeader, MAX_TRANSFER_HEADER_BYTES, PROTOCOL_VERSION,
-	TRANSFER_HEADER_LEN_BYTES,
+	CBFrameCodec, CtrlMsg, TransferHeader, TransferRange, MAX_TRANSFER_HEADER_BYTES,
+	PROTOCOL_VERSION, TRANSFER_HEADER_LEN_BYTES,
 };
 use crate::store::Store;
 use crate::transport::{Connection, RecvStream, SendStream};
@@ -148,6 +147,62 @@ const FINALIZE_PLACEHOLDER_GRACE_MS: i64 = 35_000;
 /// 每个 `ContentGet` 都会 spawn 一个读文件任务；若不对认证对端设上限，
 /// 一个对端就能开出无限上传、耗尽 fd / 内存 / CPU。
 const MAX_CONCURRENT_SENDERS: usize = 8;
+
+/// 单个传输最多拆成多少条并行数据流（ADR-002 §4.2 的硬上限 N ≤ 6）。
+///
+/// 与 [`MAX_CONCURRENT_SENDERS`] 是**两个维度**：前者限制"同时有多少个传输"，
+/// 这里限制"一个传输最多开多少条数据流"。接收端在 `ContentBegin` 里用同一个
+/// 上限校验区间计划，两端不可能对"最多几条流"产生分歧。
+const MAX_PAYLOAD_STREAMS_PER_TRANSFER: usize = 6;
+
+/// 每个会话同时活跃的**出站**数据流上限（独立于 [`MAX_CONCURRENT_SENDERS`]）。
+///
+/// 8 个并发 sender × 每传输最多 6 条 = 48 条，若不设会话级闸门，多个 WAN
+/// 传输同时上探会瞬间打开几十条 QUIC 流（每条都有流控窗口与接收任务）。
+/// 24 = 4 个传输同时用满 6 条，足够覆盖正常并发，又给慢速/异常 sender 留出
+/// 明确的背压点：拿不到许可的区间任务会等待，而不是无限开流。
+const MAX_PAYLOAD_STREAMS_PER_SESSION: usize = 24;
+
+/// 冷启动 RTT 分档阈值（ADR-002 §3.3 / §4.8）：低于该值视为 LAN。
+///
+/// LAN 上单流已接近回环上限（实测 195 MiB/s，4 流同连接 190），因此不需要
+/// 6 条等长流：初始计划只额外切一个**小探针区间**（见
+/// [`LAN_PROBE_SLICE_MAX_BYTES`]），够执行一次探针，又不会让回退后的多流
+/// 长期占着半个文件。
+const LAN_RTT_THRESHOLD: Duration = Duration::from_millis(20);
+
+/// LAN 探针区间的上限 / 下限。
+///
+/// LAN 上控制器最多探针一次，探针流只承载文件尾部的一小段（默认 16 MiB 上限）。
+/// 这样即使探针被接受、或回退时探针流还在飞，物理并发也只在很短的窗口内 >1，
+/// 不会像"等长 2/3 段"那样让回退后的传输长期停留在多流。
+const LAN_PROBE_SLICE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const LAN_PROBE_SLICE_MIN_BYTES: u64 = 2 * 1024 * 1024;
+
+/// 允许上探多流的最小剩余字节数（ADR-002 §4.2 / §4.7）。
+///
+/// 剩余 ≤ 该值（含边界）时控制器强制 N=1：小传输不值得为探针付出一个评估
+/// 窗口的固定成本，而 16 MiB 在 8 MiB 流窗口下也足以填满 2 个 BDP。
+const PROBE_MIN_REMAINING_BYTES: u64 = 16 * 1024 * 1024;
+
+/// 探针被接受所需的最小窗口 goodput 增益（8%，ADR-002 §4.2）。
+const STREAM_PROBE_GAIN_THRESHOLD: f64 = 0.08;
+
+/// 触发流数回退的丢包率阈值（1%）。`lost_packets` / `sent_packets` 增量。
+const STREAM_LOSS_BACKOFF_RATE: f64 = 0.01;
+
+/// 触发流数回退的 srtt 倍数阈值（相对传输开始时的平滑 RTT）。
+const STREAM_SRTT_BACKOFF_RATIO: f64 = 2.5;
+
+/// 控制器评估周期下限 / 上限：`T = clamp(4 × srtt, 300ms, 2s)`。
+const STREAM_PROBE_MIN_INTERVAL: Duration = Duration::from_millis(300);
+const STREAM_PROBE_MAX_INTERVAL: Duration = Duration::from_secs(2);
+
+/// 一个区间流失败后的最大重试次数（ADR-002 §3.8）。
+///
+/// 失败后先降低目标并发并冷却 2T，再以更低的 N 重试同一区间；超过次数则让
+/// 整个传输失败（用非致命的 `ContentCancel` 通知对端）。
+const MAX_RANGE_STREAM_RETRIES: u8 = 3;
 
 /// 数据块发送超时的步进粒度：旧版 64 KiB 分块时代固定使用 500ms。
 const CHUNK_SEND_TIMEOUT_STEP_MS: u64 = 500;
@@ -286,97 +341,479 @@ fn receiver_idle_expired(now: i64, last_activity_ms: i64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// 数据流路由（B1）
+// B2 分片计划、流数控制器与接收端区间账本
 //
-// 数据流与控制流是两条独立的 QUIC 流，交付顺序无法保证。下面三个纯函数把
-// "收到数据流头 / 收到 ContentEnd / 数据流 FIN" 的决策从 actor 状态里抽出来，
-// 从而可以在没有 socket 的单元测试里覆盖：未知 req_id、重复 req_id、已取消传输、
-// 以及只有 FIN 没有 ContentEnd（不得 finalize）。
+// 全部是纯函数 / 纯数据结构，不需要 socket，因此可以在 actor.rs 的 test 模块
+// 里直接覆盖：区间并集不变式、控制器决策（探针/回退/退避/ceiling/小文件），
+// 以及接收端乱序完成、重复区间、ContentEnd 时缺段等账本行为。
 // ---------------------------------------------------------------------------
 
-/// 路由判定时看到的传输状态（`ReceiverState` 的只读投影）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PayloadRouteState {
-	/// `ContentBegin` 已登记，等待数据流。
-	Awaiting,
-	/// 数据流已接入，正在传输。
-	Attached,
-	/// 数据流已 FIN（字节全部到达），等待 `ContentEnd`。
-	Finished,
-	/// 已进入最终化占位符（commit 中）或已取消/结束。
-	Committing,
+/// 把 `[offset, offset+length)` 均分成 `count` 个连续、互不重叠的区间。
+///
+/// 不变式（单元测试断言）：
+/// - `r[0].offset == offset`，`r[i].end() == r[i+1].offset`，最后一条
+///   `end() == offset + length`（若 `length > 0`）——无空洞、无重叠、并集等于
+///   请求区间；
+/// - `count` 被夹到 `[1, MAX_PAYLOAD_STREAMS_PER_TRANSFER]`，且不超过字节数
+///   （`length < count` 时每条折叠成 1 字节，保证 `length > 0`）；
+/// - 区间长度差 ≤ 1（余数按顺序分给前 `length % count` 条），避免最后一段
+///   特别大导致尾部单流化。
+///
+/// `length == 0` 返回空计划（空文件没有任何数据流）。
+fn plan_ranges(offset: u64, length: u64, count: usize) -> Vec<TransferRange> {
+	if length == 0 {
+		return Vec::new();
+	}
+	let requested = (count as u64).clamp(1, MAX_PAYLOAD_STREAMS_PER_TRANSFER as u64);
+	let count = requested.min(length) as usize;
+	let base = length / count as u64;
+	let remainder = length % count as u64;
+
+	let mut ranges = Vec::with_capacity(count);
+	let mut cursor = offset;
+	for index in 0..count {
+		let extra = u64::from((index as u64) < remainder);
+		let range_len = base + extra;
+		ranges.push(TransferRange {
+			offset: cursor,
+			length: range_len,
+		});
+		cursor = cursor.saturating_add(range_len);
+	}
+	ranges
 }
 
-/// 收到数据流头部时的路由结果。
+/// 传输开始时的区间计划（冷启动值，ADR-002 §3.3 / §4.8）。
+///
+/// - 剩余 ≤ [`PROBE_MIN_REMAINING_BYTES`]：**单流**，控制器不会探针；
+/// - 低 RTT（< 20 ms，LAN）：**2 段**——主区间 + 文件尾部的小探针区间。
+///   单流已接近回环上限，多流通常无收益；小探针区间让"探一次、回退"的代价
+///   只有十几 MiB，不会像等长 2/3 段那样在回退后仍长期多流；
+/// - 否则（WAN）：按 [`MAX_PAYLOAD_STREAMS_PER_TRANSFER`] 个等长区间切好，
+///   控制器从 N=1 起步逐步"多领"，每加一条流都有独立窗口。
+///
+/// 固定区间（而不是传输中动态切分）保证任意时刻的区间并集始终等于请求范围，
+/// 不会出现空洞或重叠，也不需要额外的控制面 "缩短区间" 消息。
+fn initial_range_plan(offset: u64, total_bytes: u64, srtt: Duration) -> Vec<TransferRange> {
+	let remaining = total_bytes.saturating_sub(offset);
+	if remaining <= PROBE_MIN_REMAINING_BYTES {
+		return plan_ranges(offset, remaining, 1);
+	}
+	if srtt < LAN_RTT_THRESHOLD {
+		let probe = (remaining / 8)
+			.clamp(LAN_PROBE_SLICE_MIN_BYTES, LAN_PROBE_SLICE_MAX_BYTES)
+			.min(remaining - 1)
+			.max(1);
+		let main = remaining - probe;
+		return vec![
+			TransferRange {
+				offset,
+				length: main,
+			},
+			TransferRange {
+				offset: offset.saturating_add(main),
+				length: probe,
+			},
+		];
+	}
+	plan_ranges(offset, remaining, MAX_PAYLOAD_STREAMS_PER_TRANSFER)
+}
+
+/// 校验对端在 `ContentBegin` 里声明的完整区间计划。
+///
+/// `total_bytes` 是整文件大小；计划必须从某个 `base_offset` 连续覆盖到
+/// `total_bytes`（公开 API 的起点是 0；断点续传时 `base_offset > 0`，接收端
+/// 仍要求一直覆盖到文件末尾，避免尾部缺段被静默接受）。
+///
+/// 返回 `Err((error_code, detail))`，调用方直接映射为 TRANSFER_FAILED。
+fn validate_range_plan(
+	ranges: &[TransferRange],
+	total_bytes: u64,
+) -> std::result::Result<(), (&'static str, String)> {
+	if ranges.len() > MAX_PAYLOAD_STREAMS_PER_TRANSFER {
+		return Err((
+			"TRANSFER_RANGE_TOO_MANY",
+			format!(
+				"{} ranges declared, max {}",
+				ranges.len(),
+				MAX_PAYLOAD_STREAMS_PER_TRANSFER
+			),
+		));
+	}
+	let Some(first) = ranges.first() else {
+		if total_bytes == 0 {
+			return Ok(());
+		}
+		return Err((
+			"TRANSFER_RANGE_EMPTY",
+			format!("no ranges declared for {total_bytes}-byte transfer"),
+		));
+	};
+	let base = first.offset;
+	if base >= total_bytes {
+		return Err((
+			"TRANSFER_RANGE_UNEXPECTED",
+			format!("range plan starts at {base}, total_bytes={total_bytes}"),
+		));
+	}
+	let mut cursor = base;
+	for (index, range) in ranges.iter().enumerate() {
+		if range.length == 0 {
+			return Err((
+				"TRANSFER_RANGE_GAP",
+				format!("range[{index}] at offset {} has zero length", range.offset),
+			));
+		}
+		if range.offset < cursor {
+			return Err((
+				"TRANSFER_RANGE_OVERLAP",
+				format!(
+					"range[{index}] starts at {} but previous range ends at {cursor}",
+					range.offset
+				),
+			));
+		}
+		if range.offset > cursor {
+			return Err((
+				"TRANSFER_RANGE_GAP",
+				format!(
+					"range[{index}] starts at {} but a gap exists (expected {cursor})",
+					range.offset
+				),
+			));
+		}
+		cursor = cursor.saturating_add(range.length);
+		if cursor > total_bytes {
+			return Err((
+				"TRANSFER_RANGE_OVERRUN",
+				format!("range[{index}] ends at {cursor}, beyond total_bytes={total_bytes}"),
+			));
+		}
+	}
+	if cursor != total_bytes {
+		return Err((
+			"TRANSFER_RANGE_GAP",
+			format!("range plan ends at {cursor}, expected total_bytes={total_bytes}"),
+		));
+	}
+	Ok(())
+}
+
+/// 控制器输入（ADR-002 §4.2）。单位：`gain`/`loss_rate`/`srtt_ratio` 为比值，
+/// `remaining_bytes` 为尚未发送的字节数。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StreamControllerInput {
+	/// 当前目标并发流数（1..=6）。
+	current_n: u8,
+	/// `Some(gain)` = 上一次决策刚多开一条流，本窗口要判定该探针的收益；
+	/// `None` = 当前没有待判定的探针（稳定期）。
+	gain: Option<f64>,
+	/// 本窗口丢包率（`lost_packets` 增量 / `sent_packets` 增量）。
+	loss_rate: f64,
+	/// 本窗口 srtt / 传输起始基线 srtt。
+	srtt_ratio: f64,
+	/// 尚未发送的字节数。
+	remaining_bytes: u64,
+	/// 本传输是否已判定"加流没有收益"（ceiling）。true 后不再上探。
+	ceiling_reached: bool,
+}
+
+/// 决策原因（仅用于日志与单测断言；wire format 不携带）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamDecisionReason {
+	/// 剩余 ≤ 16 MiB：强制单流，不再探针。
+	SmallTransfer,
+	/// 丢包 > 1% 或 srtt > 2.5× 基线：回退一条流并冷却。
+	CongestionBackoff,
+	/// 稳定期多开一条流（开始探针）。
+	ProbeStarted,
+	/// 上个窗口收益 > 8%：接受并继续上探。
+	ProbeAccepted,
+	/// 上个窗口收益 ≤ 8%：回退一条流并标记 ceiling。
+	ProbeRejected,
+	/// ceiling 已标记：保持当前 N。
+	Ceiling,
+	/// 没有可执行动作：保持当前 N。
+	Hold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StreamControllerDecision {
+	next_n: u8,
+	ceiling_reached: bool,
+	reason: StreamDecisionReason,
+}
+
+/// **纯函数**：根据一个评估窗口的信号决定下一周期目标流数（ADR-002 §4.2）。
+///
+/// 规则（顺序即优先级）：
+/// 1. 剩余 ≤ 16 MiB → N=1（不探针）；
+/// 2. 丢包 > 1% 或 srtt > 2.5× 基线 → N = max(1, N-1)（退避，不置 ceiling）；
+/// 3. 有待判定探针且 gain > 8% → N+1（继续探；到上限则保持）；
+/// 4. 有待判定探针且 gain ≤ 8% → N-1（至少 1）并置 ceiling；
+/// 5. 无待判定探针且未 ceiling 且 N<6 → N+1（开始探针）；
+/// 6. 其余 → 保持。
+///
+/// `ceiling_reached` 是**粘性**的：一次探针失败后本传输不再上探，因此 LAN
+/// 回环上最多付出一次 300ms 的探针窗口，之后稳定在 N=1，不会来回振荡。
+fn decide_stream_count(input: StreamControllerInput) -> StreamControllerDecision {
+	let max_n = MAX_PAYLOAD_STREAMS_PER_TRANSFER as u8;
+	let current = input.current_n.clamp(1, max_n);
+	let hold = |next_n: u8, ceiling: bool, reason: StreamDecisionReason| StreamControllerDecision {
+		next_n,
+		ceiling_reached: ceiling,
+		reason,
+	};
+
+	if input.remaining_bytes <= PROBE_MIN_REMAINING_BYTES {
+		return hold(
+			1,
+			input.ceiling_reached,
+			StreamDecisionReason::SmallTransfer,
+		);
+	}
+	if input.loss_rate > STREAM_LOSS_BACKOFF_RATE || input.srtt_ratio > STREAM_SRTT_BACKOFF_RATIO {
+		// 如果这次退避发生在探针窗口（gain=Some），说明"加流"直接引发了丢包 /
+		// RTT 膨胀：这比 goodput 更可靠，直接标记 ceiling，避免在劣化后反复探针
+		// （滞回）。非探针窗口的偶发丢包只退避 + 冷却，冷却后仍可再探。
+		return hold(
+			current.saturating_sub(1).max(1),
+			input.ceiling_reached || input.gain.is_some(),
+			StreamDecisionReason::CongestionBackoff,
+		);
+	}
+
+	match input.gain {
+		Some(gain) if gain > STREAM_PROBE_GAIN_THRESHOLD => {
+			if !input.ceiling_reached && current < max_n {
+				hold(current + 1, false, StreamDecisionReason::ProbeAccepted)
+			} else {
+				hold(
+					current,
+					input.ceiling_reached,
+					if input.ceiling_reached {
+						StreamDecisionReason::Ceiling
+					} else {
+						StreamDecisionReason::Hold
+					},
+				)
+			}
+		}
+		// 探针收益不足：回退并永久标记 ceiling（本传输不再上探）。
+		Some(_) => hold(
+			current.saturating_sub(1).max(1),
+			true,
+			StreamDecisionReason::ProbeRejected,
+		),
+		None if !input.ceiling_reached && current < max_n => {
+			hold(current + 1, false, StreamDecisionReason::ProbeStarted)
+		}
+		None => hold(
+			current,
+			input.ceiling_reached,
+			if input.ceiling_reached {
+				StreamDecisionReason::Ceiling
+			} else {
+				StreamDecisionReason::Hold
+			},
+		),
+	}
+}
+
+/// 控制器评估周期：`clamp(4 × srtt, 300ms, 2s)`（ADR-002 §4.2）。
+fn stream_probe_interval(srtt: Duration) -> Duration {
+	srtt.saturating_mul(4)
+		.max(STREAM_PROBE_MIN_INTERVAL)
+		.min(STREAM_PROBE_MAX_INTERVAL)
+}
+
+/// 单个计划区间的运行状态（接收端账本）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeSlotState {
+	/// `ContentBegin` 已登记，尚未收到该区间的数据流头。
+	Awaiting,
+	/// 数据流已接入，接收任务在跑。
+	Attached,
+	/// 数据流已 FIN 且字节数正确。
+	Finished,
+	/// 数据流失败（可重试）：保留槽位，等发送端以更低 N 重开同一区间。
+	Failed,
+}
+
+/// 计划区间 + 运行状态。`offset`/`length` 来自发送端 `ContentBegin.ranges`；
+/// 数据流头必须与其中一条**完全一致**才能接入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RangeSlot {
+	offset: u64,
+	length: u64,
+	state: RangeSlotState,
+}
+
+impl RangeSlot {
+	fn end(&self) -> u64 {
+		self.offset.saturating_add(self.length)
+	}
+}
+
+/// 一次入站传输的区间账本（actor 状态里的纯数据部分，便于 socket-free 测试）。
+///
+/// 不变式由 [`validate_range_plan`] 在登记时保证：slots 按 offset 升序、首尾
+/// 相接、并集恰好是 `[base_offset, total_bytes)`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReceiverRanges {
+	slots: Vec<RangeSlot>,
+	base_offset: u64,
+	total_bytes: u64,
+}
+
+impl ReceiverRanges {
+	fn from_plan(plan: &[TransferRange], total_bytes: u64) -> Self {
+		let base_offset = plan.first().map_or(0, |range| range.offset);
+		Self {
+			slots: plan
+				.iter()
+				.map(|range| RangeSlot {
+					offset: range.offset,
+					length: range.length,
+					state: RangeSlotState::Awaiting,
+				})
+				.collect(),
+			base_offset,
+			total_bytes,
+		}
+	}
+
+	fn planned_bytes(&self) -> u64 {
+		self.slots.iter().map(|slot| slot.length).sum()
+	}
+
+	/// 本次传输是否覆盖整个文件（起点 0 且区间并集等于 total_bytes）。
+	///
+	/// 只有完整传输才能在 finalize 时重算整文件 hash；断点续传（非 0 起点）
+	/// 只覆盖文件的一部分，无法用 `ContentBegin.sha256` 校验。
+	fn is_whole_file(&self) -> bool {
+		self.base_offset == 0 && self.planned_bytes() == self.total_bytes
+	}
+
+	/// 空计划（空文件）视为"所有区间已完成"。
+	fn all_finished(&self) -> bool {
+		self.slots
+			.iter()
+			.all(|slot| slot.state == RangeSlotState::Finished)
+	}
+
+	fn find_exact(&self, offset: u64, length: u64) -> Option<usize> {
+		self.slots
+			.iter()
+			.position(|slot| slot.offset == offset && slot.length == length)
+	}
+
+	fn slot_at_offset(&self, offset: u64) -> Option<usize> {
+		self.slots.iter().position(|slot| slot.offset == offset)
+	}
+
+	fn overlaps_any(&self, offset: u64, length: u64) -> bool {
+		let candidate = TransferRange { offset, length };
+		self.slots.iter().any(|slot| {
+			slot.length > 0
+				&& candidate.length > 0
+				&& slot.offset < candidate.end()
+				&& candidate.offset < slot.end()
+		})
+	}
+
+	fn set_state(&mut self, index: usize, state: RangeSlotState) {
+		if let Some(slot) = self.slots.get_mut(index) {
+			slot.state = state;
+		}
+	}
+}
+
+/// 数据流头相对区间计划的路由结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeRoute {
+	/// 计划内、尚未接入：正常运行。
+	Attach(usize),
+	/// 计划内但之前失败：允许重试（同一 offset/length，从区间起点重写）。
+	Retry(usize),
+	/// 该区间已接入/已完成：拒绝重复流。
+	Duplicate,
+	/// 与某个计划区间重叠但不是完整匹配：重叠/错位。
+	Overlap,
+	/// offset 匹配但 length 不符（例如"区间比声明的长"）。
+	LengthMismatch,
+	/// 既不在计划内也不与任何区间重叠：未声明区间。
+	Unexpected,
+}
+
+fn route_range_header(ranges: &ReceiverRanges, offset: u64, length: u64) -> RangeRoute {
+	if let Some(index) = ranges.find_exact(offset, length) {
+		return match ranges.slots[index].state {
+			RangeSlotState::Awaiting => RangeRoute::Attach(index),
+			RangeSlotState::Failed => RangeRoute::Retry(index),
+			RangeSlotState::Attached | RangeSlotState::Finished => RangeRoute::Duplicate,
+		};
+	}
+	if ranges.slot_at_offset(offset).is_some() {
+		return RangeRoute::LengthMismatch;
+	}
+	if ranges.overlaps_any(offset, length) {
+		return RangeRoute::Overlap;
+	}
+	RangeRoute::Unexpected
+}
+
+/// `ContentEnd` 的决策：只有**全部计划区间都已完成**才允许 finalize。
+///
+/// 计划区间还没全 FIN → `WaitForPayload`，由 sweep 在
+/// [`CONTENT_END_WITHOUT_PAYLOAD_GRACE_MS`] 之后判 `TRANSFER_RANGE_MISSING`；
+/// 绝不提前 commit 一个缺段的临时文件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentEndRoute {
+	FinalizeNow,
+	WaitForPayload,
+	Ignore,
+}
+
+fn content_end_route(all_ranges_finished: bool, end_already_received: bool) -> ContentEndRoute {
+	if end_already_received {
+		return ContentEndRoute::Ignore;
+	}
+	if all_ranges_finished {
+		ContentEndRoute::FinalizeNow
+	} else {
+		ContentEndRoute::WaitForPayload
+	}
+}
+
+/// 收到的数据流头对应的接收端实体状态（仅用于决定"暂存 / 接入 / 拒绝"）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PayloadRoute {
-	/// 已有 receiver 在等待：接入并启动接收任务。
-	Attach,
 	/// 尚未收到 `ContentBegin`：暂存，等待注册（有 `PAYLOAD_REGISTRATION_GRACE_MS` 上限）。
 	AwaitRegistration,
-	/// 同一 req_id 已有数据流（或已进入最终化）：拒绝这条重复流。
+	/// 已有 `Receiving` 的 receiver：交给区间路由判定。
+	ReceiverReady,
+	/// 同一 req_id 已进入最终化：拒绝。
 	Duplicate,
 	/// 该 req_id 刚被取消：立即拒绝，绝不重新接入。
 	Cancelled,
 }
 
-fn route_payload_stream(state: Option<PayloadRouteState>, cancelled: bool) -> PayloadRoute {
+fn route_payload_stream(
+	receiver_exists: bool,
+	commit_in_progress: bool,
+	cancelled: bool,
+) -> PayloadRoute {
 	if cancelled {
 		return PayloadRoute::Cancelled;
 	}
-	match state {
-		None => PayloadRoute::AwaitRegistration,
-		Some(PayloadRouteState::Awaiting) => PayloadRoute::Attach,
-		Some(
-			PayloadRouteState::Attached
-			| PayloadRouteState::Finished
-			| PayloadRouteState::Committing,
-		) => PayloadRoute::Duplicate,
+	if commit_in_progress {
+		return PayloadRoute::Duplicate;
 	}
-}
-
-/// 收到 `ContentEnd` 时的决策。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContentEndRoute {
-	/// 数据流已 FIN：立刻开始最终化。
-	FinalizeNow,
-	/// 数据流已接入或尚未到达：等 FIN / 等数据流（后者有宽限上限）。
-	WaitForPayload,
-	/// 重复 End、未知 req_id 或最终化中：忽略。
-	Ignore,
-}
-
-fn content_end_route(
-	state: Option<PayloadRouteState>,
-	end_already_received: bool,
-) -> ContentEndRoute {
-	match state {
-		Some(PayloadRouteState::Finished) if !end_already_received => ContentEndRoute::FinalizeNow,
-		Some(PayloadRouteState::Awaiting | PayloadRouteState::Attached)
-			if !end_already_received =>
-		{
-			ContentEndRoute::WaitForPayload
-		}
-		_ => ContentEndRoute::Ignore,
-	}
-}
-
-/// 数据流 FIN（或接收任务失败）时的决策。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PayloadFinRoute {
-	/// FIN 与 End 都已到达：开始最终化。
-	FinalizeNow,
-	/// 只有 FIN，`ContentEnd` 还没来：保持 `Receiving` 等待（由空闲超时兜底）。
-	WaitForContentEnd,
-	/// 重复/迟到的事件：忽略。
-	Ignore,
-}
-
-fn payload_fin_route(state: Option<PayloadRouteState>, end_received: bool) -> PayloadFinRoute {
-	match state {
-		Some(PayloadRouteState::Attached) if end_received => PayloadFinRoute::FinalizeNow,
-		Some(PayloadRouteState::Attached) => PayloadFinRoute::WaitForContentEnd,
-		_ => PayloadFinRoute::Ignore,
+	if receiver_exists {
+		PayloadRoute::ReceiverReady
+	} else {
+		PayloadRoute::AwaitRegistration
 	}
 }
 
@@ -410,22 +847,27 @@ impl PayloadStats {
 		self.last_activity_ms.store(now, Ordering::Relaxed);
 	}
 
+	/// 一条区间流失败/重试时，把它已经计入总数但会被重写覆盖的字节扣回。
+	///
+	/// 只影响进度事件与空闲超时的"已收字节"，不影响文件内容：重试的数据流
+	/// 会从同一 offset 重新写一遍。
+	fn discard_bytes(&self, bytes: u64) {
+		let _ = self
+			.received_bytes
+			.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+				Some(current.saturating_sub(bytes))
+			});
+	}
+
 	fn touch(&self, now: i64) {
 		self.last_activity_ms.store(now, Ordering::Relaxed);
 	}
 }
 
-/// 一条入站传输的数据流槽位。
-enum PayloadSlot {
-	/// `ContentBegin` 已登记，尚未收到数据流头。
-	Awaiting,
-	/// 接收任务在跑；abort 句柄用于取消传输。
-	Attached { handle: tokio::task::AbortHandle },
-	/// 接收任务已干净读到 FIN（字节已全部进入 writer channel）。
-	Finished,
-}
-
 /// 已读到头部、但还没来得及路由（`ContentBegin` 尚未到达）的数据流。
+///
+/// B2 起同一传输可能有多条数据流先于控制面的 `ContentBegin` 到达，因此
+/// `pending_payloads` 的值是 `Vec<PendingPayload>`，而不是单条。
 struct PendingPayload {
 	header: TransferHeader,
 	recv: RecvStream,
@@ -440,15 +882,22 @@ struct PayloadOpened {
 	send: SendStream,
 }
 
-/// 接收任务 → actor 的完成/失败事件。
+/// 接收任务 → actor 的完成/失败事件（B2：按区间上报）。
 enum PayloadEvent {
-	/// 数据流干净 FIN（`received_bytes` 以 [`PayloadStats`] 为准）。
-	Finished { req_id: String },
-	/// 数据流读取失败（reset/连接断开）、背压溢出或 writer 已退出。
-	Failed {
+	/// 一个区间干净读到 FIN，且本区间收到的字节数 == 计划长度。
+	RangeFinished {
 		req_id: String,
+		offset: u64,
+		received: u64,
+	},
+	/// 一个区间失败。`retryable=true` 时只标记该区间失败（保留 receiver，
+	/// 等发送端降低 N 后重开同一区间）；`false` 时整个传输失败。
+	RangeFailed {
+		req_id: String,
+		offset: u64,
 		code: String,
 		detail: String,
+		retryable: bool,
 	},
 }
 
@@ -515,12 +964,16 @@ enum ReceiverState {
 		stats: Arc<PayloadStats>,
 		/// writer Task 的 abort 句柄：超时/取消/越界时直接终止并触发 tmp 清理。
 		handle: tokio::task::AbortHandle,
-		/// 本传输的数据流状态。
-		payload: PayloadSlot,
+		/// 本传输的区间账本（计划来自 `ContentBegin.ranges`，按 offset 精确匹配
+		/// 数据流头，跟踪每条区间的 FIN / 失败状态）。
+		ranges: ReceiverRanges,
+		/// 每个已接入区间的接收任务 abort 句柄（key = 区间 offset）。
+		/// 取消/失败时必须 abort 全部区间，不能只停一条。
+		range_handles: HashMap<u64, tokio::task::AbortHandle>,
 		/// 是否已收到 `ContentEnd`（控制面）。
 		end_received: bool,
-		/// `ContentEnd` 先于数据流到达时的时间戳；用于 `CONTENT_END_WITHOUT_PAYLOAD_GRACE_MS`
-		/// 宽限后判定协议错误。0 表示尚未进入该状态。
+		/// `ContentEnd` 已到但还有区间未 FIN 时的时间戳；用于
+		/// `CONTENT_END_WITHOUT_PAYLOAD_GRACE_MS` 宽限后判 `TRANSFER_RANGE_MISSING`。
 		end_wait_started_ms: i64,
 		total_bytes: u64,
 		/// 本次传输适用的硬上限（来自 size_limits，按 item 类型选定）
@@ -598,13 +1051,21 @@ struct SenderState {
 
 enum ReceiverTaskMsg {
 	Chunk {
+		/// 本块在临时文件中的**绝对**偏移。B2 的区间任务各自顺序产出，
+		/// 但不同区间会交错推进，writer 必须按偏移定位写入（乱序写）。
+		offset: u64,
 		data: bytes::Bytes,
 		/// 在途字节预算许可：writer 写完（或消息被丢弃）才归还，从而把内存占用
 		/// 限制在 [`MAX_INFLIGHT_BYTES_PER_RECEIVER`] 以内。
 		permit: OwnedSemaphorePermit,
 	},
 	Finish {
-		expected_sha256: String, // 这里指本次传输片段的 Hash
+		/// `ContentBegin.sha256`：整文件 hash（不是区间 hash）。
+		expected_sha256: String,
+		/// 本传输是否覆盖整个文件（base_offset == 0 且区间并集 == total_bytes）。
+		/// 只有完整传输才在 commit 前按顺序重读临时文件校验整文件 hash；
+		/// 断点续传（非 0 起点）无法重算整文件 hash，跳过校验并记警告。
+		verify_whole_file: bool,
 		reply_tx: oneshot::Sender<Result<FinalizeOutcome>>, // 返回最终文件路径与持久化状态
 	},
 }
@@ -639,7 +1100,10 @@ struct FinalizeOutcome {
 struct ReceiverInbox {
 	tx: mpsc::Sender<ReceiverTaskMsg>,
 	budget: Arc<Semaphore>,
-	pending: VecDeque<bytes::Bytes>,
+	/// 下一个数据块在临时文件里的绝对偏移。区间内块是顺序到达的，因此只需
+	/// 单调前进；不同区间交错写入由 writer 按偏移 seek 处理。
+	next_offset: u64,
+	pending: VecDeque<(u64, bytes::Bytes)>,
 	pending_bytes: usize,
 	paused: bool,
 }
@@ -658,10 +1122,11 @@ enum PushOutcome {
 }
 
 impl ReceiverInbox {
-	fn new(tx: mpsc::Sender<ReceiverTaskMsg>, budget: Arc<Semaphore>) -> Self {
+	fn new(tx: mpsc::Sender<ReceiverTaskMsg>, budget: Arc<Semaphore>, range_offset: u64) -> Self {
 		Self {
 			tx,
 			budget,
+			next_offset: range_offset,
 			pending: VecDeque::new(),
 			pending_bytes: 0,
 			paused: false,
@@ -670,22 +1135,27 @@ impl ReceiverInbox {
 
 	/// 把 pending 中的块按顺序推进 writer channel，**永不 await**。
 	fn flush_pending(&mut self) -> PushOutcome {
-		while let Some(front) = self.pending.front() {
+		while let Some((offset, front)) = self.pending.front() {
 			// 块大小受 UPLOAD_CHUNK_BYTES 约束，一定放得进 u32；异常超大值按不可获取处理。
 			let len = u32::try_from(front.len()).unwrap_or(u32::MAX);
 			let Ok(permit) = self.budget.clone().try_acquire_many_owned(len) else {
 				return PushOutcome::Paused;
 			};
-			let data = self.pending.pop_front().expect("front() 刚刚确认队列非空");
+			let offset = *offset;
+			let (_, data) = self.pending.pop_front().expect("front() 刚刚确认队列非空");
 			self.pending_bytes -= data.len();
-			match self.tx.try_send(ReceiverTaskMsg::Chunk { data, permit }) {
+			match self.tx.try_send(ReceiverTaskMsg::Chunk {
+				offset,
+				data,
+				permit,
+			}) {
 				Ok(()) => {}
 				Err(mpsc::error::TrySendError::Full(msg)) => {
 					// 槽位又被占满：原样放回队首，保证顺序；许可随消息一起 drop。
 					// 本方法只会发送 Chunk 变体，其他变体不可能出现。
-					if let ReceiverTaskMsg::Chunk { data, .. } = msg {
+					if let ReceiverTaskMsg::Chunk { offset, data, .. } = msg {
 						self.pending_bytes += data.len();
-						self.pending.push_front(data);
+						self.pending.push_front((offset, data));
 					}
 					return PushOutcome::Paused;
 				}
@@ -702,23 +1172,39 @@ impl ReceiverInbox {
 
 	/// 非阻塞投递一个数据块：先 flush 旧 pending，再直接入 channel。
 	fn try_push(&mut self, data: bytes::Bytes) -> PushOutcome {
+		let offset = self.next_offset;
+		let len = data.len() as u64;
+		let outcome = self.try_push_at(offset, data);
+		// writer 已退出时数据没人消费，游标前进与否都无所谓；其余路径的数据
+		// 都已进入 channel 或 pending，必须前进。
+		if outcome != PushOutcome::Closed {
+			self.next_offset = offset.saturating_add(len);
+		}
+		outcome
+	}
+
+	fn try_push_at(&mut self, offset: u64, data: bytes::Bytes) -> PushOutcome {
 		if self.paused || !self.pending.is_empty() {
 			match self.flush_pending() {
 				PushOutcome::Closed => return PushOutcome::Closed,
-				PushOutcome::Paused => return self.push_pending(data),
+				PushOutcome::Paused => return self.push_pending(offset, data),
 				// 积压已全部推进 channel，可以继续走下面的直发路径。
 				PushOutcome::Queued | PushOutcome::Overflow => {}
 			}
 		}
 
-		let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
-		match self.budget.clone().try_acquire_many_owned(len) {
-			Ok(permit) => match self.tx.try_send(ReceiverTaskMsg::Chunk { data, permit }) {
+		let permit_len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+		match self.budget.clone().try_acquire_many_owned(permit_len) {
+			Ok(permit) => match self.tx.try_send(ReceiverTaskMsg::Chunk {
+				offset,
+				data,
+				permit,
+			}) {
 				Ok(()) => PushOutcome::Queued,
 				Err(mpsc::error::TrySendError::Full(msg)) => {
 					// 本方法只会发送 Chunk 变体，其他变体不可能出现。
 					if let ReceiverTaskMsg::Chunk { data, .. } = msg {
-						self.push_pending(data)
+						self.push_pending(offset, data)
 					} else {
 						PushOutcome::Paused
 					}
@@ -726,16 +1212,16 @@ impl ReceiverInbox {
 				Err(mpsc::error::TrySendError::Closed(_)) => PushOutcome::Closed,
 			},
 			// 在途字节预算耗尽（writer 慢）：暂存而不是等待。
-			Err(_) => self.push_pending(data),
+			Err(_) => self.push_pending(offset, data),
 		}
 	}
 
-	fn push_pending(&mut self, data: bytes::Bytes) -> PushOutcome {
+	fn push_pending(&mut self, offset: u64, data: bytes::Bytes) -> PushOutcome {
 		if self.pending_bytes.saturating_add(data.len()) > MAX_PENDING_BYTES_PER_RECEIVER {
 			return PushOutcome::Overflow;
 		}
 		self.pending_bytes += data.len();
-		self.pending.push_back(data);
+		self.pending.push_back((offset, data));
 		self.paused = true;
 		PushOutcome::Paused
 	}
@@ -743,7 +1229,7 @@ impl ReceiverInbox {
 	/// 接收任务专用：投递一个数据块，背压满时**等待** writer 排空。
 	///
 	/// 与 `try_push` 的唯一区别是 Paused 后会调用 [`Self::flush_all`]（允许 await）。
-	/// 这条路径只被独占一条数据流的接收任务使用，因此等待只会阻塞本传输，
+	/// 这条路径只被单条区间数据流的接收任务使用，因此等待只会阻塞本区间，
 	/// 不会影响控制流、心跳或其他传输。
 	async fn push_or_wait(&mut self, data: bytes::Bytes) -> PushOutcome {
 		match self.try_push(data) {
@@ -759,7 +1245,7 @@ impl ReceiverInbox {
 	///
 	/// 必须先把 pending 按序送进 writer，再发 `Finish`，否则会丢块或校验失败。
 	async fn flush_all(&mut self) -> std::result::Result<(), String> {
-		while let Some(data) = self.pending.pop_front() {
+		while let Some((offset, data)) = self.pending.pop_front() {
 			self.pending_bytes -= data.len();
 			let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
 			let permit = self
@@ -769,7 +1255,11 @@ impl ReceiverInbox {
 				.await
 				.map_err(|_| "writer channel closed".to_string())?;
 			self.tx
-				.send(ReceiverTaskMsg::Chunk { data, permit })
+				.send(ReceiverTaskMsg::Chunk {
+					offset,
+					data,
+					permit,
+				})
 				.await
 				.map_err(|_| "writer channel closed".to_string())?;
 		}
@@ -797,6 +1287,7 @@ struct ReceiverDone {
 async fn finalize_receiver(
 	mut inbox: ReceiverInbox,
 	expected_sha256: String,
+	verify_whole_file: bool,
 ) -> std::result::Result<FinalizeOutcome, (String, String)> {
 	inbox
 		.flush_all()
@@ -808,6 +1299,7 @@ async fn finalize_receiver(
 		.tx
 		.send(ReceiverTaskMsg::Finish {
 			expected_sha256,
+			verify_whole_file,
 			reply_tx,
 		})
 		.await
@@ -934,91 +1426,434 @@ fn spawn_payload_accept_loop(
 	task.abort_handle()
 }
 
-/// 在数据流上把文件字节推给本端接收任务的通用读取循环（发送端）。
+/// 发送端一个区间的失败分类。
 ///
-/// 返回 `Ok(已发送字节数)` 或 `Err((已发送字节数, 错误))`：错误里带上已发送量，
-/// 供 actor 写一条可诊断的失败汇总。
+/// 只有**网络**错误才值得降 N 后重试同一区间（接收端会保留 Failed 槽位并
+/// 覆盖重写）；本地文件读/seek 错误通常是永久性的，直接让传输失败。
+enum RangeSendError {
+	Network { bytes: u64, message: String },
+	Local { bytes: u64, message: String },
+}
+
+impl RangeSendError {
+	fn bytes(&self) -> u64 {
+		match self {
+			Self::Network { bytes, .. } | Self::Local { bytes, .. } => *bytes,
+		}
+	}
+
+	fn message(&self) -> &str {
+		match self {
+			Self::Network { message, .. } | Self::Local { message, .. } => message,
+		}
+	}
+
+	fn retryable(&self) -> bool {
+		matches!(self, Self::Network { .. })
+	}
+}
+
+/// 在一条数据流上发送**一个子区间**（B2）。
 ///
-/// 每块的 `write_all` 都套 [`chunk_send_timeout`]：旧实现里这个超时在 actor 主
-/// 循环的 `send_data_chunk` 中；B1 起数据流由本任务独占，因此超时只影响本次传输，
-/// 不会阻塞控制流/心跳/其他传输（这是 B1 的核心收益之一）。
-async fn send_payload_stream(
+/// 头部写 `[u32 LE len][postcard(TransferHeader)]`，随后只写
+/// `header.length` 个字节（不会读到文件 EOF 之后），最后 FIN。文件在区间起点
+/// `seek`，因此多个区间任务可以并发读同一个文件、各自从自己的 offset 开始。
+///
+/// `bytes_sent` 是整个传输共享的原子计数：每写成功一块就累加，供控制器计算
+/// 窗口 goodput；失败时把本次尝试已写的字节扣回，避免重试把 goodput 虚高。
+async fn send_payload_range(
 	conn: &Connection,
 	path: &std::path::Path,
 	header: TransferHeader,
-) -> std::result::Result<u64, (u64, anyhow::Error)> {
-	let (mut send, _recv) = conn
-		.open_bi()
+	bytes_sent: &AtomicU64,
+	budget: Arc<Semaphore>,
+) -> std::result::Result<u64, RangeSendError> {
+	// 会话级流数闸门：拿不到许可时等待，绝不无限开流。
+	let _stream_permit = budget
+		.acquire_owned()
 		.await
-		.map_err(|e| (0, anyhow::anyhow!("open payload stream failed: {e}")))?;
+		.map_err(|_| RangeSendError::Network {
+			bytes: 0,
+			message: "payload stream budget closed".to_string(),
+		})?;
+
+	let (mut send, _recv) = conn.open_bi().await.map_err(|e| RangeSendError::Network {
+		bytes: 0,
+		message: format!("open payload stream failed: {e}"),
+	})?;
 	write_payload_header(&mut send, &header)
 		.await
-		.map_err(|e| (0, e))?;
+		.map_err(|e| RangeSendError::Network {
+			bytes: 0,
+			message: e.to_string(),
+		})?;
 
-	let mut file = File::open(path)
-		.await
-		.map_err(|e| (0, anyhow::anyhow!("payload file open failed: {e}")))?;
+	let mut file = File::open(path).await.map_err(|e| RangeSendError::Local {
+		bytes: 0,
+		message: format!("payload file open failed: {e}"),
+	})?;
 	if header.offset > 0 {
 		file.seek(SeekFrom::Start(header.offset))
 			.await
-			.map_err(|e| (0, anyhow::anyhow!("payload file seek failed: {e}")))?;
+			.map_err(|e| RangeSendError::Local {
+				bytes: 0,
+				message: format!("payload file seek failed: {e}"),
+			})?;
 	}
 	let mut reader = BufReader::new(file);
 	let mut buf = vec![0u8; UPLOAD_CHUNK_BYTES];
-	let mut bytes_sent = 0u64;
+	let mut sent = 0u64;
 
-	loop {
-		let n = match reader.read(&mut buf).await {
-			Ok(0) => break,
+	while sent < header.length {
+		// 只读到本区间末尾：文件比声明长也不会把下一个区间的字节重复写入。
+		let want = (header.length - sent).min(buf.len() as u64) as usize;
+		let n = match reader.read(&mut buf[..want]).await {
+			Ok(0) => {
+				return Err(RangeSendError::Local {
+					bytes: sent,
+					message: format!(
+						"payload file ended before range length: sent={sent}/{}",
+						header.length
+					),
+				});
+			}
 			Ok(n) => n,
-			Err(e) => return Err((bytes_sent, anyhow::anyhow!("payload read failed: {e}"))),
+			Err(e) => {
+				return Err(RangeSendError::Local {
+					bytes: sent,
+					message: format!("payload read failed: {e}"),
+				});
+			}
 		};
 		let timeout = chunk_send_timeout(n);
 		match tokio::time::timeout(timeout, send.write_all(&buf[..n])).await {
-			Ok(Ok(())) => bytes_sent = bytes_sent.saturating_add(n as u64),
+			Ok(Ok(())) => {
+				sent = sent.saturating_add(n as u64);
+				bytes_sent.fetch_add(n as u64, Ordering::Relaxed);
+			}
 			Ok(Err(e)) => {
-				return Err((
-					bytes_sent,
-					anyhow::anyhow!("payload stream write failed: {e}"),
-				));
+				rollback_sent_bytes(bytes_sent, sent);
+				return Err(RangeSendError::Network {
+					bytes: sent,
+					message: format!("payload stream write failed: {e}"),
+				});
 			}
 			Err(_) => {
-				return Err((
-					bytes_sent,
-					anyhow::anyhow!(
+				rollback_sent_bytes(bytes_sent, sent);
+				return Err(RangeSendError::Network {
+					bytes: sent,
+					message: format!(
 						"Send data chunk timeout (network congestion): chunk_bytes={n}, timeout_ms={}",
 						timeout.as_millis()
 					),
-				));
+				});
 			}
 		}
 	}
 
-	// FIN：接收端把"读到 FIN"当作"字节已全部到达"。
+	// FIN：接收端把"读到 FIN"当作"本区间字节已全部到达"。
 	if let Err(e) = send.finish() {
-		return Err((
-			bytes_sent,
-			anyhow::anyhow!("payload stream finish failed: {e}"),
-		));
+		rollback_sent_bytes(bytes_sent, sent);
+		return Err(RangeSendError::Network {
+			bytes: sent,
+			message: format!("payload stream finish failed: {e}"),
+		});
 	}
-	Ok(bytes_sent)
+	Ok(sent)
 }
 
-/// 接收端单条数据流的读取任务。
+/// 区间发送失败时扣回本次尝试已写入的字节（供控制器 goodput 使用）。
+fn rollback_sent_bytes(bytes_sent: &AtomicU64, sent: u64) {
+	let _ = bytes_sent.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+		Some(current.saturating_sub(sent))
+	});
+}
+
+/// 一个传输的分片发送任务（发送端）。
+///
+/// 控制器在此任务里以 `T = clamp(4×srtt, 300ms, 2s)` 评估窗口 goodput / 丢包 /
+/// srtt，并用纯函数 [`decide_stream_count`] 决定目标并发 N：
+///
+/// - 从 N=1 起步，每个窗口在"还有未发送区间"时尝试 N+1；
+/// - 下个窗口若 goodput 增益 ≤ 8%：回退 N 并标记 `ceiling`（本传输不再上探）；
+/// - 丢包 > 1% 或 srtt > 2.5× 基线：回退一条并冷却 2T；
+/// - 剩余 ≤ 16 MiB：强制 N=1，不再探针；
+/// - 区间流失败：先降 N、冷却 2T，再重试同一区间（最多 3 次）。
+///
+/// 计划区间是**固定**的（见 [`initial_range_plan`]）：N 只决定"同时消费几个
+/// 尚未发送的区间"。因此 `target_n` 调小时，已经在飞的区间不会被中断（不会
+/// 留下空洞）；它只是不再领取新区间，等活跃数自然降到目标后继续。
+struct PayloadPlanJob {
+	conn: Connection,
+	path: PathBuf,
+	req_id: String,
+	item_id: String,
+	file_id: Option<String>,
+	sha256: String,
+	mime: String,
+	total_bytes: u64,
+	ranges: Vec<TransferRange>,
+	budget: Arc<Semaphore>,
+	log_sink: crate::logs::LogSink,
+}
+
+#[allow(clippy::cast_precision_loss)]
+async fn drive_payload_plan(job: PayloadPlanJob) -> std::result::Result<u64, (u64, String)> {
+	let PayloadPlanJob {
+		conn,
+		path,
+		req_id,
+		item_id,
+		file_id,
+		sha256,
+		mime,
+		total_bytes,
+		ranges,
+		budget,
+		log_sink,
+	} = job;
+
+	let bytes_sent = Arc::new(AtomicU64::new(0));
+	let mut pending: VecDeque<usize> = (0..ranges.len()).collect();
+	// 失败区间的重试不能"立刻用同一个 N 重开"：先进 deferred，等 2T 冷却结束
+	// 后（由下面的 tick 唤醒）再放回 pending，以降低后的 N 重试。
+	let mut deferred_retries: Vec<usize> = Vec::new();
+	let mut retries = vec![0u8; ranges.len()];
+	let mut join_set: tokio::task::JoinSet<(usize, std::result::Result<u64, RangeSendError>)> =
+		tokio::task::JoinSet::new();
+	let mut active = 0usize;
+
+	let mut target_n: u8 = 1;
+	let mut ceiling = false;
+	let mut probing = false;
+	let mut probe_baseline_goodput = 0.0f64;
+	let mut cooldown_until = tokio::time::Instant::now();
+
+	let initial_stats = conn.stats();
+	let srtt_base = initial_stats.path.rtt.max(Duration::from_millis(2));
+	let mut last_bytes = 0u64;
+	let mut last_lost = initial_stats.path.lost_packets;
+	let mut last_sent = initial_stats.path.sent_packets;
+	let mut last_sample_at = tokio::time::Instant::now();
+	let mut tick = tokio::time::interval_at(
+		tokio::time::Instant::now() + stream_probe_interval(srtt_base),
+		stream_probe_interval(srtt_base),
+	);
+	tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+	loop {
+		// 冷却结束：把退避中的失败区间放回待发送队列（以降低后的 N 重试）。
+		if !deferred_retries.is_empty() && tokio::time::Instant::now() >= cooldown_until {
+			pending.extend(deferred_retries.drain(..));
+		}
+
+		// 领取新区间：只受目标并发 N 与剩余区间数限制。
+		while active < target_n as usize {
+			let Some(index) = pending.pop_front() else {
+				break;
+			};
+			let range = ranges[index];
+			let header = TransferHeader {
+				req_id: req_id.clone(),
+				item_id: item_id.clone(),
+				file_id: file_id.clone(),
+				offset: range.offset,
+				length: range.length,
+				sha256: sha256.clone(),
+				mime: mime.clone(),
+			};
+			let conn = conn.clone();
+			let path = path.clone();
+			let counter = bytes_sent.clone();
+			let budget = budget.clone();
+			join_set.spawn(async move {
+				let result = send_payload_range(&conn, &path, header, &counter, budget).await;
+				(index, result)
+			});
+			active += 1;
+		}
+
+		if active == 0 && pending.is_empty() && deferred_retries.is_empty() {
+			break;
+		}
+
+		tokio::select! {
+			joined = join_set.join_next(), if active > 0 => {
+				let Some(joined) = joined else { break };
+				active = active.saturating_sub(1);
+				let (index, result) = match joined {
+					Ok(value) => value,
+					Err(e) => {
+						return Err((
+							bytes_sent.load(Ordering::Relaxed),
+							format!("payload range task panicked: {e}"),
+						));
+					}
+				};
+				match result {
+					Ok(sent) => {
+						let expected = ranges[index].length;
+						if sent != expected {
+							return Err((
+								bytes_sent.load(Ordering::Relaxed),
+								format!(
+									"range {} sent {sent} bytes, expected {expected}",
+									ranges[index].offset
+								),
+							));
+						}
+					}
+					Err(error) => {
+						let total = bytes_sent.load(Ordering::Relaxed);
+						if error.retryable() && retries[index] < MAX_RANGE_STREAM_RETRIES {
+							retries[index] += 1;
+							// 关键：失败后**不能**立刻用同一个 N 重试；降一条流并冷却 2T。
+							target_n = target_n.saturating_sub(1).max(1);
+							probing = false;
+							let cooldown = stream_probe_interval(conn.stats().path.rtt);
+							cooldown_until = tokio::time::Instant::now() + cooldown.saturating_mul(2);
+							log_sink.log_warn(
+								"Session",
+								&format!(
+									"Range stream failed, backing off before retry: transfer_id={req_id}, offset={}, attempt={}/{}, new_n={target_n}, error={}",
+									ranges[index].offset,
+									retries[index],
+									MAX_RANGE_STREAM_RETRIES,
+									error.message()
+								),
+								Some(&format!(
+									"区间数据流失败，先退避再重试: 传输ID={req_id}，偏移={}，第 {}/{} 次，新并发={target_n}，错误={}",
+									ranges[index].offset,
+									retries[index],
+									MAX_RANGE_STREAM_RETRIES,
+									error.message()
+								)),
+							);
+							deferred_retries.push(index);
+						} else {
+							return Err((
+								total,
+								format!(
+									"range {} failed after {} attempt(s) (last attempt sent {} bytes): {}",
+									ranges[index].offset,
+									retries[index] + 1,
+									error.bytes(),
+									error.message()
+								),
+							));
+						}
+					}
+				}
+			}
+			_ = tick.tick() => {
+				let now = tokio::time::Instant::now();
+				let stats = conn.stats();
+				let elapsed = now.duration_since(last_sample_at).as_secs_f64().max(1e-3);
+				let bytes_now = bytes_sent.load(Ordering::Relaxed);
+				let window_goodput =
+					bytes_now.saturating_sub(last_bytes) as f64 / elapsed;
+				let sent_delta = stats.path.sent_packets.saturating_sub(last_sent);
+				let lost_delta = stats.path.lost_packets.saturating_sub(last_lost);
+				let loss_rate = if sent_delta > 0 {
+					lost_delta as f64 / sent_delta as f64
+				} else {
+					0.0
+				};
+				let srtt = stats.path.rtt.max(Duration::from_micros(50));
+				let srtt_ratio = srtt.as_secs_f64() / srtt_base.as_secs_f64();
+				let remaining = total_bytes.saturating_sub(bytes_now);
+
+				last_bytes = bytes_now;
+				last_lost = stats.path.lost_packets;
+				last_sent = stats.path.sent_packets;
+				last_sample_at = now;
+
+				let interval = stream_probe_interval(srtt);
+				tick = tokio::time::interval_at(now + interval, interval);
+				tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+				// 冷却期内只采样，不做决策（退避后的 N 保持至少 2T）。
+				if now < cooldown_until {
+					continue;
+				}
+
+				let gain = if probing && probe_baseline_goodput > 0.0 {
+					Some((window_goodput - probe_baseline_goodput) / probe_baseline_goodput)
+				} else {
+					None
+				};
+				let decision = decide_stream_count(StreamControllerInput {
+					current_n: target_n,
+					gain,
+					loss_rate,
+					srtt_ratio,
+					remaining_bytes: remaining,
+					ceiling_reached: ceiling,
+				});
+				if decision.next_n != target_n || decision.reason != StreamDecisionReason::Hold {
+					log_sink.log_info(
+						"Session",
+						&format!(
+							"transfer.adapt transfer_id={req_id} old_n={target_n} new_n={} reason={:?} gain={gain:?} loss_rate={loss_rate:.4} srtt_ratio={srtt_ratio:.2} window_goodput={window_goodput:.0}B/s remaining={remaining}",
+							decision.next_n, decision.reason
+						),
+						Some(&format!(
+							"传输流数自适应: 传输ID={req_id}，旧并发={target_n}，新并发={}，原因={:?}，增益={gain:?}，丢包率={loss_rate:.4}，RTT倍数={srtt_ratio:.2}，窗口吞吐={window_goodput:.0}B/s，剩余={remaining}",
+							decision.next_n, decision.reason
+						)),
+					);
+				}
+
+				match decision.reason {
+					StreamDecisionReason::ProbeStarted | StreamDecisionReason::ProbeAccepted => {
+						probing = true;
+						probe_baseline_goodput = window_goodput;
+					}
+					StreamDecisionReason::ProbeRejected => {
+						// decision 已把 ceiling 置 true，本传输不再上探。
+						probing = false;
+					}
+					StreamDecisionReason::CongestionBackoff => {
+						probing = false;
+						cooldown_until = now + interval.saturating_mul(2);
+					}
+					StreamDecisionReason::SmallTransfer
+					| StreamDecisionReason::Ceiling
+					| StreamDecisionReason::Hold => {
+						probing = false;
+					}
+				}
+				// 目标并发不能超过计划区间数（LAN 只切 2 段时，探针最多到 2）。
+				let plan_cap = ranges.len().clamp(1, MAX_PAYLOAD_STREAMS_PER_TRANSFER) as u8;
+				target_n = decision.next_n.min(plan_cap);
+				ceiling = decision.ceiling_reached;
+			}
+		}
+	}
+
+	Ok(bytes_sent.load(Ordering::Relaxed))
+}
+
+/// 接收端单条**区间**数据流的读取任务（B2）。
 ///
 /// 它把数据流字节聚合成 [`UPLOAD_CHUNK_BYTES`] 大小的块，经
-/// [`ReceiverInbox::push_or_wait`] 推进 writer channel，并维护 [`PayloadStats`]。
-/// 超出声明大小/硬上限时立即返回 `Failed`（绝不写入越界块）。
+/// [`ReceiverInbox::push_or_wait`] 推进 writer channel（块携带绝对偏移，writer
+/// 负责乱序定位写），并维护 [`PayloadStats`] 与进度事件。
 ///
-/// 与旧 actor 路径的差异：
-/// - 旧 `handle_data_chunk` 的越界检查、进度事件、背压处理全部搬到这里；
-/// - 背压现在只阻塞这条数据流（QUIC 流控 + writer channel），不再影响控制流。
+/// 失败语义：
+/// - 本区间字节数超过 `range_length` / 总大小 / 硬上限：**致命**，整传输失败；
+/// - FIN 时字节数不足 `range_length`：**致命**（`TRANSFER_RANGE_UNDERRUN`），
+///   绝不把缺字节的区间当成完成；
+/// - 网络 reset/连接中断：**可重试**（`retryable=true`），actor 只把该区间标记
+///   为 Failed；发送端降 N 后从同一 offset 重写。
 #[allow(clippy::too_many_arguments)]
 async fn receive_payload_stream(
 	mut recv: RecvStream,
 	_send: SendStream,
 	req_id: String,
 	item_id: String,
+	range_offset: u64,
+	range_length: u64,
 	total_bytes: u64,
 	hard_cap_bytes: u64,
 	mut inbox: ReceiverInbox,
@@ -1026,7 +1861,20 @@ async fn receive_payload_stream(
 	sink: Arc<dyn CoreEventSink>,
 ) -> PayloadEvent {
 	let mut buf = bytes::BytesMut::with_capacity(UPLOAD_CHUNK_BYTES);
+	let mut range_received = 0u64;
 	let mut last_progress_emit = 0i64;
+
+	macro_rules! fail {
+		($code:expr, $detail:expr, $retryable:expr) => {
+			return PayloadEvent::RangeFailed {
+				req_id,
+				offset: range_offset,
+				code: $code.to_string(),
+				detail: $detail,
+				retryable: $retryable,
+			}
+		};
+	}
 
 	loop {
 		// 单次最多读一个分块大小：`Chunk` 边界不代表对端 write 边界，限制上限可以
@@ -1039,44 +1887,51 @@ async fn receive_payload_stream(
 				}
 				let data = buf.split().freeze();
 				let chunk_len = data.len() as u64;
-				let received = stats.received_bytes();
 
-				// 越界闸门：与旧 handle_data_chunk 完全一致的判定与错误码。
-				if let Some(code) = chunk_overrun(received, chunk_len, total_bytes, hard_cap_bytes)
-				{
-					return PayloadEvent::Failed {
-						req_id,
-						code: code.to_string(),
-						detail: format!(
-							"received={received}+{chunk_len}, declared_total={total_bytes}, hard_cap={hard_cap_bytes}"
+				// 区间越界：本区间声明的 length 是硬边界，多 1 字节都失败。
+				if range_received.saturating_add(chunk_len) > range_length {
+					fail!(
+						"TRANSFER_RANGE_OVERRUN",
+						format!(
+							"range {range_offset} received={range_received}+{chunk_len}, declared_length={range_length}"
 						),
-					};
+						false
+					);
+				}
+				let absolute_received = range_offset.saturating_add(range_received);
+				if let Some(code) =
+					chunk_overrun(absolute_received, chunk_len, total_bytes, hard_cap_bytes)
+				{
+					fail!(
+						code,
+						format!(
+							"absolute_received={absolute_received}+{chunk_len}, declared_total={total_bytes}, hard_cap={hard_cap_bytes}"
+						),
+						false
+					);
 				}
 
 				match inbox.push_or_wait(data).await {
 					PushOutcome::Queued | PushOutcome::Paused => {}
-					PushOutcome::Overflow => {
-						return PayloadEvent::Failed {
-							req_id,
-							code: "TRANSFER_BACKPRESSURE".to_string(),
-							detail: format!(
-								"writer backpressure: pending buffer exceeded {MAX_PENDING_BYTES_PER_RECEIVER} bytes"
-							),
-						};
-					}
-					PushOutcome::Closed => {
-						return PayloadEvent::Failed {
-							req_id,
-							code: "WRITE_TASK_DEAD".to_string(),
-							detail: "writer task exited while receiving payload".to_string(),
-						};
-					}
+					PushOutcome::Overflow => fail!(
+						"TRANSFER_BACKPRESSURE",
+						format!(
+							"writer backpressure: pending buffer exceeded {MAX_PENDING_BYTES_PER_RECEIVER} bytes"
+						),
+						false
+					),
+					PushOutcome::Closed => fail!(
+						"WRITE_TASK_DEAD",
+						"writer task exited while receiving payload".to_string(),
+						false
+					),
 				}
 
+				range_received = range_received.saturating_add(chunk_len);
 				let now = now_ms();
 				stats.record_chunk(chunk_len, now);
 				if now - last_progress_emit > 200 {
-					// 与旧实现同样的事件结构与字段；只把发送方从 actor 改为接收任务。
+					// 与旧实现同样的事件结构与字段；received 是整传输累计值。
 					let progress_evt = serde_json::json!({
 						"type": "TRANSFER_PROGRESS",
 						"payload": {
@@ -1096,52 +1951,109 @@ async fn receive_payload_stream(
 				if !buf.is_empty() {
 					let data = buf.split().freeze();
 					let chunk_len = data.len() as u64;
-					let received = stats.received_bytes();
-					if let Some(code) =
-						chunk_overrun(received, chunk_len, total_bytes, hard_cap_bytes)
-					{
-						return PayloadEvent::Failed {
-							req_id,
-							code: code.to_string(),
-							detail: format!(
-								"received={received}+{chunk_len}, declared_total={total_bytes}, hard_cap={hard_cap_bytes}"
+					if range_received.saturating_add(chunk_len) > range_length {
+						fail!(
+							"TRANSFER_RANGE_OVERRUN",
+							format!(
+								"range {range_offset} received={range_received}+{chunk_len}, declared_length={range_length}"
 							),
-						};
+							false
+						);
+					}
+					let absolute_received = range_offset.saturating_add(range_received);
+					if let Some(code) =
+						chunk_overrun(absolute_received, chunk_len, total_bytes, hard_cap_bytes)
+					{
+						fail!(
+							code,
+							format!(
+								"absolute_received={absolute_received}+{chunk_len}, declared_total={total_bytes}, hard_cap={hard_cap_bytes}"
+							),
+							false
+						);
 					}
 					match inbox.push_or_wait(data).await {
 						PushOutcome::Queued | PushOutcome::Paused => {
+							range_received = range_received.saturating_add(chunk_len);
 							stats.record_chunk(chunk_len, now_ms());
 						}
-						PushOutcome::Overflow => {
-							return PayloadEvent::Failed {
-								req_id,
-								code: "TRANSFER_BACKPRESSURE".to_string(),
-								detail: format!(
-									"writer backpressure: pending buffer exceeded {MAX_PENDING_BYTES_PER_RECEIVER} bytes"
-								),
-							};
-						}
-						PushOutcome::Closed => {
-							return PayloadEvent::Failed {
-								req_id,
-								code: "WRITE_TASK_DEAD".to_string(),
-								detail: "writer task exited while receiving payload".to_string(),
-							};
-						}
+						PushOutcome::Overflow => fail!(
+							"TRANSFER_BACKPRESSURE",
+							format!(
+								"writer backpressure: pending buffer exceeded {MAX_PENDING_BYTES_PER_RECEIVER} bytes"
+							),
+							false
+						),
+						PushOutcome::Closed => fail!(
+							"WRITE_TASK_DEAD",
+							"writer task exited while receiving payload".to_string(),
+							false
+						),
 					}
 				}
+				if range_received != range_length {
+					stats.discard_bytes(range_received);
+					fail!(
+						"TRANSFER_RANGE_UNDERRUN",
+						format!(
+							"range {range_offset} finished early: received={range_received}, declared_length={range_length}"
+						),
+						false
+					);
+				}
 				stats.touch(now_ms());
-				return PayloadEvent::Finished { req_id };
+				return PayloadEvent::RangeFinished {
+					req_id,
+					offset: range_offset,
+					received: range_received,
+				};
 			}
 			Err(e) => {
-				return PayloadEvent::Failed {
-					req_id,
-					code: "TRANSFER_STREAM_ERROR".to_string(),
-					detail: format!("payload stream reset/closed before FIN: {e}"),
-				};
+				// 网络错误可重试：把本区间已计入进度的字节扣回，发送端会从
+				// 区间起点重写（writer 按偏移覆盖）。
+				stats.discard_bytes(range_received);
+				fail!(
+					"TRANSFER_STREAM_ERROR",
+					format!("payload stream reset/closed before FIN: {e}"),
+					true
+				);
 			}
 		}
 	}
+}
+
+/// 顺序重读整个临时文件并计算整文件 SHA-256（同步版本）。
+///
+/// 只在 `spawn_blocking` 的最终化任务里调用。B2 的区间是乱序完成的，接收端
+/// 无法在写入路径上按顺序增量哈希；这是 ADR-002 §4.2 两种完整性方案中的第二种：
+/// **在所有区间 FIN + ContentEnd 之后，按偏移顺序重读临时文件、重算整文件 hash**，
+/// 与 `ContentBegin.sha256` 比对后再 commit。
+///
+/// 成本（release，本机实测口径）：额外一次顺序读（NVMe ~4.7 GiB/s），哈希本身
+/// 用 ring 的 SHA-256（SHA-NI，约 4~6 GiB/s；sha2 纯 Rust 约 2.5 GiB/s）。
+/// 256 MiB 传输约 +55ms 读 + 40~60ms hash（读与 hash 在同一循环里重叠，墙钟
+/// 主要受较慢者限制）；B1 原本在 writer 写路径上逐块哈希，B2 把同一份 hash CPU
+/// 挪到最终化阶段，净 CPU 基本不变，只多一次顺序读。
+/// 换来的是：区间乱序/重叠/缺段无法伪造通过、且能校验发送端声明的**整文件**
+/// hash（逐区间 hash 只能证明每个区间自洽，无法证明拼接顺序与整文件 hash 一致）。
+fn sha256_file_hex(path: &std::path::Path) -> anyhow::Result<String> {
+	use ring::digest::{Context, SHA256};
+	use std::io::Read;
+	let mut file = std::fs::File::open(path)?;
+	// 用 ring 的 SHA-256（带 SHA-NI/汇编优化）而不是 sha2 的纯 Rust 实现：
+	// finalize 的哈希在传输尾部串行执行，256 MiB 按 sha2 实测约 100 ms，是
+	// 端到端吞吐的主要尾延迟；ring 在本机约 2-3× 快，能把这段成本压到与 B1
+	// 写路径重叠哈希相当的水平。输出仍是标准 SHA-256，与 ContentBegin 一致。
+	let mut ctx = Context::new(&SHA256);
+	let mut buf = vec![0u8; 1024 * 1024];
+	loop {
+		let n = file.read(&mut buf)?;
+		if n == 0 {
+			break;
+		}
+		ctx.update(&buf[..n]);
+	}
+	Ok(hex::encode(ctx.finish().as_ref()))
 }
 
 /// 临时文件守护者 (RAII)，任务结束/Panic时自动删除残留文件
@@ -1229,10 +2141,16 @@ pub struct SessionActor {
 	conn: Connection,
 	/// 接收任务 → actor 的数据流完成/失败事件。
 	payload_event_tx: mpsc::Sender<PayloadEvent>,
-	/// 已读到头部、还在等 `ContentBegin` 注册的数据流（有宽限上限）。
-	pending_payloads: HashMap<String, PendingPayload>,
+	/// 已读到头部、还在等 `ContentBegin` 注册的数据流（每个 req_id 最多
+	/// `MAX_PAYLOAD_STREAMS_PER_TRANSFER` 条，有宽限上限）。
+	pending_payloads: HashMap<String, Vec<PendingPayload>>,
 	/// 最近取消的 req_id → 取消时间。用于立即拒绝与取消交叉到达的数据流。
 	cancelled_payloads: HashMap<String, i64>,
+	/// 会话级出站数据流闸门（[`MAX_PAYLOAD_STREAMS_PER_SESSION`]）。
+	///
+	/// 与 [`MAX_CONCURRENT_SENDERS`] 是独立维度：一个传输最多 6 条流，但一个
+	/// 会话同时活跃的流必须另有上限，否则多个 WAN 探针会瞬间放大调度/内存开销。
+	payload_stream_budget: Arc<Semaphore>,
 }
 
 impl SessionActor {
@@ -1430,6 +2348,7 @@ impl SessionActor {
 			payload_event_tx,
 			pending_payloads: HashMap::new(),
 			cancelled_payloads: HashMap::new(),
+			payload_stream_budget: Arc::new(Semaphore::new(MAX_PAYLOAD_STREAMS_PER_SESSION)),
 		};
 
 		actor.start_handshake().await?;
@@ -2093,9 +3012,18 @@ impl SessionActor {
 				total_bytes,
 				sha256,
 				mime,
+				ranges,
 			} => {
-				self.handle_content_begin(req_id, item_id, file_id, total_bytes, sha256, mime)
-					.await?;
+				self.handle_content_begin(
+					req_id,
+					item_id,
+					file_id,
+					total_bytes,
+					sha256,
+					mime,
+					ranges,
+				)
+				.await?;
 			}
 			CtrlMsg::ContentEnd { req_id } => {
 				self.handle_content_end(&req_id);
@@ -2183,14 +3111,16 @@ impl SessionActor {
 	}
 
 	// --- M3 Receiver Logic ---
+	#[allow(clippy::too_many_arguments)]
 	async fn handle_content_begin(
 		&mut self,
 		req_id: String,
 		item_id: String,
 		file_id: Option<String>,
 		total_bytes: u64,
-		file_sha256: String, // 注意：这是整个文件的 Hash，Resume 时不需要校验它
+		file_sha256: String, // 注意：这是整个文件的 Hash（B2 的区间 hash 不在控制面）
 		mime: String,
+		ranges: Vec<TransferRange>,
 	) -> Result<()> {
 		// 入站策略：accept_from_peer=false（或对端身份未知）时拒绝接收内容。
 		// 用 ContentCancel 而非 Error 通知对端：Error 会被对端视为致命错误并断开会话。
@@ -2284,6 +3214,29 @@ impl SessionActor {
 			return Ok(());
 		}
 
+		// 3) 区间计划（B2）：必须无空洞、无重叠、连续覆盖到文件末尾，且不超过
+		//    流数上限。任何不合法计划都在落盘前拒绝，并给出可诊断的错误码。
+		if let Err((code, detail)) = validate_range_plan(&ranges, total_bytes) {
+			self.log_sink.log_error(
+				"Session",
+				&format!(
+					"Transfer rejected: invalid range plan: transfer_id={req_id}, code={code}, detail={detail}"
+				),
+				Some(&format!(
+					"传输被拒绝：区间计划非法: 传输ID={req_id}，错误码={code}，详情={detail}"
+				)),
+				Some(code),
+			);
+			self.emit_transfer_failed(&req_id, code, &detail);
+			self.drop_pending_payload(&req_id);
+			self.send_ctrl(CtrlMsg::ContentCancel {
+				req_id,
+				reason: format!("invalid range plan: {detail}"),
+			})
+			.await?;
+			return Ok(());
+		}
+
 		// 注：磁盘剩余空间检查需要平台无关的 statvfs 封装（当前工作区没有 fs2/sysinfo 依赖），
 		// 因此这一子项按任务说明跳过；写入失败仍会由 writer Task 以 COMMIT_FAILED 上报。
 
@@ -2329,60 +3282,83 @@ impl SessionActor {
 				committed: false,
 			};
 
-			// 打开文件
+			// 打开文件。B2 使用**定位写**（每块 seek 到自己的绝对 offset），
+			// 因此不能用 append 模式（Windows 上 append 会忽略 seek）。续传时
+			// 保留已有内容并把长度截到声明值，避免残留尾部字节污染整文件 hash。
 			let mut opts = OpenOptions::new();
-			opts.write(true).create(true);
-			if is_resume {
-				opts.append(true); // 续传追加
-			} else {
-				opts.truncate(true); // 新传覆盖
-			}
+			opts.write(true).create(true).truncate(!is_resume);
 
 			let file_res = opts.open(&guard.path).await;
 			if let Err(e) = file_res {
 				eprintln!("[Session] Writer open failed: {e}");
 				return;
 			}
-			let mut writer = tokio::io::BufWriter::new(file_res.unwrap());
-			let mut hasher = Sha256::new(); // 计算本次传输片段的 Hash
-								   // 实际写入的字节数：fsync 策略按“真实大小”而不是对端声明值选择，
-								   // 这样续传/截断的传输也不会被误判成大文件。
+			// B2：区间是乱序完成的，writer 不能再用 BufWriter 的顺序追加语义；
+			// 直接对 File 定位写：每块携带绝对 offset，偏移不连续就 seek。块大小
+			// 256 KiB，跨区间 seek 的开销远小于一次网络/磁盘写。
+			let mut writer = file_res.unwrap();
+			if is_resume {
+				let resume_path = guard.path.clone();
+				let expected_len = total_bytes;
+				let resize = tokio::task::spawn_blocking(move || {
+					let file = std::fs::OpenOptions::new().write(true).open(&resume_path)?;
+					file.set_len(expected_len)
+				})
+				.await;
+				match resize {
+					Ok(Ok(())) => {}
+					Ok(Err(e)) => {
+						eprintln!("[Session] Writer resize failed: {e}");
+						return; // 触发 Drop 删除
+					}
+					Err(e) => {
+						eprintln!("[Session] Writer resize task failed: {e}");
+						return;
+					}
+				}
+			}
+			// 实际写入的字节数：fsync 策略按“真实大小”而不是对端声明值选择，
+			// 这样续传/截断的传输也不会被误判成大文件。
 			let mut written_bytes: u64 = 0;
+			let mut write_cursor: Option<u64> = None;
 
 			while let Some(msg) = rx.recv().await {
 				match msg {
-					ReceiverTaskMsg::Chunk { data, permit } => {
+					ReceiverTaskMsg::Chunk {
+						offset,
+						data,
+						permit,
+					} => {
+						if write_cursor != Some(offset) {
+							if let Err(e) = writer.seek(SeekFrom::Start(offset)).await {
+								eprintln!("[Session] Write seek failed: {e}");
+								return; // 触发 Drop 删除
+							}
+						}
 						if let Err(e) = writer.write_all(&data).await {
 							eprintln!("[Session] Write failed: {e}");
 							return; // 触发 Drop 删除
 						}
-						hasher.update(&data);
+						write_cursor = Some(offset.saturating_add(data.len() as u64));
 						written_bytes = written_bytes.saturating_add(data.len() as u64);
 						// 写完后归还字节许可：actor 看到的"在途字节"因此随磁盘进度下降。
 						drop(permit);
 					}
 					ReceiverTaskMsg::Finish {
 						expected_sha256,
+						verify_whole_file,
 						reply_tx,
 					} => {
-						// 1. Flush & Sync
+						// 1. Flush & 关闭文件句柄（校验/commit 用独立句柄重开）
 						if writer.flush().await.is_err() {
 							return;
 						}
-						let mut f = writer.into_inner();
-						if f.shutdown().await.is_err() {
+						if writer.shutdown().await.is_err() {
 							return;
 						}
-						drop(f); // 关闭文件句柄
+						drop(writer);
 
-						// 2. 校验 Hash (本次传输片段)
-						let calculated = hex::encode(hasher.finalize());
-						if calculated != expected_sha256 {
-							let _ = reply_tx.send(Err(anyhow::anyhow!("Checksum mismatch")));
-							return; // 触发 Drop 删除
-						}
-
-						// 2.5 按 ADR-002 §3.7 选择持久化动作：
+						// 2. 按 ADR-002 §3.7 选择持久化动作：
 						// - always / large-only 小文件：rename 前 sync_all（本次 commit 内完成）；
 						// - large-only 大文件：只 rename，后台 worker 补 sync_data；
 						// - never：完全不做 fsync。
@@ -2390,27 +3366,34 @@ impl SessionActor {
 						// 因此默认策略把 ≥ 8 MiB 的传输改为后台补同步。
 						let decision = cas_clone.fsync_policy().decision(written_bytes);
 
-						// 3. Commit 逻辑 (移入 spawn_blocking)
+						// 3. 完整性校验 + Commit（移入 spawn_blocking，不占 runtime worker）
 						guard.committed = true; // 禁止 Drop 删除，转交控制权
 						let guard_path = guard.path.clone(); // Clone path before move
 
 						let commit_res = tokio::task::spawn_blocking(move || {
-							// A. 转正 Blob (CAS) - 注意：Resume 场景下这里应该合并 Hash，
-							// 但简化起见，我们假设 CAS 接口能处理或仅作为临时存储。
-							// 实际 M3 完整版应计算全量 Hash 存入 blobs。
-							// 这里我们直接用 expected_sha256 (片段Hash) 做 blob 名可能不对，
-							// 但为了让流程跑通，先产生一个 Blob。
-							// *修正*：M3 协议中 ContentBegin 里的 _file_sha256 才是最终 Blob ID。
-							// 但 Writer Task 没有那个值。
-							// 暂定：用片段 Hash 存，或者如果不做全量校验，直接 commit。
+							// A. 完整性（ADR-002 §4.2 方案二）：所有区间 FIN 后按偏移
+							//    顺序重读临时文件、重算整文件 hash，与 ContentBegin.sha256
+							//    比对。代价是一次顺序读（NVMe ~4.7 GiB/s）+ 与 B1 相同的
+							//    hash CPU；换来对整文件拼接顺序的校验（逐区间 hash 无法
+							//    证明整文件 hash 一致）。
+							if verify_whole_file {
+								let calculated = sha256_file_hex(&guard_path)?;
+								if calculated != expected_sha256 {
+									anyhow::bail!(
+										"Checksum mismatch: expected={expected_sha256}, calculated={calculated}"
+									);
+								}
+							}
 
+							// B. 转正 Blob (CAS)：blob id 来自 ContentBegin 的整文件
+							//    hash（与 B1 相同）。
 							let commit = cas_clone.commit_tmp_file_with_policy(
 								&guard_path,
 								&expected_sha256,
 								decision,
 							)?;
 
-							// B. 决定落地路径 (Materialize)
+							// C. 决定落地路径 (Materialize)
 							let final_path = if let Some(real_fid) = fid {
 								// FileList 模式
 								let store = store_clone.lock().unwrap();
@@ -2460,8 +3443,8 @@ impl SessionActor {
 		// 保留 abort 句柄：ContentEnd 超时 / 取消 / 越界时终止 writer，TempFileGuard 会删 tmp。
 		let writer_handle = writer_task.abort_handle();
 
-		// 注意：如果是 Resume，这里的 total_bytes 可能是剩余量或总量，
-		// 取决于协议约定；无论如何它都是本端允许写入的上限。
+		// 注意：如果是 Resume，这里的 total_bytes 是整文件大小，区间计划覆盖
+		// [base_offset, total_bytes)；整文件 hash 只在 base_offset == 0 时校验。
 		let started_ts_ms = now_ms();
 		let stats = PayloadStats::new(started_ts_ms);
 		let receiver_state = ReceiverState::Receiving {
@@ -2474,7 +3457,8 @@ impl SessionActor {
 			budget,
 			stats,
 			handle: writer_handle,
-			payload: PayloadSlot::Awaiting,
+			ranges: ReceiverRanges::from_plan(&ranges, total_bytes),
+			range_handles: HashMap::new(),
 			end_received: false,
 			end_wait_started_ms: 0,
 			total_bytes,
@@ -2483,39 +3467,36 @@ impl SessionActor {
 		};
 		self.receivers.insert(req_id.clone(), receiver_state);
 
-		// 数据流可能先于 ContentBegin 到达（控制流/数据流独立交付）。若已暂存，
-		// 注册完成后立刻接入。
-		if let Some(pending) = self.pending_payloads.remove(&req_id) {
-			let opened = PayloadOpened {
-				header: pending.header,
-				recv: pending.recv,
-				send: pending.send,
-			};
-			self.attach_payload(opened).await?;
+		// 数据流可能先于 ContentBegin 到达（控制流/数据流独立交付）。B2 同一传输
+		// 可能已暂存多条区间流，注册完成后逐条接入；header 与计划不匹配的会在
+		// attach_payload 里按 gap/overlap/unexpected 失败整个传输。
+		if let Some(pending_streams) = self.pending_payloads.remove(&req_id) {
+			for pending in pending_streams {
+				let opened = PayloadOpened {
+					header: pending.header,
+					recv: pending.recv,
+					send: pending.send,
+				};
+				self.attach_payload(opened).await?;
+				if !matches!(
+					self.receivers.get(&req_id),
+					Some(ReceiverState::Receiving { .. })
+				) {
+					// attach 失败已终止该传输（剩余暂存流随 drop 关闭）。
+					break;
+				}
+			}
 		}
 		Ok(())
 	}
 
-	/// 当前 req_id 的路由投影（用于纯函数 [`route_payload_stream`] 等）。
-	fn payload_route_state(&self, req_id: &str) -> Option<PayloadRouteState> {
-		match self.receivers.get(req_id) {
-			Some(ReceiverState::Receiving { payload, .. }) => Some(match payload {
-				PayloadSlot::Awaiting => PayloadRouteState::Awaiting,
-				PayloadSlot::Attached { .. } => PayloadRouteState::Attached,
-				PayloadSlot::Finished => PayloadRouteState::Finished,
-			}),
-			Some(ReceiverState::Committing { .. }) => Some(PayloadRouteState::Committing),
-			_ => None,
-		}
-	}
-
-	/// 丢弃一条仍在等待 `ContentBegin` 的数据流（receiver 被拒绝/已存在时）。
+	/// 丢弃所有仍在等待 `ContentBegin` 的数据流（receiver 被拒绝/已存在时）。
 	fn drop_pending_payload(&mut self, req_id: &str) {
 		if self.pending_payloads.remove(req_id).is_some() {
 			self.log_sink.log_warn(
 				"Session",
 				&format!(
-					"Dropping payload stream that will never be registered: transfer_id={req_id}"
+					"Dropping payload streams that will never be registered: transfer_id={req_id}"
 				),
 				Some(&format!(
 					"丢弃无法注册的数据流（传输已被拒绝或已存在）: 传输ID={req_id}"
@@ -2524,16 +3505,16 @@ impl SessionActor {
 		}
 	}
 
-	/// 校验数据流头与已登记的 `ContentBegin` 一致。
+	/// 校验数据流头的**元数据**与已登记的 `ContentBegin` 一致。
 	///
-	/// 头只用于路由/诊断，接收端真正写入的大小/哈希仍以 `ContentBegin` 为准；这里
-	/// 仍然严格比对，避免对端用同 req_id 的头部把控制面与数据面拼错。
+	/// 区间 offset/length 不在这里比较，而由 [`route_range_header`] 对照
+	/// `ContentBegin.ranges` 精确匹配（B2）。这里只守住 item/file/整文件 sha
+	/// 三个字段，避免对端用同 req_id 的头部把不同内容拼在一起。
 	fn validate_payload_header(
 		header: &TransferHeader,
 		item_id: &str,
 		file_id: Option<&str>,
 		expected_sha256: &str,
-		total_bytes: u64,
 	) -> std::result::Result<(), String> {
 		if header.item_id != item_id {
 			return Err(format!(
@@ -2553,71 +3534,131 @@ impl SessionActor {
 				header.sha256
 			));
 		}
-		// B1 每条数据流承载整个传输（offset=0，length=total_bytes）。用
-		// offset + length 校验可以同时覆盖 B2 的分段语义，且 offset>0 时不会静默错位。
-		if header.offset.saturating_add(header.length) != total_bytes {
-			return Err(format!(
-				"offset+length mismatch: header={}+{}, begin={total_bytes}",
-				header.offset, header.length
-			));
-		}
 		Ok(())
 	}
 
-	/// 把一条数据流接入已登记的 receiver：启动接收任务并登记 abort 句柄。
+	/// 把一条**区间**数据流接入已登记的 receiver：启动该区间的接收任务并登记
+	/// abort 句柄。同一 req_id 的多个区间可以并发、乱序接入。
 	///
-	/// 头部与登记信息不一致时，拒绝该数据流并把传输标记为失败（不再继续等字节）。
+	/// - 元数据不一致 → 整传输失败（`TRANSFER_HEADER_MISMATCH`）；
+	/// - 区间与计划不匹配 → 重叠/错位/未声明/长度不符，整传输失败；
+	/// - 重复区间（已接入或已完成）→ 只丢弃这条流，不动传输。
 	async fn attach_payload(&mut self, opened: PayloadOpened) -> Result<()> {
 		let req_id = opened.header.req_id.clone();
+
+		// 第一段：只读借用完成校验与路由，避免在借用期间调用 &mut self 方法。
+		let routing = {
+			let Some(ReceiverState::Receiving {
+				item_id,
+				file_id,
+				expected_sha256,
+				ranges,
+				..
+			}) = self.receivers.get(&req_id)
+			else {
+				// 调用方已做过路由判定；这里再防御一次（状态可能在 await 间隙变化）。
+				return Ok(());
+			};
+			if let Err(detail) = Self::validate_payload_header(
+				&opened.header,
+				item_id,
+				file_id.as_deref(),
+				expected_sha256,
+			) {
+				Err((
+					"TRANSFER_HEADER_MISMATCH",
+					format!("payload header rejected: {detail}"),
+				))
+			} else {
+				match route_range_header(ranges, opened.header.offset, opened.header.length) {
+					RangeRoute::Attach(index) | RangeRoute::Retry(index) => Ok(index),
+					RangeRoute::Duplicate => Err((
+						"TRANSFER_RANGE_DUPLICATE",
+						format!(
+							"range {}+{} is already attached/finished",
+							opened.header.offset, opened.header.length
+						),
+					)),
+					RangeRoute::Overlap => Err((
+						"TRANSFER_RANGE_OVERLAP",
+						format!(
+							"range {}+{} overlaps a planned range",
+							opened.header.offset, opened.header.length
+						),
+					)),
+					RangeRoute::LengthMismatch => Err((
+						"TRANSFER_RANGE_LENGTH_MISMATCH",
+						format!(
+							"range at offset {} has length {}, which does not match the plan",
+							opened.header.offset, opened.header.length
+						),
+					)),
+					RangeRoute::Unexpected => Err((
+						"TRANSFER_RANGE_UNEXPECTED",
+						format!(
+							"range {}+{} is not part of the declared plan",
+							opened.header.offset, opened.header.length
+						),
+					)),
+				}
+			}
+		};
+
+		let index = match routing {
+			Ok(index) => index,
+			Err((code, detail)) => {
+				if code == "TRANSFER_RANGE_DUPLICATE" {
+					// 重复流只影响它自己：丢掉句柄（drop 会复位该流），传输继续。
+					self.log_sink.log_warn(
+						"Session",
+						&format!(
+							"Rejecting duplicate range stream: transfer_id={req_id}, {detail}"
+						),
+						Some(&format!("拒绝重复的区间数据流: 传输ID={req_id}，{detail}")),
+					);
+					return Ok(());
+				}
+				self.log_sink.log_error(
+					"Session",
+					&format!(
+						"Rejecting payload range: transfer_id={req_id}, code={code}, detail={detail}"
+					),
+					Some(&format!(
+						"拒绝区间数据流: 传输ID={req_id}，错误码={code}，详情={detail}"
+					)),
+					Some(code),
+				);
+				drop(opened);
+				self.abort_receiver(&req_id, code, &detail, "invalid payload range")
+					.await;
+				return Ok(());
+			}
+		};
+
+		// 第二段：登记 Attached 并启动该区间的接收任务。
+		let sink = self.sink.clone();
+		let event_tx = self.payload_event_tx.clone();
 		let Some(ReceiverState::Receiving {
 			tx,
 			budget,
 			stats,
 			item_id,
-			file_id,
-			expected_sha256,
 			total_bytes,
 			hard_cap_bytes,
+			ranges,
+			range_handles,
 			..
-		}) = self.receivers.get(&req_id)
+		}) = self.receivers.get_mut(&req_id)
 		else {
-			// 调用方已做过路由判定；这里再防御一次（状态可能在 await 间隙变化）。
 			return Ok(());
 		};
-
-		if let Err(detail) = Self::validate_payload_header(
-			&opened.header,
-			item_id,
-			file_id.as_deref(),
-			expected_sha256,
-			*total_bytes,
-		) {
-			let (tx_ctrl, code) = (
-				format!("payload header rejected: {detail}"),
-				"TRANSFER_HEADER_MISMATCH",
-			);
-			self.log_sink.log_error(
-				"Session",
-				&format!("Rejecting payload stream: transfer_id={req_id}, {tx_ctrl}"),
-				Some(&format!(
-					"拒绝数据流：传输ID={req_id}，头部与 ContentBegin 不一致：{detail}"
-				)),
-				Some(code),
-			);
-			// 丢弃这条数据流，并让本次传输失败（对端会收到非致命的 ContentCancel）。
-			drop(opened);
-			self.abort_receiver(&req_id, code, &tx_ctrl, "payload header mismatch")
-				.await;
-			return Ok(());
-		}
-
-		let receiver_task_inbox = ReceiverInbox::new(tx.clone(), budget.clone());
+		let range = ranges.slots[index];
+		ranges.set_state(index, RangeSlotState::Attached);
+		let receiver_task_inbox = ReceiverInbox::new(tx.clone(), budget.clone(), range.offset);
 		let stats_clone = stats.clone();
-		let sink = self.sink.clone();
 		let item_id_clone = item_id.clone();
 		let total = *total_bytes;
 		let hard_cap = *hard_cap_bytes;
-		let event_tx = self.payload_event_tx.clone();
 		let event_req_id = req_id.clone();
 
 		let handle = tokio::spawn(async move {
@@ -2626,6 +3667,8 @@ impl SessionActor {
 				opened.send,
 				event_req_id,
 				item_id_clone,
+				range.offset,
+				range.length,
 				total,
 				hard_cap,
 				receiver_task_inbox,
@@ -2637,37 +3680,34 @@ impl SessionActor {
 			let _ = event_tx.send(event).await;
 		})
 		.abort_handle();
-
-		if let Some(ReceiverState::Receiving { payload, .. }) = self.receivers.get_mut(&req_id) {
-			*payload = PayloadSlot::Attached { handle };
-		}
+		range_handles.insert(range.offset, handle);
 		Ok(())
 	}
 
 	/// 处理一条已读完头部的入站数据流（actor select 分支）。
 	async fn handle_payload_opened(&mut self, opened: PayloadOpened) -> Result<()> {
 		let req_id = opened.header.req_id.clone();
+		let receiver_exists = matches!(
+			self.receivers.get(&req_id),
+			Some(ReceiverState::Receiving { .. })
+		);
+		let commit_in_progress = matches!(
+			self.receivers.get(&req_id),
+			Some(ReceiverState::Committing { .. })
+		);
 		let route = route_payload_stream(
-			self.payload_route_state(&req_id),
+			receiver_exists,
+			commit_in_progress,
 			self.cancelled_payloads.contains_key(&req_id),
 		);
 
 		match route {
-			PayloadRoute::Attach => self.attach_payload(opened).await,
+			PayloadRoute::ReceiverReady => self.attach_payload(opened).await,
 			PayloadRoute::AwaitRegistration => {
-				// 同一 req_id 在等待注册期间又来了第二条数据流：拒绝后一条，
-				// 绝不能覆盖暂存条目（否则第一条流的句柄会被静默 drop）。
-				if self.pending_payloads.contains_key(&req_id) {
-					self.log_sink.log_warn(
-						"Session",
-						&format!(
-							"Rejecting duplicate pending payload stream: transfer_id={req_id}"
-						),
-						Some(&format!("拒绝重复的待注册数据流: 传输ID={req_id}")),
-					);
-					return Ok(());
-				}
-				if self.pending_payloads.len() >= MAX_PENDING_PAYLOAD_STREAMS {
+				// B2：同一 req_id 的多条区间流都可能先于 ContentBegin 到达，
+				// 但每个 req_id 最多暂存计划上限条，且同 offset 不得重复。
+				let total_pending: usize = self.pending_payloads.values().map(Vec::len).sum();
+				if total_pending >= MAX_PENDING_PAYLOAD_STREAMS {
 					self.log_sink.log_warn(
 						"Session",
 						&format!(
@@ -2679,15 +3719,42 @@ impl SessionActor {
 					);
 					return Ok(());
 				}
-				self.pending_payloads.insert(
-					req_id.clone(),
-					PendingPayload {
-						header: opened.header,
-						recv: opened.recv,
-						send: opened.send,
-						opened_at_ms: now_ms(),
-					},
-				);
+				let pending = self.pending_payloads.entry(req_id.clone()).or_default();
+				if pending.len() >= MAX_PAYLOAD_STREAMS_PER_TRANSFER {
+					self.log_sink.log_warn(
+						"Session",
+						&format!(
+							"Rejecting payload stream: {MAX_PAYLOAD_STREAMS_PER_TRANSFER} pending ranges already waiting (transfer_id={req_id})"
+						),
+						Some(&format!(
+							"拒绝数据流：同一传输已有 {MAX_PAYLOAD_STREAMS_PER_TRANSFER} 条待注册区间流（传输ID={req_id}）"
+						)),
+					);
+					return Ok(());
+				}
+				if pending
+					.iter()
+					.any(|item| item.header.offset == opened.header.offset)
+				{
+					self.log_sink.log_warn(
+						"Session",
+						&format!(
+							"Rejecting duplicate pending payload stream: transfer_id={req_id}, offset={}",
+							opened.header.offset
+						),
+						Some(&format!(
+							"拒绝重复的待注册数据流: 传输ID={req_id}，偏移={}",
+							opened.header.offset
+						)),
+					);
+					return Ok(());
+				}
+				pending.push(PendingPayload {
+					header: opened.header,
+					recv: opened.recv,
+					send: opened.send,
+					opened_at_ms: now_ms(),
+				});
 				self.log_sink.log_debug(
 					"Session",
 					&format!(
@@ -2702,8 +3769,8 @@ impl SessionActor {
 			PayloadRoute::Duplicate => {
 				self.log_sink.log_warn(
 					"Session",
-					&format!("Rejecting duplicate payload stream: transfer_id={req_id}"),
-					Some(&format!("拒绝重复的数据流: 传输ID={req_id}")),
+					&format!("Rejecting payload stream while finalizing: transfer_id={req_id}"),
+					Some(&format!("拒绝最终化中的重复数据流: 传输ID={req_id}")),
 				);
 				Ok(())
 			}
@@ -2720,57 +3787,102 @@ impl SessionActor {
 		}
 	}
 
-	/// 处理接收任务的完成/失败事件（actor select 分支）。
+	/// 处理区间接收任务的完成/失败事件（actor select 分支）。
 	async fn handle_payload_event(&mut self, event: PayloadEvent) -> Result<()> {
 		match event {
-			PayloadEvent::Finished { req_id } => {
-				let state = self.payload_route_state(&req_id);
-				let end_received = matches!(
-					self.receivers.get(&req_id),
-					Some(ReceiverState::Receiving {
-						end_received: true,
+			PayloadEvent::RangeFinished {
+				req_id,
+				offset,
+				received,
+			} => {
+				let outcome = {
+					let Some(ReceiverState::Receiving {
+						ranges,
+						range_handles,
+						end_received,
 						..
-					})
-				);
-				match payload_fin_route(state, end_received) {
-					PayloadFinRoute::FinalizeNow => {
-						self.mark_payload_finished(&req_id);
-						self.begin_finalize(&req_id);
+					}) = self.receivers.get_mut(&req_id)
+					else {
+						return Ok(());
+					};
+					match ranges.slot_at_offset(offset) {
+						Some(index) if ranges.slots[index].state == RangeSlotState::Attached => {
+							if received != ranges.slots[index].length {
+								Some(Err((
+									"TRANSFER_RANGE_UNDERRUN",
+									format!(
+										"range {offset} reported {received} bytes, planned {}",
+										ranges.slots[index].length
+									),
+								)))
+							} else {
+								ranges.set_state(index, RangeSlotState::Finished);
+								range_handles.remove(&offset);
+								Some(Ok(*end_received && ranges.all_finished()))
+							}
+						}
+						// 重复/迟到事件：忽略（取消后 FIN 可能晚到）。
+						_ => None,
 					}
-					PayloadFinRoute::WaitForContentEnd => {
-						// 字节已全部到达，但控制面的 ContentEnd 还没来：保持 Receiving，
-						// 由 RECEIVER_IDLE_TIMEOUT_MS 兜底（与旧实现"只等 End"一致）。
-						self.mark_payload_finished(&req_id);
+				};
+				match outcome {
+					Some(Ok(true)) => self.begin_finalize(&req_id),
+					Some(Err((code, detail))) => {
+						self.abort_receiver(&req_id, code, &detail, "range byte count mismatch")
+							.await;
 					}
-					PayloadFinRoute::Ignore => {}
+					// 区间已完成但 ContentEnd 未到（或还有别的区间未完成/重复事件）：
+					// 保持 Receiving，由 ContentEnd / idle sweep 兜底。
+					Some(Ok(false)) | None => {}
 				}
 			}
-			PayloadEvent::Failed {
+			PayloadEvent::RangeFailed {
 				req_id,
+				offset,
 				code,
 				detail,
+				retryable,
 			} => {
-				self.log_sink.log_error(
-					"Session",
-					&format!(
-						"Transfer aborted by payload stream: transfer_id={req_id}, code={code}, detail={detail}"
-					),
-					Some(&format!(
-						"数据流失败，已终止传输: 传输ID={req_id}，错误码={code}，详情={detail}"
-					)),
-					Some(&detail),
-				);
-				self.abort_receiver(&req_id, &code, &detail, "payload stream failed")
-					.await;
+				if retryable {
+					// 只标记该区间失败：发送端会降 N + 冷却 2T 后从同一 offset
+					// 重开一条流；这里保留 receiver 的 tmp 文件与其它区间。
+					if let Some(ReceiverState::Receiving {
+						ranges,
+						range_handles,
+						..
+					}) = self.receivers.get_mut(&req_id)
+					{
+						if let Some(index) = ranges.slot_at_offset(offset) {
+							ranges.set_state(index, RangeSlotState::Failed);
+						}
+						range_handles.remove(&offset);
+					}
+					self.log_sink.log_warn(
+						"Session",
+						&format!(
+							"Range stream failed, waiting for retry from sender: transfer_id={req_id}, offset={offset}, code={code}, detail={detail}"
+						),
+						Some(&format!(
+							"区间数据流失败，等待发送端退避后重试: 传输ID={req_id}，偏移={offset}，错误码={code}，详情={detail}"
+						)),
+					);
+				} else {
+					self.log_sink.log_error(
+						"Session",
+						&format!(
+							"Transfer aborted by payload range: transfer_id={req_id}, offset={offset}, code={code}, detail={detail}"
+						),
+						Some(&format!(
+							"区间数据流失败，已终止传输: 传输ID={req_id}，偏移={offset}，错误码={code}，详情={detail}"
+						)),
+						Some(&detail),
+					);
+					self.abort_receiver(&req_id, &code, &detail, "payload range failed")
+						.await;
+				}
 			}
 		}
 		Ok(())
-	}
-
-	fn mark_payload_finished(&mut self, req_id: &str) {
-		if let Some(ReceiverState::Receiving { payload, .. }) = self.receivers.get_mut(req_id) {
-			*payload = PayloadSlot::Finished;
-		}
 	}
 
 	/// 只取出 `Receiving` 状态；`Committing` 占位符必须留在 map 里，
@@ -2786,12 +3898,14 @@ impl SessionActor {
 		}
 	}
 
-	/// 立即终止一条接收中的传输：abort writer Task（RAII 删除 tmp 文件）与数据流
-	/// 接收任务，上报 TRANSFER_FAILED，并尽力通知对端停止发送（ContentCancel 是
-	/// 非致命的）。
+	/// 立即终止一条接收中的传输：abort writer Task（RAII 删除 tmp 文件）与**全部**
+	/// 区间接收任务，上报 TRANSFER_FAILED，并尽力通知对端停止发送（ContentCancel
+	/// 是非致命的）。
 	async fn abort_receiver(&mut self, req_id: &str, code: &str, detail: &str, peer_reason: &str) {
 		let Some(ReceiverState::Receiving {
-			handle, payload, ..
+			handle,
+			range_handles,
+			..
 		}) = self.take_receiving(req_id)
 		else {
 			return;
@@ -2799,12 +3913,13 @@ impl SessionActor {
 		// 直接 abort 而不是往有界 channel 里 await Cancel：这里同样不能阻塞 actor 主循环。
 		// writer Task 的 TempFileGuard 在 drop 时删除 tmp 文件。
 		handle.abort();
-		// 数据流接收任务持有 RecvStream；abort 后 drop 会自动向对端发 STOP_SENDING/RESET，
-		// 对端的 write_all 会立刻收到错误并停止上传。
-		if let PayloadSlot::Attached { handle } = payload {
-			handle.abort();
+		// 每个区间的接收任务都持有 RecvStream；必须全部 abort，否则未取消的区间
+		// 会继续读数据、继续占 QUIC 流（B1 只有一条流，B2 最多 6 条）。
+		// abort/drop 后对端会收到 STOP_SENDING/RESET，write_all 立刻失败。
+		for range_handle in range_handles.values() {
+			range_handle.abort();
 		}
-		// 若数据流还在等待注册（Awaiting），一并丢弃，避免它继续占用一条流。
+		// 若还有区间流在等待注册（Awaiting），一并丢弃，避免它继续占用流。
 		self.pending_payloads.remove(req_id);
 		self.record_cancelled_payload(req_id);
 		self.emit_transfer_failed(req_id, code, detail);
@@ -2872,66 +3987,76 @@ impl SessionActor {
 			.await;
 		}
 
-		// `ContentEnd` 已到、数据流仍缺失：超过宽限即判协议错误，绝不挂起等 FIN。
-		let missing_payload: Vec<String> = self
+		// `ContentEnd` 已到、但计划里还有区间没 FIN：超过宽限即判缺段（协议错误或
+		// 发送端放弃），绝不挂起等一个永远不会来的 FIN，也绝不 commit 缺段文件。
+		let missing_ranges: Vec<(String, String)> = self
 			.receivers
 			.iter()
 			.filter_map(|(id, st)| match st {
 				ReceiverState::Receiving {
-					payload: PayloadSlot::Awaiting,
+					ranges,
 					end_received: true,
 					end_wait_started_ms,
 					..
-				} if now - *end_wait_started_ms > CONTENT_END_WITHOUT_PAYLOAD_GRACE_MS => Some(id.clone()),
+				} if !ranges.all_finished()
+					&& now - *end_wait_started_ms > CONTENT_END_WITHOUT_PAYLOAD_GRACE_MS =>
+				{
+					let missing = ranges
+						.slots
+						.iter()
+						.filter(|slot| slot.state != RangeSlotState::Finished)
+						.map(|slot| format!("{}+{}", slot.offset, slot.length))
+						.collect::<Vec<_>>()
+						.join(",");
+					Some((id.clone(), missing))
+				}
 				_ => None,
 			})
 			.collect();
-		for id in missing_payload {
+		for (id, missing) in missing_ranges {
 			self.log_sink.log_error(
 				"Session",
 				&format!(
-					"ContentEnd without payload stream (protocol error), aborting transfer: transfer_id={id}"
+					"ContentEnd without all ranges finished (protocol error), aborting transfer: transfer_id={id}, missing_ranges=[{missing}]"
 				),
 				Some(&format!(
-					"收到 ContentEnd 但数据流始终未到（协议错误），已终止传输: 传输ID={id}"
+					"收到 ContentEnd 但仍有区间未完成（协议错误），已终止传输: 传输ID={id}，缺失区间=[{missing}]"
 				)),
-				Some("PAYLOAD_STREAM_MISSING"),
+				Some("TRANSFER_RANGE_MISSING"),
 			);
 			self.abort_receiver(
 				&id,
-				"PAYLOAD_STREAM_MISSING",
-				"ContentEnd received without a payload stream before the grace deadline",
-				"missing payload stream",
+				"TRANSFER_RANGE_MISSING",
+				&format!("ContentEnd received but ranges still missing: [{missing}]"),
+				"missing payload range",
 			)
 			.await;
 		}
 
-		// 未注册数据流的宽限回收：未知 req_id 或已取消传输。
-		let stale_pending: Vec<String> = self
-			.pending_payloads
-			.iter()
-			.filter_map(|(id, pending)| {
-				if now - pending.opened_at_ms > PAYLOAD_REGISTRATION_GRACE_MS {
-					Some(id.clone())
-				} else {
-					None
-				}
-			})
-			.collect();
+		// 未注册数据流的宽限回收：未知 req_id 或已取消传输。B2 每个 req_id
+		// 可能暂存多条区间流，按条回收。
+		let mut stale_pending: Vec<String> = Vec::new();
+		for (id, pending_streams) in &mut self.pending_payloads {
+			let before = pending_streams.len();
+			pending_streams
+				.retain(|pending| now - pending.opened_at_ms <= PAYLOAD_REGISTRATION_GRACE_MS);
+			if pending_streams.len() != before {
+				stale_pending.push(id.clone());
+			}
+		}
+		self.pending_payloads
+			.retain(|_, pending_streams| !pending_streams.is_empty());
 		for id in stale_pending {
 			let cancelled = self.cancelled_payloads.contains_key(&id);
-			if let Some(pending) = self.pending_payloads.remove(&id) {
-				drop(pending);
-				self.log_sink.log_warn(
-					"Session",
-					&format!(
-						"Dropping payload stream without ContentBegin registration: transfer_id={id}, cancelled={cancelled}"
-					),
-					Some(&format!(
-						"丢弃没有 ContentBegin 注册的数据流: 传输ID={id}，已取消={cancelled}"
-					)),
-				);
-			}
+			self.log_sink.log_warn(
+				"Session",
+				&format!(
+					"Dropping payload streams without ContentBegin registration: transfer_id={id}, cancelled={cancelled}"
+				),
+				Some(&format!(
+					"丢弃没有 ContentBegin 注册的数据流: 传输ID={id}，已取消={cancelled}"
+				)),
+			);
 		}
 
 		// 取消 tombstones 的 TTL 回收。
@@ -2983,7 +4108,7 @@ impl SessionActor {
 	fn handle_content_end(&mut self, req_id: &str) {
 		let decision = {
 			let Some(ReceiverState::Receiving {
-				payload,
+				ranges,
 				end_received,
 				end_wait_started_ms,
 				..
@@ -2992,17 +4117,12 @@ impl SessionActor {
 				// 重复 End（Committing）或未知 req_id：忽略，与旧行为一致。
 				return;
 			};
-			let slot_state = match payload {
-				PayloadSlot::Awaiting => PayloadRouteState::Awaiting,
-				PayloadSlot::Attached { .. } => PayloadRouteState::Attached,
-				PayloadSlot::Finished => PayloadRouteState::Finished,
-			};
-			let route = content_end_route(Some(slot_state), *end_received);
+			let route = content_end_route(ranges.all_finished(), *end_received);
 			if route == ContentEndRoute::WaitForPayload {
 				*end_received = true;
-				if matches!(payload, PayloadSlot::Awaiting) {
-					*end_wait_started_ms = now_ms();
-				}
+				// 从"第一次知道有区间没完成"开始计宽限；sweep 超时后判
+				// TRANSFER_RANGE_MISSING。
+				*end_wait_started_ms = now_ms();
 			}
 			route
 		};
@@ -3012,7 +4132,7 @@ impl SessionActor {
 		}
 	}
 
-	/// 数据流 FIN 与 `ContentEnd` 都已到达：把最终化交给独立任务。
+	/// 所有计划区间都 FIN 且 `ContentEnd` 已到达：把最终化交给独立任务。
 	///
 	/// `Committing` 占位符在最终化完成前一直占用 req_id —— 期间同 req_id 的
 	/// `ContentBegin` 被当作重复 Begin 忽略，`ContentEnd` 也被忽略，不会有第二个
@@ -3030,15 +4150,32 @@ impl SessionActor {
 			total_bytes,
 			started_ts_ms,
 			mime,
+			ranges,
 			..
 		}) = self.take_receiving(req_id)
 		else {
 			return;
 		};
 
-		// 数据流已 FIN，接收任务已退出；用同一组 tx/budget 构造最终化 inbox。
-		let inbox = ReceiverInbox::new(tx, budget);
+		// 数据流已全部 FIN，接收任务已退出；用同一组 tx/budget 构造最终化 inbox。
+		let inbox = ReceiverInbox::new(tx, budget, 0);
 		let received_bytes = stats.received_bytes();
+		// 只有完整传输（起点 0、区间并集 == 文件大小）才可能在 finalize 时校验
+		// 整文件 hash；断点续传部分数据无法用 ContentBegin.sha256 校验。
+		let verify_whole_file = ranges.is_whole_file();
+		if !verify_whole_file {
+			self.log_sink.log_warn(
+				"Session",
+				&format!(
+					"Transfer does not cover the whole file (base_offset={}), skipping whole-file checksum: transfer_id={transfer_id}, received={received_bytes}/{total_bytes}",
+					ranges.base_offset
+				),
+				Some(&format!(
+					"传输未覆盖整文件（起点={}），跳过整文件校验: 传输ID={transfer_id}，已收={received_bytes}/{total_bytes}",
+					ranges.base_offset
+				)),
+			);
+		}
 
 		// 占位：commit 期间保持 req_id 被占用（也计入并发名额，因为 tmp/fd/Task 还在）。
 		self.receivers.insert(
@@ -3056,12 +4193,12 @@ impl SessionActor {
 		);
 
 		let done_tx = self.receiver_done_tx.clone();
-		// 独立任务：flush pending → Finish → 等 writer 完成 flush/close/commit/materialize。
+		// 独立任务：flush pending → Finish → 等 writer 完成 flush/close/校验/commit。
 		// 30s 超时保证卡死的磁盘不会永久占着 writer Task 与 tmp 文件。
 		tokio::spawn(async move {
 			let result = if let Ok(result) = tokio::time::timeout(
 				CONTENT_END_TIMEOUT,
-				finalize_receiver(inbox, expected_sha256.clone()),
+				finalize_receiver(inbox, expected_sha256.clone(), verify_whole_file),
 			)
 			.await
 			{
@@ -3116,8 +4253,9 @@ impl SessionActor {
 				);
 
 				let store = self.store.clone();
-				// 注意：ContentBegin.sha256 是本次传输片段的 hash。FileList 传输时它只是
-				// 其中一个文件的 sha，不能用来标记 content_cache（见 mark_item_content_cached）。
+				// 注意：B2 的 ContentBegin.sha256 是**整文件** hash（区间哈希不在控制面）；
+				// FileList 传输时它只是其中一个文件的 sha，不能直接用来标记
+				// content_cache（见 mark_item_content_cached）。
 				let transfer_sha = done.expected_sha256.clone();
 				let iid = done.item_id.clone();
 				let fid = done.file_id.clone();
@@ -3241,17 +4379,17 @@ impl SessionActor {
 		// 只取消 Receiving；正在 finalize 的（Committing）保持占位并交给超时逻辑处理。
 		if let Some(ReceiverState::Receiving {
 			handle,
-			payload,
+			range_handles,
 			item_id,
 			transfer_id,
 			..
 		}) = self.take_receiving(req_id)
 		{
-			// abort writer Task（TempFileGuard 删除 tmp 文件）与数据流接收任务
+			// abort writer Task（TempFileGuard 删除 tmp 文件）与**全部**区间接收任务
 			// （drop RecvStream → 对端收到 STOP_SENDING/RESET），不 await 有界 channel。
 			handle.abort();
-			if let PayloadSlot::Attached { handle } = payload {
-				handle.abort();
+			for range_handle in range_handles.values() {
+				range_handle.abort();
 			}
 			self.pending_payloads.remove(req_id);
 			// 取消与数据流到达可能交叉：记一小段时间，迟到的数据流会被立即拒绝。
@@ -3411,11 +4549,16 @@ impl SessionActor {
 			let total_bytes = meta.len();
 			drop(file);
 
-			// [新增] 处理断点续传 offset（B1 仍只有单条整文件数据流；offset 语义保留）
-			let start_offset = offset.unwrap_or(0);
+			// 处理断点续传 offset（公开 API 目前固定 0；B2 的区间计划从该偏移
+			// 连续覆盖到文件末尾）。
+			let start_offset = offset.unwrap_or(0).min(total_bytes);
+			// 冷启动区间计划：剩余 ≤16MiB 单流；LAN（srtt<20ms）只切 2 段以摊薄
+			// 建流开销，WAN 切 6 段让控制器逐步加流（ADR-002 §3.3 / §4.2）。
+			let ranges = initial_range_plan(start_offset, total_bytes, self.conn.stats().path.rtt);
+			let range_count = ranges.len();
 
-			// 控制面：ContentBegin 先于数据流发送。接收端据此完成策略/硬上限/并发
-			// 登记；即使数据流在跨流交付中先到，也会被暂存等待这条注册。
+			// 控制面：ContentBegin 先于数据流发送，携带完整区间计划。接收端据此
+			// 校验无空洞/无重叠/不超硬上限，并登记每条区间的槽位。
 			self.send_ctrl(CtrlMsg::ContentBegin {
 				req_id: transfer_id.clone(),
 				item_id: item_id.clone(),
@@ -3423,26 +4566,38 @@ impl SessionActor {
 				total_bytes,
 				sha256: sha256.clone(), // 注意：这是整个文件的 Hash
 				mime: mime_val.clone(),
+				ranges: ranges.clone(),
 			})
 			.await?;
 
-			// 数据面：每传输一条独立 bidi 流。头部镜像 ContentBegin 的全部字段，
-			// 随后直接写文件字节，最后 finish()；完成后才回到控制流发 ContentEnd。
-			let header = TransferHeader {
+			self.log_sink.log_info(
+				"Session",
+				&format!(
+					"Outbound transfer started: transfer_id={transfer_id}, total_bytes={total_bytes}, start_offset={start_offset}, ranges={range_count}"
+				),
+				Some(&format!(
+					"出站传输已开始: 传输ID={transfer_id}，字节数={total_bytes}，起点={start_offset}，区间数={range_count}"
+				)),
+			);
+
+			let job = PayloadPlanJob {
+				conn: self.conn.clone(),
+				path,
 				req_id: transfer_id.clone(),
 				item_id,
 				file_id,
-				offset: start_offset,
-				length: total_bytes.saturating_sub(start_offset),
 				sha256,
 				mime: mime_val,
+				total_bytes,
+				ranges,
+				budget: self.payload_stream_budget.clone(),
+				log_sink: self.log_sink.clone(),
 			};
-			let conn = self.conn.clone();
 			let tx = self.upload_tx.clone();
 			let tid = transfer_id.clone();
 
 			let handle = tokio::spawn(async move {
-				match send_payload_stream(&conn, &path, header).await {
+				match drive_payload_plan(job).await {
 					Ok(bytes) => {
 						let _ = tx
 							.send(UploadMsg::Done {
@@ -3451,12 +4606,12 @@ impl SessionActor {
 							})
 							.await;
 					}
-					Err((bytes, e)) => {
+					Err((bytes, err)) => {
 						let _ = tx
 							.send(UploadMsg::Error {
 								transfer_id: tid,
 								bytes,
-								err: e.to_string(),
+								err,
 							})
 							.await;
 					}
@@ -3916,7 +5071,7 @@ mod opaque_wire_tests {
 #[cfg(test)]
 mod auth_gate_tests {
 	use super::{ctrl_is_pre_auth_allowed, ctrl_msg_kind};
-	use crate::proto::{AuthSessionFlags, CtrlMsg, PROTOCOL_VERSION};
+	use crate::proto::{AuthSessionFlags, CtrlMsg, TransferRange, PROTOCOL_VERSION};
 
 	/// 未完成 OPAQUE 之前，任何业务消息都必须被认证闸门拒绝。
 	#[test]
@@ -3939,6 +5094,10 @@ mod auth_gate_tests {
 				total_bytes: 1,
 				sha256: "00".into(),
 				mime: "text/plain".into(),
+				ranges: vec![TransferRange {
+					offset: 0,
+					length: 1,
+				}],
 			},
 			CtrlMsg::ContentEnd {
 				req_id: "t-1".into(),
@@ -4041,18 +5200,20 @@ mod transfer_guard_tests {
 	//! 可以独立于 QUIC 连接断言；需要真实连接的行为仍由 `session::tests` 里的
 	//! `#[ignore]` 网络用例覆盖。
 	use super::{
-		chunk_overrun, chunk_send_timeout, content_end_route, hard_cap_bytes, kind_from_mime,
-		mark_item_content_cached, payload_fin_route, receiver_idle_expired,
-		receiver_slot_available, route_payload_stream, sender_admission, sender_slot_available,
-		ContentEndRoute, PayloadFinRoute, PayloadRoute, PayloadRouteState, PushOutcome,
-		ReceiverInbox, ReceiverTaskMsg, SenderState, SessionActor, TerminatedGuard,
-		CHUNK_SEND_TIMEOUT_CAP, HEARTBEAT_TIMEOUT, MAX_CONCURRENT_RECEIVERS,
-		MAX_CONCURRENT_SENDERS, MAX_INFLIGHT_BYTES_PER_RECEIVER, RECEIVER_IDLE_TIMEOUT_MS,
-		UPLOAD_CHUNK_BYTES,
+		chunk_overrun, chunk_send_timeout, content_end_route, decide_stream_count, hard_cap_bytes,
+		initial_range_plan, kind_from_mime, mark_item_content_cached, plan_ranges,
+		receiver_idle_expired, receiver_slot_available, route_payload_stream, route_range_header,
+		sender_admission, sender_slot_available, stream_probe_interval, validate_range_plan,
+		ContentEndRoute, PayloadRoute, PushOutcome, RangeRoute, RangeSlotState, ReceiverInbox,
+		ReceiverRanges, ReceiverTaskMsg, SenderState, SessionActor, StreamControllerInput,
+		StreamDecisionReason, TerminatedGuard, CHUNK_SEND_TIMEOUT_CAP, HEARTBEAT_TIMEOUT,
+		LAN_PROBE_SLICE_MAX_BYTES, MAX_CONCURRENT_RECEIVERS, MAX_CONCURRENT_SENDERS,
+		MAX_INFLIGHT_BYTES_PER_RECEIVER, MAX_PAYLOAD_STREAMS_PER_TRANSFER,
+		PROBE_MIN_REMAINING_BYTES, RECEIVER_IDLE_TIMEOUT_MS, UPLOAD_CHUNK_BYTES,
 	};
 	use crate::model::{FileMeta, ItemContent, ItemKind, ItemMeta};
 	use crate::policy::SizeLimits;
-	use crate::proto::{CtrlMsg, TransferHeader};
+	use crate::proto::{CtrlMsg, TransferHeader, TransferRange};
 	use crate::session::{HandshakeStep, SessionHandle, SessionState};
 	use crate::store::Store;
 	use crate::util::now_ms;
@@ -4368,7 +5529,7 @@ mod transfer_guard_tests {
 		// channel 只有 1 个槽位，字节预算充足：第二个块撞的是"槽位满"。
 		let (tx, mut rx) = mpsc::channel::<ReceiverTaskMsg>(1);
 		let budget = Arc::new(Semaphore::new(MAX_INFLIGHT_BYTES_PER_RECEIVER));
-		let mut inbox = ReceiverInbox::new(tx, budget);
+		let mut inbox = ReceiverInbox::new(tx, budget, 4096);
 
 		assert_eq!(
 			inbox.try_push(bytes::Bytes::from(vec![0u8; CHUNK])),
@@ -4453,103 +5614,434 @@ mod transfer_guard_tests {
 	}
 
 	// -----------------------------------------------------------------------
-	// B1 数据流路由（socket-free）
+	// B2 区间计划 / 流数控制器 / 接收端区间账本（socket-free）
+	// -----------------------------------------------------------------------
+
+	const MB: u64 = 1024 * 1024;
+
+	fn controller_input(
+		current_n: u8,
+		gain: Option<f64>,
+		loss_rate: f64,
+		srtt_ratio: f64,
+		remaining_bytes: u64,
+		ceiling_reached: bool,
+	) -> StreamControllerInput {
+		StreamControllerInput {
+			current_n,
+			gain,
+			loss_rate,
+			srtt_ratio,
+			remaining_bytes,
+			ceiling_reached,
+		}
+	}
+
+	/// 计划必须无空洞、无重叠、并集恰好等于请求区间，且各段长度差 ≤ 1。
+	#[allow(clippy::assert_is_empty)]
+	fn assert_ranges_cover(plan: &[TransferRange], offset: u64, length: u64) {
+		if length == 0 {
+			assert!(plan.is_empty(), "空文件不应有数据流区间: {plan:?}");
+			return;
+		}
+		assert!(!plan.is_empty());
+		assert_eq!(plan[0].offset, offset);
+		let mut cursor = offset;
+		for range in plan {
+			assert_eq!(range.offset, cursor, "区间不连续: {plan:?}");
+			assert!(range.length > 0, "区间长度必须 > 0: {plan:?}");
+			cursor = cursor.saturating_add(range.length);
+		}
+		assert_eq!(
+			cursor,
+			offset.saturating_add(length),
+			"区间并集必须等于请求区间"
+		);
+	}
+
+	#[test]
+	fn range_plan_invariants_cover_requested_range_disjointly() {
+		for (offset, length, count) in [
+			(0u64, 64 * MB, 6usize),
+			(0, 256 * MB, 6),
+			(1024, 1000, 3),
+			(u64::from(u32::MAX), 1024 * 1024 + 7, 4),
+		] {
+			let plan = plan_ranges(offset, length, count);
+			assert!(
+				plan.len() <= MAX_PAYLOAD_STREAMS_PER_TRANSFER,
+				"区间数不能超过上限: {}",
+				plan.len()
+			);
+			assert!(
+				plan.len() <= count.max(1),
+				"count={count} 时不应生成更多区间"
+			);
+			assert_ranges_cover(&plan, offset, length);
+			let smallest = plan.iter().map(|range| range.length).min().unwrap();
+			let largest = plan.iter().map(|range| range.length).max().unwrap();
+			assert!(
+				largest - smallest <= 1,
+				"区间长度必须均匀（差 ≤ 1）: {plan:?}"
+			);
+		}
+
+		// count 超过上限、超过字节数、或为 0 时都要安全折叠。
+		let clamped_by_cap = plan_ranges(0, 600, 100);
+		assert_eq!(clamped_by_cap.len(), MAX_PAYLOAD_STREAMS_PER_TRANSFER);
+		assert_ranges_cover(&clamped_by_cap, 0, 600);
+		let folded = plan_ranges(0, 3, 6);
+		assert_eq!(folded.len(), 3);
+		assert_ranges_cover(&folded, 0, 3);
+		assert_eq!(plan_ranges(0, 0, 6), Vec::<TransferRange>::new());
+		assert_eq!(plan_ranges(0, 10, 0).len(), 1);
+	}
+
+	/// 小传输（≤ 16 MiB）必须保持单流；超过阈值后 LAN 只切 2 段、WAN 切 6 段。
+	#[test]
+	fn tiny_transfers_stay_single_stream_and_do_not_probe() {
+		for length in [1u64, 8 * MB, PROBE_MIN_REMAINING_BYTES] {
+			for srtt in [Duration::from_millis(1), Duration::from_millis(100)] {
+				let plan = initial_range_plan(0, length, srtt);
+				assert_eq!(plan.len(), 1, "length={length} 必须单流");
+				assert_ranges_cover(&plan, 0, length);
+			}
+		}
+
+		// LAN：2 段 = 主区间 + 小探针区间（尾部），保证回退代价有限。
+		let lan = initial_range_plan(0, PROBE_MIN_REMAINING_BYTES + 1, Duration::from_millis(1));
+		assert_eq!(lan.len(), 2);
+		assert_ranges_cover(&lan, 0, PROBE_MIN_REMAINING_BYTES + 1);
+		assert!(lan[0].length > 0 && lan[1].length > 0);
+		let big_lan = initial_range_plan(0, 256 * MB, Duration::from_millis(1));
+		assert_eq!(big_lan.len(), 2);
+		assert!(
+			big_lan[1].length <= LAN_PROBE_SLICE_MAX_BYTES,
+			"LAN 探针区间必须有上限: {big_lan:?}"
+		);
+		assert_ranges_cover(&big_lan, 0, 256 * MB);
+
+		// WAN：切满 6 段。
+		let wan = initial_range_plan(0, PROBE_MIN_REMAINING_BYTES + 1, Duration::from_millis(100));
+		assert_eq!(wan.len(), MAX_PAYLOAD_STREAMS_PER_TRANSFER);
+		assert_ranges_cover(&wan, 0, PROBE_MIN_REMAINING_BYTES + 1);
+
+		// 断点续传：计划从非 0 起点连续覆盖到文件末尾。
+		let resumed = initial_range_plan(1024, 64 * MB, Duration::from_millis(100));
+		assert_eq!(resumed[0].offset, 1024);
+		assert_ranges_cover(&resumed, 1024, 64 * MB - 1024);
+	}
+
+	#[test]
+	fn range_plan_validation_rejects_gaps_overlaps_and_oversize() {
+		let total = 1000u64;
+		assert!(validate_range_plan(
+			&[
+				TransferRange {
+					offset: 0,
+					length: 400,
+				},
+				TransferRange {
+					offset: 400,
+					length: 600,
+				},
+			],
+			total
+		)
+		.is_ok());
+
+		let gap = validate_range_plan(
+			&[
+				TransferRange {
+					offset: 0,
+					length: 400,
+				},
+				TransferRange {
+					offset: 500,
+					length: 500,
+				},
+			],
+			total,
+		)
+		.unwrap_err();
+		assert_eq!(gap.0, "TRANSFER_RANGE_GAP");
+
+		let overlap = validate_range_plan(
+			&[
+				TransferRange {
+					offset: 0,
+					length: 600,
+				},
+				TransferRange {
+					offset: 500,
+					length: 500,
+				},
+			],
+			total,
+		)
+		.unwrap_err();
+		assert_eq!(overlap.0, "TRANSFER_RANGE_OVERLAP");
+
+		let short = validate_range_plan(
+			&[TransferRange {
+				offset: 0,
+				length: 500,
+			}],
+			total,
+		)
+		.unwrap_err();
+		assert_eq!(short.0, "TRANSFER_RANGE_GAP");
+
+		let long = validate_range_plan(
+			&[TransferRange {
+				offset: 0,
+				length: 1200,
+			}],
+			total,
+		)
+		.unwrap_err();
+		assert_eq!(long.0, "TRANSFER_RANGE_OVERRUN");
+
+		let too_many: Vec<TransferRange> = (0..=MAX_PAYLOAD_STREAMS_PER_TRANSFER as u64)
+			.map(|index| TransferRange {
+				offset: index,
+				length: 1,
+			})
+			.collect();
+		assert_eq!(
+			validate_range_plan(&too_many, 7).unwrap_err().0,
+			"TRANSFER_RANGE_TOO_MANY"
+		);
+
+		assert!(validate_range_plan(&[], 0).is_ok());
+		assert_eq!(
+			validate_range_plan(&[], total).unwrap_err().0,
+			"TRANSFER_RANGE_EMPTY"
+		);
+	}
+
+	/// 乱序完成：任何区间未 FIN 都不能 finalize；全部 FIN 后仍需 ContentEnd。
+	#[test]
+	fn receiver_ranges_complete_out_of_order_and_need_content_end() {
+		let plan = vec![
+			TransferRange {
+				offset: 0,
+				length: 100,
+			},
+			TransferRange {
+				offset: 100,
+				length: 200,
+			},
+			TransferRange {
+				offset: 300,
+				length: 300,
+			},
+		];
+		let mut ranges = ReceiverRanges::from_plan(&plan, 600);
+		assert_eq!(ranges.slots.len(), 3);
+		assert!(!ranges.all_finished());
+
+		for index in [2usize, 0] {
+			ranges.set_state(index, RangeSlotState::Finished);
+			assert!(!ranges.all_finished(), "index={index} 之后仍应有区间未完成");
+			assert_eq!(
+				content_end_route(ranges.all_finished(), false),
+				ContentEndRoute::WaitForPayload
+			);
+		}
+
+		ranges.set_state(1, RangeSlotState::Finished);
+		assert!(ranges.all_finished());
+		assert_eq!(
+			content_end_route(ranges.all_finished(), false),
+			ContentEndRoute::FinalizeNow
+		);
+		// 重复 ContentEnd 不得再次 commit。
+		assert_eq!(content_end_route(true, true), ContentEndRoute::Ignore);
+		assert_eq!(content_end_route(false, true), ContentEndRoute::Ignore);
+
+		// 空计划（空文件）视为完成。
+		assert!(ReceiverRanges::from_plan(&[], 0).all_finished());
+	}
+
+	/// 接收端区间路由：重复/重试/长度不符/重叠/未声明都必须可区分。
+	#[test]
+	fn receiver_range_routing_detects_duplicate_overlap_and_unexpected() {
+		let plan = vec![
+			TransferRange {
+				offset: 0,
+				length: 100,
+			},
+			TransferRange {
+				offset: 100,
+				length: 100,
+			},
+		];
+		let mut ranges = ReceiverRanges::from_plan(&plan, 200);
+		assert_eq!(route_range_header(&ranges, 100, 100), RangeRoute::Attach(1));
+
+		// 已完成的区间再收到一条流：重复，只丢流、不影响传输。
+		ranges.set_state(1, RangeSlotState::Finished);
+		assert_eq!(route_range_header(&ranges, 100, 100), RangeRoute::Duplicate);
+
+		// 失败区间允许重试（同 offset/length）。
+		ranges.set_state(0, RangeSlotState::Failed);
+		assert_eq!(route_range_header(&ranges, 0, 100), RangeRoute::Retry(0));
+
+		// 同 offset 不同 length：长度不符。
+		assert_eq!(
+			route_range_header(&ranges, 0, 99),
+			RangeRoute::LengthMismatch
+		);
+		// 与计划区间部分重叠。
+		assert_eq!(route_range_header(&ranges, 50, 100), RangeRoute::Overlap);
+		// 完全在计划之外。
+		assert_eq!(route_range_header(&ranges, 200, 10), RangeRoute::Unexpected);
+	}
+
+	/// 控制器：稳定期探针 +1；有收益继续 +1；无收益回退并置 ceiling。
+	#[test]
+	fn controller_probes_up_on_gain_and_reverts_with_ceiling() {
+		let probe = decide_stream_count(controller_input(1, None, 0.0, 1.0, 64 * MB, false));
+		assert_eq!(probe.next_n, 2);
+		assert_eq!(probe.reason, StreamDecisionReason::ProbeStarted);
+		assert!(!probe.ceiling_reached);
+
+		let accepted =
+			decide_stream_count(controller_input(2, Some(0.20), 0.0, 1.0, 64 * MB, false));
+		assert_eq!(accepted.next_n, 3);
+		assert_eq!(accepted.reason, StreamDecisionReason::ProbeAccepted);
+		assert!(!accepted.ceiling_reached);
+
+		let rejected =
+			decide_stream_count(controller_input(3, Some(0.05), 0.0, 1.0, 64 * MB, false));
+		assert_eq!(rejected.next_n, 2, "收益 ≤ 8% 必须回退一条");
+		assert_eq!(rejected.reason, StreamDecisionReason::ProbeRejected);
+		assert!(rejected.ceiling_reached, "探针失败后本传输不再上探");
+
+		// ceiling 粘性：后续稳定窗口保持 N，不再探针。
+		let held = decide_stream_count(controller_input(2, None, 0.0, 1.0, 64 * MB, true));
+		assert_eq!(held.next_n, 2);
+		assert_eq!(held.reason, StreamDecisionReason::Ceiling);
+		assert!(held.ceiling_reached);
+	}
+
+	/// 控制器：丢包 > 1% 或 srtt > 2.5× 基线时退避（不低于 1）。
+	#[test]
+	fn controller_backs_off_on_loss_and_srtt() {
+		// 非探针窗口的偶发丢包：只退避，不置 ceiling（冷却后仍可再探）。
+		let loss = decide_stream_count(controller_input(4, None, 0.02, 1.0, 64 * MB, false));
+		assert_eq!(loss.next_n, 3);
+		assert_eq!(loss.reason, StreamDecisionReason::CongestionBackoff);
+		assert!(
+			!loss.ceiling_reached,
+			"非探针窗口的退避不是 ceiling，可在冷却后再次探针"
+		);
+
+		// 探针窗口出现丢包：说明加流本身导致劣化，回退并标记 ceiling（滞回）。
+		let probe_loss =
+			decide_stream_count(controller_input(2, Some(0.10), 0.02, 1.0, 64 * MB, false));
+		assert_eq!(probe_loss.next_n, 1);
+		assert_eq!(probe_loss.reason, StreamDecisionReason::CongestionBackoff);
+		assert!(probe_loss.ceiling_reached);
+
+		let srtt = decide_stream_count(controller_input(4, None, 0.0, 3.0, 64 * MB, false));
+		assert_eq!(srtt.next_n, 3);
+		assert_eq!(srtt.reason, StreamDecisionReason::CongestionBackoff);
+
+		let floor = decide_stream_count(controller_input(1, None, 0.5, 5.0, 64 * MB, false));
+		assert_eq!(floor.next_n, 1, "退避不能低于 1 条流");
+	}
+
+	/// 小传输（剩余 ≤ 16 MiB）强制 N=1；上限 6 也不越界。
+	#[test]
+	fn controller_small_transfer_stays_single_and_respects_cap() {
+		let small = decide_stream_count(controller_input(
+			4,
+			Some(0.5),
+			0.0,
+			1.0,
+			PROBE_MIN_REMAINING_BYTES,
+			false,
+		));
+		assert_eq!(small.next_n, 1);
+		assert_eq!(small.reason, StreamDecisionReason::SmallTransfer);
+
+		let at_cap = decide_stream_count(controller_input(6, None, 0.0, 1.0, 64 * MB, false));
+		assert_eq!(at_cap.next_n, 6);
+		// 已到上限且探针有收益：保持 6，不能误判为"收益不足"而回退。
+		let cap_gain =
+			decide_stream_count(controller_input(6, Some(0.5), 0.0, 1.0, 64 * MB, false));
+		assert_eq!(cap_gain.next_n, 6);
+		assert!(!cap_gain.ceiling_reached);
+	}
+
+	/// 评估周期 T = clamp(4×srtt, 300ms, 2s)。
+	#[test]
+	fn probe_interval_clamps_to_adr_bounds() {
+		assert_eq!(
+			stream_probe_interval(Duration::from_millis(1)),
+			Duration::from_millis(300)
+		);
+		assert_eq!(
+			stream_probe_interval(Duration::from_millis(100)),
+			Duration::from_millis(400)
+		);
+		assert_eq!(
+			stream_probe_interval(Duration::from_secs(10)),
+			Duration::from_secs(2)
+		);
+	}
+
+	// -----------------------------------------------------------------------
+	// 数据流路由（B2：按 req_id / 区间两级判定）
 	// -----------------------------------------------------------------------
 
 	/// 未知 req_id：先暂存等待 ContentBegin（有宽限上限），绝不直接接入。
 	#[test]
 	fn payload_route_unknown_waits_for_registration() {
 		assert_eq!(
-			route_payload_stream(None, false),
+			route_payload_stream(false, false, false),
 			PayloadRoute::AwaitRegistration
 		);
 	}
 
-	/// 已登记且尚未接入：接受。
+	/// 已有 Receiving receiver：交给区间路由判定（不是直接接入）。
 	#[test]
 	fn payload_route_accepts_registered_transfer() {
 		assert_eq!(
-			route_payload_stream(Some(PayloadRouteState::Awaiting), false),
-			PayloadRoute::Attach
+			route_payload_stream(true, false, false),
+			PayloadRoute::ReceiverReady
 		);
 	}
 
-	/// 同 req_id 的第二条数据流（已接入/已 FIN/最终化中）必须拒绝。
+	/// 同一 req_id 进入最终化/已完成后必须拒绝。
 	#[test]
 	fn payload_route_rejects_duplicate_and_finalizing() {
-		for state in [
-			PayloadRouteState::Attached,
-			PayloadRouteState::Finished,
-			PayloadRouteState::Committing,
-		] {
-			assert_eq!(
-				route_payload_stream(Some(state), false),
-				PayloadRoute::Duplicate,
-				"{state:?}"
-			);
-		}
+		assert_eq!(
+			route_payload_stream(true, true, false),
+			PayloadRoute::Duplicate
+		);
+		assert_eq!(
+			route_payload_stream(false, true, false),
+			PayloadRoute::Duplicate
+		);
 	}
 
 	/// 已取消的 req_id：即使状态看起来可接入也必须拒绝（取消与数据流可能交叉）。
 	#[test]
 	fn payload_route_rejects_cancelled_transfer() {
 		assert_eq!(
-			route_payload_stream(Some(PayloadRouteState::Awaiting), true),
+			route_payload_stream(true, false, true),
 			PayloadRoute::Cancelled
 		);
-		assert_eq!(route_payload_stream(None, true), PayloadRoute::Cancelled);
+		assert_eq!(
+			route_payload_stream(false, false, true),
+			PayloadRoute::Cancelled
+		);
 	}
 
-	/// ContentEnd 必须在 FIN 之后才 finalize；数据流未 FIN 时只等待，不提前 commit。
-	#[test]
-	fn content_end_waits_for_payload_fin() {
-		assert_eq!(
-			content_end_route(Some(PayloadRouteState::Attached), false),
-			ContentEndRoute::WaitForPayload
-		);
-		assert_eq!(
-			content_end_route(Some(PayloadRouteState::Awaiting), false),
-			ContentEndRoute::WaitForPayload
-		);
-		assert_eq!(
-			content_end_route(Some(PayloadRouteState::Finished), false),
-			ContentEndRoute::FinalizeNow
-		);
-		// 重复 End / 最终化中 / 未知 req_id：忽略，不重复 commit。
-		assert_eq!(
-			content_end_route(Some(PayloadRouteState::Finished), true),
-			ContentEndRoute::Ignore
-		);
-		assert_eq!(
-			content_end_route(Some(PayloadRouteState::Committing), false),
-			ContentEndRoute::Ignore
-		);
-		assert_eq!(content_end_route(None, false), ContentEndRoute::Ignore);
-	}
-
-	/// 只有 FIN、没有 ContentEnd：不得 finalize（等 ContentEnd / 空闲超时兜底）。
-	///
-	/// 这正是"missing ContentEnd"场景：旧实现读不到 End 就一直占着 receiver，
-	/// 新实现同样不 commit，而是由 `RECEIVER_IDLE_TIMEOUT_MS` 回收。
-	#[test]
-	fn payload_fin_without_content_end_never_finalizes() {
-		assert_eq!(
-			payload_fin_route(Some(PayloadRouteState::Attached), false),
-			PayloadFinRoute::WaitForContentEnd
-		);
-		assert_eq!(
-			payload_fin_route(Some(PayloadRouteState::Attached), true),
-			PayloadFinRoute::FinalizeNow
-		);
-		// FIN 事件重复到达（例如取消后迟到的 FIN）不能再次触发 commit。
-		assert_eq!(
-			payload_fin_route(Some(PayloadRouteState::Finished), true),
-			PayloadFinRoute::Ignore
-		);
-		assert_eq!(payload_fin_route(None, true), PayloadFinRoute::Ignore);
-	}
-
-	/// 头部与 ContentBegin 必须逐字段一致；不一致会让该传输失败而不是错写文件。
+	/// 头部与 ContentBegin 的 item/file/整文件 sha 必须逐字段一致。
 	#[test]
 	fn payload_header_validation_matches_content_begin() {
 		let sha = "a".repeat(64);
@@ -4562,41 +6054,18 @@ mod transfer_guard_tests {
 			sha256: sha.clone(),
 			mime: "application/octet-stream".into(),
 		};
-		assert!(SessionActor::validate_payload_header(
-			&header,
-			"item-1",
-			Some("file-1"),
-			&sha,
-			1024
-		)
-		.is_ok());
-
-		// item/file/sha/offset+length 任一不一致都必须拒绝。
-		assert!(SessionActor::validate_payload_header(
-			&header,
-			"item-2",
-			Some("file-1"),
-			&sha,
-			1024
-		)
-		.is_err());
 		assert!(
-			SessionActor::validate_payload_header(&header, "item-1", None, &sha, 1024).is_err()
+			SessionActor::validate_payload_header(&header, "item-1", Some("file-1"), &sha).is_ok()
 		);
+		assert!(
+			SessionActor::validate_payload_header(&header, "item-2", Some("file-1"), &sha).is_err()
+		);
+		assert!(SessionActor::validate_payload_header(&header, "item-1", None, &sha).is_err());
 		assert!(SessionActor::validate_payload_header(
 			&header,
 			"item-1",
 			Some("file-1"),
-			&"b".repeat(64),
-			1024
-		)
-		.is_err());
-		assert!(SessionActor::validate_payload_header(
-			&header,
-			"item-1",
-			Some("file-1"),
-			&sha,
-			2048
+			&"b".repeat(64)
 		)
 		.is_err());
 	}
