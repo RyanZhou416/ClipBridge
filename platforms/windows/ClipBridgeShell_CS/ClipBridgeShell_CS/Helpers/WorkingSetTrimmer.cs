@@ -81,7 +81,10 @@ internal static class WorkingSetTrimmer
     /// 是否也把“最小化”当作可裁剪状态（<c>CB_WS_TRIM_MINIMIZE=1</c> 时才为 true）。
     /// 默认 false：隐藏到托盘才裁剪，最小化保持秒开。
     /// </summary>
-    public static bool TrimOnMinimize { get; } =
+    public static bool TrimOnMinimize
+    {
+        get;
+    } =
         string.Equals(Environment.GetEnvironmentVariable(TrimOnMinimizeEnvVarName)?.Trim(), "1", StringComparison.Ordinal);
 
     /// <summary>
