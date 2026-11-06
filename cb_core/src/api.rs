@@ -4,18 +4,33 @@ use std::sync::{
 	atomic::{AtomicBool, Ordering},
 	Arc, Mutex,
 };
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::time::{interval, MissedTickBehavior};
 
 use crate::clipboard::{make_ingest_plan, ClipboardSnapshot, IngestPlan, LocalIngestDeps};
 pub(crate) use crate::model::ItemMeta;
 use crate::net::{NetCmd, NetManager};
 pub use crate::policy::{AppConfig, GlobalPolicy};
-use crate::{cas::Cas, logs::LogSink, logs::LogStore, store::Store, util::now_ms};
+use crate::{
+	cas::{Cas, FsyncPolicy, PendingSync},
+	logs::LogSink,
+	logs::LogStore,
+	store::Store,
+	util::now_ms,
+};
 
 /// CAS 缓存 GC 的“廉价预检”阈值：`content_cache` 的 SQL 账面占用低于
 /// 上限的 `1 - 1/GC_CAS_ACCOUNT_TRIGGER_DIVISOR`（即 90%）时，非启动路径
 /// 不再遍历缓存目录做账实核算（见 [`Core::run_gc`]）。
 const GC_CAS_ACCOUNT_TRIGGER_DIVISOR: i64 = 10;
+
+/// 后台 durable sweep 周期（ADR-002 §3.7）：队列满/进程重启遗留的 `durable=0`
+/// 行最迟 30 s 后被重新同步。
+const DURABILITY_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// 单次 sweep 最多处理的行数：每 30 s 分批推进，避免一次性长时间占住后台线程。
+const DURABILITY_SWEEP_BATCH: i64 = 64;
 
 // 单元测试探针：本线程执行过多少次 `run_gc` 里的 CAS 整树遍历。
 // 用 thread-local 而不是全局原子：libtest 默认每个测试一个线程，这样并行
@@ -136,6 +151,31 @@ impl Core {
 		// 关闭队列、排空并 join（见 `Inner::shutdown`）。
 		let log_sink = LogSink::new(Arc::clone(&log_store_arc));
 
+		// ADR-002 §3.7：fsync 策略只在本函数解析一次，随后由 `Cas` 持有并供所有
+		// 会话共享。非法值绝不能 panic 或悄悄切换语义：记录 warn 后回退默认
+		// `large-only`（小文件同步 fsync，大文件后台补同步）。
+		let fsync_policy =
+			match FsyncPolicy::parse(std::env::var(crate::cas::FSYNC_POLICY_ENV).ok().as_deref()) {
+				Ok(policy) => policy,
+				Err(invalid) => {
+					let mut log_store = log_store_arc.lock().unwrap();
+					let _ = log_store.log_warn(
+						"Init",
+						&format!(
+							"Invalid {}={invalid:?}; falling back to default '{}'",
+							crate::cas::FSYNC_POLICY_ENV,
+							FsyncPolicy::default().as_str()
+						),
+						Some(&format!(
+							"{} 取值非法: {invalid:?}，已回退默认策略 '{}'",
+							crate::cas::FSYNC_POLICY_ENV,
+							FsyncPolicy::default().as_str()
+						)),
+					);
+					FsyncPolicy::default()
+				}
+			};
+
 		// 记录初始化开始日志
 		{
 			let mut log_store = log_store_arc.lock().unwrap();
@@ -241,13 +281,19 @@ impl Core {
 		let store_rebuilt = store.rebuilt;
 		let store_arc = Arc::new(Mutex::new(store));
 
-		let cas = match Cas::new(&cfg.cache_dir) {
+		let cas = match Cas::new_with_policy(&cfg.cache_dir, fsync_policy) {
 			Ok(c) => {
 				let mut log_store = log_store_arc.lock().unwrap();
 				let _ = log_store.log_info(
 					"Init",
-					"CAS initialized successfully",
-					Some("CAS 初始化成功"),
+					&format!(
+						"CAS initialized successfully (fsync_policy={})",
+						fsync_policy.as_str()
+					),
+					Some(&format!(
+						"CAS 初始化成功（fsync 策略={}：always=每次传输同步；large-only=小于 8 MiB 同步、大文件后台补同步；never=不同步）",
+						fsync_policy.as_str()
+					)),
 				);
 				c
 			}
@@ -389,6 +435,14 @@ impl Core {
 		let core = Self {
 			inner: Arc::new(inner),
 		};
+		// 每 Core 一个后台 durability worker：启动时先扫一次，覆盖上次进程退出/
+		// 崩溃遗留的 `durable=0` 行；随后由接收路径的 pending 标记唤醒，并每 30 s
+		// 周期 sweep 兜底（队列满的行不会丢）。
+		ensure_durability_worker(
+			&core.inner.cas,
+			core.inner.store.clone(),
+			&core.inner.log_sink,
+		);
 		let _ = core.run_gc("Startup");
 		core
 	}
@@ -1209,6 +1263,334 @@ impl Core {
 	// 可以在这里添加针对 M1 的测试辅助方法
 }
 
+/// 确保本 Core 恰好启动一个后台 durability worker。
+///
+/// `Core::init` 与接收路径都会调用本函数；[`Cas::claim_durability_worker`] 用
+/// 原子标记保证只有一个调用者真正启动线程（其余 clone 直接返回）。
+///
+/// 为什么是专用线程而不是 `tokio::spawn`：`Core::init` 运行在 FFI 线程上，
+/// 此时 NetManager 的 runtime 还没建立，也没有任何 runtime 上下文。这里复刻
+/// 日志 writer / NetManager 的“专用维护线程”模式：线程内建一个最小
+/// current-thread runtime 驱动异步循环，真正的 `sync_data()` 再放进
+/// `spawn_blocking`，因此同步磁盘 IO 永远不会占住 tokio worker。
+pub(crate) fn ensure_durability_worker(cas: &Cas, store: Arc<Mutex<Store>>, log_sink: &LogSink) {
+	let Some((rx, stop_rx)) = cas.claim_durability_worker() else {
+		return;
+	};
+	let worker_cas = cas.clone();
+	let worker_log = log_sink.clone();
+	let spawned = std::thread::Builder::new()
+		.name("cb-durability-sync".to_string())
+		.spawn(move || {
+			let rt = match tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+			{
+				Ok(rt) => rt,
+				Err(e) => {
+					worker_log.log_error(
+						"Durability",
+						&format!("Failed to build durability sync runtime: {e}"),
+						Some(&format!("无法创建后台持久化同步运行时: {e}")),
+						Some(&e.to_string()),
+					);
+					// receiver 随闭包一起释放，队列会变成 closed；无法再安全地
+					// 重建 channel，这里只记录错误（线程创建失败本身极罕见）。
+					return;
+				}
+			};
+			rt.block_on(durability_worker(
+				rx, stop_rx, worker_cas, store, worker_log,
+			));
+		});
+	if let Err(e) = spawned {
+		log_sink.log_error(
+			"Durability",
+			&format!("Failed to spawn durability sync thread: {e}"),
+			Some(&format!("无法启动后台持久化同步线程: {e}")),
+			Some(&e.to_string()),
+		);
+	}
+}
+
+/// 后台 durability 主循环：处理队列 + 每 30 s 兜底 sweep。
+async fn durability_worker(
+	mut rx: mpsc::Receiver<PendingSync>,
+	mut stop_rx: tokio::sync::watch::Receiver<bool>,
+	cas: Cas,
+	store: Arc<Mutex<Store>>,
+	log_sink: LogSink,
+) {
+	let mut ticker = interval(DURABILITY_SWEEP_INTERVAL);
+	ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+	// 立刻消费 interval 的第一次 tick，让第一次“周期”sweep 真正发生在 30 s 后；
+	// 启动时的补同步由下面这次显式 sweep 完成。
+	ticker.tick().await;
+
+	// 启动先扫一次：上次进程在 `durable=0` 状态下退出/崩溃时，这些内容必须
+	// 在本次启动后补同步，而不是等下一次大文件传输来“顺带”唤醒队列。
+	sweep_durability_pending(&cas, &store, &log_sink).await;
+
+	loop {
+		if *stop_rx.borrow() {
+			break;
+		}
+		tokio::select! {
+			_ = stop_rx.changed() => break,
+			request = rx.recv() => match request {
+				Some(req) => {
+					sync_pending_entry(&cas, &store, &log_sink, &req).await;
+				}
+				None => break,
+			},
+			_ = ticker.tick() => {
+				sweep_durability_pending(&cas, &store, &log_sink).await;
+			}
+		}
+	}
+}
+
+/// 对一条 pending 记录执行 `sync_data()`，成功后把 `durable` 翻回 1。
+///
+/// 返回 `true` 表示 blob 已同步且库里的标记已翻转。任何一步失败都只记录 warn，
+/// 行保持 `durable=0`，由后续 sweep 重试（绝不因为同步失败回滚已完成的传输）。
+pub(crate) async fn sync_pending_entry(
+	cas: &Cas,
+	store: &Arc<Mutex<Store>>,
+	log_sink: &LogSink,
+	request: &PendingSync,
+) -> bool {
+	let path = match cas.blob_path(&request.blob_sha256) {
+		Ok(path) => path,
+		Err(e) => {
+			log_sink.log_warn(
+				"Durability",
+				&format!(
+					"durable sync skipped: invalid blob sha256={}: {e}",
+					request.blob_sha256
+				),
+				Some(&format!(
+					"后台持久化同步跳过：blob SHA256 非法 {}: {e}",
+					request.blob_sha256
+				)),
+			);
+			return false;
+		}
+	};
+
+	if let Err(e) = sync_data_blocking(cas, path.clone()).await {
+		log_sink.log_warn(
+			"Durability",
+			&format!(
+				"durable sync failed for blob {} ({}): {e}; leaving durable=0 for the 30s sweep",
+				request.blob_sha256,
+				path.display()
+			),
+			Some(&format!(
+				"后台持久化同步失败: blob={}（{}）: {e}；保持 durable=0，等待 30s 周期 sweep 重试",
+				request.blob_sha256,
+				path.display()
+			)),
+		);
+		return false;
+	}
+
+	let store_for_update = store.clone();
+	let cache_sha = request.cache_sha256.clone();
+	match tokio::task::spawn_blocking(move || {
+		store_for_update
+			.lock()
+			.unwrap()
+			.mark_cache_durable(&cache_sha)
+	})
+	.await
+	{
+		Ok(Ok(0)) => {
+			// 行已被删除/GC：blob 同步本身成功，但没有标记可翻。
+			log_sink.log_warn(
+				"Durability",
+				&format!(
+					"durable sync succeeded but no content_cache row matched sha256={}",
+					request.cache_sha256
+				),
+				Some(&format!(
+					"后台持久化同步成功，但没有匹配的 content_cache 行: sha256={}",
+					request.cache_sha256
+				)),
+			);
+			false
+		}
+		Ok(Ok(_)) => true,
+		Ok(Err(e)) => {
+			log_sink.log_warn(
+				"Durability",
+				&format!(
+					"durable sync succeeded but marking durable=1 failed for sha256={}: {e}",
+					request.cache_sha256
+				),
+				Some(&format!(
+					"后台持久化同步成功，但写回 durable=1 失败: sha256={}: {e}",
+					request.cache_sha256
+				)),
+			);
+			false
+		}
+		Err(e) => {
+			log_sink.log_warn(
+				"Durability",
+				&format!(
+					"durable sync marking task failed for sha256={}: {e}",
+					request.cache_sha256
+				),
+				Some(&format!(
+					"后台持久化标记任务失败: sha256={}: {e}",
+					request.cache_sha256
+				)),
+			);
+			false
+		}
+	}
+}
+
+/// 30 s 兜底 sweep：扫描 `content_cache.durable=0`，逐个补 `sync_data`。
+///
+/// 解析候选 blob 时使用 [`Store::sync_candidates_for_cache_sha`]：`content_cache`
+/// 的键是 item content sha，而 FileList 传输的 blob 名是单个文件 sha，两者不同；
+/// 候选列表同时覆盖两种情形。找不到任何 blob 时保持 pending 并记 warn。
+pub(crate) async fn sweep_durability_pending(
+	cas: &Cas,
+	store: &Arc<Mutex<Store>>,
+	log_sink: &LogSink,
+) -> usize {
+	let store_for_query = store.clone();
+	let pending = match tokio::task::spawn_blocking(move || {
+		store_for_query
+			.lock()
+			.unwrap()
+			.select_durability_pending(DURABILITY_SWEEP_BATCH)
+	})
+	.await
+	{
+		Ok(Ok(rows)) => rows,
+		Ok(Err(e)) => {
+			log_sink.log_warn(
+				"Durability",
+				&format!("durability sweep query failed: {e}"),
+				Some(&format!("后台持久化 sweep 查询失败: {e}")),
+			);
+			return 0;
+		}
+		Err(e) => {
+			log_sink.log_warn(
+				"Durability",
+				&format!("durability sweep query task failed: {e}"),
+				Some(&format!("后台持久化 sweep 查询任务失败: {e}")),
+			);
+			return 0;
+		}
+	};
+
+	let mut synced = 0usize;
+	for cache_sha in pending {
+		let store_for_candidates = store.clone();
+		let key = cache_sha.clone();
+		let candidates = match tokio::task::spawn_blocking(move || {
+			store_for_candidates
+				.lock()
+				.unwrap()
+				.sync_candidates_for_cache_sha(&key)
+		})
+		.await
+		{
+			Ok(Ok(v)) => v,
+			Ok(Err(e)) => {
+				log_sink.log_warn(
+					"Durability",
+					&format!("durability sweep candidate lookup failed for {cache_sha}: {e}"),
+					Some(&format!(
+						"后台持久化 sweep 解析候选 blob 失败: {cache_sha}: {e}"
+					)),
+				);
+				continue;
+			}
+			Err(e) => {
+				log_sink.log_warn(
+					"Durability",
+					&format!("durability sweep candidate task failed for {cache_sha}: {e}"),
+					Some(&format!("后台持久化 sweep 候选任务失败: {cache_sha}: {e}")),
+				);
+				continue;
+			}
+		};
+
+		let mut synced_any = false;
+		for blob_sha in &candidates {
+			let Ok(path) = cas.blob_path(blob_sha) else {
+				continue;
+			};
+			if !path.exists() {
+				continue;
+			}
+			match sync_data_blocking(cas, path).await {
+				Ok(()) => synced_any = true,
+				Err(e) => log_sink.log_warn(
+					"Durability",
+					&format!(
+						"durable sweep sync failed for blob {blob_sha} (cache sha {cache_sha}): {e}; leaving durable=0"
+					),
+					Some(&format!(
+						"后台持久化 sweep 同步失败: blob={blob_sha}（缓存键 {cache_sha}）: {e}；保持 durable=0"
+					)),
+				),
+			}
+		}
+
+		if !synced_any {
+			log_sink.log_warn(
+				"Durability",
+				&format!(
+					"durable sweep found no existing blob for cache sha {cache_sha}; leaving durable=0"
+				),
+				Some(&format!(
+					"后台持久化 sweep 未找到缓存键 {cache_sha} 对应的磁盘 blob；保持 durable=0"
+				)),
+			);
+			continue;
+		}
+
+		let store_for_update = store.clone();
+		let key = cache_sha.clone();
+		match tokio::task::spawn_blocking(move || {
+			store_for_update.lock().unwrap().mark_cache_durable(&key)
+		})
+		.await
+		{
+			Ok(Ok(_)) => synced += 1,
+			Ok(Err(e)) => log_sink.log_warn(
+				"Durability",
+				&format!("durable sweep failed to flip durable=1 for {cache_sha}: {e}"),
+				Some(&format!(
+					"后台持久化 sweep 写回 durable=1 失败: {cache_sha}: {e}"
+				)),
+			),
+			Err(e) => log_sink.log_warn(
+				"Durability",
+				&format!("durable sweep update task failed for {cache_sha}: {e}"),
+				Some(&format!("后台持久化 sweep 更新任务失败: {cache_sha}: {e}")),
+			),
+		}
+	}
+	synced
+}
+
+/// 在 `spawn_blocking` 里执行 `sync_data()`，绝不让磁盘 IO 占住 tokio worker。
+async fn sync_data_blocking(cas: &Cas, path: std::path::PathBuf) -> std::io::Result<()> {
+	let cas = cas.clone();
+	tokio::task::spawn_blocking(move || cas.sync_data_file(&path))
+		.await
+		.map_err(std::io::Error::other)?
+}
+
 pub struct ContentFetchRequest {
 	pub item_id: String,
 	pub file_id: Option<String>,
@@ -1250,6 +1632,10 @@ impl Inner {
 			let _ = tx.try_send(NetCmd::Shutdown);
 		}
 
+		// 通知后台 durability worker 退出（不 join：与 NetManager 一样尽力而为，
+		// 正在进行的单次 sync_data 会自然完成）。
+		self.cas.stop_durability_worker();
+
 		// 顺序：先通知 NetManager 停机（此后它多数日志会自然减少），再关闭 sink。
 		// `flush_and_join` 先停止接收新记录，再让 writer 排空已入队的记录并
 		// 在超时内 join。因此 shutdown 返回时，所有在关闭前成功入队的日志都已
@@ -1262,6 +1648,15 @@ impl Inner {
 		let _ = self
 			.log_sink
 			.flush_and_join(crate::logs::LOG_SINK_JOIN_TIMEOUT);
+	}
+}
+
+impl Drop for Inner {
+	fn drop(&mut self) {
+		// 最后一个 `Core` 句柄释放时停止后台 durability worker：该线程持有
+		// `Store` 的 Arc 克隆，不退出会延迟数据库/临时目录释放（Windows 上尤其明显）。
+		// `Core::shutdown` 已经发过停止信号时，这里是幂等重复。
+		self.cas.stop_durability_worker();
 	}
 }
 
@@ -1648,5 +2043,136 @@ mod ingest_gc_walk_regression {
 		);
 
 		core.shutdown();
+	}
+}
+
+/// 后台 durability worker 的无 socket 测试。
+///
+/// 覆盖：`sync_pending_entry` 成功后把 durable 翻回 1；30 s sweep 只处理
+/// `durable=0` 的行，且对“缓存键 ≠ blob 名”的 FileList 形态（候选解析）也能工作。
+#[cfg(test)]
+mod durability_worker_tests {
+	use super::*;
+	use crate::cas::PendingSync;
+
+	fn temp_log_sink(dir: &std::path::Path) -> LogSink {
+		let store = LogStore::open(dir).expect("open log store");
+		LogSink::new(Arc::new(Mutex::new(store)))
+	}
+
+	fn insert_cache_row(store: &mut Store, sha: &str, present: bool, durable: bool) {
+		store
+			.conn
+			.execute(
+				r"INSERT INTO content_cache
+                   (sha256_hex, total_bytes, present, durable, last_access_ts_ms, created_ts_ms)
+                   VALUES (?1, 16, ?2, ?3, 1, 1)",
+				rusqlite::params![sha, i32::from(present), i32::from(durable)],
+			)
+			.unwrap();
+	}
+
+	fn write_blob(cas: &Cas, sha: &str) {
+		let path = cas.blob_path(sha).unwrap();
+		std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+		std::fs::write(&path, b"durable-payload").unwrap();
+	}
+
+	#[tokio::test]
+	async fn sync_pending_entry_flips_durable_on_success() {
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path().join("cache")).unwrap();
+		let sha = "a".repeat(64);
+		write_blob(&cas, &sha);
+
+		let mut store = Store::open(dir.path().join("data")).unwrap();
+		insert_cache_row(&mut store, &sha, true, false);
+		let store = Arc::new(Mutex::new(store));
+		let log = temp_log_sink(dir.path());
+
+		let ok = sync_pending_entry(
+			&cas,
+			&store,
+			&log,
+			&PendingSync {
+				blob_sha256: sha.clone(),
+				cache_sha256: sha.clone(),
+			},
+		)
+		.await;
+		assert!(ok, "同步成功必须返回 true");
+		assert!(store.lock().unwrap().get_cache_durable(&sha).unwrap());
+		assert_eq!(
+			store.lock().unwrap().select_durability_pending(10).unwrap(),
+			Vec::<String>::new()
+		);
+	}
+
+	#[tokio::test]
+	async fn sync_pending_entry_leaves_pending_when_blob_missing() {
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path().join("cache")).unwrap();
+		let sha = "b".repeat(64);
+		// 不创建 blob：sync_data 必须失败，durable 保持 0。
+		let mut store = Store::open(dir.path().join("data")).unwrap();
+		insert_cache_row(&mut store, &sha, true, false);
+		let store = Arc::new(Mutex::new(store));
+		let log = temp_log_sink(dir.path());
+
+		let ok = sync_pending_entry(
+			&cas,
+			&store,
+			&log,
+			&PendingSync {
+				blob_sha256: sha.clone(),
+				cache_sha256: sha.clone(),
+			},
+		)
+		.await;
+		assert!(!ok);
+		assert!(!store.lock().unwrap().get_cache_durable(&sha).unwrap());
+	}
+
+	#[tokio::test]
+	async fn sweep_syncs_only_pending_rows_and_resolves_file_list_blobs() {
+		let dir = tempfile::tempdir().unwrap();
+		let cas = Cas::new(dir.path().join("cache")).unwrap();
+
+		let item_sha = "c".repeat(64); // content_cache 键（item content sha）
+		let file_sha = "d".repeat(64); // FileList 实际 blob 名（单文件 sha）
+		write_blob(&cas, &file_sha);
+
+		let mut store = Store::open(dir.path().join("data")).unwrap();
+		insert_cache_row(&mut store, &item_sha, true, false);
+		// 已 durable 的行不能被 sweep 触碰。
+		let done_sha = "e".repeat(64);
+		write_blob(&cas, &done_sha);
+		insert_cache_row(&mut store, &done_sha, true, true);
+		// items 记录把缓存键映射到 FileList 的文件 sha。
+		store
+			.conn
+			.execute(
+				r"INSERT INTO items
+                   (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, files_json)
+                   VALUES ('item-1', 'file_list', 'dev-1', 1, 16, 'application/x-clipbridge-files', ?1, ?2)",
+				rusqlite::params![
+					item_sha,
+					format!(
+						r#"[{{"file_id":"f1","rel_name":"a.bin","size_bytes":16,"sha256":"{file_sha}","local_path":null}}]"#
+					)
+				],
+			)
+			.unwrap();
+		let store = Arc::new(Mutex::new(store));
+		let log = temp_log_sink(dir.path());
+
+		let synced = sweep_durability_pending(&cas, &store, &log).await;
+		assert_eq!(synced, 1, "只有 durable=0 的行应被 sweep");
+		assert!(store.lock().unwrap().get_cache_durable(&item_sha).unwrap());
+		assert!(store.lock().unwrap().get_cache_durable(&done_sha).unwrap());
+		assert_eq!(
+			store.lock().unwrap().select_durability_pending(10).unwrap(),
+			Vec::<String>::new()
+		);
 	}
 }

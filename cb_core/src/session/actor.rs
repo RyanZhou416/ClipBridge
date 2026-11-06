@@ -25,6 +25,7 @@ use opaque_ke::{ClientLoginFinishParameters, ServerLoginParameters};
 use rand::rngs::OsRng;
 
 use super::{HandshakeStep, SessionCmd, SessionHandle, SessionRole, SessionState};
+use crate::cas::DurabilityOutcome;
 use crate::model::ItemKind;
 use crate::policy::SizeLimits;
 use crate::proto::{AuthSessionFlags, CBFrame, CBFrameCodec, CtrlMsg, PROTOCOL_VERSION};
@@ -256,18 +257,23 @@ fn receiver_idle_expired(now: i64, last_activity_ms: i64) -> bool {
 /// 以 item 的 `content.sha256` 为键；直接用它 UPDATE 会命中 0 行（旧代码还把结果丢弃）。
 /// 因此优先取 item 的 `sha256_hex`，查不到时才回退到本次传输的 hash。
 ///
+/// `durable=false` 只在 `large-only` 且大文件（≥ 8 MiB）时传入：blob 已 rename
+/// 到最终路径并允许上报完成，但 `sync_data` 还没做；后台 worker / 30s sweep 负责
+/// 把它翻回 1。
+///
 /// 返回 `(实际标记的 sha, 受影响行数)`，调用方负责在 0 行时记录警告而不是硬失败。
 fn mark_item_content_cached(
 	store: &mut Store,
 	item_id: &str,
 	fallback_sha: &str,
 	now: i64,
+	durable: bool,
 ) -> anyhow::Result<(String, usize)> {
 	let item_sha = store
 		.get_item_sha256(item_id)?
 		.filter(|sha| !sha.is_empty())
 		.unwrap_or_else(|| fallback_sha.to_string());
-	let rows = store.mark_cache_present(&item_sha, now)?;
+	let rows = store.mark_cache_present_with_durability(&item_sha, now, durable)?;
 	Ok((item_sha, rows))
 }
 
@@ -388,9 +394,20 @@ enum ReceiverTaskMsg {
 		permit: OwnedSemaphorePermit,
 	},
 	Finish {
-		expected_sha256: String,                    // 这里指本次传输片段的 Hash
-		reply_tx: oneshot::Sender<Result<PathBuf>>, // 返回最终文件路径
+		expected_sha256: String, // 这里指本次传输片段的 Hash
+		reply_tx: oneshot::Sender<Result<FinalizeOutcome>>, // 返回最终文件路径与持久化状态
 	},
+}
+
+/// 最终化成功后的产物。
+///
+/// - `path`：对外可见的最终路径（materialize 后的视图或 blob 本身）；
+/// - `blob_path`：CAS 里已 rename 的 blob（后台补同步按它取 `sync_data`）；
+/// - `durability`：本次 commit 是否已同步落盘 / 是否 pending / 是否按 never 跳过。
+struct FinalizeOutcome {
+	path: PathBuf,
+	blob_path: PathBuf,
+	durability: DurabilityOutcome,
 }
 
 /// 单个入站传输的非阻塞投递队列（actor 主循环专用）。
@@ -543,7 +560,7 @@ struct ReceiverDone {
 	total_bytes: u64,
 	started_ts_ms: i64,
 	/// `Err((code, message))` 直接映射到 TRANSFER_FAILED。
-	result: std::result::Result<PathBuf, (String, String)>,
+	result: std::result::Result<FinalizeOutcome, (String, String)>,
 }
 
 /// 在独立任务里驱动 writer 完成 flush / close / 校验 / commit / materialize。
@@ -552,7 +569,7 @@ struct ReceiverDone {
 async fn finalize_receiver(
 	mut inbox: ReceiverInbox,
 	expected_sha256: String,
-) -> std::result::Result<PathBuf, (String, String)> {
+) -> std::result::Result<FinalizeOutcome, (String, String)> {
 	inbox
 		.flush_all()
 		.await
@@ -574,7 +591,7 @@ async fn finalize_receiver(
 		})?;
 
 	match reply_rx.await {
-		Ok(Ok(path)) => Ok(path),
+		Ok(Ok(outcome)) => Ok(outcome),
 		Ok(Err(e)) => Err(("COMMIT_FAILED".to_string(), e.to_string())),
 		Err(_) => Err((
 			"COMMIT_TIMEOUT".to_string(),
@@ -1760,6 +1777,9 @@ impl SessionActor {
 			}
 			let mut writer = tokio::io::BufWriter::new(file_res.unwrap());
 			let mut hasher = Sha256::new(); // 计算本次传输片段的 Hash
+								   // 实际写入的字节数：fsync 策略按“真实大小”而不是对端声明值选择，
+								   // 这样续传/截断的传输也不会被误判成大文件。
+			let mut written_bytes: u64 = 0;
 
 			while let Some(msg) = rx.recv().await {
 				match msg {
@@ -1769,6 +1789,7 @@ impl SessionActor {
 							return; // 触发 Drop 删除
 						}
 						hasher.update(&data);
+						written_bytes = written_bytes.saturating_add(data.len() as u64);
 						// 写完后归还字节许可：actor 看到的"在途字节"因此随磁盘进度下降。
 						drop(permit);
 					}
@@ -1793,6 +1814,14 @@ impl SessionActor {
 							return; // 触发 Drop 删除
 						}
 
+						// 2.5 按 ADR-002 §3.7 选择持久化动作：
+						// - always / large-only 小文件：rename 前 sync_all（本次 commit 内完成）；
+						// - large-only 大文件：只 rename，后台 worker 补 sync_data；
+						// - never：完全不做 fsync。
+						// 同步 fsync 的代价按实测 740 MiB/s 计，大文件尾延迟 0.3–2.6 s，
+						// 因此默认策略把 ≥ 8 MiB 的传输改为后台补同步。
+						let decision = cas_clone.fsync_policy().decision(written_bytes);
+
 						// 3. Commit 逻辑 (移入 spawn_blocking)
 						guard.committed = true; // 禁止 Drop 删除，转交控制权
 						let guard_path = guard.path.clone(); // Clone path before move
@@ -1807,12 +1836,14 @@ impl SessionActor {
 							// 但 Writer Task 没有那个值。
 							// 暂定：用片段 Hash 存，或者如果不做全量校验，直接 commit。
 
-							// 这里复用原本的逻辑
-							let blob_path =
-								cas_clone.commit_tmp_file(&guard_path, &expected_sha256)?;
+							let commit = cas_clone.commit_tmp_file_with_policy(
+								&guard_path,
+								&expected_sha256,
+								decision,
+							)?;
 
 							// B. 决定落地路径 (Materialize)
-							if let Some(real_fid) = fid {
+							let final_path = if let Some(real_fid) = fid {
 								// FileList 模式
 								let store = store_clone.lock().unwrap();
 								if let Some(fmeta) = store.get_file_meta(&iid, &real_fid)? {
@@ -1820,9 +1851,9 @@ impl SessionActor {
 										&expected_sha256,
 										&tid,
 										&fmeta.rel_name,
-									)
+									)?
 								} else {
-									Ok(blob_path)
+									commit.blob_path.clone()
 								}
 							} else {
 								// Text/Image 模式
@@ -1832,19 +1863,25 @@ impl SessionActor {
 									_ => None,
 								};
 								if let Some(extension) = ext {
-									cas_clone.materialize_blob(&expected_sha256, extension)
+									cas_clone.materialize_blob(&expected_sha256, extension)?
 								} else {
-									Ok(blob_path)
+									commit.blob_path.clone()
 								}
-							}
+							};
+
+							Ok::<FinalizeOutcome, anyhow::Error>(FinalizeOutcome {
+								path: final_path,
+								blob_path: commit.blob_path,
+								durability: commit.durability,
+							})
 						})
 						.await;
 
 						// 发送结果回主 Actor
 						let res = match commit_res {
-							Ok(Ok(path)) => Ok(path),
+							Ok(Ok(outcome)) => Ok(outcome),
 							Ok(Err(e)) => Err(e),
-							Err(e) => Err(e.into()),
+							Err(e) => Err(anyhow::Error::new(e)),
 						};
 						let _ = reply_tx.send(res);
 						return; // 任务结束
@@ -2185,13 +2222,23 @@ impl SessionActor {
 		self.receivers.remove(&done.transfer_id);
 
 		match done.result {
-			Ok(final_path) => {
+			Ok(outcome) => {
+				// 持久化顺序契约（ADR-002 §3.7）：
+				// - Synced（always / large-only 小文件）：sync_all 已在 rename 前成功，
+				//   此刻才允许上报 CONTENT_CACHED；
+				// - Pending（large-only ≥ 8 MiB）：rename 已成功，立即上报完成并把
+				//   durable=0 写进库，后台 worker 负责 sync_data；
+				// - NotSynced（never）：不做 fsync（旧行为），durable 保持默认 1。
+				let durability_pending = outcome.durability == DurabilityOutcome::Pending;
+				let final_path = outcome.path;
+				let blob_path = outcome.blob_path;
+
 				// 每个传输只写一条汇总（字节数 + 耗时），不再逐块记录
 				let elapsed_ms = now_ms() - done.started_ts_ms;
 				self.log_sink.log_info(
 					"Session",
-					&format!("Inbound transfer completed: transfer_id={}, bytes={}/{}, elapsed_ms={elapsed_ms}, sha256={}", done.transfer_id, done.received_bytes, done.total_bytes, done.expected_sha256),
-					Some(&format!("入站传输成功完成: 传输ID={}，字节数={}/{}，耗时={elapsed_ms}ms，SHA256={}", done.transfer_id, done.received_bytes, done.total_bytes, done.expected_sha256)),
+					&format!("Inbound transfer completed: transfer_id={}, bytes={}/{}, elapsed_ms={elapsed_ms}, sha256={}, durability={:?}", done.transfer_id, done.received_bytes, done.total_bytes, done.expected_sha256, outcome.durability),
+					Some(&format!("入站传输成功完成: 传输ID={}，字节数={}/{}，耗时={elapsed_ms}ms，SHA256={}，持久化状态={:?}", done.transfer_id, done.received_bytes, done.total_bytes, done.expected_sha256, outcome.durability)),
 				);
 
 				let store = self.store.clone();
@@ -2208,9 +2255,15 @@ impl SessionActor {
 				// 【新增】查询 DB 获取完整元数据
 				let meta_info = tokio::task::spawn_blocking(move || {
 					let mut guard = store.lock().unwrap();
-					// 按 item 自身 content.sha256 标记缓存并保留命中行数
-					let (marked_sha, marked_rows) =
-						mark_item_content_cached(&mut guard, &iid, &transfer_sha, now_ms())?;
+					// 按 item 自身 content.sha256 标记缓存并保留命中行数；
+					// 只有需要后台补同步时才写 durable=0（其余模式为 1）。
+					let (marked_sha, marked_rows) = mark_item_content_cached(
+						&mut guard,
+						&iid,
+						&transfer_sha,
+						now_ms(),
+						!durability_pending,
+					)?;
 
 					// 补充查询
 					let mime = guard.get_item_mime(&iid)?.unwrap_or_default();
@@ -2247,6 +2300,38 @@ impl SessionActor {
 							"缓存标记未命中任何行: 项目ID={item_id}，项目SHA256={marked_sha}，传输SHA256={expected_sha256}"
 						)),
 					);
+				}
+
+				// 大文件（large-only ≥ 8 MiB）：durable=0 已经和 present=1 一起落库，
+				// 现在把“同步最终 blob”的请求投递给后台 worker。队列有界；满了就
+				// 只记警告，行仍然是 durable=0，30 s sweep 会兜底。
+				if durability_pending && marked_rows > 0 {
+					let queued = self
+						.cas
+						.enqueue_background_sync(expected_sha256.clone(), marked_sha.clone());
+					// 无论入队成功与否都要确保 worker 存在（sweep 兜底路径）。
+					crate::api::ensure_durability_worker(
+						&self.cas,
+						self.store.clone(),
+						&self.log_sink,
+					);
+					if !queued {
+						self.log_sink.log_warn(
+							"Session",
+							&format!(
+								"durability queue full/closed; transfer stays durable=0 and the 30s sweep will sync it: transfer_id={}, blob={}, cache_sha256={}",
+								done.transfer_id,
+								blob_path.display(),
+								marked_sha
+							),
+							Some(&format!(
+								"后台持久化队列已满/已关闭，本次传输保持 durable=0，由 30s 周期 sweep 补同步: 传输ID={}，blob={}，缓存SHA256={}",
+								done.transfer_id,
+								blob_path.display(),
+								marked_sha
+							)),
+						);
+					}
 				}
 
 				// 【修改】构造符合文档的 local_ref
@@ -3344,7 +3429,7 @@ mod transfer_guard_tests {
 
 		// ContentEnd 侧传入的是「本次传输片段 hash」（FileList 里 = file_sha）
 		let (marked_sha, marked_rows) =
-			mark_item_content_cached(&mut store, &meta.item_id, &file_sha, now_ms()).unwrap();
+			mark_item_content_cached(&mut store, &meta.item_id, &file_sha, now_ms(), true).unwrap();
 
 		assert_eq!(marked_sha, item_sha);
 		assert_eq!(marked_rows, 1, "必须命中 item content sha 对应的行");
@@ -3363,9 +3448,48 @@ mod transfer_guard_tests {
 		let mut store = Store::open(dir.path()).unwrap();
 		let missing_sha = "c".repeat(64);
 		let (marked_sha, rows) =
-			mark_item_content_cached(&mut store, "item-missing", &missing_sha, now_ms()).unwrap();
+			mark_item_content_cached(&mut store, "item-missing", &missing_sha, now_ms(), true)
+				.unwrap();
 		assert_eq!(marked_sha, missing_sha);
 		assert_eq!(rows, 0);
+	}
+
+	/// 接收完成路径的 durable 写入：大文件 pending 时必须与 present=1 一起写 0，
+	/// 后台同步（或 sweep）成功后由 `mark_cache_durable` 翻回 1。
+	#[test]
+	fn receiver_completion_can_mark_durability_pending() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+		let sha = "9".repeat(64);
+		store
+			.conn
+			.execute(
+				r"INSERT INTO content_cache
+                   (sha256_hex, total_bytes, present, last_access_ts_ms, created_ts_ms)
+                   VALUES (?1, 10, 0, 1, 1)",
+				rusqlite::params![sha],
+			)
+			.unwrap();
+
+		// 大文件路径：present=1 + durable=0 同一条 UPDATE。
+		let (marked, rows) =
+			mark_item_content_cached(&mut store, "no-item", &sha, 2, false).expect("mark pending");
+		assert_eq!(marked, sha);
+		assert_eq!(rows, 1);
+		assert!(store.get_cache_present(&sha).unwrap());
+		assert!(!store.get_cache_durable(&sha).unwrap());
+		assert_eq!(
+			store.select_durability_pending(10).unwrap(),
+			vec![sha.clone()]
+		);
+
+		// 后台 sync_data 成功后的写回。
+		assert_eq!(store.mark_cache_durable(&sha).unwrap(), 1);
+		assert!(store.get_cache_durable(&sha).unwrap());
+		assert_eq!(
+			store.select_durability_pending(10).unwrap(),
+			Vec::<String>::new()
+		);
 	}
 
 	/// writer channel 满（慢磁盘 / 慢 writer）时，actor 的数据帧分支必须立刻返回，

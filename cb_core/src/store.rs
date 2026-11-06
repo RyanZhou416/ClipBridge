@@ -12,14 +12,19 @@ pub struct Store {
 
 /// 当前 `core.db` 的 schema 版本。
 ///
-/// **v2 采用“版本不匹配即整库重建”（drop-and-rebuild），不做逐版本迁移。**
+/// **v2 起采用“版本不匹配即整库重建”（drop-and-rebuild），不做逐版本迁移。**
 /// 项目没有兼容负担：schemas 一旦变化，`items` / `history` / `content_cache` /
 /// `trusted_peers` / `peer_rules` 全部删除重建，配对信任与共享策略也按设计一起丢失，
 /// 设备需要重新输入密码配对。这是有意的取舍，不是 bug。
 ///
 /// 任何未来的 DDL 变更（新增/删除列、索引、约束）都必须递增本常量；否则已有库
 /// 会带着旧结构继续运行，正是 v1 时代 `CREATE TABLE IF NOT EXISTS` 踩过的坑。
-pub const SCHEMA_VERSION: i64 = 2;
+///
+/// v3（ADR-002 §3.7）：`content_cache` 新增 `durable INTEGER NOT NULL DEFAULT 1`，
+/// 0 表示“blob 已 rename 到最终路径，但后台 `sync_data` 尚未完成”。升级到 v3 的
+/// 旧库会走既有 drop-and-rebuild：内容/身份表全部重建，CAS 由 `Core::init` 一并清空，
+/// 磁盘对象不可恢复（这是已批准的重建策略，不是本列引入的额外风险）。
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// 重建时先删除的表：本模块拥有的全部内容/身份表。
 ///
@@ -34,16 +39,17 @@ const DROP_OWNED_TABLES_DDL: &str = r"
     DROP TABLE IF EXISTS peer_rules;
 ";
 
-/// v2 的完整 DDL。
+/// v3 的完整 DDL。
 ///
 /// 表职责：
 /// - `items`：每个剪贴板条目的元数据（内容本体在 CAS，`sha256_hex` 关联 `content_cache`）。
 /// - `history`：按账号的历史视图；软删除只置 `is_deleted=1`，不删行。
-/// - `content_cache`：SHA-256 内容的体积与 `present` 状态（LRU/GC 依据）。
+/// - `content_cache`：SHA-256 内容的体积、`present` 状态（LRU/GC 依据）与
+///   `durable` 持久化标记（1 = 已 fsync 或按策略无需 fsync；0 = 后台同步待完成）。
 /// - `trusted_peers`：TOFU 设备指纹（配对信任）。
 /// - `peer_rules`：每个设备的共享/接收策略。
 ///
-/// 约束说明（v2 生成）：
+/// 约束说明（v3 生成）：
 /// - `items.kind` 用 CHECK 限定为 `kind_to_str` 产出的三个值，防止脏数据。
 /// - `history.item_id` 外键到 `items.item_id` 并 `ON DELETE CASCADE`。现有删除路径
 ///   都是软删除（只置 `is_deleted`），因此 cascade 只在未来做硬删除时兜底：
@@ -51,6 +57,8 @@ const DROP_OWNED_TABLES_DDL: &str = r"
 ///   不依赖 cascade。
 /// - `items.expires_ts_ms` 已删除：全仓库没有任何 TTL 清理逻辑读取它，模型里的
 ///   `ItemMeta.expires_ts_ms` 仍保留（对外 JSON 形状），读取时恒为 `None`。
+/// - `content_cache.durable` 默认 1：本列之前的所有行（以及本地 ingest 写入）都按
+///   “已持久化”处理；只有接收路径在 `large-only` 且 ≥ 8 MiB 时才显式写 0。
 const SCHEMA_DDL: &str = r"
     -- items 表：存储项的元数据
     CREATE TABLE IF NOT EXISTS items (
@@ -82,15 +90,18 @@ const SCHEMA_DDL: &str = r"
     CREATE UNIQUE INDEX IF NOT EXISTS idx_history_account_item ON history(account_uid, item_id);
 
     -- content_cache 表：存储内容缓存信息
+    -- durable：1 = 内容已 fsync 或按策略无需 fsync；0 = 已上报完成但后台 sync_data 待完成
     CREATE TABLE IF NOT EXISTS content_cache (
       sha256_hex TEXT PRIMARY KEY,
       total_bytes INTEGER NOT NULL,
       present INTEGER NOT NULL,
+      durable INTEGER NOT NULL DEFAULT 1,
       last_access_ts_ms INTEGER NOT NULL,
       created_ts_ms INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_cache_lru ON content_cache(present, last_access_ts_ms);
     CREATE INDEX IF NOT EXISTS idx_cache_size ON content_cache(present, total_bytes);
+    CREATE INDEX IF NOT EXISTS idx_cache_durable ON content_cache(durable);
 
     -- trusted_peers 表：记录已信任的设备指纹
     CREATE TABLE IF NOT EXISTS trusted_peers (
@@ -198,11 +209,11 @@ impl Store {
 		Ok(true)
 	}
 
-	/// 检查“版本号相同”的库是否真的具备 v2 结构。
+	/// 检查“版本号相同”的库是否真的具备 v3 结构。
 	///
 	/// 这是兜底而不是迁移：旧 migrate_v2 时代 `user_version=2` 但 `items` 没有
-	/// `files_json`，v1 时代也没有 `trusted_peers` / `peer_rules`。只要关键表或
-	/// 关键列缺失就按旧库整库重建。
+	/// `files_json`，v1 时代也没有 `trusted_peers` / `peer_rules`；v2 库的
+	/// `content_cache` 没有 `durable`。只要关键表或关键列缺失就按旧库整库重建。
 	fn schema_ready(conn: &Connection) -> anyhow::Result<bool> {
 		for table in [
 			"items",
@@ -239,7 +250,18 @@ impl Store {
 			return Ok(false);
 		}
 
-		// 外键指纹：v2 要求 history.item_id -> items.item_id ON DELETE CASCADE。
+		// v3 列指纹：内容表的 durable 标记必须存在。
+		let has_durable = conn
+			.prepare("PRAGMA table_info(content_cache)")?
+			.query_map([], |r| r.get::<_, String>(1))?
+			.collect::<rusqlite::Result<Vec<_>>>()?
+			.iter()
+			.any(|c| c == "durable");
+		if !has_durable {
+			return Ok(false);
+		}
+
+		// 外键指纹：v2 起要求 history.item_id -> items.item_id ON DELETE CASCADE。
 		let fk_count: i64 = conn.query_row(
 			r#"SELECT COUNT(*) FROM pragma_foreign_key_list('history')
                WHERE "table"='items' AND "from"='item_id' AND on_delete='CASCADE'"#,
@@ -407,15 +429,109 @@ impl Store {
 		Ok(n)
 	}
 
-	/// Phase C：CAS 写完后把 present=1，并 touch LRU
+	/// Phase C：CAS 写完后把 present=1，并 touch LRU。
+	///
+	/// 默认按 `durable=1` 处理（本地 ingest 路径与旧行为一致）。接收路径必须用
+	/// [`Store::mark_cache_present_with_durability`] 明确告诉库这次是否还要后台
+	/// `sync_data`，否则“已上报完成但尚未落盘”的窗口就无法被 sweep 发现。
 	pub fn mark_cache_present(&mut self, sha256_hex: &str, now_ms: i64) -> anyhow::Result<usize> {
+		self.mark_cache_present_with_durability(sha256_hex, now_ms, true)
+	}
+
+	/// Phase C（接收路径）：CAS 写完、按 fsync 策略决定 durable 后，一并更新
+	/// `present` / `durable` / LRU。
+	///
+	/// `durable=false` 表示：blob 已 rename 到最终路径（rename 成功后才调用），
+	/// 但 `sync_data` 还没完成，行需要由后台任务或 30s sweep 补同步。
+	pub fn mark_cache_present_with_durability(
+		&mut self,
+		sha256_hex: &str,
+		now_ms: i64,
+		durable: bool,
+	) -> anyhow::Result<usize> {
 		let n = self.conn.execute(
 			r"UPDATE content_cache
-           SET present=1, last_access_ts_ms=?2
+           SET present=1, durable=?3, last_access_ts_ms=?2
            WHERE sha256_hex=?1",
-			params![sha256_hex, now_ms],
+			params![sha256_hex, now_ms, i32::from(durable)],
 		)?;
 		Ok(n)
+	}
+
+	/// 后台同步成功后把 durable 翻回 1。返回受影响行数（0 表示行已被删除）。
+	pub fn mark_cache_durable(&mut self, sha256_hex: &str) -> anyhow::Result<usize> {
+		let n = self.conn.execute(
+			"UPDATE content_cache SET durable=1 WHERE sha256_hex=?1",
+			params![sha256_hex],
+		)?;
+		Ok(n)
+	}
+
+	/// 读取 durable 标记（诊断 / 测试用；本列不进入 FFI 返回值）。
+	pub fn get_cache_durable(&self, sha256_hex: &str) -> anyhow::Result<bool> {
+		let v: i64 = self.conn.query_row(
+			"SELECT durable FROM content_cache WHERE sha256_hex=?1",
+			params![sha256_hex],
+			|r| r.get(0),
+		)?;
+		Ok(v != 0)
+	}
+
+	/// 后台同步队列满/进程重启后，sweep 用这个查询找回所有待同步行。
+	///
+	/// 只返回 `present=1 AND durable=0`：`present=0` 表示内容已被 GC/删除，
+	/// 没有 blob 可同步；若仍按 durable=0 处理会让 sweep 每 30 s 对同一批
+	/// 已删除内容重复记警告。`present` 与 `durable` 由接收完成路径在同一条
+	/// UPDATE 里写入，正常 pending 行必然 present=1。
+	pub fn select_durability_pending(&self, limit: i64) -> anyhow::Result<Vec<String>> {
+		let mut stmt = self.conn.prepare(
+			r"
+            SELECT sha256_hex
+            FROM content_cache
+            WHERE present=1 AND durable=0
+            ORDER BY last_access_ts_ms ASC, sha256_hex ASC
+            LIMIT ?1
+            ",
+		)?;
+		let rows = stmt.query_map(params![limit], |r| r.get(0))?;
+		let mut out = Vec::new();
+		for it in rows {
+			out.push(it?);
+		}
+		Ok(out)
+	}
+
+	/// 为 sweep 解析一个 `content_cache` 键可能对应的磁盘 blob 列表。
+	///
+	/// `content_cache` 以 **item 的** `content.sha256` 为键，但 FileList 传输的
+	/// `ContentBegin.sha256` 是**单个文件**的 hash（见 actor.rs 的
+	/// `mark_item_content_cached`），两者并不相等。因此 sweep 不能假设 blob 名
+	/// 就是行主键：先取 item 自身 content sha 作为候选，再从 `files_json` 里
+	/// 补上每个文件的 sha，逐个尝试 `sync_data`。返回空列表表示库里没有对应
+	/// item（例如元数据已删除），调用方只记警告、保持 durable=0。
+	pub fn sync_candidates_for_cache_sha(&self, sha256_hex: &str) -> anyhow::Result<Vec<String>> {
+		let mut out = vec![sha256_hex.to_string()];
+		let mut stmt = self
+			.conn
+			.prepare("SELECT files_json FROM items WHERE sha256_hex=?1")?;
+		let mut rows = stmt.query(params![sha256_hex])?;
+		while let Some(row) = rows.next()? {
+			let files_json: Option<String> = row.get(0)?;
+			let Some(files_json) = files_json else {
+				continue;
+			};
+			let Ok(files) = serde_json::from_str::<Vec<FileMeta>>(&files_json) else {
+				continue;
+			};
+			for f in files {
+				if let Some(sha) = f.sha256 {
+					if !sha.is_empty() && !out.iter().any(|s| s == &sha) {
+						out.push(sha);
+					}
+				}
+			}
+		}
+		Ok(out)
 	}
 
 	pub fn touch_cache(&mut self, sha256_hex: &str, now_ms: i64) -> anyhow::Result<usize> {
@@ -1254,5 +1370,106 @@ mod schema_tests {
 			.query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))
 			.unwrap();
 		assert_eq!(remaining, 0);
+	}
+
+	/// v3 的 durable 列：默认 1（旧行/本地 ingest 视为已持久化），可以置 0/1，
+	/// sweep 查询只返回 durable=0 的行。
+	#[test]
+	fn durable_defaults_to_one_and_sweep_lists_only_pending_rows() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+
+		// 不写 durable 列，模拟“本列出现之前插入的行”：DEFAULT 1 必须生效。
+		for (sha, ts) in [("a".repeat(64), 1_i64), ("b".repeat(64), 2_i64)] {
+			store
+				.conn
+				.execute(
+					r"INSERT INTO content_cache
+                       (sha256_hex, total_bytes, present, last_access_ts_ms, created_ts_ms)
+                       VALUES (?1, 10, 0, ?2, ?2)",
+					params![sha, ts],
+				)
+				.unwrap();
+		}
+
+		let a = "a".repeat(64);
+		let b = "b".repeat(64);
+		assert!(
+			store.get_cache_durable(&a).unwrap(),
+			"未显式写入 durable 的行必须默认 1"
+		);
+		assert_eq!(
+			store.select_durability_pending(10).unwrap(),
+			Vec::<String>::new()
+		);
+
+		// 接收路径：present=1 + durable=0 必须能在同一条 UPDATE 里落库。
+		assert_eq!(
+			store
+				.mark_cache_present_with_durability(&a, 100, false)
+				.unwrap(),
+			1
+		);
+		assert!(store.get_cache_present(&a).unwrap());
+		assert!(!store.get_cache_durable(&a).unwrap());
+		assert_eq!(
+			store.select_durability_pending(10).unwrap(),
+			vec![a.clone()]
+		);
+
+		// sweep 只处理 pending：durable=1 的行不会出现。
+		assert_eq!(
+			store.select_durability_pending(10).unwrap(),
+			vec![a.clone()]
+		);
+
+		// 后台同步成功：翻回 1 后不再出现在 sweep 结果里。
+		assert_eq!(store.mark_cache_durable(&a).unwrap(), 1);
+		assert!(store.get_cache_durable(&a).unwrap());
+		assert_eq!(
+			store.select_durability_pending(10).unwrap(),
+			Vec::<String>::new(),
+			"同步完成后必须离开 pending 列表"
+		);
+
+		// 再置 0 可以重复进入 pending（后台失败重试 / 再次接收）。
+		assert_eq!(
+			store
+				.mark_cache_present_with_durability(&b, 200, false)
+				.unwrap(),
+			1
+		);
+		assert_eq!(store.select_durability_pending(10).unwrap(), vec![b]);
+	}
+
+	/// 同一版本号、但 content_cache 缺 durable 列的旧库（v2 结构）必须重建，
+	/// 否则接收路径的 durable=0 写入会在老库上直接失败。
+	#[test]
+	fn missing_durable_column_forces_rebuild() {
+		let dir = tempfile::tempdir().unwrap();
+		{
+			// 先建出 v3 结构，再把版本号伪装成 v3、删掉 durable 列。
+			let _store = Store::open(dir.path()).unwrap();
+			let conn = Connection::open(dir.path().join("core.db")).unwrap();
+			conn.execute_batch(
+				"DROP INDEX idx_cache_durable;
+                 ALTER TABLE content_cache DROP COLUMN durable;
+                 PRAGMA user_version = 3;",
+			)
+			.unwrap();
+		}
+
+		let reopened = Store::open(dir.path()).unwrap();
+		assert!(reopened.rebuilt, "缺 durable 列时不能只信版本号");
+		let has_durable = reopened
+			.conn
+			.prepare("PRAGMA table_info(content_cache)")
+			.unwrap()
+			.query_map([], |r| r.get::<_, String>(1))
+			.unwrap()
+			.map(Result::unwrap)
+			.any(|c| c == "durable");
+		assert!(has_durable);
+		assert_eq!(user_version(&reopened.conn), SCHEMA_VERSION);
 	}
 }
