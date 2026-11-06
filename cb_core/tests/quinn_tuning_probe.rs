@@ -28,6 +28,13 @@
 //!    为此专门跑一行 `payload=16000 + init_cwnd=100KiB` 对照；实际部署目标
 //!    9000 B（jumbo frame）不需要这一步。
 //!
+//!    另一个配套项：Windows 默认 UDP 接收缓冲只有 64 KiB，9000 B 时只够放
+//!    ~7 个数据报。实测 9000 B + 默认缓冲只有 8 MiB 缓冲的约 55~70%
+//!    （丢包与 cwnd 事件明显上升）。quinn 不提供 socket 缓冲设置，若要吃满
+//!    jumbo 收益，`cb_core` 必须自己建 socket（`Endpoint::new`）并用
+//!    `quinn::udp::UdpSocketState::set_send/recv_buffer_size` 抬高缓冲；
+//!    探针为此额外跑一行 `control: payload=9000 sockbuf=default` 对照。
+//!
 //! 2. **`MAX_TRANSMIT_SEGMENTS` 10 → 32（上界估计，不改 quinn 源码）**：
 //!    quinn 0.11.12 把每次发送的 GSO 段数硬编码为 `MAX_TRANSMIT_SEGMENTS = 10`
 //!    （`quinn/src/connection.rs:1341`），而 Windows 报告 512。本探针不能改
@@ -1454,6 +1461,28 @@ fn quinn_tuning_probe() {
 			&mut payload_rows,
 		);
 	}
+	// jumbo 的另一半：socket 缓冲。Windows 默认 64 KiB 在 9000 B 时只够放
+	// ~7 个数据报，会先被内核丢包吃掉收益。这一行固定 9000 B + 默认缓冲，
+	// 与上面 8 MiB 的 9000 行构成对照。
+	if cfg.sockbuf_bytes > 0 {
+		run_and_push(
+			&runtime,
+			CaseSpec {
+				label: "control: payload=9000 sockbuf=default".to_string(),
+				payload: 9000,
+				conns: 1,
+				endpoint_pairs: 1,
+				streams: 1,
+				file_bytes: cfg.file_bytes(),
+				sockbuf_bytes: 0,
+				initial_cwnd: None,
+			},
+			&cert_chain,
+			&priv_key,
+			case_timeout,
+			&mut payload_rows,
+		);
+	}
 
 	// 维度 3：Endpoint 数量（全部 1452 B，与历史 402-478 MiB/s 数字可比）。
 	let mut endpoint_rows = Vec::new();
@@ -1626,6 +1655,30 @@ fn quinn_tuning_probe() {
 						(base.mib_per_s() / metrics.mib_per_s() - 1.0) * 100.0
 					);
 				}
+			}
+		}
+	}
+
+	// 9000 B 的缓冲对照：量化“jumbo 需要更大 socket 缓冲”。
+	if cfg.sockbuf_bytes > 0 {
+		let default_9000 = payload_rows.iter().find(|row| {
+			row.spec.label == "control: payload=9000 sockbuf=default" && row.outcome.is_ok()
+		});
+		let with_buf_9000 = payload_refs
+			.iter()
+			.find(|(payload, _, _)| *payload == 9000)
+			.map(|(_, _, metrics)| *metrics);
+		if let (Some(row), Some(with_buf)) = (default_9000, with_buf_9000) {
+			if let Ok(metrics) = &row.outcome {
+				println!(
+					"[derive] sockbuf@9000: default={:.1} MiB/s vs {}={:.1} MiB/s ({:+.1}%), lost_pkt={} vs {}",
+					metrics.mib_per_s(),
+					cfg.sockbuf_label(),
+					with_buf.mib_per_s(),
+					(with_buf.mib_per_s() / metrics.mib_per_s() - 1.0) * 100.0,
+					metrics.lost_packets,
+					with_buf.lost_packets
+				);
 			}
 		}
 	}
