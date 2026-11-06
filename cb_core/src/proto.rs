@@ -21,7 +21,13 @@ use serde::{Deserialize, Serialize};
 //      "本子区间"；`sha256` 仍是整文件 hash（与 `ContentBegin.sha256` 一致）。
 //      整文件的完整性在接收端 finalize 时按顺序重读临时文件校验（见 ADR-002
 //      §4.2 的两种方案与 actor.rs 的注释）。两端必须同版本。
-pub const PROTOCOL_VERSION: u32 = 5;
+// - 6（ADR-002 阶段 C1）：多数据端点 + 每 peer 数据连接池。`Hello` / `HelloAck`
+//      新增 `data_ports`（按对端希望被连接顺序排列的已绑定数据端口；空列表 =
+//      只有控制连接，即旧行为）。发送方（控制连接的 server 端）会按接受顺序
+//      轮转这份列表，使并发 peer 落到自己不同的数据 endpoint 上。字段带
+//      `#[serde(default)]`，所以解码旧版 payload 不会报错；真正阻止旧对端的是
+//      下面严格相等的版本闸门（与 v3/v4/v5 的既有策略一致）。
+pub const PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Debug)]
 pub enum CBFrame {
@@ -50,6 +56,24 @@ pub enum CtrlMsg {
 		account_uid: String,
 		capabilities: Vec<String>,
 		client_nonce: Option<String>,
+		/// C1（v6）：本端通告的连接 endpoint 列表（按希望被连接/使用的顺序）。
+		///
+		/// 元素语义：
+		/// - 非 0：本端已绑定的**数据端口**（`P+1..`），对端可以对它建立独立
+		///   QUIC 连接来承载一次大传输；
+		/// - `0`（见 `net::data_link` 的 `CONTROL_CONNECTION_SENTINEL`）：表示
+		///   "使用已有的控制连接"（真实 UDP 端口不可能是 0）。控制连接也参与
+		///   连接池的负载均衡，这样 K 个 endpoint 能被并发 peer 均匀铺满。
+		///
+		/// - 空列表 = 本端没有额外数据端点（`CB_QUIC_DATA_ENDPOINTS=1`）或旧对端；
+		///   对端应退化为单连接（与控制连接相同的行为）。
+		///
+		/// `#[serde(default)]`：旧版 payload 缺少该字段时解码为空列表，不会让
+		/// 解码直接失败（真正拒绝旧对端的是严格的 `protocol_version` 闸门）。
+		/// `skip_serializing_if`：空列表不写进 JSON，K=1 时线格式只多出
+		/// `protocol_version` 的变化（任务要求的行为等价，见 ADR C1 说明）。
+		#[serde(default, skip_serializing_if = "Vec::is_empty")]
+		data_ports: Vec<u16>,
 	},
 
 	// 2. 握手：HelloAck
@@ -57,6 +81,11 @@ pub enum CtrlMsg {
 		reply_to: Option<String>,
 		server_device_id: String,
 		protocol_version: u32,
+		/// C1（v6）：服务端通告的 endpoint 列表；server 端会按接受顺序轮转，
+		/// 让并发 peer 的第 0 条连接落到自己不同的 endpoint 上。语义与
+		/// `Hello.data_ports` 相同（非 0 端口 + 0 控制连接哨兵；空 = 单连接）。
+		#[serde(default, skip_serializing_if = "Vec::is_empty")]
+		data_ports: Vec<u16>,
 	},
 
 	// 3. 鉴权失败
@@ -396,6 +425,98 @@ mod tests {
 			sha256: "a".repeat(64),
 			mime: "text/plain".to_string(),
 		}
+	}
+
+	/// C1（v6）：`Hello` / `HelloAck` 的 `data_ports` 必须能走控制流 JSON 无损
+	/// 往返；旧版 payload 缺少该字段时（`#[serde(default)]`）解码为空列表，
+	/// 语义等价于"只有控制连接"。
+	#[test]
+	fn hello_data_ports_roundtrip_and_legacy_default_is_empty() {
+		let hello = CtrlMsg::Hello {
+			msg_id: Some("m1".into()),
+			protocol_version: PROTOCOL_VERSION,
+			device_id: "dev-a".into(),
+			account_uid: "uid".into(),
+			capabilities: vec!["file".into()],
+			client_nonce: Some("n1".into()),
+			data_ports: vec![5001, 5002, 5003],
+		};
+		let json = serde_json::to_vec(&hello).expect("serialize Hello");
+		let decoded: CtrlMsg = serde_json::from_slice(&json).expect("deserialize Hello");
+		match decoded {
+			CtrlMsg::Hello { data_ports, .. } => assert_eq!(data_ports, vec![5001, 5002, 5003]),
+			other => panic!("expected Hello, got {other:?}"),
+		}
+
+		let ack = CtrlMsg::HelloAck {
+			reply_to: None,
+			server_device_id: "dev-b".into(),
+			protocol_version: PROTOCOL_VERSION,
+			data_ports: vec![6001],
+		};
+		let json = serde_json::to_vec(&ack).expect("serialize HelloAck");
+		let decoded: CtrlMsg = serde_json::from_slice(&json).expect("deserialize HelloAck");
+		match decoded {
+			CtrlMsg::HelloAck { data_ports, .. } => assert_eq!(data_ports, vec![6001]),
+			other => panic!("expected HelloAck, got {other:?}"),
+		}
+
+		// 旧版（v5）Hello/HelloAck 的 JSON 里没有 data_ports 字段。
+		let legacy_hello = r#"{"type":"HELLO","msg_id":null,"protocol_version":5,"device_id":"dev-old","account_uid":"uid","capabilities":[],"client_nonce":null}"#;
+		let decoded: CtrlMsg =
+			serde_json::from_str(legacy_hello).expect("legacy Hello must decode");
+		match decoded {
+			CtrlMsg::Hello {
+				protocol_version,
+				data_ports,
+				..
+			} => {
+				assert_eq!(protocol_version, 5);
+				assert_eq!(
+					data_ports,
+					Vec::<u16>::new(),
+					"旧 payload 必须退化为空端口列表"
+				);
+			}
+			other => panic!("expected Hello, got {other:?}"),
+		}
+
+		let legacy_ack = r#"{"type":"HELLO_ACK","reply_to":null,"server_device_id":"dev-old","protocol_version":5}"#;
+		let decoded: CtrlMsg =
+			serde_json::from_str(legacy_ack).expect("legacy HelloAck must decode");
+		match decoded {
+			CtrlMsg::HelloAck { data_ports, .. } => {
+				assert_eq!(
+					data_ports,
+					Vec::<u16>::new(),
+					"旧 payload 必须退化为空端口列表"
+				);
+			}
+			other => panic!("expected HelloAck, got {other:?}"),
+		}
+
+		// K=1（没有数据端点）时空列表不写进 JSON：线格式只多出协议版本的变化。
+		let quiet = CtrlMsg::Hello {
+			msg_id: None,
+			protocol_version: PROTOCOL_VERSION,
+			device_id: "dev-quiet".into(),
+			account_uid: "uid".into(),
+			capabilities: Vec::new(),
+			client_nonce: None,
+			data_ports: Vec::new(),
+		};
+		let json = serde_json::to_string(&quiet).expect("serialize empty-port Hello");
+		assert!(
+			!json.contains("data_ports"),
+			"空端口列表必须从线格式中省略: {json}"
+		);
+	}
+
+	/// 版本号是握手闸门的一部分：C1 必须是 6（v5 及更早的对端会被明确拒绝，
+	/// 而不是半兼容地读到缺失字段后继续）。
+	#[test]
+	fn protocol_version_bumped_for_c1() {
+		assert_eq!(PROTOCOL_VERSION, 6);
 	}
 
 	/// `TransferHeader` 必须能通过 postcard 无损往返（含 `Option::Some/None` 两种

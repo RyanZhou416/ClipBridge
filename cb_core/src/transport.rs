@@ -5,6 +5,7 @@ pub mod cert;
 use std::fmt::Debug;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket}; // Ipv6Addr 在 v1 暂不强制
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +16,8 @@ use quinn::{
 	Endpoint, EndpointConfig, MtuDiscoveryConfig, Runtime, ServerConfig, TokioRuntime,
 	TransportConfig, VarInt,
 };
+
+use crate::net::ports::{allocate_data_ports, data_endpoint_count_from_env, MAX_PORT_SCAN};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
@@ -149,7 +152,21 @@ impl ClientCertVerifier for RequestClientCertVerifier {
 }
 
 pub struct Transport {
+	/// 控制/发现端点（端口 P，mDNS 广播的就是它）。
 	endpoint: Endpoint,
+	/// C1 额外数据端点（端口 P+1..，数量 = `CB_QUIC_DATA_ENDPOINTS - 1`）。
+	///
+	/// 每个 endpoint 拥有独立的 UDP socket 和 quinn 接收循环（ADR-002 §5.3：
+	/// 4 个独立 Endpoint 比同一 Endpoint 上的 4 条连接聚合高 58%，且零丢包）。
+	/// `Endpoint` 不可 Clone、不可共享，因此这里是一个 `Vec<Endpoint>`。
+	data_endpoints: Vec<Endpoint>,
+	/// 实际绑定成功的数据端口（与 `data_endpoints` 一一对应）。
+	///
+	/// 端口冲突时会跳过被占用的端口；通告给对端的是**这里**的真实端口，而不是
+	/// 计划中的 P+1..P+K。空列表 = 只有控制连接（`K=1` 或额外端口全部绑定失败）。
+	data_ports: Vec<u16>,
+	/// `shutdown()` 后置位，让各 endpoint 的 accept loop 知道"退出不是暂时失败"。
+	closed: AtomicBool,
 	pub local_cert_der: Vec<u8>,
 }
 
@@ -501,17 +518,101 @@ impl Transport {
 		let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime);
 		let mut endpoint = Endpoint::new(
 			quic_endpoint_config(udp_payload),
-			Some(server_config),
+			Some(server_config.clone()),
 			socket,
-			runtime,
+			runtime.clone(),
 		)
 		.context("failed to create QUIC endpoint with pre-configured UDP socket")?;
-		endpoint.set_default_client_config(client_config);
+		endpoint.set_default_client_config(client_config.clone());
+
+		let control_port = endpoint.local_addr()?.port();
+
+		// 5. C1：额外数据端点（端口 P+1..）。
+		//
+		// 端口规则见 [`crate::net::ports`]：
+		// - 要求的总数来自 `CB_QUIC_DATA_ENDPOINTS`（默认 2，夹到 1..=4）；
+		// - K=1 时 `needed == 0`，不 bind 任何额外端口、不通告任何端口，
+		//   行为与引入 C1 之前完全一致；
+		// - 每个端口先 bind 到临时 `UdpSocket`（设置 8 MiB 缓冲），成功后再交给
+		//   独立的 `Endpoint`；被占用的端口跳过，通告的是实际绑定成功的端口。
+		let data_endpoint_total = data_endpoint_count_from_env();
+		let needed = data_endpoint_total.saturating_sub(1);
+		let mut data_endpoints: Vec<Endpoint> = Vec::with_capacity(needed);
+		let mut data_ports: Vec<u16> = Vec::with_capacity(needed);
+		if needed > 0 {
+			let mut bound_sockets: Vec<UdpSocket> = Vec::with_capacity(needed);
+			let bound_ports = allocate_data_ports(control_port, needed, MAX_PORT_SCAN, |port| {
+				let addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port);
+				match bind_udp_socket(addr) {
+					Ok(socket) => {
+						bound_sockets.push(socket);
+						true
+					}
+					Err(error) => {
+						eprintln!("[Transport] 数据端口 {port} 不可用（继续向后找）: {error:#}");
+						false
+					}
+				}
+			});
+
+			// bound_ports 与 bound_sockets 一一对应（allocate_data_ports 对每个
+			// 候选只询问一次；闭包成功时按同样顺序 push）。
+			for (port, socket) in bound_ports.iter().copied().zip(bound_sockets) {
+				match Endpoint::new(
+					quic_endpoint_config(udp_payload),
+					Some(server_config.clone()),
+					socket,
+					runtime.clone(),
+				) {
+					Ok(mut data_endpoint) => {
+						data_endpoint.set_default_client_config(client_config.clone());
+						data_ports.push(port);
+						data_endpoints.push(data_endpoint);
+					}
+					Err(error) => {
+						eprintln!("[Transport] 数据端点（端口 {port}）创建失败，已跳过: {error:#}");
+					}
+				}
+			}
+
+			if data_endpoints.len() < needed {
+				eprintln!(
+					"[Transport] 数据端点不足：请求 {} 个额外端点，实际绑定 {} 个（端口冲突）",
+					needed,
+					data_endpoints.len()
+				);
+			}
+		}
+		eprintln!(
+			"[Transport] C1 数据端点: 控制端口={control_port}, 数据端口={data_ports:?} \
+			 （{}={data_endpoint_total}，额外={}）",
+			crate::net::ports::DATA_ENDPOINT_COUNT_ENV,
+			data_endpoints.len()
+		);
 
 		Ok(Self {
 			endpoint,
+			data_endpoints,
+			data_ports,
+			closed: AtomicBool::new(false),
 			local_cert_der,
 		})
+	}
+
+	/// 实际绑定成功的数据端口（不含控制端口）。
+	pub fn data_ports(&self) -> &[u16] {
+		&self.data_ports
+	}
+
+	/// 额外数据端点数量（0 = K=1，只有控制连接）。
+	pub fn data_endpoint_count(&self) -> usize {
+		self.data_endpoints.len()
+	}
+
+	/// `shutdown()` 之后为 true；数据端点 accept loop 用它区分"暂时握手失败"
+	/// 与"端点已关闭"。
+	pub fn is_shutdown(&self) -> bool {
+		self.closed.load(Ordering::Acquire)
 	}
 
 	pub fn local_port(&self) -> Result<u16> {
@@ -526,6 +627,20 @@ impl Transport {
 		Ok(conn)
 	}
 
+	/// 从第 `slot` 个**数据端点**拨号（C1）。
+	///
+	/// 连接归属该数据端点：它的发送/接收都由这个 endpoint 的 socket 与接收循环
+	/// 承载，这正是多 endpoint 分摊负载的关键。
+	pub async fn connect_data(&self, slot: usize, addr_str: &str) -> Result<Connection> {
+		let endpoint = self
+			.data_endpoints
+			.get(slot)
+			.context("data endpoint slot out of range")?;
+		let addr: SocketAddr = addr_str.parse().context("invalid socket addr")?;
+		let connecting = endpoint.connect(addr, "localhost")?;
+		Ok(connecting.await?)
+	}
+
 	pub async fn accept(&self) -> Option<Connection> {
 		let incoming = self.endpoint.accept().await?;
 		match incoming.await {
@@ -537,13 +652,30 @@ impl Transport {
 		}
 	}
 
+	/// 在第 `slot` 个数据端点上接受入站连接（C1）。
+	pub async fn accept_data(&self, slot: usize) -> Option<Connection> {
+		let endpoint = self.data_endpoints.get(slot)?;
+		let incoming = endpoint.accept().await?;
+		match incoming.await {
+			Ok(conn) => Some(conn),
+			Err(e) => {
+				eprintln!("[Transport] Data endpoint {slot} handshake failed: {e}");
+				None
+			}
+		}
+	}
+
 	pub fn is_ipv4(&self) -> bool {
 		// 如果获取失败，默认认为是 IPv4（为了兼容性）
 		self.endpoint.local_addr().map_or(true, |a| a.is_ipv4())
 	}
 
 	pub fn shutdown(&self) {
+		self.closed.store(true, Ordering::Release);
 		self.endpoint.close(0u32.into(), b"shutdown");
+		for endpoint in &self.data_endpoints {
+			endpoint.close(0u32.into(), b"shutdown");
+		}
 	}
 }
 

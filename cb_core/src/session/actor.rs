@@ -24,7 +24,9 @@ use crate::crypto::{
 use opaque_ke::{ClientLoginFinishParameters, ServerLoginParameters};
 use rand::rngs::OsRng;
 
-use super::{HandshakeStep, SessionCmd, SessionHandle, SessionRole, SessionState};
+use super::{
+	HandshakeStep, SessionCmd, SessionHandle, SessionKind, SessionRole, SessionState, TransferLoad,
+};
 use crate::cas::DurabilityOutcome;
 use crate::model::ItemKind;
 use crate::policy::SizeLimits;
@@ -162,6 +164,20 @@ const MAX_PAYLOAD_STREAMS_PER_TRANSFER: usize = 6;
 /// 24 = 4 个传输同时用满 6 条，足够覆盖正常并发，又给慢速/异常 sender 留出
 /// 明确的背压点：拿不到许可的区间任务会等待，而不是无限开流。
 const MAX_PAYLOAD_STREAMS_PER_SESSION: usize = 24;
+
+// C1（ADR-002 §4.3）并发上限的语义边界：**全部是"每连接"上限，不是每 peer**。
+//
+// 每个 `SessionActor` 恰好绑定一条 QUIC 连接；C1 允许同一 peer 最多
+// `CB_QUIC_DATA_ENDPOINTS` 条数据连接，因此一个 peer 的理论并发上限是
+// `K × MAX_CONCURRENT_SENDERS` / `K × MAX_CONCURRENT_RECEIVERS`（默认 K=2 => 16）。
+// 每传输 6 条子流、每会话 24 条子流同样按连接计。
+//
+// 为什么不做成"每 peer 汇总上限"：汇总需要跨会话共享一个信号量/计数器，而
+// `ContentBegin`/`ContentGet` 的准入判定发生在各自的 actor 主循环里，跨会话锁
+// 会把一个慢连接的问题扩散到控制面。当前做法的安全边界是"每 peer K 条连接、
+// 每条连接受上述上限约束"；连接池的分配策略（net::data_link）会跳过已满
+// `MAX_ACTIVE_TRANSFERS_PER_LINK = 8` 个在途传输的连接，避免把新传输压到饱和链路。
+// 详见 `docs/adr/002-adaptive-large-file-transfer.md` 的 C1 落地说明。
 
 /// 冷启动 RTT 分档阈值（ADR-002 §3.3 / §4.8）：低于该值视为 LAN。
 ///
@@ -2151,6 +2167,14 @@ pub struct SessionActor {
 	/// 与 [`MAX_CONCURRENT_SENDERS`] 是独立维度：一个传输最多 6 条流，但一个
 	/// 会话同时活跃的流必须另有上限，否则多个 WAN 探针会瞬间放大调度/内存开销。
 	payload_stream_budget: Arc<Semaphore>,
+	/// C1：控制会话 / 数据会话。数据会话不对外发 PEER_ONLINE/OFFLINE。
+	kind: SessionKind,
+	/// C1：本端要通告的数据端口（server 端可能按接受顺序轮转过）。
+	local_data_ports: Vec<u16>,
+	/// C1：对端通告的数据端口（与 `SessionHandle::peer_data_ports` 共享）。
+	peer_data_ports: Arc<Mutex<Vec<u16>>>,
+	/// C1：本连接活跃传输数（与 `SessionHandle::load` 共享）。
+	load: Arc<TransferLoad>,
 }
 
 impl SessionActor {
@@ -2178,10 +2202,18 @@ impl SessionActor {
 			cas,
 			expected_peer_id,
 			crate::logs::LogSink::new(log_store),
+			SessionKind::Control,
+			Vec::new(),
 		)
 	}
 
 	/// 用共享的 [`crate::logs::LogSink`] 启动会话 actor（生产路径）。
+	///
+	/// `kind` / `local_data_ports` 是 C1 新增：
+	/// - 控制会话的数据端口会被通告给对端（server 端由 NetManager 按接受顺序
+	///   轮转，让并发 peer 落到不同的数据 endpoint）；
+	/// - 数据会话与控制会话走完全相同的 TLS/OPAQUE/TOFU 握手，只是不对外发
+	///   `PEER_ONLINE`/`PEER_OFFLINE`，也不参与 `list_peers`。
 	#[allow(clippy::too_many_arguments)]
 	pub fn spawn_with_sink(
 		role: SessionRole,
@@ -2192,10 +2224,15 @@ impl SessionActor {
 		cas: crate::cas::Cas,
 		expected_peer_id: Option<String>,
 		log_sink: crate::logs::LogSink,
+		kind: SessionKind,
+		local_data_ports: Vec<u16>,
 	) -> SessionHandle {
 		let (cmd_tx, cmd_rx) = mpsc::channel(32);
 		let state_ref = Arc::new(Mutex::new(SessionState::TransportReady));
 		let peer_id_ref = Arc::new(Mutex::new(None));
+		let peer_data_ports_ref = Arc::new(Mutex::new(Vec::new()));
+		let load_ref = Arc::new(TransferLoad::default());
+		let remote_addr = conn.remote_address();
 
 		let initial_did = expected_peer_id.unwrap_or_else(|| "pending_server".to_string());
 
@@ -2204,6 +2241,10 @@ impl SessionActor {
 			peer_id: peer_id_ref.clone(),
 			state: state_ref.clone(),
 			cmd_tx,
+			kind,
+			remote_addr: Some(remote_addr),
+			peer_data_ports: peer_data_ports_ref.clone(),
+			load: load_ref.clone(),
 		};
 
 		// 缺失/空的对端证书视为握手失败：绝不能把 "unknown" 当作指纹写入
@@ -2245,6 +2286,10 @@ impl SessionActor {
 				upload_tx,
 				upload_rx,
 				log_sink,
+				kind,
+				local_data_ports,
+				peer_data_ports_ref,
+				load_ref,
 			)
 			.await
 			{
@@ -2284,6 +2329,10 @@ impl SessionActor {
 		upload_tx: mpsc::Sender<UploadMsg>,
 		mut upload_rx: mpsc::Receiver<UploadMsg>,
 		log_sink: crate::logs::LogSink,
+		kind: SessionKind,
+		local_data_ports: Vec<u16>,
+		peer_data_ports: Arc<Mutex<Vec<u16>>>,
+		load: Arc<TransferLoad>,
 	) -> Result<()> {
 		let (send, recv) = match role {
 			SessionRole::Client => conn.open_bi().await.context("Client open_bi failed")?,
@@ -2349,6 +2398,10 @@ impl SessionActor {
 			pending_payloads: HashMap::new(),
 			cancelled_payloads: HashMap::new(),
 			payload_stream_budget: Arc::new(Semaphore::new(MAX_PAYLOAD_STREAMS_PER_SESSION)),
+			kind,
+			local_data_ports,
+			peer_data_ports,
+			load,
 		};
 
 		actor.start_handshake().await?;
@@ -2517,6 +2570,13 @@ impl SessionActor {
 						actor.handle_payload_event(evt).await?;
 					}
 				}
+
+				// C1：每推进一次状态就把"本连接活跃传输数"写给连接池。
+				// 放在 select 之后（而不是每个分支里）保证 receivers/senders 的
+				// 增删（含 cross-task 的 receiver_done / payload_event）都会被覆盖。
+				actor
+					.load
+					.store(actor.receivers.len() + actor.senders.len());
 			}
 			Ok(())
 		}
@@ -2532,36 +2592,42 @@ impl SessionActor {
 		actor.conn.close(0u32.into(), b"session terminated");
 
 		actor.update_state(SessionState::Terminated);
-		if let Some(did) = &actor.remote_device_id {
-			let reason = match &run_result {
-				Ok(()) => "Connection closed".to_string(),
-				Err(e) => format!("Error: {e}"),
-			};
-			{
-				let log_level = if run_result.is_ok() { 2 } else { 4 }; // Info or Error
-				if log_level == 2 {
-					actor.log_sink.log_info(
-						"Session",
-						&format!("Session terminated: device_id={did}, reason={reason}"),
-						Some(&format!("会话已终止: 设备ID={did}，原因={reason}")),
-					);
-				} else {
-					actor.log_sink.log_error(
-						"Session",
-						&format!(
-							"Session terminated due to error: device_id={did}, error={reason}"
-						),
-						Some(&format!("会话因错误终止: 设备ID={did}，错误={reason}")),
-						Some(&reason),
-					);
+		// C1：连接没了，负载归零，避免池里残留"永远很忙"的死连接。
+		actor.load.store(0);
+		// 数据会话（C1）不对外发 PEER_OFFLINE：同一设备仍由控制会话代表，
+		// 否则外壳会在每次数据连接重建时看到设备反复消失/重连。
+		if actor.kind == SessionKind::Control {
+			if let Some(did) = &actor.remote_device_id {
+				let reason = match &run_result {
+					Ok(()) => "Connection closed".to_string(),
+					Err(e) => format!("Error: {e}"),
+				};
+				{
+					let log_level = if run_result.is_ok() { 2 } else { 4 }; // Info or Error
+					if log_level == 2 {
+						actor.log_sink.log_info(
+							"Session",
+							&format!("Session terminated: device_id={did}, reason={reason}"),
+							Some(&format!("会话已终止: 设备ID={did}，原因={reason}")),
+						);
+					} else {
+						actor.log_sink.log_error(
+							"Session",
+							&format!(
+								"Session terminated due to error: device_id={did}, error={reason}"
+							),
+							Some(&format!("会话因错误终止: 设备ID={did}，错误={reason}")),
+							Some(&reason),
+						);
+					}
 				}
+				let json = serde_json::json!({
+					"type": "PEER_OFFLINE",
+					"ts_ms": now_ms(),
+					"payload": { "device_id": did, "reason": reason }
+				});
+				actor.sink.emit(json.to_string());
 			}
-			let json = serde_json::json!({
-				"type": "PEER_OFFLINE",
-				"ts_ms": now_ms(),
-				"payload": { "device_id": did, "reason": reason }
-			});
-			actor.sink.emit(json.to_string());
 		}
 		run_result
 	}
@@ -2596,6 +2662,25 @@ impl SessionActor {
 		*lock = Some(id);
 	}
 
+	/// C1：把对端通告的数据端口写入与 `SessionHandle` 共享的槽位。
+	fn set_peer_data_ports(&mut self, ports: Vec<u16>) {
+		let count = ports.len();
+		let mut lock = self.peer_data_ports.lock().unwrap();
+		*lock = ports;
+		drop(lock);
+		self.log_sink.log_debug(
+			"Session",
+			&format!(
+				"Peer data endpoints advertised: kind={:?}, count={count}",
+				self.kind
+			),
+			Some(&format!(
+				"对端数据端点通告: 会话类型={:?}，数量={count}",
+				self.kind
+			)),
+		);
+	}
+
 	async fn send_ctrl(&mut self, msg: CtrlMsg) -> Result<()> {
 		self.writer
 			.send(CBFrame::Control(Box::new(msg)))
@@ -2624,8 +2709,15 @@ impl SessionActor {
 					protocol_version: PROTOCOL_VERSION,
 					device_id: self.config.device_id.clone(),
 					account_uid: self.config.account_uid.clone(),
-					capabilities: vec!["text".into(), "image".into(), "file".into()],
+					capabilities: vec![
+						"text".into(),
+						"image".into(),
+						"file".into(),
+						"data-endpoints-v1".into(),
+					],
 					client_nonce: Some(uuid::Uuid::new_v4().to_string()),
+					// C1：通告本端可被连接的数据端口（空 = 只支持控制连接）。
+					data_ports: self.local_data_ports.clone(),
 				};
 				self.log_sink.log_info(
 					"Session",
@@ -2756,6 +2848,7 @@ impl SessionActor {
 				account_uid,
 				msg_id,
 				protocol_version,
+				data_ports,
 				..
 			} => {
 				if self.role == SessionRole::Server {
@@ -2819,6 +2912,8 @@ impl SessionActor {
 						anyhow::bail!("Auth failed: uid mismatch");
 					}
 					self.update_remote_id(device_id.clone());
+					// C1：记录对端通告的数据端口（空列表 = 对端只有控制连接）。
+					self.set_peer_data_ports(data_ports);
 					self.log_sink.log_info(
                             "Session",
                             &format!("Account verification completed: remote_device_id={device_id}, verified=true"),
@@ -2828,6 +2923,7 @@ impl SessionActor {
 						reply_to: msg_id,
 						server_device_id: self.config.device_id.clone(),
 						protocol_version: PROTOCOL_VERSION,
+						data_ports: self.local_data_ports.clone(),
 					})
 					.await?;
 					self.update_state(SessionState::Handshaking(HandshakeStep::OpaqueStart));
@@ -2836,6 +2932,7 @@ impl SessionActor {
 			CtrlMsg::HelloAck {
 				server_device_id,
 				protocol_version,
+				data_ports,
 				..
 			} => {
 				if self.role == SessionRole::Client {
@@ -2860,6 +2957,8 @@ impl SessionActor {
                             Some(&format!("Hello 消息已接收: 远程设备ID={server_device_id}，远程账号=N/A")),
 					);
 					self.update_remote_id(server_device_id.clone());
+					// C1：记录服务端通告的数据端口（空列表 = 服务端只有控制连接）。
+					self.set_peer_data_ports(data_ports);
 					self.start_opaque_login().await?;
 				}
 			}
@@ -4860,6 +4959,11 @@ impl SessionActor {
 
 	fn transition_to_online(&mut self) {
 		self.update_state(SessionState::Online);
+		// C1：数据会话不对外发 PEER_ONLINE —— 同一设备仍由控制会话代表，
+		// 否则外壳会看到设备反复上下线。
+		if self.kind == SessionKind::Data {
+			return;
+		}
 		if let Some(did) = &self.remote_device_id {
 			self.log_sink.log_info(
 				"Session",
@@ -5133,11 +5237,13 @@ mod auth_gate_tests {
 				account_uid: "uid".into(),
 				capabilities: Vec::new(),
 				client_nonce: None,
+				data_ports: Vec::new(),
 			},
 			CtrlMsg::HelloAck {
 				reply_to: None,
 				server_device_id: "srv".into(),
 				protocol_version: PROTOCOL_VERSION,
+				data_ports: Vec::new(),
 			},
 			CtrlMsg::OpaqueStart {
 				msg_id: None,
@@ -5214,7 +5320,7 @@ mod transfer_guard_tests {
 	use crate::model::{FileMeta, ItemContent, ItemKind, ItemMeta};
 	use crate::policy::SizeLimits;
 	use crate::proto::{CtrlMsg, TransferHeader, TransferRange};
-	use crate::session::{HandshakeStep, SessionHandle, SessionState};
+	use crate::session::{HandshakeStep, SessionHandle, SessionKind, SessionState, TransferLoad};
 	use crate::store::Store;
 	use crate::util::now_ms;
 	use std::collections::HashMap;
@@ -5404,6 +5510,10 @@ mod transfer_guard_tests {
 			peer_id: Arc::new(Mutex::new(Some("dev-1".to_string()))),
 			state: Arc::new(Mutex::new(SessionState::TransportReady)),
 			cmd_tx,
+			kind: SessionKind::Control,
+			remote_addr: None,
+			peer_data_ports: Arc::new(Mutex::new(Vec::new())),
+			load: Arc::new(TransferLoad::default()),
 		};
 
 		assert!(!handle.is_finished());

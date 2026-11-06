@@ -1,6 +1,10 @@
 // cb_core/src/net/mod.rs
 
+mod data_link;
+pub mod ports;
+
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -9,11 +13,33 @@ use tokio::time::interval;
 use crate::api::{PeerConnectionState, PeerStatus};
 use crate::discovery::{DiscoveryEvent, DiscoveryService, PeerCandidate};
 use crate::logs::LogSink;
-use crate::session::{SessionActor, SessionCmd, SessionHandle, SessionRole};
+use crate::session::{SessionActor, SessionCmd, SessionHandle, SessionKind, SessionRole};
 use crate::store::Store;
 use crate::transport::Transport;
 use crate::util::now_ms;
 use std::sync::Mutex;
+
+use data_link::{
+	advertised_endpoint_list, local_endpoint_for_slot, should_use_data_link, slot_count, DataPool,
+	ReserveOutcome,
+};
+
+/// 建立一条数据连接（拨号 + 完整应用层握手）的总预算。
+///
+/// 局域网 QUIC + OPAQUE 正常在 100~300 ms；5 s 只是兜底。超时后本次传输
+/// 回退到控制连接，绝不让调用方（`ensure_content_cached`）无限等待。
+const DATA_LINK_DIAL_TIMEOUT: Duration = Duration::from_secs(3);
+const DATA_LINK_ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 本进程同时保留的**入站**数据会话上限。
+///
+/// 数据端口是公开监听的，认证前的连接也会占用一个会话槽位/一次握手 CPU。
+/// 控制连接有既有上限（每设备一条 + 退避），数据连接没有天然上限，因此这里
+/// 再加一道资源闸门：超过上限的新连接直接 close（不影响已有传输）。
+const MAX_INBOUND_DATA_SESSIONS: usize = 64;
+
+/// 入站数据连接：`(数据端点槽位, 已完成的 QUIC 连接)`。
+type AcceptedDataConnection = (usize, crate::transport::Connection);
 
 /// 网络层管理器
 pub struct NetManager {
@@ -38,6 +64,20 @@ pub struct NetManager {
 	dial_tx: mpsc::Sender<DialOutcome>,
 	dial_rx: mpsc::Receiver<DialOutcome>,
 	event_sink: Arc<dyn crate::api::CoreEventSink>,
+
+	// --- C1（ADR-002 §4.3）：多数据端点 / 每 peer 数据连接池 ---
+	/// 每 peer 数据连接池（拨号侧/拉取发起侧使用；被 dial 的发送方由各自
+	/// endpoint 承担负载，连接在建立时即绑定到某个数据 Endpoint）。
+	data_pool: Arc<DataPool>,
+	/// 本端**入站**数据会话（其他 peer 拨到我们的数据端口）。与控制会话分开
+	/// 维护：它们不参与 `list_peers`、不广播元数据、不发 PEER_ONLINE/OFFLINE。
+	data_sessions: Vec<SessionHandle>,
+	/// 各数据 endpoint 的 accept loop 汇总到这里，由主循环 spawn 数据会话。
+	data_accept_rx: mpsc::Receiver<AcceptedDataConnection>,
+	/// 本端实际绑定的数据端口（通告给对端；空 = 只有控制连接）。
+	local_data_ports: Vec<u16>,
+	/// 控制连接 server 端按接受顺序轮转数据端口用的计数器。
+	next_data_port_rotation: usize,
 }
 
 /// 拨号超时（详见 `perform_dial` 与 `NetManager::spawn` 的说明）。
@@ -128,6 +168,220 @@ fn broadcast_to_online(
 struct BackoffState {
 	fail_count: u32,
 	next_retry_ts: i64,
+}
+
+/// 把 `RequestTransfer` 投递给某个会话；队列已关闭时把 `reply_tx` 还回来，
+/// 让调用方可以回退到控制连接或在本地报错（绝不把调用方永久挂在 oneshot 上）。
+async fn try_send_transfer_request(
+	handle: &SessionHandle,
+	item_id: String,
+	file_id: Option<String>,
+	reply_tx: oneshot::Sender<anyhow::Result<String>>,
+) -> Result<(), oneshot::Sender<anyhow::Result<String>>> {
+	let cmd = SessionCmd::RequestTransfer {
+		item_id,
+		file_id,
+		reply_tx,
+	};
+	match handle.cmd_tx.send(cmd).await {
+		Ok(()) => Ok(()),
+		Err(mpsc::error::SendError(SessionCmd::RequestTransfer { reply_tx, .. })) => Err(reply_tx),
+		Err(_) => unreachable!("仅发送 RequestTransfer，错误命令不可能是别的变体"),
+	}
+}
+
+/// C1：数据连接不可用时的安全回退——把本次传输交给控制连接。
+///
+/// 回退是**静默且安全**的：控制连接上的一切语义与引入 C1 之前完全相同，
+/// 只是大传输不会得到多 endpoint 的并行收益。
+async fn fallback_to_control(
+	control: &SessionHandle,
+	item_id: String,
+	file_id: Option<String>,
+	reply: oneshot::Sender<anyhow::Result<String>>,
+) {
+	if let Err(reply_tx) = try_send_transfer_request(control, item_id, file_id, reply).await {
+		let _ = reply_tx.send(Err(anyhow::anyhow!(
+			"control session command queue closed before transfer request"
+		)));
+	}
+}
+
+/// 后台建立一条 C1 数据连接并投递传输请求所需的全部上下文。
+///
+/// 建立流程放在独立 `tokio::spawn` 里：拨号 + QUIC + OPAQUE/TOFU 握手可能要
+/// 几百毫秒，绝不能在 `NetManager` 主循环里 await（会拖住 accept/发现/心跳）。
+struct DataLinkJob {
+	transport: Arc<Transport>,
+	pool: Arc<DataPool>,
+	control: SessionHandle,
+	peer_id: String,
+	peer_ip: IpAddr,
+	peer_port: u16,
+	/// 连接池槽位（用于 `mark_created` / `mark_failed`）。
+	slot: usize,
+	/// 拨号使用的本端数据 endpoint 序号（与池槽位解耦：轮转后的列表顺序
+	/// 与本地 endpoint 序号没有语义关系）。
+	data_endpoint: usize,
+	local_data_ports: Vec<u16>,
+	config: crate::api::CoreConfig,
+	event_sink: Arc<dyn crate::api::CoreEventSink>,
+	store: Arc<Mutex<Store>>,
+	cas: crate::cas::Cas,
+	log_sink: LogSink,
+	item_id: String,
+	file_id: Option<String>,
+	total_bytes: u64,
+	reply: oneshot::Sender<anyhow::Result<String>>,
+}
+
+/// C1：为一次大传输建立（或失败后重建）数据连接，并把 `ContentGet` 投过去。
+///
+/// 失败路径统一回退控制连接：数据连接的问题只影响"本次传输用哪条连接"，
+/// 不会影响控制会话，也不会让调用方卡死。
+async fn establish_data_link_and_request(job: DataLinkJob) {
+	let DataLinkJob {
+		transport,
+		pool,
+		control,
+		peer_id,
+		peer_ip,
+		peer_port,
+		slot,
+		data_endpoint,
+		local_data_ports,
+		config,
+		event_sink,
+		store,
+		cas,
+		log_sink,
+		item_id,
+		file_id,
+		total_bytes,
+		reply,
+	} = job;
+
+	let addr = std::net::SocketAddr::new(peer_ip, peer_port);
+
+	// 1. 从第 `data_endpoint` 个本地数据端点拨号，连到对端通告的数据端口。
+	//    连接一旦建立就绑定在这个本地 Endpoint 的 socket/驱动上（负载分摊来源）。
+	let connected = tokio::time::timeout(
+		DATA_LINK_DIAL_TIMEOUT,
+		transport.connect_data(data_endpoint, &addr.to_string()),
+	)
+	.await;
+	let conn = match connected {
+		Ok(Ok(conn)) => conn,
+		Ok(Err(error)) => {
+			pool.mark_failed(&peer_id, slot);
+			log_sink.log_warn(
+				"Network",
+				&format!(
+					"C1 data link dial failed: peer={peer_id}, slot={slot}, addr={addr}, error={error}"
+				),
+				Some(&format!(
+					"C1 数据连接拨号失败，回退控制连接: 设备ID={peer_id}，槽位={slot}，地址={addr}，错误={error}"
+				)),
+			);
+			fallback_to_control(&control, item_id, file_id, reply).await;
+			return;
+		}
+		Err(_) => {
+			pool.mark_failed(&peer_id, slot);
+			log_sink.log_warn(
+				"Network",
+				&format!(
+					"C1 data link dial timed out: peer={peer_id}, slot={slot}, addr={addr}, timeout={DATA_LINK_DIAL_TIMEOUT:?}"
+				),
+				Some(&format!(
+					"C1 数据连接拨号超时，回退控制连接: 设备ID={peer_id}，槽位={slot}，地址={addr}"
+				)),
+			);
+			fallback_to_control(&control, item_id, file_id, reply).await;
+			return;
+		}
+	};
+
+	// 2. 数据连接跑**与控制连接完全相同**的 SessionActor 握手（TLS/OPAQUE/TOFU），
+	//    只是标记为 Data：不对外发 PEER_ONLINE/OFFLINE、不进 list_peers。
+	let link = SessionActor::spawn_with_sink(
+		SessionRole::Client,
+		conn,
+		config,
+		event_sink,
+		store,
+		cas,
+		Some(peer_id.clone()),
+		log_sink.clone(),
+		SessionKind::Data,
+		local_data_ports,
+	);
+
+	let deadline = tokio::time::Instant::now() + DATA_LINK_ONLINE_TIMEOUT;
+	loop {
+		if link.is_online() {
+			break;
+		}
+		if link.is_finished() || link.cmd_tx.is_closed() {
+			break;
+		}
+		if tokio::time::Instant::now() >= deadline {
+			break;
+		}
+		tokio::time::sleep(Duration::from_millis(20)).await;
+	}
+
+	if !link.is_online() {
+		pool.mark_failed(&peer_id, slot);
+		let _ = link.cmd_tx.try_send(SessionCmd::Shutdown);
+		log_sink.log_warn(
+			"Network",
+			&format!("C1 data link handshake failed: peer={peer_id}, slot={slot}, remote={addr}"),
+			Some(&format!(
+				"C1 数据连接握手失败，回退控制连接: 设备ID={peer_id}，槽位={slot}，远端={addr}"
+			)),
+		);
+		fallback_to_control(&control, item_id, file_id, reply).await;
+		return;
+	}
+
+	if !pool.mark_created(&peer_id, slot, link.clone()) {
+		// 池在此期间被重建（控制连接重连/端口变化）：这条连接已无意义。
+		let _ = link.cmd_tx.try_send(SessionCmd::Shutdown);
+		log_sink.log_warn(
+			"Network",
+			&format!("C1 data link invalidated by pool reset: peer={peer_id}, slot={slot}"),
+			Some(&format!(
+				"C1 数据连接因连接池重建而作废: 设备ID={peer_id}，槽位={slot}"
+			)),
+		);
+		fallback_to_control(&control, item_id, file_id, reply).await;
+		return;
+	}
+
+	let local_port = transport
+		.data_ports()
+		.get(data_endpoint)
+		.copied()
+		.unwrap_or(0);
+	log_sink.log_info(
+		"Network",
+		&format!(
+			"C1 data link established: peer={peer_id}, slot={slot}, local_data_endpoint={data_endpoint}, local_data_port={local_port}, peer_data_port={peer_port}, bytes={total_bytes}"
+		),
+		Some(&format!(
+			"C1 数据连接已建立: 设备ID={peer_id}，槽位={slot}，本地数据端点={data_endpoint}，本地数据端口={local_port}，对端数据端口={peer_port}，字节={total_bytes}"
+		)),
+	);
+
+	let fallback_item = item_id.clone();
+	let fallback_file = file_id.clone();
+	if let Err(reply_tx) = try_send_transfer_request(&link, item_id, file_id, reply).await {
+		// 连接在握手完成后、投递前死亡：清掉槽位，等下次使用重建。
+		pool.mark_failed(&peer_id, slot);
+		let _ = link.cmd_tx.try_send(SessionCmd::Shutdown);
+		fallback_to_control(&control, fallback_item, fallback_file, reply_tx).await;
+	}
 }
 
 #[derive(Debug)]
@@ -233,6 +487,54 @@ impl NetManager {
                                     Some(&format!("mDNS 发现服务已启动，监听端口: {port}")),
                                     );
 
+									// 3b. C1：为每个数据 endpoint 启动独立的 accept loop。
+									//
+									// 每个 loop 只认领一个 Endpoint 的入站连接（quinn 每个
+									// Endpoint 本来就有独立的 socket/接收循环，正是 ADR-002
+									// §5.3 收益的来源）。连接在这里只完成 QUIC 握手，随后交给
+									// 主循环 spawn 正常的 SessionActor（TLS/OPAQUE/TOFU 与控制
+									// 会话完全相同）。
+									let (data_accept_tx, data_accept_rx) = mpsc::channel(32);
+									for slot in 0..transport.data_endpoint_count() {
+										let transport = transport.clone();
+										let tx = data_accept_tx.clone();
+										tokio::spawn(async move {
+											loop {
+												match transport.accept_data(slot).await {
+													Some(conn) => {
+														if tx.send((slot, conn)).await.is_err() {
+															// 主循环已退出：释放 Endpoint 引用。
+															break;
+														}
+													}
+													None => {
+														// None 既可能是握手失败（endpoint 仍健康），
+														// 也可能是端点已关闭；只有后者才退出。
+														if transport.is_shutdown() {
+															break;
+														}
+													}
+												}
+											}
+										});
+									}
+									drop(data_accept_tx);
+
+									let local_data_ports = transport.data_ports().to_vec();
+									log_sink.log_info(
+										"Network",
+										&format!(
+											"C1 data endpoints ready: count={}, ports={:?}",
+											transport.data_endpoint_count(),
+											local_data_ports
+										),
+										Some(&format!(
+											"C1 数据端点已就绪: 数量={}，端口={:?}",
+											transport.data_endpoint_count(),
+											local_data_ports
+										)),
+									);
+
 									let manager = Self {
 										config,
 										transport,
@@ -249,6 +551,11 @@ impl NetManager {
 										dial_tx,
 										dial_rx,
 										event_sink,
+										data_pool: Arc::new(DataPool::default()),
+										data_sessions: Vec::new(),
+										data_accept_rx,
+										local_data_ports,
+										next_data_port_rotation: 0,
 									};
 									// 4. 运行主循环
 									manager.run().await;
@@ -299,35 +606,188 @@ impl NetManager {
 						}
 
 						Some(NetCmd::EnsureContentCached { item_id, file_id, force: _, reply }) => {
-							// 1. 查库找 owner (A 的 device_id)
+							// 1. 查库找 owner (A 的 device_id) 与传输体积。
 							// DB 查询放进 spawn_blocking：SQLite busy/慢盘不能卡住主循环。
+							//
+							// C1 需要 `total_bytes` 才能在"小传输走控制连接 / 大传输走数据连接池"
+							// 之间做选择（阈值 16 MiB，见 net::data_link）。
 							let store = self.store.clone();
 							let lookup_item_id = item_id.clone();
-							let owner_res = tokio::task::spawn_blocking(move || {
+							let lookup_file_id = file_id.clone();
+							let (owner_res, total_bytes) = tokio::task::spawn_blocking(move || {
 								let store = store.lock().unwrap();
-								// 注意：这行末尾【不要】加分号
-								store.get_item_owner(&lookup_item_id).ok().flatten()
+								let owner = store.get_item_owner(&lookup_item_id).ok().flatten();
+								let total_bytes = store
+									.get_item_meta_by_id(&lookup_item_id)
+									.ok()
+									.flatten()
+									.map_or(0u64, |meta| {
+										if let Some(file_id) = lookup_file_id.as_deref() {
+											meta.files
+												.iter()
+												.find(|file| file.file_id == file_id)
+												.and_then(|file| u64::try_from(file.size_bytes).ok())
+												.unwrap_or_else(|| {
+													u64::try_from(meta.content.total_bytes).unwrap_or(0)
+												})
+										} else {
+											u64::try_from(meta.content.total_bytes).unwrap_or(0)
+										}
+									});
+								(owner, total_bytes)
 							})
 							.await
-							.unwrap_or(None);
+							.unwrap_or((None, 0));
 
 							if let Some(device_id) = owner_res {
-								// 2. 找对应的 Session
-								if let Some(session) = self.sessions.iter().find(|s| s.device_id() == device_id && s.is_online()) {
-									// 3. 发送命令给 SessionActor
-									//
-									// 这里保留 send().await：这是针对**单个**目标会话的直接请求，
-									// 调用方（ensure_content_cached）正阻塞在 reply_tx 上等待该
-									// 传输的结果，命令必须送达这个会话。注意：若该 actor 长时间
-									// 不消费（队列满），本 select 循环仍可能被拖住——这是已知的
-									// 残留风险，后续可改为 try_send + 立即回复 "session busy"。
-									let _ = session.cmd_tx.send(SessionCmd::RequestTransfer {
-										item_id,
-										file_id,
-										reply_tx: reply,
-									}).await;
+								// 2. 找对应的控制会话（C1：数据会话不参与这里的查找，
+								//    控制连接永远是 peer 的代表）。
+								let control = self
+									.sessions
+									.iter()
+									.find(|s| s.device_id() == device_id && s.is_online())
+									.cloned();
+
+								if let Some(control) = control {
+									// C1：对端通告的 endpoint 列表（含控制连接哨兵 0）。
+									let peer_endpoints = control.peer_data_ports();
+									let peer_ip = control.remote_addr.map(|addr| addr.ip());
+									let local_endpoints = self.transport.data_endpoint_count();
+									let use_pool = should_use_data_link(
+										total_bytes,
+										&peer_endpoints,
+										local_endpoints,
+									) && peer_ip.is_some();
+
+									if use_pool {
+										let peer_ip = peer_ip.expect("use_pool 已要求 remote_addr 存在");
+										let slots = slot_count(local_endpoints, peer_endpoints.len());
+										match self.data_pool.reserve(
+											&device_id,
+											peer_ip,
+											&peer_endpoints,
+											slots,
+											Some(&control),
+										) {
+											ReserveOutcome::Existing { slot, handle } => {
+												self.log_sink.log_info(
+													"Network",
+													&format!(
+														"C1 transfer routed to existing data link: peer={device_id}, slot={slot}, bytes={total_bytes}"
+													),
+													Some(&format!(
+														"C1 传输已分配到已有数据连接: 设备ID={device_id}，槽位={slot}，字节={total_bytes}"
+													)),
+												);
+												// 投递失败（连接刚好断开）→ 回退控制连接；
+												// 绝不因为数据连接问题让大传输直接失败。
+												let fallback_item = item_id.clone();
+												let fallback_file = file_id.clone();
+												if let Err(reply_tx) = try_send_transfer_request(
+													&handle,
+													item_id,
+													file_id,
+													reply,
+												)
+												.await
+												{
+													fallback_to_control(
+														&control,
+														fallback_item,
+														fallback_file,
+														reply_tx,
+													)
+													.await;
+												}
+											}
+											ReserveOutcome::Control { slot } => {
+												// 轮转把控制连接分配给了本次传输：直接走控制连接
+												// （与引入 C1 之前的路径相同，控制面语义不变）。
+												self.log_sink.log_info(
+													"Network",
+													&format!(
+														"C1 transfer routed to control connection: peer={device_id}, slot={slot}, bytes={total_bytes}"
+													),
+													Some(&format!(
+														"C1 传输已分配到控制连接: 设备ID={device_id}，槽位={slot}，字节={total_bytes}"
+													)),
+												);
+												if let Err(reply_tx) = try_send_transfer_request(
+													&control,
+													item_id,
+													file_id,
+													reply,
+												)
+												.await
+												{
+													let _ = reply_tx.send(Err(anyhow::anyhow!(
+														"control session command queue closed before transfer request"
+													)));
+												}
+											}
+											ReserveOutcome::Create { slot } => {
+												// 懒建立：后台拨号 + 完整握手，完成后把传输投给
+												// 新连接；失败则回退控制连接。
+												let peer_port = peer_endpoints[slot];
+												let data_endpoint =
+													local_endpoint_for_slot(slot, local_endpoints);
+												let job = DataLinkJob {
+													transport: self.transport.clone(),
+													pool: self.data_pool.clone(),
+													control: control.clone(),
+													peer_id: device_id.clone(),
+													peer_ip,
+													peer_port,
+													slot,
+													data_endpoint,
+													local_data_ports: advertised_endpoint_list(
+														&self.local_data_ports,
+														0,
+													),
+													config: self.config.clone(),
+													event_sink: self.event_sink.clone(),
+													store: self.store.clone(),
+													cas: self.cas.clone(),
+													log_sink: self.log_sink.clone(),
+													item_id,
+													file_id,
+													total_bytes,
+													reply,
+												};
+												tokio::spawn(establish_data_link_and_request(job));
+											}
+											ReserveOutcome::Unavailable => {
+												// 所有连接都在建立中/满载：本次走控制连接，
+												// 行为与今天一致（不会阻塞或失败）。
+												fallback_to_control(
+													&control,
+													item_id,
+													file_id,
+													reply,
+												)
+												.await;
+											}
+										}
+									} else {
+										// 小传输 / 对端不通告数据端口 / 本端 K=1：
+										// 保持引入 C1 之前的行为（控制连接）。
+										if let Err(reply_tx) = try_send_transfer_request(
+											&control,
+											item_id,
+											file_id,
+											reply,
+										)
+										.await
+										{
+											let _ = reply_tx.send(Err(anyhow::anyhow!(
+												"session command queue closed before transfer request"
+											)));
+										}
+									}
 								} else {
-									let _ = reply.send(Err(anyhow::anyhow!("Device {device_id} not online")));
+									let _ = reply.send(Err(anyhow::anyhow!(
+										"Device {device_id} not online"
+									)));
 								}
 							} else {
 								 let _ = reply.send(Err(anyhow::anyhow!("Item not found or no owner info")));
@@ -335,11 +795,17 @@ impl NetManager {
 						}
 
 						Some(NetCmd::CancelTransfer { transfer_id }) => {
-							// 广播给所有 session 尝试取消 (因为 NetManager 不记录 transfer_id 属于哪个 session)
-							// 或者 SessionHandle 可以返回它正在处理的 transfer_ids?
-							// 简单做法：群发，SessionActor 发现不是自己的会忽略
+							// 广播给所有会话尝试取消（NetManager 不记录 transfer_id 属于哪个会话，
+							// SessionActor 发现不是自己的会忽略）。C1 的数据会话也必须覆盖，
+							// 否则分配到大传输数据连接上的取消会静默失效。
 							// 多会话路径：非阻塞投递，队列满时丢弃并记日志，不阻塞主循环。
-							for s in &self.sessions {
+							let data_pool_sessions = self.data_pool.sessions();
+							for s in self
+								.sessions
+								.iter()
+								.chain(self.data_sessions.iter())
+								.chain(data_pool_sessions.iter())
+							{
 								let _ = try_send_to_session(
 									s,
 									SessionCmd::CancelTransfer { transfer_id: transfer_id.clone() },
@@ -370,7 +836,7 @@ impl NetManager {
 					}
 				}
 
-				// 4. 入站连接
+				// 4. 入站控制连接
 				conn = self.transport.accept() => {
 					if let Some(conn) = conn {
 						let addr = conn.remote_address();
@@ -380,6 +846,10 @@ impl NetManager {
 						Some(&format!("已接受入站连接: {addr}，正在创建服务器会话")),
 						);
 
+						// C1：控制连接的 server 端按接受顺序轮转自己通告的 endpoint
+						// 列表（含控制连接哨兵），让并发 peer 的第 0 条连接落到
+						// 不同的 endpoint。
+						let advertised = self.next_advertised_endpoints();
 						let handle = SessionActor::spawn_with_sink(
 							SessionRole::Server,
 							conn,
@@ -389,8 +859,55 @@ impl NetManager {
 							self.cas.clone(),
 							None,
 							self.log_sink.clone(),
+							SessionKind::Control,
+							advertised,
 						);
 						self.sessions.push(handle);
+					}
+				}
+
+				// 4b. 入站数据连接（C1）：每个数据 endpoint 的 accept loop 汇总到这里。
+				// 数据连接同样跑完整握手/认证，只是标记为 Data，不当成 peer 的代表。
+				accepted = self.data_accept_rx.recv(), if !self.data_accept_rx.is_closed() => {
+					if let Some((slot, conn)) = accepted {
+						let addr = conn.remote_address();
+						if self.data_sessions.len() >= MAX_INBOUND_DATA_SESSIONS {
+							self.log_sink.log_warn(
+								"Network",
+								&format!(
+									"Rejecting inbound data connection: limit reached ({MAX_INBOUND_DATA_SESSIONS}), from={addr}, slot={slot}"
+								),
+								Some(&format!(
+									"拒绝入站数据连接：已达上限 {MAX_INBOUND_DATA_SESSIONS}，来源={addr}，槽位={slot}"
+								)),
+							);
+							conn.close(0u32.into(), b"too many data sessions");
+						} else {
+							self.log_sink.log_info(
+								"Network",
+								&format!(
+									"Inbound data connection accepted: from={addr}, data_endpoint_slot={slot}, spawning data session"
+								),
+								Some(&format!(
+									"已接受入站数据连接: 来源={addr}，数据端点槽位={slot}，正在创建数据会话"
+								)),
+							);
+							let handle = SessionActor::spawn_with_sink(
+								SessionRole::Server,
+								conn,
+								self.config.clone(),
+								self.event_sink.clone(),
+								self.store.clone(),
+								self.cas.clone(),
+								None,
+								self.log_sink.clone(),
+								SessionKind::Data,
+								// 数据连接也通告本端 endpoint（对端可能反向复用
+								// 这条连接的身份信息；未轮转即可）。
+								advertised_endpoint_list(&self.local_data_ports, 0),
+							);
+							self.data_sessions.push(handle);
+						}
 					}
 				}
 
@@ -400,6 +917,24 @@ impl NetManager {
 				}
 			}
 		}
+	}
+
+	/// C1：为一条新接受的控制连接生成要通告的 endpoint 列表。
+	///
+	/// 列表 = `[P+1, ..., P+(K-1), 0]` 再按本 NetManager **接受控制连接的顺序**
+	/// 轮转（`0` 是控制连接哨兵，见 `data_link::CONTROL_CONNECTION_SENTINEL`）。
+	/// 第 n 个 peer 看到的列表从 `n % K` 开始，于是多个 peer 并发拉取时，它们
+	/// 各自的"第 0 条连接"会落到本机不同的 endpoint 上（这是 C1 吞吐收益的
+	/// 来源；4 个 peer 时刚好铺满 4 个 endpoint）。
+	///
+	/// 没有数据端点（K=1）时返回空列表：对端会退化为单连接，行为与今天一致。
+	fn next_advertised_endpoints(&mut self) -> Vec<u16> {
+		if self.local_data_ports.is_empty() {
+			return Vec::new();
+		}
+		let rotation = self.next_data_port_rotation;
+		self.next_data_port_rotation = self.next_data_port_rotation.wrapping_add(1);
+		advertised_endpoint_list(&self.local_data_ports, rotation)
 	}
 
 	/// 收集当前会话状态。
@@ -504,6 +1039,17 @@ impl NetManager {
 				true
 			}
 		});
+
+		// C1：控制连接断开的 peer，其数据连接池一并回收（数据连接本身多半也
+		// 已经断了；留着只会让后续传输选中死连接）。连接池与实时数据会话是两套
+		// 视图：池持有"我们主动拨出的"数据会话，data_sessions 持有"别人拨进来的"。
+		for did in &dead_ids {
+			for handle in self.data_pool.drop_peer(did) {
+				let _ = handle.cmd_tx.try_send(SessionCmd::Shutdown);
+			}
+		}
+		self.data_sessions
+			.retain(|s| !(s.is_finished() || s.cmd_tx.is_closed()));
 
 		for did in dead_ids {
 			let entry = self.backoff_map.entry(did.clone()).or_insert(BackoffState {
@@ -758,6 +1304,11 @@ impl NetManager {
 				conn,
 			} => {
 				println!("[Net] Connected to {device_id} at {addr}, spawning client session");
+				// C1：拨号侧也按顺序轮转自己通告的 endpoint 列表。很多拓扑里
+				// "id 较小的一端拨号"（本仓库 `handle_discovery_event` 就是如此），
+				// 此时**发送方**往往正是拨号方；它无法在 Hello 之前知道对端 id，
+				// 但可以按拨号顺序轮转，让第 n 个 peer 从第 n % K 个 endpoint 开始。
+				let advertised = self.next_advertised_endpoints();
 				let handle = SessionActor::spawn_with_sink(
 					SessionRole::Client,
 					conn,
@@ -767,6 +1318,8 @@ impl NetManager {
 					self.cas.clone(),
 					Some(device_id),
 					self.log_sink.clone(),
+					SessionKind::Control,
+					advertised,
 				);
 				self.sessions.push(handle);
 			}
@@ -804,10 +1357,18 @@ impl NetManager {
 
 	async fn shutdown(&self) {
 		self.discovery.shutdown().await;
-		self.transport.shutdown();
+		// 先关控制会话与数据会话（它们持有 Connection），再关 Transport 的
+		// 全部 Endpoint；最后清空连接池，保证没有遗留的数据连接。
 		for s in &self.sessions {
 			s.shutdown().await;
 		}
+		for s in &self.data_sessions {
+			s.shutdown().await;
+		}
+		for s in self.data_pool.take_all() {
+			s.shutdown().await;
+		}
+		self.transport.shutdown();
 	}
 }
 
@@ -830,6 +1391,10 @@ mod tests {
 			peer_id: Arc::new(Mutex::new(Some(device_id.to_string()))),
 			state: Arc::new(Mutex::new(crate::session::SessionState::Online)),
 			cmd_tx,
+			kind: SessionKind::Control,
+			remote_addr: None,
+			peer_data_ports: Arc::new(Mutex::new(Vec::new())),
+			load: Arc::new(crate::session::TransferLoad::default()),
 		};
 		(handle, cmd_rx)
 	}

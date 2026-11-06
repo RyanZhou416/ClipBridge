@@ -15,6 +15,8 @@
 //! - `CB_HUB_K`：本轮扫描的**最大** K，只接受 1/2/4/8，默认 2；
 //!   探针会从 1 开始按 1/2/4/8 的阶梯一直跑到该值（例如 2 => 依次跑 K=1、K=2）。
 //! - `CB_HUB_FILE_MB`：hub 种子大对象的 MiB 数，默认 64。
+//! - `CB_HUB_WARMUP_MB`：C1 预热对象 MiB 数，默认 0（关闭）。>0 时每个 peer 在
+//!   计时窗口前先拉一次该对象，触发数据连接建立；用于区分"冷启动"与"稳态"。
 //! - `CB_HUB_TOTAL_SECS`：整个探针的墙钟预算，默认 60；预算不足时后续 K 会被跳过。
 //! - `CB_HUB_RUN_TIMEOUT_SECS`：单个 K 等待全部传输完成的上限，默认 45。
 //! - `CB_HUB_CONNECT_SECS`：等待全部 peer 变为 Online 的上限，默认 20。
@@ -26,7 +28,7 @@
 //!   “按 device_id 直接拨号”的入口（`discovery` 只产出候选，拨号在
 //!   `NetManager` 内部完成），因此只能走 mDNS。同一账号下所有节点会互相可见；
 //!   `NetManager` 只让 device_id 字典序较小的一侧主动拨号，所以 hub 的 id
-//!   取最小 => 每个 peer 主动连 hub（hub↔peer 是传输路径）。peer 之间也可能
+//!   取最小 => **hub 主动连每个 peer**（hub↔peer 是传输路径）。peer 之间也可能
 //!   建立空闲会话，这是 mDNS 全互联脚手架的副作用，不影响“单个 hub + K 个
 //!   peer”的传输语义。
 //! - 大对象：默认 64 MiB 文本。默认 `hard_text_bytes` 只有 16 MiB，因此探针把
@@ -34,6 +36,9 @@
 //!   置 0（关闭自动预取，保证走显式 `ensure_content_cached` 拉取路径）。
 //!   文本与图片的传输/CAS 路径相同，选文本是为了避免图片 materialize 的额外
 //!   文件操作。
+//! - C1 预热（`CB_HUB_WARMUP_MB>0`）：在计时窗口**之前**让每个 peer 额外拉一个
+//!   小对象，触发每 peer 数据连接的建立与首次使用。这样测量的才是“已有连接”
+//!   的稳态吞吐，而不是把首个大传输的握手成本算进去。默认 0（关闭）。
 //! - 并发：所有 Core API 都是阻塞式 FFI 风格；探针用普通 `std::thread`
 //!   （非 tokio 运行时线程）调用 `ensure_content_cached`/`list_peers`，
 //!   与现有测试里的 `spawn_blocking` 等价，且不会在 tokio worker 上
@@ -85,6 +90,10 @@ const BLOB_PREFIX: &str = "cb-hub-probe-blob";
 struct ProbeParams {
 	max_k: usize,
 	file_mb: usize,
+	/// C1 A/B 用：测量前先用一个 ≥16 MiB 的小对象让每个 peer 建立数据连接
+	/// （否则首个大传输会把数据连接握手成本算进测量窗口）。0 = 关闭（默认，
+	/// 与历史行为一致）。
+	warmup_mb: usize,
 	total_secs: u64,
 	run_timeout: Duration,
 	connect_timeout: Duration,
@@ -118,6 +127,8 @@ fn load_params() -> ProbeParams {
 	};
 
 	let file_mb = env_usize("CB_HUB_FILE_MB", DEFAULT_FILE_MB).clamp(1, 4096);
+	// C1 A/B：0 = 不做预热（历史行为）；>0 时先让每个 peer 拉一个该体积的对象。
+	let warmup_mb = env_usize("CB_HUB_WARMUP_MB", 0).min(256);
 	let total_secs = env_usize("CB_HUB_TOTAL_SECS", DEFAULT_TOTAL_SECS).max(10) as u64;
 	let run_timeout_secs =
 		env_usize("CB_HUB_RUN_TIMEOUT_SECS", DEFAULT_RUN_TIMEOUT_SECS).max(5) as u64;
@@ -128,6 +139,7 @@ fn load_params() -> ProbeParams {
 	ProbeParams {
 		max_k,
 		file_mb,
+		warmup_mb,
 		total_secs,
 		run_timeout: Duration::from_secs(run_timeout_secs),
 		connect_timeout: Duration::from_secs(connect_secs),
@@ -153,9 +165,10 @@ fn print_banner(params: &ProbeParams) {
 		thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get)
 	);
 	println!(
-		"knobs: max_k={} file_mb={} total_secs={} run_timeout={:?} connect_timeout={:?} ingest_period={:?} list_period={:?}",
+		"knobs: max_k={} file_mb={} warmup_mb={} total_secs={} run_timeout={:?} connect_timeout={:?} ingest_period={:?} list_period={:?}",
 		params.max_k,
 		params.file_mb,
+		params.warmup_mb,
 		params.total_secs,
 		params.run_timeout,
 		params.connect_timeout,
@@ -164,7 +177,7 @@ fn print_banner(params: &ProbeParams) {
 	);
 	println!("[probe] 说明: 公开 API 没有直接拨号入口，网络使用 mDNS 发现（同账号全互联）；");
 	println!(
-		"[probe]       hub id 字典序最小，因此由每个 peer 主动连接 hub；peer↔peer 空闲会话是脚手架副作用。"
+		"[probe]       id 字典序较小的一端主动拨号；hub id 最小，因此由 hub 主动连接每个 peer；peer↔peer 空闲会话是脚手架副作用。"
 	);
 	println!();
 }
@@ -539,6 +552,10 @@ struct PeerJob {
 	core: Core,
 	rx: mpsc::Receiver<String>,
 	item_id: String,
+	/// C1 预热对象（`CB_HUB_WARMUP_MB>0` 时存在）：在计时窗口前先拉一次，
+	/// 让本 peer 的数据连接完成建立/认证。为 None 时行为与历史探针一致。
+	warmup_item_id: Option<String>,
+	warmup_timeout: Duration,
 	expected_bytes: u64,
 	meta_timeout: Duration,
 	transfer_timeout: Duration,
@@ -572,6 +589,8 @@ fn run_peer_job(job: PeerJob) -> PeerOutcome {
 		core,
 		rx,
 		item_id,
+		warmup_item_id,
+		warmup_timeout,
 		expected_bytes,
 		meta_timeout,
 		transfer_timeout,
@@ -595,6 +614,63 @@ fn run_peer_job(job: PeerJob) -> PeerOutcome {
 		}
 	}
 	let meta_wait_s = meta_started.elapsed().as_secs_f64();
+
+	// 1b) C1 预热：在闸门之前拉一个小对象，让本 peer 的数据连接完成
+	//     QUIC + OPAQUE/TOFU 握手。预热失败不致命（继续测冷启动路径）。
+	if let Some(warmup_item_id) = warmup_item_id {
+		let warmup_meta_deadline = Instant::now() + meta_timeout;
+		let mut warmup_meta_seen = false;
+		while Instant::now() < warmup_meta_deadline {
+			match rx.recv_timeout(Duration::from_millis(100)) {
+				Ok(event) => {
+					if event.contains("ITEM_META_ADDED") && event.contains(&warmup_item_id) {
+						warmup_meta_seen = true;
+						break;
+					}
+				}
+				Err(mpsc::RecvTimeoutError::Timeout) => {}
+				Err(mpsc::RecvTimeoutError::Disconnected) => break,
+			}
+		}
+		let mut warmup_ok = warmup_meta_seen;
+		if warmup_meta_seen {
+			match core.ensure_content_cached(&warmup_item_id, None) {
+				Ok(tid) => {
+					let deadline = Instant::now() + warmup_timeout;
+					loop {
+						if Instant::now() >= deadline {
+							warmup_ok = false;
+							break;
+						}
+						match rx.recv_timeout(Duration::from_millis(100)) {
+							Ok(event) => {
+								if event.contains("CONTENT_CACHED") && event.contains(&tid) {
+									break;
+								}
+								if event.contains("TRANSFER_FAILED") && event.contains(&tid) {
+									warmup_ok = false;
+									break;
+								}
+							}
+							Err(mpsc::RecvTimeoutError::Timeout) => {}
+							Err(mpsc::RecvTimeoutError::Disconnected) => {
+								warmup_ok = false;
+								break;
+							}
+						}
+					}
+				}
+				Err(_e) => warmup_ok = false,
+			}
+		}
+		if !warmup_ok {
+			println!("[probe] peer{index}: C1 预热失败/超时（继续测量，结果可能含建连开销）");
+		} else {
+			// 让 SessionActor 把接收器移除后的 load=0 写回连接池，避免紧接着的
+			// 测量传输把刚空闲的链路当成"仍在忙"而重新建连。
+			thread::sleep(Duration::from_millis(250));
+		}
+	}
 
 	// 2) 所有 peer 在同一个闸门前集合，随后尽量同时调用 ensure_content_cached。
 	gate.mark_ready();
@@ -859,6 +935,31 @@ fn run_one(k: usize, params: &ProbeParams, probe_root: &Path, run_seq: usize) ->
 		params.file_mb, item_id, seed_meta.content.sha256, seed_s
 	);
 
+	// 2b) C1 预热对象：在计时窗口之前让每个 peer 各拉一次，触发数据连接的
+	//     建立与认证（这部分成本不计入墙钟/每 peer 吞吐）。
+	let warmup_item_id = if params.warmup_mb > 0 {
+		let warmup_bytes = params.warmup_mb * 1024 * 1024;
+		let warmup_text = build_probe_text(&run_tag, warmup_bytes, "warmup");
+		match set.hub.ingest_local_copy(ClipboardSnapshot::Text {
+			text_utf8: warmup_text,
+			ts_ms: now_ms(),
+		}) {
+			Ok(meta) => {
+				println!(
+					"[probe] K={k}: C1 预热对象 {} MiB item_id={} 已种入",
+					params.warmup_mb, meta.item_id
+				);
+				Some(meta.item_id.clone())
+			}
+			Err(e) => {
+				println!("[probe] K={k}: C1 预热对象种入失败，本次不做预热: {e}");
+				None
+			}
+		}
+	} else {
+		None
+	};
+
 	// 3) 启动 K 个 peer 工作线程，等待它们都拿到 meta 并到达闸门。
 	let gate = Arc::new(StartGate::new());
 	let mut handles: Vec<JoinHandle<PeerOutcome>> = Vec::with_capacity(k);
@@ -869,6 +970,8 @@ fn run_one(k: usize, params: &ProbeParams, probe_root: &Path, run_seq: usize) ->
 			core: peer,
 			rx,
 			item_id: item_id.clone(),
+			warmup_item_id: warmup_item_id.clone(),
+			warmup_timeout: Duration::from_secs(30),
 			expected_bytes,
 			meta_timeout: params.meta_timeout,
 			transfer_timeout: params.run_timeout,
