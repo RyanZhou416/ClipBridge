@@ -115,12 +115,16 @@ public sealed partial class MainPage : Page
     private const int BackgroundDecodePixelWidth = 1600;
 
     /// <summary>
-    /// 视差速度：卡片区相对页面滚动多移动的比例。
-    /// 1.1 表示页面滚 100px 时卡片区反向偏移 110px，形成"背景更慢、前景更快"的层感。
-    /// 历史上曾被性能提交移除（担心 ViewChanged 高频回调），现按原值恢复；
-    /// RenderTransform 不参与布局，单次仅一次 2D 平移。
+    /// 视差速度：卡片区相对页面滚动**额外**移动的比例。
+    ///
+    /// 视觉总速度 ≈ 1 + ParallaxSpeed（页面本身滚 1 份 + Transform 再推 ParallaxSpeed 份），
+    /// 所以 1.1 会让卡片区的观感速度接近 2.1 倍 —— 这是"轻轻一滚就飞出去"的根源。
+    /// 现在改为 0.2：卡片区比页面略快，保留层次感，但不放大滚动速度。
+    ///
+    /// 取值建议：0 = 关闭视差；0.15~0.25 = 轻微层感（推荐）；≥0.5 = 明显的快速前景。
+    /// RenderTransform 不参与布局，单次开销只是一次 2D 平移。
     /// </summary>
-    private const double ParallaxSpeed = 1.1;
+    private const double ParallaxSpeed = 0.2;
 
     // 首绘是否还挂在合并重绘队列里（用于只打一次 mainpage-charts-deferred 标记）
     private bool _initialChartDrawPending;
