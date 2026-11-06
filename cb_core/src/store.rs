@@ -6,7 +6,103 @@ use crate::model::{FileMeta, ItemKind, ItemMeta};
 
 pub struct Store {
 	pub(crate) conn: Connection,
+	/// 本次 `open` 是否因为 schema 版本/指纹不匹配而整库重建（见 [`SCHEMA_VERSION`]）。
+	pub rebuilt: bool,
 }
+
+/// 当前 `core.db` 的 schema 版本。
+///
+/// **v2 采用“版本不匹配即整库重建”（drop-and-rebuild），不做逐版本迁移。**
+/// 项目没有兼容负担：schemas 一旦变化，`items` / `history` / `content_cache` /
+/// `trusted_peers` / `peer_rules` 全部删除重建，配对信任与共享策略也按设计一起丢失，
+/// 设备需要重新输入密码配对。这是有意的取舍，不是 bug。
+///
+/// 任何未来的 DDL 变更（新增/删除列、索引、约束）都必须递增本常量；否则已有库
+/// 会带着旧结构继续运行，正是 v1 时代 `CREATE TABLE IF NOT EXISTS` 踩过的坑。
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// 重建时先删除的表：本模块拥有的全部内容/身份表。
+///
+/// 顺序上 `history` 在 `items` 之前（子表先删，避免外键检查打扰 DROP）；
+/// `DROP TABLE` 会一并删除该表上的索引。v1（含更早的 migrate_v1..v3 时代）
+/// 用的就是这些表名，没有发现其它历史拼写/别名，因此列表不需要兼容旧名字。
+const DROP_OWNED_TABLES_DDL: &str = r"
+    DROP TABLE IF EXISTS history;
+    DROP TABLE IF EXISTS items;
+    DROP TABLE IF EXISTS content_cache;
+    DROP TABLE IF EXISTS trusted_peers;
+    DROP TABLE IF EXISTS peer_rules;
+";
+
+/// v2 的完整 DDL。
+///
+/// 表职责：
+/// - `items`：每个剪贴板条目的元数据（内容本体在 CAS，`sha256_hex` 关联 `content_cache`）。
+/// - `history`：按账号的历史视图；软删除只置 `is_deleted=1`，不删行。
+/// - `content_cache`：SHA-256 内容的体积与 `present` 状态（LRU/GC 依据）。
+/// - `trusted_peers`：TOFU 设备指纹（配对信任）。
+/// - `peer_rules`：每个设备的共享/接收策略。
+const SCHEMA_DDL: &str = r"
+    -- items 表：存储项的元数据
+    CREATE TABLE IF NOT EXISTS items (
+      item_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      owner_device_id TEXT NOT NULL,
+      created_ts_ms INTEGER NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      mime TEXT NOT NULL,
+      sha256_hex TEXT NOT NULL,
+      preview_json TEXT,
+      files_json TEXT,
+      expires_ts_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_ts_ms);
+    CREATE INDEX IF NOT EXISTS idx_items_sha256 ON items(sha256_hex);
+    CREATE INDEX IF NOT EXISTS idx_items_owner_created ON items(owner_device_id, created_ts_ms);
+
+    -- history 表：追踪项的历史数据
+    CREATE TABLE IF NOT EXISTS history (
+      history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_uid TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      sort_ts_ms INTEGER NOT NULL,
+      source_device_id TEXT,
+      is_deleted INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_history_account_sort ON history(account_uid, sort_ts_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_history_item ON history(item_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_history_account_item ON history(account_uid, item_id);
+
+    -- content_cache 表：存储内容缓存信息
+    CREATE TABLE IF NOT EXISTS content_cache (
+      sha256_hex TEXT PRIMARY KEY,
+      total_bytes INTEGER NOT NULL,
+      present INTEGER NOT NULL,
+      last_access_ts_ms INTEGER NOT NULL,
+      created_ts_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_cache_lru ON content_cache(present, last_access_ts_ms);
+    CREATE INDEX IF NOT EXISTS idx_cache_size ON content_cache(present, total_bytes);
+
+    -- trusted_peers 表：记录已信任的设备指纹
+    CREATE TABLE IF NOT EXISTS trusted_peers (
+        account_uid TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        fingerprint_sha256 TEXT NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (account_uid, device_id)
+    );
+
+    -- peer_rules 表：存储设备共享策略
+    CREATE TABLE IF NOT EXISTS peer_rules (
+        account_uid TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        share_to_peer INTEGER NOT NULL DEFAULT 1,
+        accept_from_peer INTEGER NOT NULL DEFAULT 1,
+        updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (account_uid, device_id)
+    );
+";
 
 pub struct CacheRow {
 	pub present: bool,
@@ -29,8 +125,8 @@ impl Store {
 
 		let conn = Connection::open(db_path)?;
 		Self::init_pragmas(&conn)?;
-		Self::init_schema(&conn)?;
-		Ok(Self { conn })
+		let rebuilt = Self::ensure_schema(&conn)?;
+		Ok(Self { conn, rebuilt })
 	}
 
 	fn init_pragmas(conn: &Connection) -> anyhow::Result<()> {
@@ -45,88 +141,80 @@ impl Store {
 		Ok(())
 	}
 
-	/// 初始化数据库模式（统一的初始化函数，合并了所有迁移）
+	/// 按 [`SCHEMA_VERSION`] 校验并（必要时）重建数据库模式。
 	///
-	/// 此函数直接创建完整的数据库结构，不进行版本检查。
-	/// 开发阶段，每次启动都重新创建表结构（使用 CREATE TABLE IF NOT EXISTS）。
+	/// 旧实现只执行 `CREATE TABLE IF NOT EXISTS`，所以任何 DDL 变化都不会作用到
+	/// 已存在的库（注释里“每次启动都重新创建”的说法是错的）。这里改为：
 	///
-	/// # 模式
-	/// - `items`: 存储项的元数据
-	/// - `history`: 追踪项的历史数据
-	/// - `content_cache`: 存储内容缓存信息
-	/// - `trusted_peers`: 记录已信任的设备指纹
+	/// 1. 读取 `PRAGMA user_version`；
+	/// 2. 与 [`SCHEMA_VERSION`] 不同（含新文件的 0）→ drop-and-rebuild；
+	/// 3. 版本号相同也再校验一次 schema 指纹：旧版 `migrate_v1..v3` 曾把
+	///    `user_version` 写成 1/2/3，其中“v2”并没有 `files_json`，不能只信版本号；
+	/// 4. 重建后把 `user_version` 写为 [`SCHEMA_VERSION`]。
 	///
-	/// # 参数
-	/// - `conn`: 指向 SQLite 数据库连接的引用
+	/// 重建是**有意的**：内容表、身份表（含 `trusted_peers` / `peer_rules`）全部销毁，
+	/// 配对数据按设计丢失，设备需要重新配对。日志会明确写出 old → new 版本。
 	///
 	/// # 返回值
-	/// - `Ok(())`: 如果初始化成功
-	/// - `Err(anyhow::Error)`: 如果初始化失败
-	fn init_schema(conn: &Connection) -> anyhow::Result<()> {
-		conn.execute_batch(
-            r"
-            -- items 表：存储项的元数据
-            CREATE TABLE IF NOT EXISTS items (
-              item_id TEXT PRIMARY KEY,
-              kind TEXT NOT NULL,
-              owner_device_id TEXT NOT NULL,
-              created_ts_ms INTEGER NOT NULL,
-              size_bytes INTEGER NOT NULL,
-              mime TEXT NOT NULL,
-              sha256_hex TEXT NOT NULL,
-              preview_json TEXT,
-              files_json TEXT,
-              expires_ts_ms INTEGER
-            );
-            CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_ts_ms);
-            CREATE INDEX IF NOT EXISTS idx_items_sha256 ON items(sha256_hex);
-            CREATE INDEX IF NOT EXISTS idx_items_owner_created ON items(owner_device_id, created_ts_ms);
+	/// `Ok(true)` 表示本次执行了 drop-and-rebuild；`Ok(false)` 表示结构已是最新。
+	fn ensure_schema(conn: &Connection) -> anyhow::Result<bool> {
+		let old_version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+		let rebuilt = old_version != SCHEMA_VERSION || !Self::schema_ready(conn)?;
+		if !rebuilt {
+			return Ok(false);
+		}
 
-            -- history 表：追踪项的历史数据
-            CREATE TABLE IF NOT EXISTS history (
-              history_id INTEGER PRIMARY KEY AUTOINCREMENT,
-              account_uid TEXT NOT NULL,
-              item_id TEXT NOT NULL,
-              sort_ts_ms INTEGER NOT NULL,
-              source_device_id TEXT,
-              is_deleted INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_history_account_sort ON history(account_uid, sort_ts_ms DESC);
-            CREATE INDEX IF NOT EXISTS idx_history_item ON history(item_id);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_history_account_item ON history(account_uid, item_id);
+		// DDL 与版本号写在同一个事务里：要么整套新结构 + 新版本号一起生效，
+		// 要么保持旧库（下次启动重试），不会留下“表删了、版本没写”的中间态。
+		let tx = conn.unchecked_transaction()?;
+		tx.execute_batch(DROP_OWNED_TABLES_DDL)?;
+		tx.execute_batch(SCHEMA_DDL)?;
+		tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+		tx.commit()?;
 
-            -- content_cache 表：存储内容缓存信息
-            CREATE TABLE IF NOT EXISTS content_cache (
-              sha256_hex TEXT PRIMARY KEY,
-              total_bytes INTEGER NOT NULL,
-              present INTEGER NOT NULL,
-              last_access_ts_ms INTEGER NOT NULL,
-              created_ts_ms INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_cache_lru ON content_cache(present, last_access_ts_ms);
-            CREATE INDEX IF NOT EXISTS idx_cache_size ON content_cache(present, total_bytes);
+		eprintln!(
+			"[store] core.db schema changed ({old_version} -> {SCHEMA_VERSION}): \
+             dropped and recreated all content/identity tables; trusted_peers/peer_rules \
+             are lost by design and devices must re-pair with the password"
+		);
+		Ok(true)
+	}
 
-            -- trusted_peers 表：记录已信任的设备指纹
-            CREATE TABLE IF NOT EXISTS trusted_peers (
-                account_uid TEXT NOT NULL,
-                device_id TEXT NOT NULL,
-                fingerprint_sha256 TEXT NOT NULL,
-                updated_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (account_uid, device_id)
-            );
+	/// 检查“版本号相同”的库是否真的具备 v2 结构。
+	///
+	/// 这是兜底而不是迁移：旧 migrate_v2 时代 `user_version=2` 但 `items` 没有
+	/// `files_json`，v1 时代也没有 `trusted_peers` / `peer_rules`。只要关键表或
+	/// 关键列缺失就按旧库整库重建。
+	fn schema_ready(conn: &Connection) -> anyhow::Result<bool> {
+		for table in [
+			"items",
+			"history",
+			"content_cache",
+			"trusted_peers",
+			"peer_rules",
+		] {
+			let exists: i64 = conn.query_row(
+				"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+				[table],
+				|r| r.get(0),
+			)?;
+			if exists == 0 {
+				return Ok(false);
+			}
+		}
 
-            -- peer_rules 表：存储设备共享策略
-            CREATE TABLE IF NOT EXISTS peer_rules (
-                account_uid TEXT NOT NULL,
-                device_id TEXT NOT NULL,
-                share_to_peer INTEGER NOT NULL DEFAULT 1,
-                accept_from_peer INTEGER NOT NULL DEFAULT 1,
-                updated_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (account_uid, device_id)
-            );
-            ",
-        )?;
-		Ok(())
+		// files_json 是当前一代 items 的关键列；旧 v2 没有它。
+		let mut stmt = conn.prepare("PRAGMA table_info(items)")?;
+		let mut rows = stmt.query([])?;
+		let mut has_files_json = false;
+		while let Some(row) = rows.next()? {
+			let name: String = row.get(1)?;
+			if name == "files_json" {
+				has_files_json = true;
+				break;
+			}
+		}
+		Ok(has_files_json)
 	}
 
 	fn kind_to_str(k: &ItemKind) -> &'static str {
@@ -899,5 +987,91 @@ impl Store {
 		tx.execute("DELETE FROM peer_rules", [])?;
 		tx.commit()?;
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod schema_tests {
+	use super::*;
+
+	fn user_version(conn: &Connection) -> i64 {
+		conn.pragma_query_value(None, "user_version", |r| r.get(0))
+			.unwrap()
+	}
+
+	fn item_columns(conn: &Connection) -> Vec<String> {
+		let mut stmt = conn.prepare("PRAGMA table_info(items)").unwrap();
+		stmt.query_map([], |r| r.get::<_, String>(1))
+			.unwrap()
+			.map(Result::unwrap)
+			.collect()
+	}
+
+	#[test]
+	fn fresh_db_is_stamped_and_reopened_without_rebuild() {
+		let dir = tempfile::tempdir().unwrap();
+
+		let store = Store::open(dir.path()).unwrap();
+		assert!(store.rebuilt, "新文件 user_version=0，必须走一次重建");
+		assert_eq!(user_version(&store.conn), SCHEMA_VERSION);
+		drop(store);
+
+		let reopened = Store::open(dir.path()).unwrap();
+		assert!(!reopened.rebuilt, "版本一致且结构完整时不应重建");
+	}
+
+	#[test]
+	fn legacy_v2_without_files_json_is_rebuilt() {
+		let dir = tempfile::tempdir().unwrap();
+		let db_path = dir.path().join("core.db");
+		{
+			// 模拟 Dec 2025 的 migrate_v1..v3 时代：user_version=2，但 items 还没有
+			// files_json，也没有 peer_rules。只信版本号会漏掉这种库。
+			let conn = Connection::open(&db_path).unwrap();
+			conn.execute_batch(
+				r"
+                CREATE TABLE items (
+                  item_id TEXT PRIMARY KEY,
+                  kind TEXT NOT NULL,
+                  owner_device_id TEXT NOT NULL,
+                  created_ts_ms INTEGER NOT NULL,
+                  size_bytes INTEGER NOT NULL,
+                  mime TEXT NOT NULL,
+                  sha256_hex TEXT NOT NULL,
+                  preview_json TEXT,
+                  expires_ts_ms INTEGER
+                );
+                CREATE TABLE history (
+                  history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  account_uid TEXT NOT NULL,
+                  item_id TEXT NOT NULL,
+                  sort_ts_ms INTEGER NOT NULL,
+                  source_device_id TEXT,
+                  is_deleted INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE content_cache (
+                  sha256_hex TEXT PRIMARY KEY,
+                  total_bytes INTEGER NOT NULL,
+                  present INTEGER NOT NULL,
+                  last_access_ts_ms INTEGER NOT NULL,
+                  created_ts_ms INTEGER NOT NULL
+                );
+                CREATE TABLE trusted_peers (
+                  account_uid TEXT NOT NULL,
+                  device_id TEXT NOT NULL,
+                  fingerprint_sha256 TEXT NOT NULL,
+                  updated_at_ms INTEGER NOT NULL,
+                  PRIMARY KEY (account_uid, device_id)
+                );
+                PRAGMA user_version = 2;
+                ",
+			)
+			.unwrap();
+		}
+
+		let store = Store::open(dir.path()).unwrap();
+		assert!(store.rebuilt, "旧 v2 结构指纹不符，必须整库重建");
+		assert!(item_columns(&store.conn).iter().any(|c| c == "files_json"));
+		assert_eq!(user_version(&store.conn), SCHEMA_VERSION);
 	}
 }

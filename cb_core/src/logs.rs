@@ -120,8 +120,36 @@ fn normalize_lang_code(lang: &str) -> String {
 	}
 }
 
+/// 当前 `logs.db` 的 schema 版本。
+///
+/// 日志只是诊断数据，没有兼容负担：版本不匹配时整表删除重建即可。
+/// 与 `core.db` 一样，未来任何 DDL 变化都必须递增本常量。
+pub const LOG_SCHEMA_VERSION: i64 = 2;
+
+/// 重建日志库时删除的表（历史上一直叫 `logs`，未发现其它拼写）。
+const DROP_LOG_TABLES_DDL: &str = "DROP TABLE IF EXISTS logs;";
+
+/// v2 的 `logs` 表 DDL。
+const LOG_SCHEMA_DDL: &str = r"
+    CREATE TABLE IF NOT EXISTS logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_utc INTEGER NOT NULL,
+        level INTEGER NOT NULL,
+        component TEXT NOT NULL,
+        category TEXT NOT NULL,
+        message TEXT NOT NULL,
+        exception TEXT,
+        props_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts_utc);
+    CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
+    CREATE INDEX IF NOT EXISTS idx_logs_category ON logs(category);
+";
+
 pub struct LogStore {
 	pub(crate) conn: Connection,
+	/// 本次 `open` 是否因为 schema 版本变化而整库重建（日志被清空）。
+	pub rebuilt: bool,
 }
 
 impl LogStore {
@@ -133,8 +161,8 @@ impl LogStore {
 
 		let conn = Connection::open(db_path)?;
 		Self::init_pragmas(&conn)?;
-		Self::init_schema(&conn)?;
-		let mut store = Self { conn };
+		let rebuilt = Self::ensure_schema(&conn)?;
+		let mut store = Self { conn, rebuilt };
 		// 启动时执行一次保留策略：日志维护失败不应让核心无法启动，只记录错误。
 		if let Err(e) = store.prune(crate::util::now_ms()) {
 			eprintln!("[logs] prune on open failed: {e}");
@@ -154,25 +182,29 @@ impl LogStore {
 		Ok(())
 	}
 
-	fn init_schema(conn: &Connection) -> anyhow::Result<()> {
-		conn.execute_batch(
-			r"
-            CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts_utc INTEGER NOT NULL,
-                level INTEGER NOT NULL,
-                component TEXT NOT NULL,
-                category TEXT NOT NULL,
-                message TEXT NOT NULL,
-                exception TEXT,
-                props_json TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts_utc);
-            CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
-            CREATE INDEX IF NOT EXISTS idx_logs_category ON logs(category);
-            ",
-		)?;
-		Ok(())
+	/// 按 [`LOG_SCHEMA_VERSION`] 校验并（必要时）重建日志库。
+	///
+	/// 日志是诊断数据：版本不匹配时直接 `DROP TABLE` 重建，不做迁移。
+	///
+	/// # 返回值
+	/// `Ok(true)` 表示本次执行了 drop-and-rebuild（旧日志已全部丢弃）。
+	fn ensure_schema(conn: &Connection) -> anyhow::Result<bool> {
+		let old_version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+		if old_version == LOG_SCHEMA_VERSION {
+			return Ok(false);
+		}
+
+		let tx = conn.unchecked_transaction()?;
+		tx.execute_batch(DROP_LOG_TABLES_DDL)?;
+		tx.execute_batch(LOG_SCHEMA_DDL)?;
+		tx.pragma_update(None, "user_version", LOG_SCHEMA_VERSION)?;
+		tx.commit()?;
+
+		eprintln!(
+			"[logs] logs.db schema changed ({old_version} -> {LOG_SCHEMA_VERSION}): \
+             diagnostic logs dropped and recreated"
+		);
+		Ok(true)
 	}
 
 	/// 写入日志（单语言，向后兼容）
@@ -846,6 +878,38 @@ mod tests {
 		assert_eq!(stats.total_deleted(), 6);
 		assert!(stats.vacuumed);
 		assert_eq!(store.stats().unwrap().count, 0);
+	}
+
+	#[test]
+	fn schema_is_stamped_and_only_rebuilt_on_version_change() {
+		let dir = tempfile::tempdir().unwrap();
+
+		let store = LogStore::open(dir.path()).unwrap();
+		assert!(store.rebuilt, "新文件 user_version=0，必须重建一次");
+		let version: i64 = store
+			.conn
+			.pragma_query_value(None, "user_version", |r| r.get(0))
+			.unwrap();
+		assert_eq!(version, LOG_SCHEMA_VERSION);
+		drop(store);
+
+		let reopened = LogStore::open(dir.path()).unwrap();
+		assert!(!reopened.rebuilt, "版本一致时不应清空日志");
+		drop(reopened);
+
+		// 人为写旧版本号，模拟下一次 schema 变更：必须整表重建并重新打戳。
+		{
+			let conn = Connection::open(dir.path().join("logs.db")).unwrap();
+			conn.pragma_update(None, "user_version", LOG_SCHEMA_VERSION - 1)
+				.unwrap();
+		}
+		let rebuilt = LogStore::open(dir.path()).unwrap();
+		assert!(rebuilt.rebuilt);
+		let version: i64 = rebuilt
+			.conn
+			.pragma_query_value(None, "user_version", |r| r.get(0))
+			.unwrap();
+		assert_eq!(version, LOG_SCHEMA_VERSION);
 	}
 
 	#[test]

@@ -114,6 +114,7 @@ impl Core {
 	pub fn init(cfg: CoreConfig, sink: Arc<dyn CoreEventSink>) -> Self {
 		// 初始化日志存储（需要先创建才能记录日志）
 		let log_store = LogStore::open(&cfg.data_dir).expect("open log store");
+		let logs_rebuilt = log_store.rebuilt;
 		let log_store_arc = Arc::new(Mutex::new(log_store));
 
 		// 记录初始化开始日志
@@ -125,17 +126,50 @@ impl Core {
 				&format!("Core initializing with device_id: {device_id}"),
 				Some(&format!("核心正在初始化，设备 ID: {device_id}")),
 			);
+			// 日志库重建会清空旧日志，这条 warn 会作为新库里的第一条记录。
+			if logs_rebuilt {
+				let _ = log_store.log_warn(
+					"Init",
+					&format!(
+						"logs.db schema changed (-> v{}): diagnostic logs were dropped and the table rebuilt",
+						crate::logs::LOG_SCHEMA_VERSION
+					),
+					Some(&format!(
+						"日志库 schema 已切换到 v{}：诊断日志已清空并重建",
+						crate::logs::LOG_SCHEMA_VERSION
+					)),
+				);
+			}
 		}
 
 		// 初始化各个组件
 		let store = match Store::open(&cfg.data_dir) {
 			Ok(s) => {
+				let rebuilt = s.rebuilt;
 				let mut log_store = log_store_arc.lock().unwrap();
-				let _ = log_store.log_info(
-					"Init",
-					"Store initialized successfully",
-					Some("存储初始化成功"),
-				);
+				if rebuilt {
+					// 这是设计决定，不是意外：v2 用整库重建代替迁移，身份表也会被销毁。
+					let _ = log_store.log_warn(
+						"Init",
+						&format!(
+							"core.db schema changed (-> v{}): ALL content/identity tables were dropped and recreated, \
+                             including trusted_peers and peer_rules. Pairing data is lost by design; \
+                             devices must re-pair with the password.",
+							crate::store::SCHEMA_VERSION
+						),
+						Some(&format!(
+							"核心库 schema 已切换到 v{}：所有内容/身份表（含 trusted_peers 与 peer_rules）\
+                             已按设计销毁重建，配对数据丢失，设备需重新输入密码配对。",
+							crate::store::SCHEMA_VERSION
+						)),
+					);
+				} else {
+					let _ = log_store.log_info(
+						"Init",
+						"Store initialized successfully",
+						Some("存储初始化成功"),
+					);
+				}
 				s
 			}
 			Err(e) => {
@@ -149,6 +183,7 @@ impl Core {
 				panic!("Failed to open store: {e}");
 			}
 		};
+		let store_rebuilt = store.rebuilt;
 		let store_arc = Arc::new(Mutex::new(store));
 
 		let stats_store = match StatsStore::open(&cfg.data_dir) {
@@ -195,6 +230,42 @@ impl Core {
 				panic!("Failed to init cas: {e}");
 			}
 		};
+
+		// 核心库整库重建后，`content_cache` 里的每一行都没了；磁盘上的 CAS 对象
+		// 已经没有元数据引用它们，不清理就会变成永远无法被 LRU/GC 回收的孤儿，
+		// 持续占用 gc_cas_max_bytes 预算。这里按设计把缓存目录（blobs/files/
+		// downloads/tmp）一并清空，然后才做存在性对账。
+		if store_rebuilt {
+			let before_bytes = cas.total_size_bytes().unwrap_or(0);
+			match cas.clear_all() {
+				Ok(()) => {
+					let mut log_store = log_store_arc.lock().unwrap();
+					let _ = log_store.log_warn(
+						"Init",
+						&format!(
+							"core.db was rebuilt: cleared CAS cache (blobs/files/downloads/tmp), \
+                             freed ~{before_bytes} bytes; content_cache is empty so all blobs were orphaned"
+						),
+						Some(&format!(
+							"核心库已重建：已清空 CAS 缓存（blobs/files/downloads/tmp），约释放 {before_bytes} 字节；\
+                             因为 content_cache 已清空，这些 blob 都已成为孤儿"
+						)),
+					);
+				}
+				Err(e) => {
+					// 清理失败不应阻断启动，但必须留下明确错误（磁盘可能仍被占用）。
+					let mut log_store = log_store_arc.lock().unwrap();
+					let _ = log_store.log_error(
+						"Init",
+						&format!("core.db was rebuilt but CAS cleanup failed: {e}; orphan blobs may remain"),
+						Some(&format!(
+							"核心库已重建，但 CAS 缓存清理失败: {e}；可能仍残留孤儿 blob"
+						)),
+						Some(&e.to_string()),
+					);
+				}
+			}
+		}
 
 		// --- M1 集成：启动网络管理器 ---
 		// 注意：这里假设 NetManager::spawn 是同步封装（内部 spawn 异步任务）
