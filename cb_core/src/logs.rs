@@ -254,6 +254,21 @@ impl LogStore {
             PRAGMA synchronous=NORMAL;
             PRAGMA foreign_keys=ON;
             PRAGMA busy_timeout=5000;
+
+            -- P4 性能调优（core.db 与 logs.db 使用同一组参数）：
+            -- cache_size 为负数时单位是 KiB：-16000 ≈ 16 MB 页缓存，减少读路径换页；
+            -- mmap_size = 64 MiB：读多写少的查询走内存映射，省一次内核到用户态拷贝
+            --   （个别 SQLite 构建/平台禁用 mmap，读回 0 属正常，见测试）；
+            -- temp_store = MEMORY：ORDER BY / 临时索引不落临时文件；
+            -- journal_size_limit = 8 MiB：checkpoint 后把 -wal 文件压回该上限，
+            --   防止批量写入把 WAL 撑大后长期占用磁盘。
+            -- 内存代价约 16 + 64 MB；相对 app 约 200 MB 的常驻占用很小，且 mmap 是
+            -- 只读、由 OS 按需换页的地址空间（不计入堆），收益（少 syscall/少写盘）
+            -- 明显大于这点成本。日志是最高频写入的表，收益尤其直接。
+            PRAGMA cache_size = -16000;
+            PRAGMA mmap_size = 67108864;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA journal_size_limit = 8388608;
             ",
 		)?;
 		Ok(())
@@ -261,7 +276,9 @@ impl LogStore {
 
 	/// 按 [`LOG_SCHEMA_VERSION`] 校验并（必要时）重建日志库。
 	///
-	/// 日志是诊断数据：版本不匹配时直接 `DROP TABLE` 重建，不做迁移。
+	/// 日志是可丢弃的诊断数据：core.db 走逐版本迁移以保留用户数据，logs.db 在版本
+	/// 变化时直接 `DROP TABLE` 重建——丢日志可接受，因此这里刻意不实现迁移。
+	/// 注意：本函数仍须与 `Store::ensure_schema` 一样，先完成 PRAGMA 调优。
 	///
 	/// # 返回值
 	/// `Ok(true)` 表示本次执行了 drop-and-rebuild（旧日志已全部丢弃）。
@@ -1356,6 +1373,47 @@ mod tests {
 		store
 			.write(ts_utc, 2, "Test", "Retention", "message", None, None)
 			.unwrap();
+	}
+
+	/// P4：logs.db 连接必须应用与 core.db 相同的 PRAGMA 调优。
+	#[test]
+	fn init_pragmas_are_applied() {
+		let dir = tempfile::tempdir().unwrap();
+		let store = LogStore::open(dir.path()).unwrap();
+
+		let cache_size: i64 = store
+			.conn
+			.pragma_query_value(None, "cache_size", |r| r.get(0))
+			.unwrap();
+		assert_eq!(cache_size, -16000, "cache_size 必须为 16 MB（负数 = KiB）");
+
+		let journal_size_limit: i64 = store
+			.conn
+			.pragma_query_value(None, "journal_size_limit", |r| r.get(0))
+			.unwrap();
+		assert_eq!(journal_size_limit, 8_388_608);
+
+		let temp_store: i64 = store
+			.conn
+			.pragma_query_value(None, "temp_store", |r| r.get(0))
+			.unwrap();
+		assert_eq!(temp_store, 2, "temp_store=2 表示 MEMORY");
+
+		let journal_mode: String = store
+			.conn
+			.pragma_query_value(None, "journal_mode", |r| r.get(0))
+			.unwrap();
+		assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+
+		// mmap_size 在禁用 mmap 的 SQLite 构建上读回 0；本机 bundled 构建应等于设置值。
+		let mmap_size: i64 = store
+			.conn
+			.pragma_query_value(None, "mmap_size", |r| r.get(0))
+			.unwrap();
+		assert!(
+			mmap_size == 0 || mmap_size == 67_108_864,
+			"unexpected mmap_size {mmap_size}"
+		);
 	}
 
 	#[test]

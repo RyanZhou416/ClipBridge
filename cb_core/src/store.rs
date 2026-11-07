@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,25 +7,34 @@ use crate::model::{FileMeta, ItemKind, ItemMeta, ItemPreview};
 
 pub struct Store {
 	pub(crate) conn: Connection,
-	/// 本次 `open` 是否因为 schema 版本/指纹不匹配而整库重建（见 [`SCHEMA_VERSION`]）。
+	/// 本次 `open` 是否执行了 drop-and-rebuild（数据丢失路径）。
+	///
+	/// 全新数据库与损坏兜底重建为 `true`；**逐版本迁移成功后为 `false`**（数据保留，
+	/// 调用方不应清空 CAS）。见 [`SCHEMA_VERSION`] 与 `ensure_schema`。
 	pub rebuilt: bool,
 }
 
-/// 当前 `core.db` 的 schema 版本。
+/// 当前 `core.db` 的 schema **目标**版本。
 ///
-/// **v2 起采用“版本不匹配即整库重建”（drop-and-rebuild），不做逐版本迁移。**
-/// 项目没有兼容负担：schemas 一旦变化，`items` / `history` / `content_cache` /
-/// `trusted_peers` / `peer_rules` 全部删除重建，配对信任与共享策略也按设计一起丢失，
-/// 设备需要重新输入密码配对。这是有意的取舍，不是 bug。
+/// **v4 起采用逐版本增量迁移，不再“版本不匹配即整库重建”（drop-and-rebuild）。**
+/// 打开已有库时按 `MIGRATIONS` 表从当前 `PRAGMA user_version` 逐级升级到本常量：
+/// 每一步都在**独立事务**里执行 DDL 与版本号更新，任一步失败则整体回滚，库停留在
+/// 失败前的版本并在下次启动重试。`items` / `history` / `content_cache` /
+/// `trusted_peers` / `peer_rules` 的数据全部保留，用户无需重新配对。
 ///
-/// 任何未来的 DDL 变更（新增/删除列、索引、约束）都必须递增本常量；否则已有库
-/// 会带着旧结构继续运行，正是 v1 时代 `CREATE TABLE IF NOT EXISTS` 踩过的坑。
+/// 版本高于本常量（旧 app 打开新库）直接返回错误，绝不降级、绝不清库。
+/// 只有在**目标版本**的结构指纹（`schema_ready`）不一致时才回退到旧的
+/// drop-and-rebuild——那是损坏兜底，不是正常升级路径，且会显式写日志。
 ///
-/// v3（ADR-002 §3.7）：`content_cache` 新增 `durable INTEGER NOT NULL DEFAULT 1`，
-/// 0 表示“blob 已 rename 到最终路径，但后台 `sync_data` 尚未完成”。升级到 v3 的
-/// 旧库会走既有 drop-and-rebuild：内容/身份表全部重建，CAS 由 `Core::init` 一并清空，
-/// 磁盘对象不可恢复（这是已批准的重建策略，不是本列引入的额外风险）。
-pub const SCHEMA_VERSION: i64 = 3;
+/// 任何未来的 DDL 变更都必须同时：递增本常量、更新 [`SCHEMA_DDL`]（新建库的完整
+/// 目标结构）、在 `MIGRATIONS` 追加一条 `旧版本 -> 旧版本 + 1` 的迁移。只改
+/// `SCHEMA_DDL` 不改版本号会让已有库继续使用旧结构（v1 时代
+/// `CREATE TABLE IF NOT EXISTS` 踩过的坑）。
+///
+/// 版本历史：
+/// - v3（ADR-002 §3.7）：`content_cache.durable INTEGER NOT NULL DEFAULT 1`。
+/// - v4：`idx_items_kind_created(kind, created_ts_ms)`（见 `MIGRATIONS`）。
+pub const SCHEMA_VERSION: i64 = 4;
 
 // ---------------------------------------------------------------------------
 // F12：入站 `ItemMeta` 的逻辑上限
@@ -234,7 +243,10 @@ const DROP_OWNED_TABLES_DDL: &str = r"
     DROP TABLE IF EXISTS peer_rules;
 ";
 
-/// v3 的完整 DDL。
+/// 目标版本（[`SCHEMA_VERSION`]）的完整 DDL：新建库与损坏兜底重建都执行它。
+///
+/// 已有库的升级由 `MIGRATIONS` 逐版本完成，不执行本 DDL。因此每次 schema 变更
+/// 必须同时更新这里和迁移表，二者描述的是同一个目标结构。
 ///
 /// 表职责：
 /// - `items`：每个剪贴板条目的元数据（内容本体在 CAS，`sha256_hex` 关联 `content_cache`）。
@@ -244,7 +256,7 @@ const DROP_OWNED_TABLES_DDL: &str = r"
 /// - `trusted_peers`：TOFU 设备指纹（配对信任）。
 /// - `peer_rules`：每个设备的共享/接收策略。
 ///
-/// 约束说明（v3 生成）：
+/// 约束说明（v3 起）：
 /// - `items.kind` 用 CHECK 限定为 `kind_to_str` 产出的三个值，防止脏数据。
 /// - `history.item_id` 外键到 `items.item_id` 并 `ON DELETE CASCADE`。现有删除路径
 ///   都是软删除（只置 `is_deleted`），因此 cascade 只在未来做硬删除时兜底：
@@ -270,6 +282,9 @@ const SCHEMA_DDL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_ts_ms);
     CREATE INDEX IF NOT EXISTS idx_items_sha256 ON items(sha256_hex);
     CREATE INDEX IF NOT EXISTS idx_items_owner_created ON items(owner_device_id, created_ts_ms);
+    -- v4：按 kind + 时间范围筛选/统计条目（活动统计、按类型的历史视图）；
+    -- 有序前缀 kind 也服务单类型查询，写入成本远低于全表扫描。
+    CREATE INDEX IF NOT EXISTS idx_items_kind_created ON items(kind, created_ts_ms);
 
     -- history 表：追踪项的历史数据；item 被硬删除时级联清掉历史
     CREATE TABLE IF NOT EXISTS history (
@@ -318,6 +333,83 @@ const SCHEMA_DDL: &str = r"
     );
 ";
 
+// ---------------------------------------------------------------------------
+// P1：增量迁移框架
+//
+// 约定：迁移表按 `from` 升序排列，每条只负责 `from -> from + 1`。打开旧库时从
+// `PRAGMA user_version` 起逐条执行，每条的 DDL/DML 与版本号更新在**同一个事务**
+// 里提交；任何一步失败都会回滚该步，库停留在上一步的版本，数据不丢、也不半迁移。
+//
+// 迁移实现应使用 `IF NOT EXISTS` 等幂等写法：旧库可能已被手工修补过，或在
+// 提交前崩溃后重试。迁移函数只拿到 `&Transaction`，无法自行提交或开新事务。
+// ---------------------------------------------------------------------------
+
+/// 单条迁移的实现：把库从 `from` 升到 `from + 1`，只允许操作传入的事务。
+type MigrationStep = fn(&Transaction<'_>) -> anyhow::Result<()>;
+
+/// 一条注册在 `MIGRATIONS` 表里的迁移。
+struct Migration {
+	/// 迁移的源版本；成功后 `user_version` 变为 `from + 1`。
+	from: i64,
+	/// 迁移实现（见 [`MigrationStep`]）。
+	apply: MigrationStep,
+	/// 单行说明，成功日志会带上。
+	description: &'static str,
+}
+
+/// 迁移表：唯一的“版本 -> 操作”注册点。
+///
+/// 新增 schema 版本时：递增 [`SCHEMA_VERSION`]、更新 [`SCHEMA_DDL`]，并在本表
+/// 末尾追加一条 `from = 旧目标版本` 的迁移。版本链必须连续，`ensure_schema`
+/// 会检查 `from` 到 `SCHEMA_VERSION` 的每一级都有迁移，缺一级就走显式的
+/// drop-and-rebuild 兜底。
+const MIGRATIONS: &[Migration] = &[Migration {
+	from: 3,
+	apply: migrate_v3_to_v4,
+	description: "create items(kind, created_ts_ms) index for kind/time queries",
+}];
+
+/// v3 -> v4：为 `items` 增加 `(kind, created_ts_ms)` 组合索引。
+///
+/// 用途：按类型 + 时间范围筛选或统计条目时避免全表扫描 `items`；索引的有序前缀
+/// `kind` 对单类型查询同样有效。索引名/列不改变任何行数据，是纯增量变更。
+/// `IF NOT EXISTS` 保证对手工补过索引的库可重复执行。
+fn migrate_v3_to_v4(tx: &Transaction<'_>) -> anyhow::Result<()> {
+	tx.execute_batch(
+		r"
+        CREATE INDEX IF NOT EXISTS idx_items_kind_created ON items(kind, created_ts_ms);
+        ",
+	)?;
+	#[cfg(test)]
+	if test_hooks::fail_v4_migration() {
+		// 测试注入点：DDL 已执行但提交前失败，用来验证事务回滚 + 版本号不前进。
+		anyhow::bail!("injected failure in v3 -> v4 migration (test-only)");
+	}
+	Ok(())
+}
+
+/// 仅测试使用的迁移注入钩子。
+///
+/// 用 thread-local 而不是全局 static：`cargo test` 默认并发跑测试，测试线程各自
+/// 独立，钩子不会串到其它用例的 `Store::open`。
+#[cfg(test)]
+mod test_hooks {
+	use std::cell::Cell;
+
+	thread_local! {
+		/// 让 v3 -> v4 迁移在 DDL 之后故意失败；只在设置它的测试线程上生效。
+		static FAIL_V4_MIGRATION: Cell<bool> = const { Cell::new(false) };
+	}
+
+	pub(super) fn set_fail_v4_migration(fail: bool) {
+		FAIL_V4_MIGRATION.with(|flag| flag.set(fail));
+	}
+
+	pub(super) fn fail_v4_migration() -> bool {
+		FAIL_V4_MIGRATION.with(Cell::get)
+	}
+}
+
 pub struct CacheRow {
 	pub present: bool,
 }
@@ -360,56 +452,197 @@ impl Store {
             PRAGMA synchronous=NORMAL;
             PRAGMA foreign_keys=ON;
             PRAGMA busy_timeout=5000;
+
+            -- P4 性能调优（core.db 与 logs.db 使用同一组参数）：
+            -- cache_size 为负数时单位是 KiB：-16000 ≈ 16 MB 页缓存，减少读路径换页；
+            -- mmap_size = 64 MiB：读多写少的查询走内存映射，省一次内核到用户态拷贝
+            --   （个别 SQLite 构建/平台禁用 mmap，读回 0 属正常，见测试）；
+            -- temp_store = MEMORY：ORDER BY / 临时索引（如 history 排序）不落临时文件；
+            -- journal_size_limit = 8 MiB：checkpoint 后把 -wal 文件压回该上限，
+            --   防止批量写入把 WAL 撑大后长期占用磁盘。
+            -- 内存代价约 16 + 64 MB；相对 app 约 200 MB 的常驻占用很小，且 mmap 是
+            -- 只读、由 OS 按需换页的地址空间（不计入堆），收益（少 syscall/少写盘）
+            -- 明显大于这点成本。
+            PRAGMA cache_size = -16000;
+            PRAGMA mmap_size = 67108864;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA journal_size_limit = 8388608;
             ",
 		)?;
 		Ok(())
 	}
 
-	/// 按 [`SCHEMA_VERSION`] 校验并（必要时）重建数据库模式。
+	/// 按 [`SCHEMA_VERSION`] 迁移或校验数据库模式。
 	///
-	/// 旧实现只执行 `CREATE TABLE IF NOT EXISTS`，所以任何 DDL 变化都不会作用到
-	/// 已存在的库（注释里“每次启动都重新创建”的说法是错的）。这里改为：
-	///
-	/// 1. 读取 `PRAGMA user_version`；
-	/// 2. 与 [`SCHEMA_VERSION`] 不同（含新文件的 0）→ drop-and-rebuild；
-	/// 3. 版本号相同也再校验一次 schema 指纹：旧版 `migrate_v1..v3` 曾把
-	///    `user_version` 写成 1/2/3，其中“v2”并没有 `files_json`，不能只信版本号；
-	/// 4. 重建后把 `user_version` 写为 [`SCHEMA_VERSION`]。
-	///
-	/// 重建是**有意的**：内容表、身份表（含 `trusted_peers` / `peer_rules`）全部销毁，
-	/// 配对数据按设计丢失，设备需要重新配对。日志会明确写出 old → new 版本。
+	/// 决策顺序（从上到下，先命中先返回）：
+	/// 1. `user_version > SCHEMA_VERSION`（旧 app 打开新库）→ 明确报错，不降级、
+	///    不清库；
+	/// 2. `user_version == SCHEMA_VERSION`：指纹一致直接使用；不一致才走旧的
+	///    drop-and-rebuild（损坏兜底，日志写明原因）；
+	/// 3. `user_version == 0`（全新文件）→ 直接创建目标结构；
+	/// 4. `0 < user_version < SCHEMA_VERSION`：源结构指纹（表/列/外键）不成立
+	///    （旧 v1/v2 形态或已损坏）时无迁移价值，沿用旧的 drop-and-rebuild 并显式
+	///    记录；迁移表缺少 `old -> ... -> target` 完整链路时同样回退；否则逐级迁移
+	///    （每级一个事务，**任一级失败直接返回 Err**，库停留在该级之前的版本，
+	///    不 wipe、不半迁移，下次启动重试）。迁移完成后目标指纹仍不一致 →
+	///    损坏兜底 drop-and-rebuild。
 	///
 	/// # 返回值
-	/// `Ok(true)` 表示本次执行了 drop-and-rebuild；`Ok(false)` 表示结构已是最新。
+	/// `Ok(true)` 表示执行了 drop-and-rebuild（数据丢失）；`Ok(false)` 表示结构已
+	/// 是最新，或已通过迁移升级（数据保留）。
 	fn ensure_schema(conn: &Connection) -> anyhow::Result<bool> {
 		let old_version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-		let rebuilt = old_version != SCHEMA_VERSION || !Self::schema_ready(conn)?;
-		if !rebuilt {
-			return Ok(false);
+
+		if old_version > SCHEMA_VERSION {
+			anyhow::bail!(
+				"core.db schema version {old_version} is newer than this build supports \
+                 ({SCHEMA_VERSION}); refusing to open or modify it. Downgrading the app is \
+                 not supported: restore the matching app version, or move the database \
+                 aside to start fresh (this build will not delete existing data)"
+			);
 		}
 
-		// DDL 与版本号写在同一个事务里：要么整套新结构 + 新版本号一起生效，
-		// 要么保持旧库（下次启动重试），不会留下“表删了、版本没写”的中间态。
+		if old_version == SCHEMA_VERSION {
+			if Self::schema_ready(conn)? {
+				return Ok(false);
+			}
+			Self::rebuild_schema(conn)?;
+			eprintln!(
+				"[store] core.db structural fingerprint mismatch at v{SCHEMA_VERSION}: \
+                 dropped and recreated all content/identity tables (corruption fallback; \
+                 trusted_peers/peer_rules are lost by design)"
+			);
+			return Ok(true);
+		}
+
+		if old_version == 0 {
+			Self::rebuild_schema(conn)?;
+			eprintln!(
+				"[store] core.db created at v{SCHEMA_VERSION} (fresh database; empty tables)"
+			);
+			return Ok(true);
+		}
+
+		// 0 < old_version < SCHEMA_VERSION：只有结构可信且迁移链完整才迁移。
+		if !Self::schema_core_ready(conn)? {
+			Self::rebuild_schema(conn)?;
+			eprintln!(
+				"[store] core.db v{old_version} does not match any supported source shape \
+                 (missing tables/columns/foreign keys): dropped and recreated at \
+                 v{SCHEMA_VERSION} (legacy/corruption fallback; trusted_peers/peer_rules lost)"
+			);
+			return Ok(true);
+		}
+		if !Self::migration_chain_available(old_version, SCHEMA_VERSION) {
+			Self::rebuild_schema(conn)?;
+			eprintln!(
+				"[store] core.db v{old_version} has no migration path to v{SCHEMA_VERSION}: \
+                 dropped and recreated (legacy fallback; trusted_peers/peer_rules lost)"
+			);
+			return Ok(true);
+		}
+
+		Self::apply_migrations(conn, old_version, SCHEMA_VERSION)?;
+
+		if !Self::schema_ready(conn)? {
+			Self::rebuild_schema(conn)?;
+			eprintln!(
+				"[store] core.db structural fingerprint mismatch at v{SCHEMA_VERSION} after \
+                 migration: dropped and recreated all content/identity tables \
+                 (corruption fallback; trusted_peers/peer_rules are lost by design)"
+			);
+			return Ok(true);
+		}
+		Ok(false)
+	}
+
+	/// 损坏/旧版兜底：删除本模块拥有的全部表，按 [`SCHEMA_DDL`] 重建并打版本号。
+	///
+	/// DDL 与版本号在同一事务里：要么整套新结构 + 新版本号一起生效，要么保持旧库
+	/// （下次启动重试），不会留下“表删了、版本没写”的中间态。
+	///
+	/// 注意：这是**唯一**会丢数据的路径，只在全新库或指纹损坏时调用。正常版本升级
+	/// 走 [`Store::apply_migrations`]。
+	fn rebuild_schema(conn: &Connection) -> anyhow::Result<()> {
 		let tx = conn.unchecked_transaction()?;
 		tx.execute_batch(DROP_OWNED_TABLES_DDL)?;
 		tx.execute_batch(SCHEMA_DDL)?;
 		tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 		tx.commit()?;
-
-		eprintln!(
-			"[store] core.db schema changed ({old_version} -> {SCHEMA_VERSION}): \
-             dropped and recreated all content/identity tables; trusted_peers/peer_rules \
-             are lost by design and devices must re-pair with the password"
-		);
-		Ok(true)
+		Ok(())
 	}
 
-	/// 检查“版本号相同”的库是否真的具备 v3 结构。
+	/// 查找 `version -> version + 1` 的迁移（迁移表按 `from` 升序）。
+	fn migration_from(version: i64) -> Option<&'static Migration> {
+		MIGRATIONS.iter().find(|m| m.from == version)
+	}
+
+	/// 迁移表是否覆盖 `from` 到 `target` 的每一级（缺一级就不能迁移）。
+	fn migration_chain_available(mut version: i64, target: i64) -> bool {
+		while version < target {
+			let Some(step) = Self::migration_from(version) else {
+				return false;
+			};
+			version = step.from + 1;
+		}
+		true
+	}
+
+	/// 逐级执行迁移：每级一个事务，DDL/DML 与 `user_version` 同事务提交。
 	///
-	/// 这是兜底而不是迁移：旧 migrate_v2 时代 `user_version=2` 但 `items` 没有
-	/// `files_json`，v1 时代也没有 `trusted_peers` / `peer_rules`；v2 库的
-	/// `content_cache` 没有 `durable`。只要关键表或关键列缺失就按旧库整库重建。
+	/// 返回 `Err` 时当前这一级已回滚，库停留在上一级版本；不会清库、也不会留下
+	/// 部分应用的结构。错误原样向上传递（[`Store::open`] 失败），下次启动重试。
+	fn apply_migrations(conn: &Connection, from: i64, target: i64) -> anyhow::Result<()> {
+		let mut version = from;
+		while version < target {
+			let step = Self::migration_from(version).ok_or_else(|| {
+				anyhow::anyhow!(
+					"no migration registered for core.db v{version} -> v{}",
+					version + 1
+				)
+			})?;
+
+			let tx = conn.unchecked_transaction()?;
+			(step.apply)(&tx)?;
+			tx.pragma_update(None, "user_version", step.from + 1)?;
+			tx.commit()?;
+
+			eprintln!(
+				"[store] core.db migrated v{} -> v{}: {}",
+				step.from,
+				step.from + 1,
+				step.description
+			);
+			version = step.from + 1;
+		}
+		Ok(())
+	}
+
+	/// 目标版本（v4）的完整结构指纹。
+	///
+	/// 在 [`Store::schema_core_ready`] 的表/列/外键检查之上，再要求 v4 新增索引
+	/// `idx_items_kind_created` 存在：v3 库没有它（迁移会建），v4 库缺它则说明被
+	/// 外部改坏或迁移未生效，按损坏走 drop-and-rebuild。
 	fn schema_ready(conn: &Connection) -> anyhow::Result<bool> {
+		if !Self::schema_core_ready(conn)? {
+			return Ok(false);
+		}
+		let has_kind_created_idx: i64 = conn.query_row(
+			"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_items_kind_created'",
+			[],
+			|r| r.get(0),
+		)?;
+		Ok(has_kind_created_idx > 0)
+	}
+
+	/// v3 与 v4 共有的结构指纹：表、关键列与外键。
+	///
+	/// 迁移前的源结构检查与目标版本检查都复用它；v4 新增的索引由
+	/// [`Store::schema_ready`] 单独追加。旧 migrate_v2 时代 `user_version=2` 但
+	/// `items` 没有 `files_json`，v1 时代也没有 `trusted_peers` / `peer_rules`，
+	/// 更早的 `content_cache` 没有 `durable`——只要关键表或关键列缺失就视为
+	/// 无法迁移的旧库/损坏库。
+	fn schema_core_ready(conn: &Connection) -> anyhow::Result<bool> {
 		for table in [
 			"items",
 			"history",
@@ -1625,6 +1858,355 @@ mod schema_tests {
 			.unwrap()
 			.map(Result::unwrap)
 			.collect()
+	}
+
+	fn count_rows(conn: &Connection, table: &str) -> i64 {
+		conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+			.unwrap()
+	}
+
+	fn index_exists(conn: &Connection, name: &str) -> bool {
+		let n: i64 = conn
+			.query_row(
+				"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+				params![name],
+				|r| r.get(0),
+			)
+			.unwrap();
+		n > 0
+	}
+
+	/// v3 的完整 DDL（测试专用）：用于构造“升级前”的旧库。
+	///
+	/// 与 v4 的 [`SCHEMA_DDL`] 唯一区别是没有 `idx_items_kind_created`——这正是
+	/// v3 -> v4 迁移要补上的增量。
+	const V3_SCHEMA_DDL: &str = r"
+        CREATE TABLE items (
+          item_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL CHECK (kind IN ('text','image','file_list')),
+          owner_device_id TEXT NOT NULL,
+          created_ts_ms INTEGER NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          mime TEXT NOT NULL,
+          sha256_hex TEXT NOT NULL,
+          preview_json TEXT,
+          files_json TEXT
+        );
+        CREATE INDEX idx_items_created ON items(created_ts_ms);
+        CREATE INDEX idx_items_sha256 ON items(sha256_hex);
+        CREATE INDEX idx_items_owner_created ON items(owner_device_id, created_ts_ms);
+
+        CREATE TABLE history (
+          history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          account_uid TEXT NOT NULL,
+          item_id TEXT NOT NULL REFERENCES items(item_id) ON DELETE CASCADE,
+          sort_ts_ms INTEGER NOT NULL,
+          source_device_id TEXT,
+          is_deleted INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_history_account_sort ON history(account_uid, sort_ts_ms DESC);
+        CREATE INDEX idx_history_item ON history(item_id);
+        CREATE UNIQUE INDEX idx_history_account_item ON history(account_uid, item_id);
+
+        CREATE TABLE content_cache (
+          sha256_hex TEXT PRIMARY KEY,
+          total_bytes INTEGER NOT NULL,
+          present INTEGER NOT NULL,
+          durable INTEGER NOT NULL DEFAULT 1,
+          last_access_ts_ms INTEGER NOT NULL,
+          created_ts_ms INTEGER NOT NULL
+        );
+        CREATE INDEX idx_cache_lru ON content_cache(present, last_access_ts_ms);
+        CREATE INDEX idx_cache_size ON content_cache(present, total_bytes);
+        CREATE INDEX idx_cache_durable ON content_cache(durable);
+
+        CREATE TABLE trusted_peers (
+            account_uid TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            fingerprint_sha256 TEXT NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (account_uid, device_id)
+        );
+
+        CREATE TABLE peer_rules (
+            account_uid TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            share_to_peer INTEGER NOT NULL DEFAULT 1,
+            accept_from_peer INTEGER NOT NULL DEFAULT 1,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (account_uid, device_id)
+        );
+    ";
+
+	/// 建一个结构完整、版本号为 3、且每张表都有数据的旧库。
+	fn create_v3_db(dir: &std::path::Path) {
+		let conn = Connection::open(dir.join("core.db")).unwrap();
+		conn.execute_batch(V3_SCHEMA_DDL).unwrap();
+		conn.execute_batch(
+			r#"
+            INSERT INTO content_cache
+                (sha256_hex, total_bytes, present, durable, last_access_ts_ms, created_ts_ms)
+                VALUES ('sha-v3-a', 10, 1, 1, 100, 90),
+                       ('sha-v3-b', 20, 0, 1, 200, 190);
+            INSERT INTO items
+                (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex, preview_json, files_json)
+                VALUES ('item-v3-a', 'text', 'dev-v3', 1000, 10, 'text/plain', 'sha-v3-a', '{"text":"hello-v3"}', '[]'),
+                       ('item-v3-b', 'image', 'dev-v3', 2000, 20, 'image/png', 'sha-v3-b', '{}', '[]');
+            INSERT INTO history(account_uid, item_id, sort_ts_ms, source_device_id)
+                VALUES ('acct-v3', 'item-v3-a', 1000, 'dev-v3');
+            INSERT INTO trusted_peers(account_uid, device_id, fingerprint_sha256, updated_at_ms)
+                VALUES ('acct-v3', 'peer-v3', 'fingerprint-v3', 1234);
+            INSERT INTO peer_rules(account_uid, device_id, share_to_peer, accept_from_peer, updated_at_ms)
+                VALUES ('acct-v3', 'peer-v3', 0, 1, 1234);
+            PRAGMA user_version = 3;
+            "#,
+		)
+		.unwrap();
+		drop(conn);
+	}
+
+	#[test]
+	fn fresh_db_is_v4_with_all_tables_and_indices() {
+		let dir = tempfile::tempdir().unwrap();
+		let store = Store::open(dir.path()).unwrap();
+		assert_eq!(SCHEMA_VERSION, 4);
+		assert_eq!(user_version(&store.conn), SCHEMA_VERSION);
+		for table in [
+			"items",
+			"history",
+			"content_cache",
+			"trusted_peers",
+			"peer_rules",
+		] {
+			let exists: i64 = store
+				.conn
+				.query_row(
+					"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+					params![table],
+					|r| r.get(0),
+				)
+				.unwrap();
+			assert_eq!(exists, 1, "missing table {table}");
+		}
+		for index in [
+			"idx_items_created",
+			"idx_items_sha256",
+			"idx_items_owner_created",
+			"idx_items_kind_created",
+			"idx_history_account_sort",
+			"idx_history_item",
+			"idx_history_account_item",
+			"idx_cache_lru",
+			"idx_cache_size",
+			"idx_cache_durable",
+		] {
+			assert!(
+				index_exists(&store.conn, index),
+				"fresh v4 db is missing index {index}"
+			);
+		}
+	}
+
+	/// P1 核心用例：一个 v3 库（每张表都有行）打开后必须**迁移**到 v4，而不是重建；
+	/// 行数据、身份/策略表全部保留，新索引存在，且再打开不会重复迁移。
+	#[test]
+	fn v3_db_migrates_to_v4_and_preserves_all_rows() {
+		let dir = tempfile::tempdir().unwrap();
+		create_v3_db(dir.path());
+
+		let store = Store::open(dir.path()).unwrap();
+		assert!(!store.rebuilt, "v3 -> v4 是迁移，绝不能走 drop-and-rebuild");
+		assert_eq!(user_version(&store.conn), SCHEMA_VERSION);
+		assert!(index_exists(&store.conn, "idx_items_kind_created"));
+		assert_eq!(count_rows(&store.conn, "items"), 2);
+		assert_eq!(count_rows(&store.conn, "content_cache"), 2);
+		assert_eq!(count_rows(&store.conn, "history"), 1);
+		assert_eq!(count_rows(&store.conn, "trusted_peers"), 1);
+		assert_eq!(count_rows(&store.conn, "peer_rules"), 1);
+
+		// 保留的不只是行数：列内容也必须原样可读。
+		let (mime, preview, files): (String, String, String) = store
+			.conn
+			.query_row(
+				"SELECT mime, preview_json, files_json FROM items WHERE item_id='item-v3-a'",
+				[],
+				|r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+			)
+			.unwrap();
+		assert_eq!(mime, "text/plain");
+		assert_eq!(preview, r#"{"text":"hello-v3"}"#);
+		assert_eq!(files, "[]");
+		drop(store);
+
+		// 第二次打开：版本/指纹都匹配，不应再迁移或重建。
+		let reopened = Store::open(dir.path()).unwrap();
+		assert!(!reopened.rebuilt);
+		assert_eq!(user_version(&reopened.conn), SCHEMA_VERSION);
+		assert_eq!(count_rows(&reopened.conn, "items"), 2);
+	}
+
+	/// P1 失败语义：迁移步骤报错时 `open` 返回 Err，事务回滚，库停留在旧版本且
+	/// 数据完好；清除注入后同一库可以正常迁移。
+	#[test]
+	fn failed_migration_returns_err_and_leaves_db_at_previous_version() {
+		let dir = tempfile::tempdir().unwrap();
+		create_v3_db(dir.path());
+
+		test_hooks::set_fail_v4_migration(true);
+		let result = Store::open(dir.path());
+		test_hooks::set_fail_v4_migration(false);
+
+		let err = result
+			.err()
+			.expect("migration failure must make Store::open fail");
+		assert!(
+			format!("{err:#}").contains("injected failure"),
+			"unexpected error: {err:#}"
+		);
+
+		// 直接读原库：版本号仍为 3、行数据完好、失败步骤的索引已回滚。
+		let conn = Connection::open(dir.path().join("core.db")).unwrap();
+		assert_eq!(user_version(&conn), 3, "失败的迁移不得推进 user_version");
+		assert_eq!(count_rows(&conn, "items"), 2);
+		assert_eq!(count_rows(&conn, "trusted_peers"), 1);
+		assert!(
+			!index_exists(&conn, "idx_items_kind_created"),
+			"失败步骤的 DDL 必须随事务回滚"
+		);
+		drop(conn);
+
+		let store = Store::open(dir.path()).unwrap();
+		assert!(!store.rebuilt);
+		assert_eq!(user_version(&store.conn), SCHEMA_VERSION);
+		assert!(index_exists(&store.conn, "idx_items_kind_created"));
+		assert_eq!(count_rows(&store.conn, "items"), 2);
+	}
+
+	/// P1 降级保护：`user_version` 高于当前构建时返回清晰错误，绝不写库/清库。
+	#[test]
+	fn newer_schema_version_is_rejected_without_data_loss() {
+		let dir = tempfile::tempdir().unwrap();
+		{
+			let store = Store::open(dir.path()).unwrap();
+			store
+				.conn
+				.execute(
+					r"INSERT INTO items
+                       (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex)
+                       VALUES ('item-future', 'text', 'dev', 1, 1, 'text/plain', 'sha-future')",
+					[],
+				)
+				.unwrap();
+		}
+		{
+			let conn = Connection::open(dir.path().join("core.db")).unwrap();
+			conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+				.unwrap();
+		}
+
+		let err = Store::open(dir.path())
+			.err()
+			.expect("newer schema version must be rejected");
+		let msg = format!("{err:#}");
+		assert!(
+			msg.contains("newer than this build supports"),
+			"error must explain the downgrade: {msg}"
+		);
+		assert!(
+			msg.contains(&(SCHEMA_VERSION + 1).to_string()),
+			"error must include the found version: {msg}"
+		);
+
+		let conn = Connection::open(dir.path().join("core.db")).unwrap();
+		assert_eq!(
+			user_version(&conn),
+			SCHEMA_VERSION + 1,
+			"不得改写更高版本号"
+		);
+		assert_eq!(count_rows(&conn, "items"), 1, "拒绝打开时不得清库");
+	}
+
+	/// P1 损坏兜底：版本号已是目标版本、但指纹（v4 索引）缺失时，仍按旧策略
+	/// drop-and-rebuild，而不是带着坏结构运行。
+	#[test]
+	fn target_version_fingerprint_mismatch_rebuilds() {
+		let dir = tempfile::tempdir().unwrap();
+		{
+			let store = Store::open(dir.path()).unwrap();
+			store
+				.conn
+				.execute(
+					r"INSERT INTO items
+                       (item_id, kind, owner_device_id, created_ts_ms, size_bytes, mime, sha256_hex)
+                       VALUES ('item-corrupt', 'text', 'dev', 1, 1, 'text/plain', 'sha-corrupt')",
+					[],
+				)
+				.unwrap();
+			store
+				.conn
+				.execute_batch("DROP INDEX idx_items_kind_created;")
+				.unwrap();
+		}
+
+		let reopened = Store::open(dir.path()).unwrap();
+		assert!(reopened.rebuilt, "目标版本缺索引时必须走损坏兜底重建");
+		assert_eq!(user_version(&reopened.conn), SCHEMA_VERSION);
+		assert!(index_exists(&reopened.conn, "idx_items_kind_created"));
+		assert_eq!(
+			count_rows(&reopened.conn, "items"),
+			0,
+			"损坏兜底会清空内容表（这是唯一允许丢数据的路径）"
+		);
+	}
+
+	/// P4：core.db 连接必须带上调优后的 PRAGMA。
+	#[test]
+	fn init_pragmas_are_applied() {
+		let dir = tempfile::tempdir().unwrap();
+		let store = Store::open(dir.path()).unwrap();
+
+		let cache_size: i64 = store
+			.conn
+			.pragma_query_value(None, "cache_size", |r| r.get(0))
+			.unwrap();
+		assert_eq!(cache_size, -16000, "cache_size 必须为 16 MB（负数 = KiB）");
+
+		let journal_size_limit: i64 = store
+			.conn
+			.pragma_query_value(None, "journal_size_limit", |r| r.get(0))
+			.unwrap();
+		assert_eq!(journal_size_limit, 8_388_608);
+
+		let temp_store: i64 = store
+			.conn
+			.pragma_query_value(None, "temp_store", |r| r.get(0))
+			.unwrap();
+		assert_eq!(temp_store, 2, "temp_store=2 表示 MEMORY");
+
+		let journal_mode: String = store
+			.conn
+			.pragma_query_value(None, "journal_mode", |r| r.get(0))
+			.unwrap();
+		assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+		assert_eq!(
+			store
+				.conn
+				.pragma_query_value::<i64, _>(None, "synchronous", |r| r.get(0))
+				.unwrap(),
+			1,
+			"synchronous=NORMAL(1)"
+		);
+
+		// mmap_size 在禁用 mmap 的 SQLite 构建（SQLITE_MAX_MMAP_SIZE=0）上会读回 0；
+		// 本机 bundled 构建应等于设置值。两种都接受，但绝不接受其它数值。
+		let mmap_size: i64 = store
+			.conn
+			.pragma_query_value(None, "mmap_size", |r| r.get(0))
+			.unwrap();
+		assert!(
+			mmap_size == 0 || mmap_size == 67_108_864,
+			"unexpected mmap_size {mmap_size}"
+		);
 	}
 
 	#[test]
