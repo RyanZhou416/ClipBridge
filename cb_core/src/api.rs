@@ -17,6 +17,7 @@ use crate::{
 	logs::LogSink,
 	logs::LogStore,
 	store::Store,
+	store::StoreReader,
 	util::now_ms,
 };
 
@@ -38,6 +39,50 @@ const DURABILITY_SWEEP_BATCH: i64 = 64;
 /// 历史行就永远不会被清理。这里复用已有的 `cb-durability-sync` 维护线程，
 /// 在它自己的 ticker 上做周期保留（不是每条消息/每次写都做）。
 const HISTORY_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
+
+/// P3：单次维护窗口最多归还给文件系统多少个 `freelist` 页
+/// （`PRAGMA incremental_vacuum(N)` 的 N）。有界是为了不长时间占住写连接。
+const INCREMENTAL_VACUUM_PAGES_PER_CALL: i64 = 256;
+
+/// P3：单次维护窗口最多删除多少行孤儿 `items` / 无引用 `content_cache` 行。
+const COMPACTION_ROWS_PER_CALL: i64 = 512;
+
+/// P3：一次有界的空间回收（调用方必须已持有 `Store` 写连接）。
+///
+/// 顺序很重要：先删没有 history 引用的孤儿 items，再判定 content_cache 引用，
+/// 这样本轮刚变成孤儿的 item 不会继续“保住”它引用的 cache 行；最后把
+/// freelist 上最多 [`INCREMENTAL_VACUUM_PAGES_PER_CALL`] 页归还文件系统。
+///
+/// 返回 `(孤儿 items, 无引用 cache 行, 归还页数)`。所有单步都有上界，
+/// 不随库增长（详见 [`Store::compact_unreferenced_cache_rows`] 的流式实现）。
+fn bounded_space_reclamation(store: &mut Store) -> anyhow::Result<(i64, i64, i64)> {
+	let items_deleted = store.compact_orphan_items(COMPACTION_ROWS_PER_CALL)?;
+	let cache_deleted = store.compact_unreferenced_cache_rows(COMPACTION_ROWS_PER_CALL)?;
+	let pages_reclaimed = store.incremental_vacuum(INCREMENTAL_VACUUM_PAGES_PER_CALL)?;
+	Ok((items_deleted, cache_deleted, pages_reclaimed))
+}
+
+/// P3：记录一次空间回收的计数（全为 0 时不刷日志）。
+fn log_space_reclamation(log_sink: &LogSink, reason: &str, counts: (i64, i64, i64)) {
+	let (items_deleted, cache_deleted, pages_reclaimed) = counts;
+	if items_deleted == 0 && cache_deleted == 0 && pages_reclaimed == 0 {
+		return;
+	}
+	log_sink.log_info(
+		"GC",
+		&format!(
+			"Space reclamation ({reason}): deleted {items_deleted} orphan item(s) and \
+             {cache_deleted} unreferenced content_cache row(s); reclaimed {pages_reclaimed} \
+             freelist page(s) (per-call caps: {COMPACTION_ROWS_PER_CALL} rows / \
+             {INCREMENTAL_VACUUM_PAGES_PER_CALL} pages)"
+		),
+		Some(&format!(
+			"空间回收（{reason}）：删除 {items_deleted} 条孤儿 item、{cache_deleted} 条无引用缓存行；\
+             归还 {pages_reclaimed} 个空闲页（单次上限 {COMPACTION_ROWS_PER_CALL} 行 / \
+             {INCREMENTAL_VACUUM_PAGES_PER_CALL} 页）"
+		)),
+	);
+}
 
 /// F12：历史保留任务的配置（由 `Core::init` 解析一次后交给维护线程）。
 pub(crate) struct HistoryRetention {
@@ -541,11 +586,19 @@ impl Core {
 				.as_deref(),
 		);
 
+		// Task B：查询只读连接池。写路径继续使用 `store_arc`（唯一写连接）；
+		// FFI 的 history / item / cache·activity stats 查询改走独立只读连接，
+		// 不再排在写连接（WAL 自动 checkpoint/落盘）持有的 `Mutex<Store>` 后面。
+		// 池在 `Store::open` 完成 schema 迁移之后创建，保证读连接看到 v5 结构。
+		// 连接本身惰性打开，不增加启动耗时。
+		let store_reader = StoreReader::open(&cfg.data_dir);
+
 		let inner = Inner {
 			core_config: cfg,
 			sink,
 			is_shutdown: AtomicBool::new(false),
 			store: store_arc,
+			store_reader,
 			log_store: log_store_arc,
 			log_sink,
 			cas,
@@ -827,6 +880,8 @@ impl Core {
 
 		// 2) Cache GC（LRU）
 		let max_cas = self.inner.core_config.app_config.gc_cas_max_bytes;
+		// P3：本轮是否真的驱逐了 CAS blob（决定要不要做一次有界的空间回收）。
+		let mut cache_evicted = false;
 		if max_cas > 0 {
 			// 廉价预检：`SELECT SUM(total_bytes) FROM content_cache WHERE present=1`
 			// 走 idx_cache_size(present,total_bytes) 索引，不打开任何文件。它只是
@@ -879,6 +934,7 @@ impl Core {
 					let Ok(freed) = self.inner.cas.remove_blob(&sha) else {
 						break;
 					};
+					cache_evicted = true;
 					{
 						let mut store = self.inner.store.lock().unwrap();
 						store.mark_cache_missing(&sha, now)?;
@@ -891,6 +947,19 @@ impl Core {
 					cur = cur.saturating_sub(freed);
 				}
 			}
+		}
+
+		// 3) P3 空间回收（有界）。
+		//
+		// 只在真正会产生孤儿行/空闲页的维护窗口执行：启动、历史硬删除、CAS 驱逐。
+		// 普通 `AfterIngest` 不扫描 items（否则每次 ingest 都多一次全表维护）；
+		// 周期兜底由后台维护线程（`run_history_retention`）每 60 s 执行一次。
+		if reason == "Startup" || purged_rows > 0 || cache_evicted {
+			let counts = {
+				let mut store = self.inner.store.lock().unwrap();
+				bounded_space_reclamation(&mut store)?
+			};
+			log_space_reclamation(&self.inner.log_sink, reason, counts);
 		}
 		Ok(())
 	}
@@ -1183,8 +1252,12 @@ impl Core {
 		if self.inner.is_shutdown.load(Ordering::Acquire) {
 			anyhow::bail!("core already shutdown");
 		}
-		let store = self.inner.store.lock().unwrap();
-		store.list_history_metas_paged(&self.inner.core_config.account_uid, limit, cursor)
+		// Task B：查询走只读连接池，不再等待写连接的 WAL checkpoint。
+		self.inner.store_reader.list_history_metas_paged(
+			&self.inner.core_config.account_uid,
+			limit,
+			cursor,
+		)
 	}
 
 	/// 本地删除：软删除 + 从 CAS 移除 blob + 发出 item_deleted 事件
@@ -1227,12 +1300,8 @@ impl Core {
 		if self.inner.is_shutdown.load(Ordering::Acquire) {
 			anyhow::bail!("core already shutdown");
 		}
-		let store = self
-			.inner
-			.store
-			.lock()
-			.map_err(|_| anyhow::anyhow!("store mutex poisoned"))?;
-		store.get_item_meta_by_id(item_id)
+		// Task B：只读连接池（WAL 快照），与写路径解耦。
+		self.inner.store_reader.get_item_meta_by_id(item_id)
 	}
 
 	/// 统计窗口归一化，保持旧 FFI 行为：`end_ts_ms==0` 取当前时间；
@@ -1272,10 +1341,9 @@ impl Core {
 		let bucket_sec = Self::normalize_bucket_sec(bucket_sec, 10);
 		let bucket_ms = i64::from(bucket_sec) * 1000;
 
-		let (rows, current_cache_bytes) = {
-			let store = self.inner.store.lock().unwrap();
-			(store.list_present_cache_rows()?, store.sum_present_bytes()?)
-		};
+		// Task B：统计查询走只读池；两次查询各自拿一条快照连接。
+		let rows = self.inner.store_reader.list_present_cache_rows()?;
+		let current_cache_bytes = self.inner.store_reader.sum_present_bytes()?;
 
 		let mut baseline = 0i64;
 		let mut buckets: Vec<(i64, i64)> = Vec::new();
@@ -1365,10 +1433,11 @@ impl Core {
 		let bucket_sec = Self::normalize_bucket_sec(bucket_sec, 60);
 		let bucket_ms = i64::from(bucket_sec) * 1000;
 
-		let buckets = {
-			let store = self.inner.store.lock().unwrap();
-			store.activity_buckets(start_ts, end_ts, bucket_ms)?
-		};
+		// Task B：活动统计走只读池，避免被写连接的 checkpoint 拖慢。
+		let buckets = self
+			.inner
+			.store_reader
+			.activity_buckets(start_ts, end_ts, bucket_ms)?;
 
 		let series: Vec<serde_json::Value> = buckets
 			.iter()
@@ -1544,7 +1613,8 @@ pub(crate) fn ensure_durability_worker(
 	}
 }
 
-/// F12：维护线程上的历史行数保留（阻塞 SQLite 全部放进 `spawn_blocking`）。
+/// F12 + P3：维护线程上的历史行数保留与有界空间回收（阻塞 SQLite 全部放进
+/// `spawn_blocking`）。
 async fn run_history_retention(
 	store: &Arc<Mutex<Store>>,
 	cfg: &HistoryRetention,
@@ -1553,33 +1623,45 @@ async fn run_history_retention(
 	let store_for_task = Arc::clone(store);
 	let account_uid = cfg.account_uid.clone();
 	let keep_rows = cfg.keep_rows;
-	let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(i64, i64)> {
-		if keep_rows <= 0 {
-			// 保留已关闭：不要为一次空跑去做 COUNT。
-			return Ok((0, 0));
-		}
-		let mut guard = store_for_task.lock().unwrap();
-		let total = guard.history_total_count_for_account(&account_uid)?;
-		if keep_rows > 0 && total > keep_rows {
-			let deleted = guard.purge_history_oldest_excess(&account_uid, total - keep_rows)?;
-			Ok((total, deleted))
-		} else {
-			Ok((total, 0))
-		}
-	})
-	.await;
+	let result =
+		tokio::task::spawn_blocking(move || -> anyhow::Result<(i64, i64, (i64, i64, i64))> {
+			let mut guard = store_for_task.lock().unwrap();
+
+			// 保留已关闭（keep_rows <= 0）时不付 COUNT 的成本；但周期空间回收仍要跑，
+			// 否则上一轮留下的空闲页/孤儿行只能等下次启动才处理。
+			let (total, deleted) = if keep_rows > 0 {
+				let total = guard.history_total_count_for_account(&account_uid)?;
+				let deleted = if total > keep_rows {
+					guard.purge_history_oldest_excess(&account_uid, total - keep_rows)?
+				} else {
+					0
+				};
+				(total, deleted)
+			} else {
+				(0, 0)
+			};
+
+			// P3：周期有界空间回收。顺序/上界见 `bounded_space_reclamation`。
+			let reclamation = bounded_space_reclamation(&mut guard)?;
+			Ok((total, deleted, reclamation))
+		})
+		.await;
 	match result {
-		Ok(Ok((_total, 0))) => {}
-		Ok(Ok((total, deleted))) => log_sink.log_info(
-			"GC",
-			&format!(
-				"History retention (periodic): hard-deleted {deleted} row(s) beyond the newest \
-                 {keep_rows} per account (was {total} rows)"
-			),
-			Some(&format!(
-				"历史保留（周期）：按每账号最新 {keep_rows} 条硬删除 {deleted} 行（原 {total} 行）"
-			)),
-		),
+		Ok(Ok((total, deleted, reclamation))) => {
+			if deleted > 0 {
+				log_sink.log_info(
+					"GC",
+					&format!(
+						"History retention (periodic): hard-deleted {deleted} row(s) beyond the newest \
+                         {keep_rows} per account (was {total} rows)"
+					),
+					Some(&format!(
+						"历史保留（周期）：按每账号最新 {keep_rows} 条硬删除 {deleted} 行（原 {total} 行）"
+					)),
+				);
+			}
+			log_space_reclamation(log_sink, "Periodic", reclamation);
+		}
 		Ok(Err(e)) => log_sink.log_warn(
 			"GC",
 			&format!("History retention (periodic) failed: {e}"),
@@ -1895,6 +1977,11 @@ pub struct Inner {
 	pub sink: Arc<dyn CoreEventSink>,
 	pub is_shutdown: AtomicBool,
 	pub store: Arc<Mutex<Store>>,
+	/// 查询专用只读连接池（WAL 快照；`query_only=ON`）。
+	///
+	/// 只服务只读查询（history/item/stats）；写路径与需要事务一致性的读取
+	/// （GC、对账、actor 元数据）继续用 `store` 的写连接。
+	pub store_reader: StoreReader,
 	/// 查询/删除路径共享的同步 LogStore（FFI 线程使用，允许阻塞）。
 	pub log_store: Arc<Mutex<LogStore>>,
 	/// 运行时路径使用的非阻塞日志入口（内部有专用 writer 线程）。

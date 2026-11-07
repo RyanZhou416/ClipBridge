@@ -1,5 +1,30 @@
 use super::common::*;
 
+use crate::model::{ItemContent, ItemKind, ItemMeta, ItemPreview};
+
+fn gc_text_meta(i: i64) -> ItemMeta {
+	ItemMeta {
+		ty: "ItemMeta".to_string(),
+		item_id: format!("item-gc-{i:03}"),
+		kind: ItemKind::Text,
+		created_ts_ms: i,
+		source_device_id: "peer-a".to_string(),
+		source_device_name: None,
+		size_bytes: 8,
+		preview: ItemPreview {
+			text: Some(format!("row {i}")),
+			..Default::default()
+		},
+		content: ItemContent {
+			mime: "text/plain".to_string(),
+			sha256: format!("sha-gc-{i:03}"),
+			total_bytes: 8,
+		},
+		files: Vec::new(),
+		expires_ts_ms: None,
+	}
+}
+
 #[test]
 fn gc_evicts_lru_when_over_cap() {
 	// cap = 50 bytes
@@ -44,4 +69,55 @@ fn gc_evicts_lru_when_over_cap() {
 
 	assert!(!p1);
 	assert!(p2);
+}
+
+/// P3：历史行被硬删除（保留策略）之后，`run_gc` 的有界空间回收必须删掉
+/// 变成孤儿的 items 与无引用的 content_cache 行，同时保留仍有 history 引用的行。
+#[test]
+fn run_gc_reclaims_orphans_after_history_hard_delete() {
+	let (core, _dirs) = mk_core("gc-space-reclaim", 50_000, 1_i64 << 40);
+	let store = &core.inner.store;
+
+	{
+		let mut guard = store.lock().unwrap();
+		for i in 0..20 {
+			guard
+				.insert_remote_item("acct-uid-1", &gc_text_meta(i), i)
+				.unwrap();
+		}
+		// 模拟历史保留：硬删除最旧的 15 行 history（items 暂成孤儿）。
+		assert_eq!(
+			guard.purge_history_oldest_excess("acct-uid-1", 15).unwrap(),
+			15
+		);
+	}
+	let count = |sql: &str| -> i64 {
+		store
+			.lock()
+			.unwrap()
+			.conn
+			.query_row(sql, [], |r| r.get(0))
+			.unwrap()
+	};
+	assert_eq!(count("SELECT COUNT(*) FROM items"), 20);
+
+	// 启动路径（reason == "Startup"）触发有界空间回收；生产环境由启动 /
+	// 历史硬删除 / CAS 驱逐触发，周期兜底在后台维护线程。
+	core.run_gc("Startup").unwrap();
+
+	assert_eq!(
+		count("SELECT COUNT(*) FROM items"),
+		5,
+		"只保留仍有 history 行引用的 5 条 items"
+	);
+	assert_eq!(
+		count("SELECT COUNT(*) FROM content_cache"),
+		5,
+		"孤儿 items 的 present=0 cache 行必须一并回收"
+	);
+	// 存活历史仍可读（读路径走只读连接池）。
+	let visible = core.list_history(100, None).unwrap();
+	assert_eq!(visible.len(), 5, "存活历史不得被空间回收误删");
+
+	core.shutdown();
 }
