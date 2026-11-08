@@ -1,4 +1,4 @@
-# ADR-004：Windows 分发渠道与安装形态（v4，定稿）
+# ADR-004：Windows 分发渠道与安装形态（v4.1，定稿）
 
 - 状态：**定稿，待实施**（v1 初稿 → v2 三路评审 → v3 成熟实践采纳 → v4 四路评审 + 源码对照）
 - 日期：2026-11-08
@@ -13,12 +13,13 @@
 |---|---|---|
 | 两个 MSI 怎么构建 | **一个 wixproj，`PerUser` 定义构建两遍**；`OutputName`/`OutputPath`/`IntermediateOutputPath` 按变体分开（MachineSetup / UserSetup），共享 `Product.wxs` | PowerToys `PowerToysInstallerVNext.wixproj`（`PerUser` 定义 + 两套 OutputPath） |
 | machine / user 的 UpgradeCode | **两套独立 UpgradeCode**；machine 沿用现有 GUID（可升级现场），user 用新 GUID；bundle 用 `util:ProductSearch` **同时探测两者** | PowerToys `PowerToys.wxs:41-42`（ProductSearch 两个 UpgradeCode） |
-| per-user MSI 的 ARP 会不会落 HKLM | 会（WiX 官方承认"pure per-user package writes Uninstall key to HKLM"），但 **Burn 包 MSI 时会自动传 `ARPSYSTEMCOMPONENT=1`**，winget 跳过 SystemComponent 条目 → 用户看到的是 **bundle 的 HKCU ARP** | Burn 行为（SO 19803280）、winget-cli#6063、FireGiant 2026-08-26 会议纪要 |
+| per-user MSI 的 ARP 会不会落 HKLM | 会；**Burn 不会自动传 ARPSYSTEMCOMPONENT**（WiX Burn 源码 0 命中）→ bundle 里必须显式 MsiProperty ARPSYSTEMCOMPONENT=1；winget 跳过 SystemComponent 条目 → 用户看到 **bundle 的 HKCU ARP** | WiX Burn 源码 + winget-cli#6063 |
 | 安装目录 | machine：`[ProgramFiles64Folder]\ClipBridge`；user：**显式** `[LocalAppDataFolder]\Programs\ClipBridge`（不依赖隐式重定向） | MS Installation Context（per-user 重定向存在，但显式更稳；A 的 spike 建议） |
 | 注册表根/开始菜单要不要参数化 | **不需要**：注册表根用 `HKMU`（-1 → machine=HKLM / user=HKCU）；`ProgramMenuFolder` 随 ALLUSERS 自动切换 | MS Installation Context |
 | DesktopFolder 含义 | per-machine 下 `DesktopFolder` 本身就是 **All Users 桌面**，不是"安装者桌面"；MSI **没有** `CommonDesktopFolder` | MS Installation Context（A/B 一致） |
 | RemoveFolderEx | **目录 id 不可用**：属性必须在 `CostInitialize` 之前解析，而 Directory 属性要到 `CostFinalize` 才有值 → 用 **Remember Property**（安装时写注册表，卸载时 RegistrySearch 读回） | WiX 官方 RemoveFolderEx 文档 |
-| MSIX 数据 | `LocalState` + 首启导入；导入用 **`export_backup`（VACUUM INTO 一致性快照）**，不要直接拷活库 | 官方虚拟化文档 + 仓库已有 `export_backup` |
+| MSI 静默安装的互斥检测 | 标准 RegistrySearch 不够，**AppSearch 必须同时排进 InstallUISequence 与 InstallExecuteSequence**；util:RegistrySearch 是 Burn 侧的（父元素 Bundle/Fragment），不能用于 MSI | MS AppSearch 文档 + WiX util 文档 |
+| MSIX 数据 | LocalState + 首启导入；**不要直接拷活库**。export_backup 需要已初始化 core（FFI 传 handle），首启登录前不可用 → 需新增无 handle 的快照函数（§5.1） | 官方虚拟化文档 + exports.rs:709 |
 | WinUI3 开机启动 | **`uap5:Extension` + `uap5:StartupTask`**，不要 `desktop:Extension` + Executable/EntryPoint | Files 的 manifest、MS Q&A |
 | 单实例 | `AppInstance` 按身份/版本分列表、跨 MSIX/MSI 不互通 → **`Global\ClipBridge-<SID>-<数据根哈希>` 互斥量 + 命名管道**；`Local\` 不够（RDP 多会话） | AppLifecycle 文档 + C/D 评审合并 |
 | release-please 触发发布 | `GITHUB_TOKEN` 创建的 tag **不触发**其它 workflow → 配 **PAT/App token**，或发布并入同一 workflow | GitHub 递归保护（多个真实仓库的修复 commit） |
@@ -55,7 +56,7 @@ Windows 壳已有 WinUI 3 应用、WiX 3.14 MSI、MSTest；目前只有 per-mach
 | D7 | 更新责任 | 本轮不做自研更新器 |
 | D8 | 版本与发布 | `Version.props` 单一来源 + release-please（PAT）+ 重写 Release 流水线 |
 | D9 | 共存 | 安装期互斥（专用键 + ProductSearch/RegistrySearch）+ 运行期互斥量/管道 |
-| D10 | EXE | Burn，fixed per-user；内部包 per-user MSI（ARP 由 Burn 自动 SystemComponent） |
+| D10 | EXE | Burn，fixed per-user；内部包 per-user MSI（bundle **显式**传 ARPSYSTEMCOMPONENT=1） |
 | D11 | MSI 工具链 | WiX 3.14（`InstallScope="perMachine|perUser"`；不需要双用途/ICE105） |
 | D12 | 设置存储 | 统一到数据根（MSIX 为 LocalState）`settings.json`，含迁移 |
 | D13 | 便携默认 | 数据随 exe（标记）；不可写回退并提示 |
@@ -107,10 +108,10 @@ dotnet publish（Release、win-x64、self-contained、R2R、瘦身）→ stage�
 - **MSIX**：`LocalFolder`（LocalState）+ `LocalCacheFolder`；设置统一到 `<LocalState>\settings.json`（D12）。
   - **导入规格**（C 的 blocker）：
     1. 检测：LocalState 无 `core.db` 且真实 `%LOCALAPPDATA%\ClipBridge\core.db` 存在；
-    2. **用 `export_backup`（VACUUM INTO）生成一致性快照**，复制快照到 LocalState（不直接拷活库）；
+    2. **一致性快照**：export_backup 需要已初始化的 core（exports.rs:709 的 handle），首启登录前不可用 → 新增**无 handle 的 cb_snapshot_db(src, dst)**（只读打开旧库 + VACUUM INTO，复用 core 的 rusqlite）或 shell 侧 Microsoft.Data.Sqlite；不要直接拷活库；
     3. 复制 `tls\`、设置、`device_id`（设置键 `Core_DeviceId`）；CAS 缓存可选导入（否则历史图片/文件悬空，需提示）；
     4. 写 sentinel（记录来源版本/时间）；失败则删除半成品、保留原数据、下次重试；
-    5. 导入后**必须重新登录**（PasswordVault 按包身份隔离，旧凭证读不到 → fail-closed Degraded）；
+    5. 凭证：PasswordVault 对**非 AppContainer 的桌面应用**是用户级共享（官方文档），full-trust MSIX 可读旧凭证；仅读不到时回退到重新登录（fail-closed Degraded），不是强制重登；
     6. 卸载重装后 sentinel 随 LocalState 消失 → 会再次导入旧真实数据：UI 明确提示"已从旧版本导入"，并提供"不再导入"开关。
   - **禁止**两个渠道同时指向同一 DB（真实 `core.db` + 私有 `-wal/-shm` = 混合损坏态）。
 - **device_id 语义**：一台机器 N 个用户 = N 个 device_id（各自数据根）；换渠道导入保留 device_id，
@@ -137,14 +138,14 @@ dotnet publish（Release、win-x64、self-contained、R2R、瘦身）→ stage�
   - heat 去 `.pdb`；恢复被抑制的 ICE03/30（先跑一遍看）。
 - 升级：machine 专用 UpgradeCode + `MajorUpgrade`。
 - 互斥：安装前检测 user 版标记（**专用键**，见 §5.7）；`LaunchCondition` 必须带 `NOT Installed`
-  （卸载/修复走同一序列，否则死锁）；静默路径用 `util:RegistrySearch`（AppSearch 只在 UI 序列）。
+  （卸载/修复走同一序列，否则死锁）；MSI 侧用标准 RegistrySearch，并把 AppSearch **同时排进 InstallUISequence 与 InstallExecuteSequence**（官方 AppSearch 文档），否则 /qn 下条件不生效。
 - 测试矩阵：install / major-upgrade / repair / uninstall；与 user 版互斥；数据保留；`/qn`。
 
 ### 5.3 per-user EXE（Burn）
 
 - **per-user MSI**（`PerUser=true`）：
   - `InstallScope="perUser"`；目录**显式** `[LocalAppDataFolder]\Programs\ClipBridge`（不依赖隐式重定向）；
-  - 注册表 `HKMU`（user→HKCU）；无 WixUI/License；`ARPSYSTEMCOMPONENT=1`（burn 也会自动传，双保险）；
+  - 注册表 `HKMU`（user→HKCU）；无 WixUI/License；`ARPSYSTEMCOMPONENT=1`（**Burn 不会自动传**，必须显式）；
   - 新 `UpgradeCode`（与 machine 不同）。
 - **bundle**（`PerUser=true`）：
   - Burn + WixStdBA；`MsiPackage Visible="no"`（默认）+ `bal:DisplayInternalUICondition="false"`；
@@ -294,9 +295,9 @@ Installers:
 
 | # | 风险 | 处理 |
 |---|---|---|
-| R1 | per-user MSI ARP 落 HKLM 导致 winget 误判 | V11 + `ARPSYSTEMCOMPONENT`（Burn 自动）+ bundle ARP |
+| R1 | per-user MSI ARP 落 HKLM 导致 winget 误判 | V11 + bundle 显式 MsiProperty ARPSYSTEMCOMPONENT=1 + bundle ARP |
 | R2 | 两 UpgradeCode 的升级/降级跨 scope | V12 + 专用标记 + `NOT Installed` |
-| R3 | `/qn` 下互斥条件失效（AppSearch 只在 UI） | 用 `util:RegistrySearch`/ProductSearch；V11 |
+| R3 | /qn 下互斥条件失效（AppSearch 只在 UI） | MSI：AppSearch 排入 execute；bundle：util:ProductSearch；V11 |
 | R4 | MSIX 导入/凭证/缓存 | 导入规格（§5.1）+ V2/V13 |
 | R5 | StartupTask/Toast | V4/V5 |
 | R6 | 双渠道 mDNS/TOFU 冲突 | 互斥量 + 文档"先退另一个" |
@@ -323,3 +324,16 @@ Installers:
 - Files：WinUI3 Store + 侧载；`unvirtualizedResources`（文件管理器正当理由）、`uap5:StartupTask`。
 - 官方文档：Single Package Authoring（仅作对照，已否决）、MSIX flexible virtualization、Store 包版本/签名、
   WiX RemoveFolderEx、AppLifecycle instancing。
+
+## 12. v4.1 验证记录（官方文档 / 源码）
+
+| 假设 | 验证结果 | 依据 |
+|---|---|---|
+| Burn 自动传 ARPSYSTEMCOMPONENT | 不成立（引擎源码 0 命中）→ 显式 MsiProperty | WiX Burn msiengine.cpp / engine.cpp / apply.cpp |
+| util:RegistrySearch 可用于 MSI | 不成立：父元素仅 Bundle/Fragment（Burn 侧） | WiX util RegistrySearch 文档 |
+| AppSearch 只在 UI 序列 | 不成立：官方要求同时排进 UI 与 execute | MS AppSearch Action 文档 |
+| PasswordVault 按包身份隔离 | 不成立：非 AppContainer 桌面应用可访问用户全部 locker | MS PasswordVault 文档 |
+| export_backup 可在未登录时用 | 不成立：FFI 需要 core handle | crates/cb_core_ffi/src/exports.rs:709 |
+| winget 支持 burn / ElevationRequirement | 成立（elevationRequired / elevationProhibited / elevatesSelf） | winget 1.10 schema |
+| PowerToys 一套 wixproj 两变体 | 成立（PerUser + 两套 OutputPath） | PowerToys PowerToysInstallerVNext.wixproj |
+| per-user 安装目录 | PowerToys 用 %LOCALAPPDATA%\PowerToys；CB 显式 %LOCALAPPDATA%\Programs\ClipBridge 合法 | PowerToys Common.wxi |
