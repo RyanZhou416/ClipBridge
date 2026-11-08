@@ -19,9 +19,18 @@ namespace ClipBridgeShell_CS.Contracts.Services;
 /// </remarks>
 public interface ICoreHostService
 {
-    CoreState State { get; }
-    string? LastError { get; }
-    CoreDiagnostics Diagnostics { get; }
+    CoreState State
+    {
+        get;
+    }
+    string? LastError
+    {
+        get;
+    }
+    CoreDiagnostics Diagnostics
+    {
+        get;
+    }
 
     event Action<CoreState>? StateChanged;
 
@@ -113,6 +122,15 @@ public interface ICoreHostService
 
     /// <summary>清空缓存；核心未就绪或句柄不可用时返回 false。</summary>
     Task<bool> ClearCacheAsync();
+
+    /// <summary>
+    /// 单向导出备份到 <paramref name="destDir"/>（目标必须为空目录或不存在）。
+    /// </summary>
+    /// <param name="destDir">备份目标目录。</param>
+    /// <param name="includeContent">是否同时复制 CAS 缓存内容（文件/图片等）。</param>
+    /// <returns>导出结果的路径、各数据库尺寸与行数。</returns>
+    /// <exception cref="InvalidOperationException">核心未就绪或核心返回错误 envelope。</exception>
+    Task<BackupInfo> ExportBackupAsync(string destDir, bool includeContent);
 
     /// <summary>清空统计数据库；核心未就绪或句柄不可用时返回 false。</summary>
     Task<bool> ClearStatsDbAsync();

@@ -1,4 +1,5 @@
 mod common;
+mod export_backup;
 mod gc;
 mod history;
 mod image;

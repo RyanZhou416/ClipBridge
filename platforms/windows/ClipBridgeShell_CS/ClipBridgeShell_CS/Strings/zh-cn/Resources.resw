@@ -929,4 +929,28 @@
   <data name="Main_ClipboardIsLocked" xml:space="preserve">
     <value>剪贴板已锁定，请先解锁</value>
   </data>
+  <data name="Settings_ExportBackup_SettingsCard.Header" xml:space="preserve">
+    <value>导出备份</value>
+  </data>
+  <data name="Settings_ExportBackup_SettingsCard.Description" xml:space="preserve">
+    <value>将元数据库、日志和可选的缓存内容导出到一个新目录（单向导出，不支持恢复）。</value>
+  </data>
+  <data name="Settings_ExportBackup_IncludeContent.Content" xml:space="preserve">
+    <value>包含缓存内容（图片/文件，可能较大）</value>
+  </data>
+  <data name="Settings_ExportBackup_Button.Content" xml:space="preserve">
+    <value>导出备份</value>
+  </data>
+  <data name="Settings_ExportBackupDone_Title" xml:space="preserve">
+    <value>备份导出完成</value>
+  </data>
+  <data name="Settings_ExportBackupDone_Content" xml:space="preserve">
+    <value>已导出到：{0}&#10;元数据库：{1} 字节&#10;日志库：{2} 字节&#10;缓存内容：{3} 字节&#10;条目：{4}，历史：{5}</value>
+  </data>
+  <data name="Settings_ExportBackupFailed" xml:space="preserve">
+    <value>导出备份失败</value>
+  </data>
+  <data name="Settings_ExportBackupCoreNotReady" xml:space="preserve">
+    <value>核心未就绪，无法导出备份。</value>
+  </data>
 </root>

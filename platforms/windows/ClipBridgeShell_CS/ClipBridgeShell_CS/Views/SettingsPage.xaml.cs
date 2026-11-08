@@ -4,9 +4,9 @@ using ClipBridgeShell_CS.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
+using Windows.Graphics.Imaging;
 using Windows.Storage;
 using Windows.Storage.Pickers;
-using Windows.Graphics.Imaging;
 using Windows.System;
 using WinUI3Localizer;
 
@@ -50,19 +50,19 @@ public sealed partial class SettingsPage : Page
     }
 
     // 每次进入页面时初始化数据
-    protected override async void OnNavigatedTo(NavigationEventArgs e)
+    protected async override void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
         await ViewModel.InitializeAsync();
-        
+
         // 初始化核心开关状态
         var coreHost = App.GetService<ICoreHostService>();
         CoreToggleSwitch.IsOn = coreHost.State == CoreState.Ready;
-        
+
         // 订阅状态变化
         coreHost.StateChanged += OnCoreStateChanged;
     }
-    
+
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         base.OnNavigatedFrom(e);
@@ -70,7 +70,7 @@ public sealed partial class SettingsPage : Page
         var coreHost = App.GetService<ICoreHostService>();
         coreHost.StateChanged -= OnCoreStateChanged;
     }
-    
+
     private void OnCoreStateChanged(CoreState state)
     {
         // 在UI线程更新开关状态
@@ -79,14 +79,14 @@ public sealed partial class SettingsPage : Page
             CoreToggleSwitch.IsOn = state == CoreState.Ready;
         });
     }
-    
+
     private async void CoreToggleSwitch_Toggled(object sender, RoutedEventArgs e)
     {
         var toggleSwitch = sender as ToggleSwitch;
         if (toggleSwitch == null) return;
-        
+
         var coreHost = App.GetService<ICoreHostService>();
-        
+
         if (toggleSwitch.IsOn)
         {
             // 开启核心
@@ -177,7 +177,7 @@ public sealed partial class SettingsPage : Page
         {
             path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
         }
-        
+
         var dlg = new ContentDialog
         {
             Title = "LocalFolder",
@@ -356,9 +356,87 @@ public sealed partial class SettingsPage : Page
         }
     }
 
-    private async void DeleteStatsDb_Click(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// 导出一次性备份（单向导出，没有恢复入口）。成功对话框展示目标目录与各部分尺寸。
+    /// </summary>
+    private async void ExportBackup_Click(object sender, RoutedEventArgs e)
     {
         var loc = Localizer.Get();
+        var coreHost = App.GetService<ICoreHostService>();
+
+        if (coreHost.State != CoreState.Ready)
+        {
+            var notReady = new ContentDialog
+            {
+                Title = loc.GetLocalizedString("Settings_ExportBackupFailed"),
+                Content = loc.GetLocalizedString("Settings_ExportBackupCoreNotReady"),
+                PrimaryButtonText = "OK",
+                XamlRoot = this.Content.XamlRoot
+            };
+            await notReady.ShowAsync();
+            return;
+        }
+
+        // 在选目录 + 导出期间禁用按钮，避免重复点击打开多个 picker / 并发导出。
+        ExportBackupButton.IsEnabled = false;
+        try
+        {
+            // WinUI 3 的 FolderPicker 必须先绑定窗口句柄，否则抛出 COMException。
+            var picker = new FolderPicker();
+            var windowHandle = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle);
+            picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
+            picker.FileTypeFilter.Add("*");
+
+            var folder = await picker.PickSingleFolderAsync();
+            if (folder is null)
+            {
+                return; // 用户取消
+            }
+
+            var includeContent = ExportBackupIncludeContent.IsChecked == true;
+            ExportBackupProgress.Visibility = Visibility.Visible;
+            ExportBackupProgress.IsActive = true;
+
+            var info = await coreHost.ExportBackupAsync(folder.Path, includeContent);
+            var done = new ContentDialog
+            {
+                Title = loc.GetLocalizedString("Settings_ExportBackupDone_Title"),
+                Content = string.Format(
+                    loc.GetLocalizedString("Settings_ExportBackupDone_Content"),
+                    info.Dest,
+                    info.CoreDbBytes,
+                    info.LogsDbBytes,
+                    info.ContentBytes,
+                    info.Items,
+                    info.History),
+                PrimaryButtonText = "OK",
+                XamlRoot = this.Content.XamlRoot
+            };
+            await done.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            var err = new ContentDialog
+            {
+                Title = loc.GetLocalizedString("Settings_ExportBackupFailed"),
+                Content = ex.Message,
+                PrimaryButtonText = "OK",
+                XamlRoot = this.Content.XamlRoot
+            };
+            await err.ShowAsync();
+        }
+        finally
+        {
+            ExportBackupProgress.IsActive = false;
+            ExportBackupProgress.Visibility = Visibility.Collapsed;
+            ExportBackupButton.IsEnabled = true;
+        }
+    }
+
+    private async void DeleteStatsDb_Click(object sender, RoutedEventArgs e)
+    {
+        _ = Localizer.Get();
 
         var confirm = new ContentDialog
         {
@@ -508,19 +586,19 @@ public sealed partial class SettingsPage : Page
         try
         {
             var loc = Localizer.Get();
-            
+
             // 创建文件选择器
             var picker = new FileOpenPicker();
             var windowHandle = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
             WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle);
-            
+
             picker.ViewMode = PickerViewMode.Thumbnail;
             picker.SuggestedStartLocation = PickerLocationId.PicturesLibrary;
             picker.FileTypeFilter.Add(".jpg");
             picker.FileTypeFilter.Add(".jpeg");
             picker.FileTypeFilter.Add(".png");
             picker.FileTypeFilter.Add(".bmp");
-            
+
             var file = await picker.PickSingleFileAsync();
             if (file == null)
                 return;
@@ -543,7 +621,7 @@ public sealed partial class SettingsPage : Page
                     var error = new ContentDialog
                     {
                         Title = loc.GetLocalizedString("Settings_BackgroundImage_InvalidSize_Title"),
-                        Content = string.Format(loc.GetLocalizedString("Settings_BackgroundImage_InvalidSize_Content"), 
+                        Content = string.Format(loc.GetLocalizedString("Settings_BackgroundImage_InvalidSize_Content"),
                             width, height, minWidth, minHeight, recommendedWidth, recommendedHeight),
                         PrimaryButtonText = "OK",
                         XamlRoot = this.Content.XamlRoot
@@ -584,7 +662,7 @@ public sealed partial class SettingsPage : Page
                 if (!Directory.Exists(imagesFolderPath)) Directory.CreateDirectory(imagesFolderPath);
                 imagesFolder = await StorageFolder.GetFolderFromPathAsync(imagesFolderPath);
             }
-            
+
             // 删除旧的背景图片（如果存在）
             if (!string.IsNullOrEmpty(ViewModel.BackgroundImagePath))
             {
@@ -604,7 +682,7 @@ public sealed partial class SettingsPage : Page
 
             // 复制新文件
             var newFile = await file.CopyAsync(imagesFolder, $"background_{DateTime.Now.Ticks}.{file.FileType.TrimStart('.')}", NameCollisionOption.ReplaceExisting);
-            
+
             // 保存路径到设置
             ViewModel.BackgroundImagePath = newFile.Path;
 
@@ -635,7 +713,7 @@ public sealed partial class SettingsPage : Page
     private async void ResetBackgroundImage_Click(object sender, RoutedEventArgs e)
     {
         var loc = Localizer.Get();
-        
+
         var confirm = new ContentDialog
         {
             Title = loc.GetLocalizedString("Settings_BackgroundImage_ResetConfirm_Title"),

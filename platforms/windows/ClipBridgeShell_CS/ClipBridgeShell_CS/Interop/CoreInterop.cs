@@ -13,7 +13,7 @@ public class SourceStats
 {
     [JsonPropertyName("components")]
     public Dictionary<string, long> Components { get; set; } = new();
-    
+
     [JsonPropertyName("categories")]
     public Dictionary<string, long> Categories { get; set; } = new();
 }
@@ -265,6 +265,11 @@ internal static class CoreInterop
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr cb_clear_cache(IntPtr h);
 
+    // CB_API const char* cb_export_backup(cb_handle* h, const char* request_json);
+    // 单向导出备份；request_json: {"dest_dir":"...","include_content":false}
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr cb_export_backup(IntPtr h, [MarshalAs(UnmanagedType.LPUTF8Str)] string request_json);
+
     // 释放非 string 类型的指针 (如 logs 返回的 json 数组可能需要通用 free)
     // 如果头文件中 cb_free_string 是通用的 free，则使用 cb_free_string 即可。
     // 鉴于原 Native.cs 使用了 cb_free，这里保留一个别名以兼容 Log 模块。
@@ -312,9 +317,9 @@ internal static class CoreInterop
         string? messageZhCn, string? exception, string? propsJson, long tsUtc, out long id)
     {
         // 手动处理可空字符串指针
-        IntPtr zhCnPtr = messageZhCn != null ? Marshal.StringToCoTaskMemUTF8(messageZhCn) : IntPtr.Zero;
-        IntPtr exPtr = exception != null ? Marshal.StringToCoTaskMemUTF8(exception) : IntPtr.Zero;
-        IntPtr propsPtr = propsJson != null ? Marshal.StringToCoTaskMemUTF8(propsJson) : IntPtr.Zero;
+        var zhCnPtr = messageZhCn != null ? Marshal.StringToCoTaskMemUTF8(messageZhCn) : IntPtr.Zero;
+        var exPtr = exception != null ? Marshal.StringToCoTaskMemUTF8(exception) : IntPtr.Zero;
+        var propsPtr = propsJson != null ? Marshal.StringToCoTaskMemUTF8(propsJson) : IntPtr.Zero;
 
         try
         {
@@ -330,8 +335,8 @@ internal static class CoreInterop
 
     internal static int LogsQueryLatestRaw(IntPtr handle, int levelMin, string? like, int limit, string? lang, out IntPtr jsonPtr)
     {
-        IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
-        IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
+        var likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
+        var langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
         try
         {
             return cb_logs_query_latest(handle, levelMin, likePtr, limit, langPtr, out jsonPtr);
@@ -345,8 +350,8 @@ internal static class CoreInterop
 
     internal static int LogsQueryAfterIdRaw(IntPtr handle, long afterId, int levelMin, string? like, int limit, string? lang, out IntPtr jsonPtr)
     {
-        IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
-        IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
+        var likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
+        var langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
         try
         {
             return cb_logs_query_after_id(handle, afterId, levelMin, likePtr, limit, langPtr, out jsonPtr);
@@ -360,8 +365,8 @@ internal static class CoreInterop
 
     internal static int LogsQueryBeforeIdRaw(IntPtr handle, long beforeId, int levelMin, string? like, int limit, string? lang, out IntPtr jsonPtr)
     {
-        IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
-        IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
+        var likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
+        var langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
         try
         {
             return cb_logs_query_before_id(handle, beforeId, levelMin, likePtr, limit, langPtr, out jsonPtr);
@@ -375,8 +380,8 @@ internal static class CoreInterop
 
     internal static int LogsQueryRangeRaw(IntPtr handle, long startMs, long endMs, int levelMin, string? like, int limit, int offset, string? lang, out IntPtr jsonPtr)
     {
-        IntPtr likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
-        IntPtr langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
+        var likePtr = like != null ? Marshal.StringToCoTaskMemUTF8(like) : IntPtr.Zero;
+        var langPtr = lang != null ? Marshal.StringToCoTaskMemUTF8(lang) : IntPtr.Zero;
         try
         {
             return cb_logs_query_range(handle, startMs, endMs, levelMin, likePtr, limit, offset, langPtr, out jsonPtr);
@@ -393,20 +398,29 @@ internal static class CoreInterop
 public sealed class CacheStatsResult
 {
     [JsonPropertyName("window")]
-    public StatsWindow? Window { get; set; }
-    
+    public StatsWindow? Window
+    {
+        get; set;
+    }
+
     [JsonPropertyName("series")]
     public List<CacheStatsPoint> Series { get; set; } = new();
-    
+
     [JsonPropertyName("current_cache_bytes")]
-    public long CurrentCacheBytes { get; set; }
+    public long CurrentCacheBytes
+    {
+        get; set;
+    }
 }
 
 public sealed class NetworkStatsResult
 {
     [JsonPropertyName("window")]
-    public StatsWindow? Window { get; set; }
-    
+    public StatsWindow? Window
+    {
+        get; set;
+    }
+
     [JsonPropertyName("series")]
     public List<NetworkStatsPoint> Series { get; set; } = new();
 }
@@ -414,56 +428,140 @@ public sealed class NetworkStatsResult
 public sealed class ActivityStatsResult
 {
     [JsonPropertyName("window")]
-    public StatsWindow? Window { get; set; }
-    
+    public StatsWindow? Window
+    {
+        get; set;
+    }
+
     [JsonPropertyName("series")]
     public List<ActivityStatsPoint> Series { get; set; } = new();
+}
+
+/// <summary>
+/// <c>cb_export_backup</c> 成功时的 data 负载（对应 Rust 的 <c>BackupInfo</c>）。
+/// </summary>
+public sealed class BackupInfo
+{
+    [JsonPropertyName("dest")]
+    public string Dest { get; set; } = string.Empty;
+
+    [JsonPropertyName("core_db_bytes")]
+    public long CoreDbBytes
+    {
+        get; set;
+    }
+
+    [JsonPropertyName("logs_db_bytes")]
+    public long LogsDbBytes
+    {
+        get; set;
+    }
+
+    [JsonPropertyName("content_bytes")]
+    public long ContentBytes
+    {
+        get; set;
+    }
+
+    [JsonPropertyName("items")]
+    public long Items
+    {
+        get; set;
+    }
+
+    [JsonPropertyName("history")]
+    public long History
+    {
+        get; set;
+    }
+
+    [JsonPropertyName("created_at_ms")]
+    public long CreatedAtMs
+    {
+        get; set;
+    }
 }
 
 public sealed class StatsWindow
 {
     [JsonPropertyName("start_ts_ms")]
-    public long StartTsMs { get; set; }
-    
+    public long StartTsMs
+    {
+        get; set;
+    }
+
     [JsonPropertyName("end_ts_ms")]
-    public long EndTsMs { get; set; }
-    
+    public long EndTsMs
+    {
+        get; set;
+    }
+
     [JsonPropertyName("bucket_sec")]
-    public int BucketSec { get; set; }
+    public int BucketSec
+    {
+        get; set;
+    }
 }
 
 public sealed class CacheStatsPoint
 {
     [JsonPropertyName("ts_ms")]
-    public long TsMs { get; set; }
-    
+    public long TsMs
+    {
+        get; set;
+    }
+
     [JsonPropertyName("cache_bytes")]
-    public long CacheBytes { get; set; }
+    public long CacheBytes
+    {
+        get; set;
+    }
 }
 
 public sealed class NetworkStatsPoint
 {
     [JsonPropertyName("ts_ms")]
-    public long TsMs { get; set; }
-    
+    public long TsMs
+    {
+        get; set;
+    }
+
     [JsonPropertyName("bytes_sent")]
-    public long BytesSent { get; set; }
-    
+    public long BytesSent
+    {
+        get; set;
+    }
+
     [JsonPropertyName("bytes_recv")]
-    public long BytesRecv { get; set; }
+    public long BytesRecv
+    {
+        get; set;
+    }
 }
 
 public sealed class ActivityStatsPoint
 {
     [JsonPropertyName("ts_ms")]
-    public long TsMs { get; set; }
-    
+    public long TsMs
+    {
+        get; set;
+    }
+
     [JsonPropertyName("text_count")]
-    public long TextCount { get; set; }
-    
+    public long TextCount
+    {
+        get; set;
+    }
+
     [JsonPropertyName("image_count")]
-    public long ImageCount { get; set; }
-    
+    public long ImageCount
+    {
+        get; set;
+    }
+
     [JsonPropertyName("files_count")]
-    public long FilesCount { get; set; }
+    public long FilesCount
+    {
+        get; set;
+    }
 }

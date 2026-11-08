@@ -1411,6 +1411,49 @@ public sealed class CoreHostService : ICoreHostService
         });
     }
 
+    public Task<BackupInfo> ExportBackupAsync(string destDir, bool includeContent)
+    {
+        if (State != CoreState.Ready)
+        {
+            throw new InvalidOperationException("Core is not ready");
+        }
+
+        if (string.IsNullOrWhiteSpace(destDir))
+        {
+            throw new ArgumentException("Backup destination must not be empty.", nameof(destDir));
+        }
+
+        return Task.Run(() =>
+        {
+            var request = new
+            {
+                dest_dir = destDir,
+                include_content = includeContent
+            };
+            var requestJson = JsonSerializer.Serialize(request, _jsonOpts);
+
+            var ptr = IntPtr.Zero;
+            if (!TryUseHandle(h =>
+                {
+                    ptr = CoreInterop.cb_export_backup(h, requestJson);
+                    return true;
+                }))
+            {
+                throw new InvalidOperationException("Core is not ready");
+            }
+
+            var json = CoreInterop.PtrToStringAndFree(ptr);
+            if (!TryParseEnvelope<BackupInfo>(json, out var info, out var errCode, out var errMsg)
+                || info is null)
+            {
+                throw new InvalidOperationException(
+                    $"ExportBackup failed: {errCode ?? "UNKNOWN"} - {errMsg ?? "Unknown error"}");
+            }
+
+            return info;
+        });
+    }
+
     public Task<bool> ClearStatsDbAsync()
     {
         if (State != CoreState.Ready)

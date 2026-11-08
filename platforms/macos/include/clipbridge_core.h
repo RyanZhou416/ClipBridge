@@ -86,6 +86,12 @@ CB_API const char* cb_clear_logs_db(cb_handle* h);
 CB_API const char* cb_clear_stats_db(cb_handle* h);
 CB_API const char* cb_clear_cache(cb_handle* h);
 
+// 单向导出备份（没有恢复入口）
+// request_json: {"dest_dir":"D:\\ClipBridgeBackups\\snapshot","include_content":false}
+// 返回 {"ok":true,"data":{"dest":"...","core_db_bytes":...,"logs_db_bytes":...,
+//        "content_bytes":...,"items":...,"history":...,"created_at_ms":...}}
+CB_API const char* cb_export_backup(cb_handle* h, const char* request_json);
+
 // 统计查询
 CB_API const char* cb_query_cache_stats(cb_handle* h, const char* query_json);
 CB_API const char* cb_query_net_stats(cb_handle* h, const char* query_json);

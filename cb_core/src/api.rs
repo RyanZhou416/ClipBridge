@@ -1,5 +1,6 @@
 // cb_core/src/api.rs
 
+use std::path::{Path, PathBuf};
 use std::sync::{
 	atomic::{AtomicBool, Ordering},
 	Arc, Mutex,
@@ -538,6 +539,60 @@ pub enum PeerConnectionState {
 	Offline, // 彻底断开
 }
 
+/// 一次性备份的格式标识（写入 `manifest.json` 的 `format` 字段）。
+///
+/// v1 的约定：目录内包含 `core.db`、`logs.db`、`manifest.json`；当
+/// `include_content=true` 时还包含 `cache/{blobs,files,downloads}` 的镜像。
+/// **单向导出，没有恢复实现**；未来改变字段语义时必须换一个新标识。
+pub const BACKUP_FORMAT: &str = "clipbridge-backup-v1";
+
+/// `Core::export_backup` 的返回信息（FFI 直接把它放进 `data` 字段）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackupInfo {
+	/// 最终备份目录（不是 `<dest>.partial`）。
+	pub dest: PathBuf,
+	pub core_db_bytes: u64,
+	pub logs_db_bytes: u64,
+	pub content_bytes: u64,
+	pub items: i64,
+	pub history: i64,
+	pub created_at_ms: i64,
+}
+
+/// 各表的行数快照；与 `core.db` 的 `VACUUM INTO` 在同一把锁内采集，因此一致。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackupCounts {
+	pub items: i64,
+	pub history: i64,
+	pub content_cache: i64,
+	pub trusted_peers: i64,
+	pub peer_rules: i64,
+	/// 来自 `logs.db` 的独立快照。
+	pub logs: i64,
+}
+
+/// 备份产物的字节数。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackupSizes {
+	pub core_db_bytes: u64,
+	pub logs_db_bytes: u64,
+	pub content_bytes: u64,
+	pub total_bytes: u64,
+}
+
+/// `<dest>/manifest.json` 的内容。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackupManifest {
+	pub format: String,
+	/// `core.db` 的 schema 版本（[`crate::store::SCHEMA_VERSION`]）。
+	pub schema_version: i64,
+	pub app_version: String,
+	pub created_at_ms: i64,
+	pub include_content: bool,
+	pub counts: BackupCounts,
+	pub sizes: BackupSizes,
+}
+
 /**
  * ClipBridge Core 的权威句柄。
  *
@@ -966,6 +1021,239 @@ impl Core {
 		let mut store = self.inner.store.lock().unwrap();
 		store.mark_all_cache_missing()?;
 		Ok(())
+	}
+
+	/// 把本机数据单向导出为一个备份目录（**没有恢复/导入实现**）。
+	///
+	/// 目录结构：
+	/// ```text
+	/// <dest>/
+	///   core.db          -- 通过 SQLite `VACUUM INTO` 生成的一致性在线快照
+	///   logs.db          -- 同上
+	///   manifest.json    -- 格式/schema/版本/行数/尺寸
+	///   cache/blobs/...  -- 仅 include_content=true 时复制（CAS 对象）
+	///   cache/files/...  -- 仅 include_content=true 时复制（物化视图）
+	///   cache/downloads/ -- 仅 include_content=true 时复制（下载视图）
+	/// ```
+	///
+	/// 原子性：所有内容先写进同级 `<dest>.partial`，全部成功后才 `rename` 为
+	/// `<dest>`；任何一步失败都会删除 partial，因此不会留下“半个备份”。
+	///
+	/// `include_content=false` 只备份元数据与日志（快）；`true` 会复制 CAS，可能
+	/// 耗时较长。`cache/tmp` 永远不复制（那是未完成传输的临时文件）。
+	pub fn export_backup(
+		&self,
+		dest_dir: &Path,
+		include_content: bool,
+	) -> anyhow::Result<BackupInfo> {
+		if self.inner.is_shutdown.load(Ordering::Acquire) {
+			anyhow::bail!("core already shutdown");
+		}
+		if dest_dir.as_os_str().is_empty() {
+			anyhow::bail!("backup destination must not be empty");
+		}
+
+		// 用 `<dest>.partial` 作为同级临时目录；file_name() 会忽略末尾分隔符。
+		let file_name = dest_dir.file_name().ok_or_else(|| {
+			anyhow::anyhow!(
+				"backup destination has no file name: {}",
+				dest_dir.display()
+			)
+		})?;
+		let partial_dir =
+			dest_dir.with_file_name(format!("{}.partial", file_name.to_string_lossy()));
+
+		// 1) 预检：目标必须不存在，或是一个空目录。非空目录一律拒绝（不覆盖用户数据）。
+		match std::fs::symlink_metadata(dest_dir) {
+			Ok(meta) => {
+				if !meta.file_type().is_dir() {
+					anyhow::bail!(
+						"backup destination exists and is not a directory: {}",
+						dest_dir.display()
+					);
+				}
+				let mut entries = std::fs::read_dir(dest_dir).map_err(|error| {
+					anyhow::Error::new(error).context(format!(
+						"failed to inspect backup destination: {}",
+						dest_dir.display()
+					))
+				})?;
+				if entries.next().transpose()?.is_some() {
+					anyhow::bail!("backup destination is not empty: {}", dest_dir.display());
+				}
+			}
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+			Err(error) => {
+				return Err(anyhow::Error::new(error).context(format!(
+					"failed to inspect backup destination: {}",
+					dest_dir.display()
+				)));
+			}
+		}
+
+		// 2) 清理上次中断可能残留的 partial；父目录按需创建（不提前创建 dest 本身）。
+		remove_path_if_exists(&partial_dir)?;
+		if let Some(parent) = dest_dir
+			.parent()
+			.filter(|parent| !parent.as_os_str().is_empty())
+		{
+			std::fs::create_dir_all(parent).map_err(|error| {
+				anyhow::Error::new(error).context(format!(
+					"failed to create backup parent: {}",
+					parent.display()
+				))
+			})?;
+		}
+		std::fs::create_dir_all(&partial_dir).map_err(|error| {
+			anyhow::Error::new(error).context(format!(
+				"failed to create partial backup directory: {}",
+				partial_dir.display()
+			))
+		})?;
+
+		// 3) 在 partial 里生成内容；失败时删除 partial。
+		let result = self.export_backup_into(dest_dir, &partial_dir, include_content);
+		if result.is_err() {
+			let _ = std::fs::remove_dir_all(&partial_dir);
+			return result;
+		}
+
+		// 4) 发布：目标若存在只可能是空目录，先移除再 rename（Windows 上 rename
+		//    不能覆盖已存在的目录）。此时 dest 里没有任何用户数据，移除是安全的。
+		match std::fs::remove_dir(dest_dir) {
+			Ok(()) => {}
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+			Err(error) => {
+				let _ = std::fs::remove_dir_all(&partial_dir);
+				return Err(anyhow::Error::new(error).context(format!(
+					"failed to publish backup at {}",
+					dest_dir.display()
+				)));
+			}
+		}
+		if let Err(error) = std::fs::rename(&partial_dir, dest_dir) {
+			let _ = std::fs::remove_dir_all(&partial_dir);
+			return Err(anyhow::Error::new(error).context(format!(
+				"failed to publish backup at {}",
+				dest_dir.display()
+			)));
+		}
+
+		result
+	}
+
+	/// `export_backup` 的实际写入阶段（目标仍是 `<dest>.partial`）。
+	fn export_backup_into(
+		&self,
+		dest_dir: &Path,
+		partial_dir: &Path,
+		include_content: bool,
+	) -> anyhow::Result<BackupInfo> {
+		let created_at_ms = now_ms();
+		let core_db_path = partial_dir.join("core.db");
+		let logs_db_path = partial_dir.join("logs.db");
+
+		// core.db：先 VACUUM INTO，再在**同一把写锁**内采集行数，保证快照与计数一致。
+		let (items, history, content_cache, trusted_peers, peer_rules) = {
+			let store = self.inner.store.lock().unwrap();
+			sqlite_vacuum_into(&store.conn, &core_db_path)?;
+			(
+				sqlite_count(&store.conn, "items")?,
+				sqlite_count(&store.conn, "history")?,
+				sqlite_count(&store.conn, "content_cache")?,
+				sqlite_count(&store.conn, "trusted_peers")?,
+				sqlite_count(&store.conn, "peer_rules")?,
+			)
+		};
+		let core_db_bytes = file_len(&core_db_path)?;
+
+		// logs.db：独立连接；完成后才释放日志锁。
+		let logs = {
+			let log_store = self.inner.log_store.lock().unwrap();
+			sqlite_vacuum_into(&log_store.conn, &logs_db_path)?;
+			sqlite_count(&log_store.conn, "logs")?
+		};
+		let logs_db_bytes = file_len(&logs_db_path)?;
+
+		// 可选：复制 CAS 目录（不含 cache/tmp）。
+		let content_bytes = if include_content {
+			self.copy_backup_content(partial_dir)?
+		} else {
+			0
+		};
+
+		// 测试注入点：验证“快照已写入但后续步骤失败”时 partial 会被完整清理。
+		#[cfg(test)]
+		if export_test_hooks::fail_after_snapshot() {
+			anyhow::bail!("injected backup failure (test-only)");
+		}
+
+		let manifest = BackupManifest {
+			format: BACKUP_FORMAT.to_string(),
+			schema_version: crate::store::SCHEMA_VERSION,
+			app_version: env!("CARGO_PKG_VERSION").to_string(),
+			created_at_ms,
+			include_content,
+			counts: BackupCounts {
+				items,
+				history,
+				content_cache,
+				trusted_peers,
+				peer_rules,
+				logs,
+			},
+			sizes: BackupSizes {
+				core_db_bytes,
+				logs_db_bytes,
+				content_bytes,
+				total_bytes: core_db_bytes
+					.saturating_add(logs_db_bytes)
+					.saturating_add(content_bytes),
+			},
+		};
+		let manifest_json = serde_json::to_vec_pretty(&manifest)?;
+		std::fs::write(partial_dir.join("manifest.json"), manifest_json)
+			.map_err(|error| anyhow::Error::new(error).context("failed to write manifest.json"))?;
+
+		Ok(BackupInfo {
+			dest: dest_dir.to_path_buf(),
+			core_db_bytes,
+			logs_db_bytes,
+			content_bytes,
+			items,
+			history,
+			created_at_ms,
+		})
+	}
+
+	/// 把 `cache/{blobs,files,downloads}` 复制到备份目录；缺失的目录直接跳过。
+	///
+	/// 并发 GC 可能在遍历途中删掉某个 blob：`NotFound` 视为“该文件已不存在”，
+	/// 跳过而不让整个备份失败；其它 IO 错误仍然向上传播并触发 partial 清理。
+	fn copy_backup_content(&self, partial_dir: &Path) -> anyhow::Result<u64> {
+		let cache_src = self.inner.cas.cache_dir();
+		let cache_dst = partial_dir.join("cache");
+		let mut content_bytes = 0_u64;
+		for name in ["blobs", "files", "downloads"] {
+			let src = cache_src.join(name);
+			match std::fs::symlink_metadata(&src) {
+				Ok(meta) => {
+					if !meta.file_type().is_dir() {
+						anyhow::bail!("cache content path is not a directory: {}", src.display());
+					}
+					let copied = copy_tree(&src, &cache_dst.join(name))?;
+					content_bytes = content_bytes.saturating_add(copied);
+				}
+				Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+				Err(error) => {
+					return Err(anyhow::Error::new(error).context(format!(
+						"failed to inspect cache content directory: {}",
+						src.display()
+					)));
+				}
+			}
+		}
+		Ok(content_bytes)
 	}
 
 	/**
@@ -1746,6 +2034,132 @@ impl Core {
 			},
 			"series": series
 		}))
+	}
+}
+
+/// 删除路径（文件或目录，递归）；不存在时视为成功。
+fn remove_path_if_exists(path: &Path) -> anyhow::Result<()> {
+	match std::fs::symlink_metadata(path) {
+		Ok(meta) => if meta.file_type().is_dir() {
+			std::fs::remove_dir_all(path)
+		} else {
+			std::fs::remove_file(path)
+		}
+		.map_err(|error| {
+			anyhow::Error::new(error)
+				.context(format!("failed to remove stale path: {}", path.display()))
+		}),
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+		Err(error) => Err(anyhow::Error::new(error)
+			.context(format!("failed to inspect stale path: {}", path.display()))),
+	}
+}
+
+/// 用 SQLite 的 `VACUUM INTO` 生成一致性在线快照（**不**直接复制活动数据库文件）。
+///
+/// `VACUUM INTO` 在源库上表现为一个读事务，会把 WAL 中已提交的内容一并写入新库；
+/// 因此快照是自洽的，不依赖调用方先做 checkpoint。它必须在事务之外执行。
+fn sqlite_vacuum_into(conn: &rusqlite::Connection, dest: &Path) -> anyhow::Result<()> {
+	let dest = dest.to_string_lossy();
+	conn.execute("VACUUM INTO ?1", rusqlite::params![dest.as_ref()])
+		.map_err(|error| {
+			anyhow::Error::new(error).context(format!("VACUUM INTO failed: {dest}"))
+		})?;
+	Ok(())
+}
+
+/// 统计固定表名的行数（表名来自本模块常量，不接受外部输入）。
+fn sqlite_count(conn: &rusqlite::Connection, table: &str) -> anyhow::Result<i64> {
+	conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+		row.get(0)
+	})
+	.map_err(|error| anyhow::Error::new(error).context(format!("COUNT(*) failed for {table}")))
+}
+
+/// 文件字节数；刚刚由 `VACUUM INTO` 生成的文件必须存在。
+fn file_len(path: &Path) -> anyhow::Result<u64> {
+	std::fs::metadata(path)
+		.map(|meta| meta.len())
+		.map_err(|error| {
+			anyhow::Error::new(error)
+				.context(format!("failed to stat backup file: {}", path.display()))
+		})
+}
+
+/// 递归复制目录树，返回写入的字节数。
+///
+/// `NotFound` 视为源文件在并发 GC 中消失（跳过）；其它错误向上传播，由调用方
+/// 清理 partial。符号链接不跟随（避免把缓存目录之外的任意文件带进备份）。
+fn copy_tree(src: &Path, dst: &Path) -> anyhow::Result<u64> {
+	let meta = match std::fs::symlink_metadata(src) {
+		Ok(meta) => meta,
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+		Err(error) => {
+			return Err(
+				anyhow::Error::new(error).context(format!("failed to inspect: {}", src.display()))
+			);
+		}
+	};
+
+	if meta.file_type().is_symlink() {
+		// 不复制链接目标：备份只包含缓存目录内真实存在的常规文件。
+		return Ok(0);
+	}
+	if meta.is_dir() {
+		std::fs::create_dir_all(dst).map_err(|error| {
+			anyhow::Error::new(error).context(format!("failed to create dir: {}", dst.display()))
+		})?;
+		let mut total = 0_u64;
+		let entries = std::fs::read_dir(src).map_err(|error| {
+			anyhow::Error::new(error).context(format!("failed to read dir: {}", src.display()))
+		})?;
+		for entry in entries {
+			let entry = entry.map_err(|error| {
+				anyhow::Error::new(error)
+					.context(format!("failed to read dir entry: {}", src.display()))
+			})?;
+			let child_src = entry.path();
+			let child_dst = dst.join(entry.file_name());
+			total = total.saturating_add(copy_tree(&child_src, &child_dst)?);
+		}
+		Ok(total)
+	} else if meta.is_file() {
+		if let Some(parent) = dst.parent() {
+			std::fs::create_dir_all(parent).map_err(|error| {
+				anyhow::Error::new(error)
+					.context(format!("failed to create dir: {}", parent.display()))
+			})?;
+		}
+		match std::fs::copy(src, dst) {
+			Ok(bytes) => Ok(bytes),
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+			Err(error) => Err(anyhow::Error::new(error).context(format!(
+				"failed to copy {} -> {}",
+				src.display(),
+				dst.display()
+			))),
+		}
+	} else {
+		// 设备/管道等特殊文件：缓存目录里不应出现，静默跳过。
+		Ok(0)
+	}
+}
+
+/// 仅测试用的导出失败注入点；thread-local 避免并行测试互相影响。
+#[cfg(test)]
+pub(crate) mod export_test_hooks {
+	use std::cell::Cell;
+
+	thread_local! {
+		static FAIL_AFTER_SNAPSHOT: Cell<bool> = const { Cell::new(false) };
+	}
+
+	pub(crate) fn set_fail_after_snapshot(fail: bool) {
+		FAIL_AFTER_SNAPSHOT.with(|flag| flag.set(fail));
+	}
+
+	pub(crate) fn fail_after_snapshot() -> bool {
+		FAIL_AFTER_SNAPSHOT.with(Cell::get)
 	}
 }
 

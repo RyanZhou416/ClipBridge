@@ -2,7 +2,7 @@
 //!
 //! 三个平台 cdylib（Windows / macOS / Android）都通过
 //! `pub use cb_core_ffi::exports::*;` 复用这份完整表面，因此不存在
-//! feature flag 或平台子集：33 个函数在三个平台上完全一致。
+//! feature flag 或平台子集：34 个函数在三个平台上完全一致。
 //!
 //! 行为参考实现是 Windows 旧版 `lib.rs`：JSON envelope、
 //! `{"ok":true,"data":{"handle":N}}`、`CORE_BUSY` / `CORE_SHUTDOWN`、
@@ -660,7 +660,7 @@ pub extern "C" fn cb_clear_logs_db(h: *mut cb_handle) -> *const c_char {
 
 /// 清空统计数据库。
 ///
-/// 统计已改为按需计算，`stats.db` 被彻底移除；本函数为保持 33 函数 ABI 不变而
+/// 统计已改为按需计算，`stats.db` 被彻底移除；本函数为保持 34 函数 ABI 不变而
 /// 保留：句柄有效时直接返回成功，没有可清空的持久化数据。
 #[no_mangle]
 pub extern "C" fn cb_clear_stats_db(h: *mut cb_handle) -> *const c_char {
@@ -686,6 +686,46 @@ pub extern "C" fn cb_clear_cache(h: *mut cb_handle) -> *const c_char {
 	}));
 
 	ffi_result("CLEAR_FAILED", run)
+}
+
+/// `cb_export_backup` 请求 DTO。
+///
+/// 入参：`{"dest_dir":"D:\\ClipBridgeBackups\\2026-01-01","include_content":false}`
+/// - `dest_dir` 必填，必须是空目录或不存在的路径；
+/// - `include_content` 缺省 false（只导出元数据与日志）。
+#[derive(serde::Deserialize)]
+struct ExportBackupDto {
+	dest_dir: String,
+	#[serde(default)]
+	include_content: bool,
+}
+
+/// 单向导出本机数据为备份目录（没有恢复入口）。
+///
+/// 成功：`{"ok":true,"data":{"dest":"...","core_db_bytes":...,"logs_db_bytes":...,
+/// "content_bytes":...,"items":...,"history":...,"created_at_ms":...}}`；
+/// 失败：标准错误 envelope（默认错误码 `EXPORT_BACKUP_FAILED`）。
+#[no_mangle]
+pub extern "C" fn cb_export_backup(
+	h: *mut cb_handle,
+	request_json: *const c_char,
+) -> *const c_char {
+	let run = panic::catch_unwind(AssertUnwindSafe(|| -> anyhow::Result<String> {
+		let _guard = enter(h)?;
+		let handle = unsafe { &mut *h };
+
+		let json_str = cstr_to_str(request_json)?;
+		let req: ExportBackupDto =
+			serde_json::from_str(json_str).context("invalid backup request json")?;
+
+		let info = handle
+			.core_mut()?
+			.export_backup(std::path::Path::new(&req.dest_dir), req.include_content)?;
+
+		Ok(ok_json(info))
+	}));
+
+	ffi_result("EXPORT_BACKUP_FAILED", run)
 }
 
 /// 查询缓存统计。

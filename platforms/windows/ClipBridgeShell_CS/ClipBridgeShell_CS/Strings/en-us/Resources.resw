@@ -929,4 +929,28 @@
   <data name="Main_ClipboardIsLocked" xml:space="preserve">
     <value>Clipboard is locked, unlock first</value>
   </data>
+  <data name="Settings_ExportBackup_SettingsCard.Header" xml:space="preserve">
+    <value>Export backup</value>
+  </data>
+  <data name="Settings_ExportBackup_SettingsCard.Description" xml:space="preserve">
+    <value>Export the metadata database, logs, and optionally cached content to a new folder (one-way export; restore is not supported).</value>
+  </data>
+  <data name="Settings_ExportBackup_IncludeContent.Content" xml:space="preserve">
+    <value>Include cached content (images/files; may be large)</value>
+  </data>
+  <data name="Settings_ExportBackup_Button.Content" xml:space="preserve">
+    <value>Export backup</value>
+  </data>
+  <data name="Settings_ExportBackupDone_Title" xml:space="preserve">
+    <value>Backup exported</value>
+  </data>
+  <data name="Settings_ExportBackupDone_Content" xml:space="preserve">
+    <value>Exported to: {0}&#10;Metadata database: {1} bytes&#10;Logs database: {2} bytes&#10;Cached content: {3} bytes&#10;Items: {4}, history: {5}</value>
+  </data>
+  <data name="Settings_ExportBackupFailed" xml:space="preserve">
+    <value>Failed to export backup</value>
+  </data>
+  <data name="Settings_ExportBackupCoreNotReady" xml:space="preserve">
+    <value>Core is not ready; cannot export a backup.</value>
+  </data>
 </root>

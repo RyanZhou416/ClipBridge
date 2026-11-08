@@ -198,6 +198,27 @@
 							l:Uids.Uid="Settings_DeleteCache_Button"/>
 						</ctk:SettingsCard>
 
+						<!-- 导出备份（单向导出，无恢复） -->
+						<ctk:SettingsCard l:Uids.Uid="Settings_ExportBackup_SettingsCard"
+								  HeaderIcon="{ui:FontIcon Glyph=&#xE74E;}"
+								  HorizontalAlignment="Stretch">
+							<StackPanel Spacing="8" HorizontalAlignment="Stretch">
+								<CheckBox x:Name="ExportBackupIncludeContent"
+										  l:Uids.Uid="Settings_ExportBackup_IncludeContent"/>
+								<StackPanel Orientation="Horizontal" Spacing="8">
+									<ProgressRing x:Name="ExportBackupProgress"
+												  Width="20"
+												  Height="20"
+												  IsActive="False"
+												  Visibility="Collapsed"/>
+									<Button x:Name="ExportBackupButton"
+											Click="ExportBackup_Click"
+											Width="180"
+											l:Uids.Uid="Settings_ExportBackup_Button"/>
+								</StackPanel>
+							</StackPanel>
+						</ctk:SettingsCard>
+
 						<!-- 清除本地证书 -->
 						<ctk:SettingsCard l:Uids.Uid="Settings_ClearLocalCert_SettingsCard"
 								  HeaderIcon="{ui:FontIcon Glyph=&#xE74D;}"
