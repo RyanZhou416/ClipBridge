@@ -15,6 +15,7 @@ use crate::discovery::{DiscoveryEvent, DiscoveryService, PeerCandidate};
 use crate::logs::LogSink;
 use crate::session::{SessionActor, SessionCmd, SessionHandle, SessionKind, SessionRole};
 use crate::store::Store;
+use crate::store::StoreReader;
 use crate::transport::Transport;
 use crate::util::now_ms;
 use std::sync::Mutex;
@@ -151,6 +152,9 @@ pub struct NetManager {
 	transport: Arc<Transport>,
 	discovery: DiscoveryService,
 	store: Arc<Mutex<Store>>,
+	/// 查询只读连接池：只用于**非授权**的信息性读取（`list_peers` 展示、
+	/// `EnsureContentCached` 的路由/体积估算）。写连接仍负责所有授权与写操作。
+	store_reader: Arc<StoreReader>,
 	log_sink: LogSink,
 	sessions: Vec<SessionHandle>,
 	/// F4.1：本端 accept 到的控制会话（`sessions` 的子集，仅用于计数与上限
@@ -337,6 +341,8 @@ struct DataLinkJob {
 	config: crate::api::CoreConfig,
 	event_sink: Arc<dyn crate::api::CoreEventSink>,
 	store: Arc<Mutex<Store>>,
+	/// 只读池：只给新建的 SessionActor 用于非授权查询。
+	store_reader: Arc<StoreReader>,
 	cas: crate::cas::Cas,
 	log_sink: LogSink,
 	item_id: String,
@@ -363,6 +369,7 @@ async fn establish_data_link_and_request(job: DataLinkJob) {
 		config,
 		event_sink,
 		store,
+		store_reader,
 		cas,
 		log_sink,
 		item_id,
@@ -420,6 +427,7 @@ async fn establish_data_link_and_request(job: DataLinkJob) {
 		config,
 		event_sink,
 		store,
+		store_reader,
 		cas,
 		Some(peer_id.clone()),
 		log_sink.clone(),
@@ -526,6 +534,7 @@ impl NetManager {
 		config: crate::api::CoreConfig,
 		event_sink: Arc<dyn crate::api::CoreEventSink>,
 		store: Arc<Mutex<Store>>,
+		store_reader: Arc<StoreReader>,
 		cas: crate::cas::Cas,
 		log_sink: LogSink,
 	) -> anyhow::Result<mpsc::Sender<NetCmd>> {
@@ -674,6 +683,7 @@ impl NetManager {
 										transport,
 										discovery,
 										store,
+										store_reader,
 										log_sink,
 										cas,
 										sessions: Vec::new(),
@@ -745,15 +755,24 @@ impl NetManager {
 							// 1. 查库找 owner (A 的 device_id) 与传输体积。
 							// DB 查询放进 spawn_blocking：SQLite busy/慢盘不能卡住主循环。
 							//
+							// 【只用只读池】这两项都是**信息性**读取，不构成授权：
+							// - owner 只用于选择"向哪个在线会话发起拉取"；真正的
+							//   owner/准入校验在发送方的 `ContentBegin` 准入与 serve
+							//   路径上（写连接），不在这里；
+							// - total_bytes 只用于 C1 的“小传输走控制连接 / 大传输走
+							//   数据连接池”选择。
+							// 陈旧快照的后果最多是：向一个已不再是 owner 的 peer 发起
+							// 拉取（对端按授权规则拒绝）或选错传输通道/体积为 0；不会
+							// 放行任何内容，也不会把数据写进库。
+							//
 							// C1 需要 `total_bytes` 才能在"小传输走控制连接 / 大传输走数据连接池"
 							// 之间做选择（阈值 16 MiB，见 net::data_link）。
-							let store = self.store.clone();
+							let reader = self.store_reader.clone();
 							let lookup_item_id = item_id.clone();
 							let lookup_file_id = file_id.clone();
 							let (owner_res, total_bytes) = tokio::task::spawn_blocking(move || {
-								let store = store.lock().unwrap();
-								let owner = store.get_item_owner(&lookup_item_id).ok().flatten();
-								let total_bytes = store
+								let owner = reader.get_item_owner(&lookup_item_id).ok().flatten();
+								let total_bytes = reader
 									.get_item_meta_by_id(&lookup_item_id)
 									.ok()
 									.flatten()
@@ -883,6 +902,7 @@ impl NetManager {
 													config: self.config.clone(),
 													event_sink: self.event_sink.clone(),
 													store: self.store.clone(),
+													store_reader: self.store_reader.clone(),
 													cas: self.cas.clone(),
 													log_sink: self.log_sink.clone(),
 													item_id,
@@ -1011,6 +1031,7 @@ impl NetManager {
 								self.config.clone(),
 								self.event_sink.clone(),
 								self.store.clone(),
+								self.store_reader.clone(),
 								self.cas.clone(),
 								None,
 								self.log_sink.clone(),
@@ -1057,6 +1078,7 @@ impl NetManager {
 								self.config.clone(),
 								self.event_sink.clone(),
 								self.store.clone(),
+								self.store_reader.clone(),
 								self.cas.clone(),
 								None,
 								self.log_sink.clone(),
@@ -1134,14 +1156,20 @@ impl NetManager {
 		}
 
 		// 2. 一次性在 blocking 线程查询所有策略（不存在则默认都允许）。
-		let store = self.store.clone();
+		//
+		// 【只用只读池】这里是 `list_peers` 的**展示**字段：`share_to_peer` /
+		// `accept_from_peer` 只回给外壳显示，不参与任何放行/拒绝决定。
+		// 真正的授权在 `SessionActor::load_peer_rule` / `outbound_share_allowed` /
+		// `inbound_accept_allowed` 里，仍然读**写连接**（见那里的注释）。
+		// 因此这里容忍陈旧快照：最坏情况是 UI 上的开关状态最多滞后一个 checkpoint
+		// 周期，不会改变任何授权结果。
+		let reader = self.store_reader.clone();
 		let device_ids: Vec<String> = base.iter().map(|(id, _)| id.clone()).collect();
 		let rule_count = device_ids.len();
 		let rules = tokio::task::spawn_blocking(move || {
-			let store = store.lock().unwrap();
 			device_ids
 				.iter()
-				.map(|did| match store.get_peer_rule(&account_uid, did) {
+				.map(|did| match reader.get_peer_rule(&account_uid, did) {
 					Ok(Some(rule)) => (rule.share_to_peer, rule.accept_from_peer),
 					_ => (true, true), // 默认都允许
 				})
@@ -1479,6 +1507,7 @@ impl NetManager {
 					self.config.clone(),
 					self.event_sink.clone(),
 					self.store.clone(),
+					self.store_reader.clone(),
 					self.cas.clone(),
 					Some(device_id),
 					self.log_sink.clone(),

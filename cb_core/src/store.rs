@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 use crate::model::{FileMeta, ItemKind, ItemMeta, ItemPreview};
 
@@ -470,7 +471,8 @@ impl Store {
 	}
 
 	fn init_pragmas(conn: &Connection) -> anyhow::Result<()> {
-		conn.execute_batch(
+		use std::fmt::Write as _;
+		let mut pragmas = String::from(
 			r"
             -- P3：增量 auto-vacuum。**必须排在 journal_mode=WAL 与建表之前**：
             -- 全新数据库只有在首页写入前设置，才会以 auto-vacuum 结构创建；
@@ -496,8 +498,32 @@ impl Store {
             PRAGMA mmap_size = 67108864;
             PRAGMA temp_store = MEMORY;
             PRAGMA journal_size_limit = 8388608;
+
+            -- P5（checkpoint 尾延迟）：把自动 checkpoint 的触发阈值大幅抬高，
+            -- 而不是完全关闭。旧行为是 1000 页触发，且 SQLite 会在写事务提交时
+            -- 把 PASSIVE checkpoint 在**持有 `Mutex<Store>` 的写连接上**同步做完；
+            -- 一次 checkpoint 要复制 30–90 ms 的 WAL 帧，期间所有查询都排在写连接
+            -- 互斥锁后面（db_contention_probe 实测读者 p99 ≈ 10.8–11.5 ms、max 最高
+            -- 87 ms，而读者单独运行时 p99 仅 0.54 ms）。
+            --
+            -- 现在的主路径由维护线程用**独立连接**每 5 s 做一次 PASSIVE checkpoint
+            -- （见 [`WalMaintainer`]），超阈值时追加 RESTART 复位；PASSIVE 不阻塞
+            -- 写者，因此绝大多数提交不再承担 checkpoint 成本。
+            --
+            -- 为什么保留一个非 0 的自动阈值作为**安全网**：维护线程可能因为线程创建
+            -- 失败、或调用方（测试/工具）直接构造 `Store` 而没有维护线程而不存在；
+            -- 此时 `wal_autocheckpoint=0` 会让 `-wal` 无界增长，读快照必须扫描更多
+            -- 帧、读延迟反而变差（实测 p50 326 µs → 1.1 ms）。4000 页 ≈ 16 MB 是一个
+            -- 上界：维护线程正常时几乎不会触发，异常时 WAL 也不会失控。
             ",
-		)?;
+		);
+		// 用 writeln! 而不是 push_str(&format!(..))：避免一次临时 String 分配
+		// （clippy::format_push_string / write_with_newline）。
+		let _ = writeln!(
+			pragmas,
+			"PRAGMA wal_autocheckpoint = {WAL_AUTOCHECKPOINT_PAGES};"
+		);
+		conn.execute_batch(&pragmas)?;
 		Ok(())
 	}
 
@@ -1466,24 +1492,15 @@ impl Store {
 	}
 
 	/// 获取 PeerRule（如果不存在返回 None）
+	///
+	/// 授权路径（`SessionActor::load_peer_rule`）必须继续使用**写连接**，见那里的
+	/// 注释；只读池上的同名查询只用于 `list_peers` 展示。
 	pub fn get_peer_rule(
 		&self,
 		account_uid: &str,
 		device_id: &str,
 	) -> anyhow::Result<Option<PeerRule>> {
-		let res: Option<(bool, bool, i64)> = self.conn.query_row(
-            "SELECT share_to_peer, accept_from_peer, updated_at_ms FROM peer_rules WHERE account_uid=?1 AND device_id=?2",
-            params![account_uid, device_id],
-            |r| Ok((r.get::<_, i32>(0)? != 0, r.get::<_, i32>(1)? != 0, r.get(2)?)),
-        ).optional()?;
-
-		Ok(res.map(|(share_to, accept_from, updated_at)| PeerRule {
-			account_uid: account_uid.to_string(),
-			device_id: device_id.to_string(),
-			share_to_peer: share_to,
-			accept_from_peer: accept_from,
-			updated_at_ms: updated_at,
-		}))
+		query_peer_rule(&self.conn, account_uid, device_id)
 	}
 
 	/// 列出所有 PeerRule（用于调试或迁移）
@@ -1606,17 +1623,12 @@ impl Store {
 	}
 
 	/// M3: 获取 item 的 owner (用于 NetManager 路由)
+	///
+	/// 注意用途区分：本方法只回答"这个 item 声称属于谁"，不能作为授权依据。
+	/// 删除/发送内容前的 owner 校验（`SessionActor`）仍在写连接上做；只读池上的
+	/// 同名查询只用于 `EnsureContentCached` 的路由选择（见 net.rs）。
 	pub fn get_item_owner(&self, item_id: &str) -> anyhow::Result<Option<String>> {
-		let mut stmt = self
-			.conn
-			.prepare("SELECT owner_device_id FROM items WHERE item_id = ?")?;
-		let mut rows = stmt.query([item_id])?;
-		if let Some(row) = rows.next()? {
-			let owner: String = row.get(0)?;
-			Ok(Some(owner))
-		} else {
-			Ok(None)
-		}
+		query_item_owner(&self.conn, item_id)
 	}
 
 	/// M3: 获取 item 的 sha256 (用于 Session 发送文件)
@@ -1634,17 +1646,12 @@ impl Store {
 	}
 
 	/// M3: 获取 item 的 mime (用于 Session 发送 ContentBegin)
+	///
+	/// MIME 在接收侧参与硬上限分类（安全相关，见
+	/// `SessionActor::inbound_item_kind`），那一处必须走写连接；只读池上的同名
+	/// 查询只用于 `CONTENT_CACHED` 事件的展示字段（见 `handle_receiver_done`）。
 	pub fn get_item_mime(&self, item_id: &str) -> anyhow::Result<Option<String>> {
-		let mut stmt = self
-			.conn
-			.prepare("SELECT mime FROM items WHERE item_id = ?")?;
-		let mut rows = stmt.query([item_id])?;
-		if let Some(row) = rows.next()? {
-			let mime: String = row.get(0)?;
-			Ok(Some(mime))
-		} else {
-			Ok(None)
-		}
+		query_item_mime(&self.conn, item_id)
 	}
 
 	/// M3-3: 获取 FileList 中指定 file_id 的详细信息 (sha256, rel_name, size)
@@ -2068,6 +2075,228 @@ impl StoreReader {
 	) -> anyhow::Result<Vec<ActivityBucket>> {
 		self.with_conn(|conn| query_activity_buckets(conn, start_ts_ms, end_ts_ms, bucket_ms))
 	}
+
+	/// 只读查询：item 的 owner（**仅用于路由/展示**，绝不能作为授权依据）。
+	///
+	/// 授权性的 owner 校验（删除、serve 内容、`ContentBegin` 准入）仍在写连接上
+	/// 完成：见 `session/actor.rs` 中对应的注释。
+	pub fn get_item_owner(&self, item_id: &str) -> anyhow::Result<Option<String>> {
+		self.with_conn(|conn| query_item_owner(conn, item_id))
+	}
+
+	/// 只读查询：item 的 MIME。只用于展示字段（例如 `CONTENT_CACHED` 事件）；
+	/// 影响硬上限分类的 MIME 查询在写连接上（见 `inbound_item_kind`）。
+	pub fn get_item_mime(&self, item_id: &str) -> anyhow::Result<Option<String>> {
+		self.with_conn(|conn| query_item_mime(conn, item_id))
+	}
+
+	/// 只读查询：PeerRule。只用于 `list_peers` 的状态展示；`share_to_peer` /
+	/// `accept_from_peer` 的**授权判定**在 `SessionActor` 里仍然读写连接。
+	pub fn get_peer_rule(
+		&self,
+		account_uid: &str,
+		device_id: &str,
+	) -> anyhow::Result<Option<PeerRule>> {
+		self.with_conn(|conn| query_peer_rule(conn, account_uid, device_id))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// WAL 维护：显式 PASSIVE checkpoint（P5）
+//
+// 背景：`PRAGMA wal_autocheckpoint=0`（见 `Store::init_pragmas`）把 checkpoint
+// 从提交路径上拿掉，但 WAL 必须有人收尾，否则会无限增长。这里用一条**独立
+// 连接**（不经过 `Mutex<Store>`，也不会被 `query_only` 限制）由维护线程周期
+// 执行 checkpoint：
+// - `PASSIVE`（常规）：只复制已提交帧，从不阻塞写者、从不等待读者、从不
+//   truncate。它把读取从 WAL 迁回主库文件，但**不会复位 WAL 文件**。
+// - `RESTART`（仅在 `-wal` 超过阈值时，且先 PASSIVE 回填）：等待读者结束并
+//   复位 WAL 头，让下一次写提交从文件开头复用并截回 `journal_size_limit`。
+//   这是唯一能真正限制 `-wal` 文件大小增长的周期手段（实测：只做 PASSIVE 时
+//   持续写入会让 `-wal` 涨到几百 MB）。
+// - `TRUNCATE`：只在关闭时尽力尝试一次，把 `-wal` 清空（失败/busy 只记录，
+//   不影响关闭流程）。
+//
+// 阈值策略（由 `api.rs` 的维护线程驱动）：常规每 5 s 一次 PASSIVE；一旦
+// `-wal` 超过 32 MiB 就改为每 1 s 一次 PASSIVE+RESTART。`journal_size_limit`
+// 仍然生效：RESTART 后的下一次提交会把 WAL 文件截回该上限。
+// ---------------------------------------------------------------------------
+
+/// WAL 维护连接的握手参数：与写连接一致的 busy_timeout / journal 限制。
+const WAL_MAINTENANCE_JOURNAL_SIZE_LIMIT: i64 = 8_388_608;
+
+/// 写连接的安全网阈值：`-wal` 超过这么多页（4000 × 4 KiB ≈ 16 MB）时
+/// 由 SQLite 在提交里自行 checkpoint。
+///
+/// 正常路径由 [`WalMaintainer`] 用独立连接每 5 s 做 PASSIVE checkpoint，
+/// 因此这个阈值几乎不会触发；它的存在是为了在维护线程缺失（测试/工具直接
+/// 构造 `Store`、线程创建失败）时仍能限制 WAL 大小 —— 否则 WAL 无界增长会让
+/// 每个读快照扫描更多帧，读延迟反而变差（实测 p50 从 326 µs 涨到 1.1 ms）。
+pub const WAL_AUTOCHECKPOINT_PAGES: i64 = 4_000;
+/// PASSIVE checkpoint 遇到读者/写者时的最长等待（SQLite 对 PASSIVE 不会等待
+/// 读者，但 busy_timeout 仍覆盖内部锁竞争）。
+const WAL_MAINTENANCE_BUSY_TIMEOUT_MS: u64 = 5_000;
+/// 关闭时 TRUNCATE 只等这么久：shutdown 不能被仍在收尾的读者拖住。
+const WAL_TRUNCATE_BUSY_TIMEOUT_MS: u64 = 500;
+
+/// 阈值 RESTART 等待读者/写者的上限。
+///
+/// RESTART 在持 WAL 写锁期间等待读者结束；若读者长时间不释放快照，写者会被
+/// 挡在写锁后面（并通过 `Mutex<Store>` 波及读者）。用较短的上限：拿不到就
+/// 返回 busy 行，由维护线程下一个 1 s 节拍重试，绝不把写路径卡满 5 s。
+const WAL_RESTART_BUSY_TIMEOUT_MS: u64 = 250;
+
+/// 一次 checkpoint 的可观测结果（用于维护线程日志）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointOutcome {
+	/// `1` = 因其它连接持有读快照/写锁而未能复制完所有帧（PASSIVE 的正常情形，
+	/// 不是错误）；`0` = 已完成。
+	pub busy: bool,
+	/// checkpoint 时 WAL 中的帧数（`-1` 表示未知）。
+	pub wal_frames: i64,
+	/// 本次实际复制到数据库文件的帧数。
+	pub checkpointed_frames: i64,
+	/// checkpoint 前后 `-wal` 文件的字节数（stat 失败时为 0）。
+	pub wal_bytes_before: u64,
+	pub wal_bytes_after: u64,
+}
+
+/// 用**独立连接**执行 WAL checkpoint 的维护器。
+///
+/// 连接是**惰性**打开的：`open_core` / `open_logs` 只记录数据库路径，第一次
+/// checkpoint（或 shutdown TRUNCATE）时才真正 `Connection::open` 并设置 PRAGMA。
+/// 这样 `Core::init` 不付额外两次 SQLite open 的成本（实测约 17 ms，会直接
+/// 拖慢启动），失败也只影响维护线程、不影响业务启动。
+///
+/// 内部用 `Mutex<Option<Connection>>` 串行化维护线程与 shutdown 的调用
+/// （`rusqlite::Connection` 只保证 `Send`，不保证 `Sync`）。所有方法都是阻塞的，
+/// 调用方负责放进 `spawn_blocking`。
+pub struct WalMaintainer {
+	db_path: PathBuf,
+	conn: Mutex<Option<Connection>>,
+}
+
+impl WalMaintainer {
+	/// 构造 `core.db` 的维护器（连接惰性打开）。
+	pub fn open_core(data_dir: impl AsRef<Path>) -> Self {
+		Self::new(data_dir.as_ref().join("core.db"))
+	}
+
+	/// 构造 `logs.db` 的维护器（日志库同样关闭了自动 checkpoint，见 api.rs）。
+	pub fn open_logs(data_dir: impl AsRef<Path>) -> Self {
+		Self::new(data_dir.as_ref().join("logs.db"))
+	}
+
+	fn new(db_path: PathBuf) -> Self {
+		Self {
+			db_path,
+			conn: Mutex::new(None),
+		}
+	}
+
+	/// 维护连接是否已经被打开过（shutdown 用来决定是否值得再付一次 open 成本）。
+	pub fn is_open(&self) -> bool {
+		self.conn
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.is_some()
+	}
+
+	/// 返回已打开的维护连接；首次调用时打开并应用 PRAGMA。
+	fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<T>) -> anyhow::Result<T> {
+		let mut slot = self
+			.conn
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
+		if slot.is_none() {
+			let conn = Connection::open(&self.db_path)?;
+			conn.busy_timeout(Duration::from_millis(WAL_MAINTENANCE_BUSY_TIMEOUT_MS))?;
+			conn.execute_batch(
+				r"
+                PRAGMA journal_mode=WAL;
+                PRAGMA wal_autocheckpoint=0;
+                PRAGMA synchronous=NORMAL;
+                ",
+			)?;
+			conn.pragma_update(
+				None,
+				"journal_size_limit",
+				WAL_MAINTENANCE_JOURNAL_SIZE_LIMIT,
+			)?;
+			*slot = Some(conn);
+		}
+		f(slot.as_ref().expect("maintenance connection initialized"))
+	}
+
+	/// 当前 `-wal` 文件字节数（不存在时为 0）。
+	pub fn wal_size_bytes(&self) -> u64 {
+		wal_size_bytes(&self.db_path)
+	}
+
+	/// 执行 `PRAGMA wal_checkpoint(PASSIVE)`：不阻塞写者，也绝不 truncate。
+	///
+	/// **注意**：SQLite 的 PASSIVE checkpoint 只把帧回填到主库，**不会复位/截断
+	/// WAL 文件**；WAL 的复位只发生在 RESTART/TRUNCATE 模式，或写连接下一次
+	/// 提交时恰好满足 `readLock==0`（在持续写入时几乎不可达）。因此调用方不能
+	/// 只靠 PASSIVE 来限制 `-wal` 文件大小——阈值路径必须再跑一次
+	/// [`WalMaintainer::checkpoint_restart`]（见 api.rs 的维护线程）。
+	pub fn checkpoint_passive(&self) -> anyhow::Result<CheckpointOutcome> {
+		self.checkpoint("PASSIVE", WAL_MAINTENANCE_BUSY_TIMEOUT_MS)
+	}
+
+	/// 执行 `PRAGMA wal_checkpoint(RESTART)`：等读者结束并**复位** WAL 头，
+	/// 让下一次写入从文件开头复用空间（不截断文件，文件大小保持高水位）。
+	///
+	/// 代价：RESTART 需要 WAL 写锁，且在回填剩余帧期间持有它；调用方应先用
+	/// PASSIVE 把绝大部分帧回填掉，这样 RESTART 只处理“两次调用之间新增的少量
+	/// 帧”，对写者的阻塞可忽略。等待读者/写者受 busy_timeout 限制，超时后退回
+	/// PASSIVE 语义（返回 busy 行，不报错）。
+	pub fn checkpoint_restart(&self) -> anyhow::Result<CheckpointOutcome> {
+		self.checkpoint("RESTART", WAL_RESTART_BUSY_TIMEOUT_MS)
+	}
+
+	/// 执行 `PRAGMA wal_checkpoint(TRUNCATE)`：只应在关闭/空闲时调用。
+	///
+	/// 用较短的 busy_timeout：如果仍有读者持有快照，SQLite 会返回 busy 行而不是
+	/// 让 shutdown 卡满 5 s；调用方记录结果即可。
+	pub fn checkpoint_truncate(&self) -> anyhow::Result<CheckpointOutcome> {
+		self.checkpoint("TRUNCATE", WAL_TRUNCATE_BUSY_TIMEOUT_MS)
+	}
+
+	fn checkpoint(
+		&self,
+		mode: &'static str,
+		busy_timeout_ms: u64,
+	) -> anyhow::Result<CheckpointOutcome> {
+		let wal_bytes_before = self.wal_size_bytes();
+		let (busy, wal_frames, checkpointed_frames) = self.with_conn(|conn| {
+			conn.busy_timeout(Duration::from_millis(busy_timeout_ms))?;
+			// PRAGMA 不支持绑定变量；`mode` 是编译期常量（PASSIVE/RESTART/TRUNCATE），
+			// 无注入面。`query_row` 返回 rusqlite 错误，这里显式 ? 转成 anyhow。
+			let row = conn.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |row| {
+				Ok((
+					row.get::<_, i64>(0)?,
+					row.get::<_, i64>(1)?,
+					row.get::<_, i64>(2)?,
+				))
+			})?;
+			Ok(row)
+		})?;
+		Ok(CheckpointOutcome {
+			busy: busy != 0,
+			wal_frames,
+			checkpointed_frames,
+			wal_bytes_before,
+			wal_bytes_after: self.wal_size_bytes(),
+		})
+	}
+}
+
+/// `-wal` 边车文件大小；stat 失败/文件不存在都返回 0。
+fn wal_size_bytes(db_path: &Path) -> u64 {
+	let mut wal_path = db_path.as_os_str().to_os_string();
+	wal_path.push("-wal");
+	fs::metadata(PathBuf::from(wal_path)).map_or(0, |meta| meta.len())
 }
 
 /// 借出的只读连接；`Drop` 时归还池并唤醒一个等待者。
@@ -2124,6 +2353,59 @@ fn open_read_only_connection(db_path: &Path) -> anyhow::Result<Connection> {
 // 查询实现（连接无关）：写连接 Store 与只读池 StoreReader 共用同一份 SQL，
 // 避免两条路径的列顺序/JSON 解析漂移。
 // ---------------------------------------------------------------------------
+
+/// `items.owner_device_id`：只用于路由/展示，**不是**授权判据。
+fn query_item_owner(conn: &Connection, item_id: &str) -> anyhow::Result<Option<String>> {
+	let mut stmt = conn.prepare("SELECT owner_device_id FROM items WHERE item_id = ?")?;
+	let mut rows = stmt.query([item_id])?;
+	if let Some(row) = rows.next()? {
+		let owner: String = row.get(0)?;
+		Ok(Some(owner))
+	} else {
+		Ok(None)
+	}
+}
+
+/// `items.mime`：展示字段；影响硬上限分类的调用方必须走写连接。
+fn query_item_mime(conn: &Connection, item_id: &str) -> anyhow::Result<Option<String>> {
+	let mut stmt = conn.prepare("SELECT mime FROM items WHERE item_id = ?")?;
+	let mut rows = stmt.query([item_id])?;
+	if let Some(row) = rows.next()? {
+		let mime: String = row.get(0)?;
+		Ok(Some(mime))
+	} else {
+		Ok(None)
+	}
+}
+
+/// `peer_rules` 单行：展示用；授权判定必须走写连接。
+fn query_peer_rule(
+	conn: &Connection,
+	account_uid: &str,
+	device_id: &str,
+) -> anyhow::Result<Option<PeerRule>> {
+	let res: Option<(bool, bool, i64)> = conn
+		.query_row(
+			"SELECT share_to_peer, accept_from_peer, updated_at_ms FROM peer_rules WHERE account_uid=?1 AND device_id=?2",
+			params![account_uid, device_id],
+			|r| {
+				Ok((
+					r.get::<_, i32>(0)? != 0,
+					r.get::<_, i32>(1)? != 0,
+					r.get(2)?,
+				))
+			},
+		)
+		.optional()?;
+
+	Ok(res.map(|(share_to, accept_from, updated_at)| PeerRule {
+		account_uid: account_uid.to_string(),
+		device_id: device_id.to_string(),
+		share_to_peer: share_to,
+		accept_from_peer: accept_from,
+		updated_at_ms: updated_at,
+	}))
+}
 
 fn query_item_meta_by_id(conn: &Connection, item_id: &str) -> anyhow::Result<Option<ItemMeta>> {
 	let mut stmt = conn.prepare(
@@ -2769,6 +3051,17 @@ mod schema_tests {
 			.pragma_query_value(None, "journal_mode", |r| r.get(0))
 			.unwrap();
 		assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+
+		// P5：写连接把自动 checkpoint 阈值抬到 [`WAL_AUTOCHECKPOINT_PAGES`]
+		// （安全网），正常路径由维护线程的独立连接做 PASSIVE（见 `WalMaintainer`）。
+		let wal_autocheckpoint: i64 = store
+			.conn
+			.pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))
+			.unwrap();
+		assert_eq!(
+			wal_autocheckpoint, WAL_AUTOCHECKPOINT_PAGES,
+			"写连接的 wal_autocheckpoint 必须是安全网阈值（4000 页），不能是默认 1000"
+		);
 
 		// P3：新库必须在 WAL/建表之前设置 auto_vacuum，读回应为 2（INCREMENTAL）。
 		let auto_vacuum: i64 = store
@@ -3879,5 +4172,164 @@ mod schema_tests {
 
 		let all = reader.list_history_metas("acct", 1_000).unwrap();
 		assert_eq!(all.len(), 400, "写入完成后读池必须看到全部 400 条");
+	}
+
+	/// P5：只读池新增的信息性查询与写连接结果一致，且 `query_only` 仍然生效。
+	#[test]
+	fn read_pool_matches_informational_lookups() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+		store
+			.insert_remote_item("acct", &test_item_meta("item-info", "sha-info"), 1)
+			.unwrap();
+		store
+			.upsert_peer_rule(&PeerRule {
+				account_uid: "acct".to_string(),
+				device_id: "peer-a".to_string(),
+				share_to_peer: false,
+				accept_from_peer: true,
+				updated_at_ms: 7,
+			})
+			.unwrap();
+
+		let reader = StoreReader::with_size(dir.path(), 1);
+		assert_eq!(
+			reader.get_item_owner("item-info").unwrap().as_deref(),
+			Some("peer-a")
+		);
+		assert_eq!(
+			reader.get_item_mime("item-info").unwrap().as_deref(),
+			Some("text/plain")
+		);
+		assert_eq!(reader.get_item_owner("missing").unwrap(), None);
+		assert_eq!(reader.get_item_mime("missing").unwrap(), None);
+		assert!(reader.get_peer_rule("acct", "missing").unwrap().is_none());
+		let rule = reader
+			.get_peer_rule("acct", "peer-a")
+			.unwrap()
+			.expect("peer rule");
+		assert!(!rule.share_to_peer);
+		assert!(rule.accept_from_peer);
+		assert_eq!(rule.updated_at_ms, 7);
+	}
+
+	/// P5：自动 checkpoint 阈值被抬到 [`WAL_AUTOCHECKPOINT_PAGES`] 后（正常路径
+	/// 由维护线程做 PASSIVE），独立维护连接上的 PASSIVE checkpoint 必须能把写连接
+	/// 产生的 WAL 帧复制回主库（不依赖写连接）；同时锁定一个关键事实：
+	/// **PASSIVE 只回填、不复位/不截断 `-wal`**。
+	#[test]
+	fn wal_maintainer_passive_checkpoint_backfills_frames_but_does_not_shrink_wal() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+
+		// 写连接只写 WAL：200 行远低于安全网阈值，不会触发自动 checkpoint。
+		let maintainer = WalMaintainer::open_core(dir.path());
+		// 先给 WAL 一点内容，确认阈值判断基于真实文件大小。
+		for i in 0..200_i64 {
+			let mut meta = test_item_meta(&format!("item-wal-{i:03}"), &format!("sha-wal-{i:03}"));
+			meta.created_ts_ms = i;
+			store.insert_remote_item("acct", &meta, i).unwrap();
+		}
+		let before = maintainer.wal_size_bytes();
+		assert!(
+			before > 0,
+			"低于安全网阈值的提交必须只写 -wal，不能被自动 checkpoint 清空"
+		);
+
+		let outcome = maintainer.checkpoint_passive().unwrap();
+		assert!(!outcome.busy, "无读者/写者时应能完成 PASSIVE checkpoint");
+		assert!(
+			outcome.checkpointed_frames > 0,
+			"PASSIVE checkpoint 必须复制 WAL 帧: {outcome:?}"
+		);
+		assert!(
+			outcome.wal_bytes_after >= outcome.wal_bytes_before,
+			"PASSIVE 不应截断 -wal（复位/截断只发生在 RESTART/TRUNCATE）: {outcome:?}"
+		);
+		// 独立连接做 checkpoint 后，主库对写连接立即可见（WAL 已回写）。
+		assert_eq!(store.history_total_count_for_account("acct").unwrap(), 200);
+
+		// 再写一条 → 写连接提交，WAL 继续增长但数据完整可读。
+		store
+			.insert_remote_item(
+				"acct",
+				&test_item_meta("item-wal-after", "sha-wal-after"),
+				200,
+			)
+			.unwrap();
+		assert_eq!(store.history_total_count_for_account("acct").unwrap(), 201);
+	}
+
+	/// P5：阈值路径的关键性质——PASSIVE 回填 + RESTART 复位后，**下一次写提交**
+	/// 必须把 `-wal` 截回 `journal_size_limit`（8 MiB），从而真正限制 WAL 增长。
+	#[test]
+	fn wal_maintainer_restart_then_next_commit_truncates_wal_to_journal_limit() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut store = Store::open(dir.path()).unwrap();
+		let maintainer = WalMaintainer::open_core(dir.path());
+
+		// 造出明显大于 journal_size_limit 的 WAL。
+		for i in 0..2_000_i64 {
+			let mut meta = test_item_meta(&format!("item-wal-{i:04}"), &format!("sha-wal-{i:04}"));
+			meta.created_ts_ms = i;
+			store.insert_remote_item("acct", &meta, i).unwrap();
+		}
+		let before = maintainer.wal_size_bytes();
+		assert!(
+			before > WAL_MAINTENANCE_JOURNAL_SIZE_LIMIT as u64,
+			"测试前提：-wal 必须大于 journal_size_limit（实际 {before}）"
+		);
+
+		// 先 PASSIVE 回填（不拿写锁），再 RESTART 等读者并复位 WAL 头。
+		let passive = maintainer.checkpoint_passive().unwrap();
+		assert!(!passive.busy);
+		let restart = maintainer.checkpoint_restart().unwrap();
+		assert!(!restart.busy, "无并发读者时 RESTART 必须成功: {restart:?}");
+
+		// 下一次提交写 WAL 头（frame 0），并按 journal_size_limit 截断文件。
+		store
+			.insert_remote_item(
+				"acct",
+				&test_item_meta("item-after-reset", "sha-after"),
+				9_999,
+			)
+			.unwrap();
+		let after = maintainer.wal_size_bytes();
+		assert!(
+			after <= WAL_MAINTENANCE_JOURNAL_SIZE_LIMIT as u64,
+			"RESTART 后的下一次提交必须把 -wal 截回 journal_size_limit，实际 {after}（之前 {before}）"
+		);
+		assert_eq!(
+			store.history_total_count_for_account("acct").unwrap(),
+			2_001
+		);
+	}
+
+	/// P5：维护连接是独立连接（不是 `query_only` 读池），因此能执行 checkpoint；
+	/// 同时确认它不会顺手改业务连接上的 `wal_autocheckpoint` 设置：
+	/// 维护连接保持 0（只做显式 checkpoint），写连接是安全网阈值。
+	#[test]
+	fn wal_maintainer_uses_independent_connection_and_keeps_autocheckpoint_off() {
+		let dir = tempfile::tempdir().unwrap();
+		let store = Store::open(dir.path()).unwrap();
+		let maintainer = WalMaintainer::open_core(dir.path());
+		// 维护连接自己也关闭自动 checkpoint，避免它在写路径上做隐式收尾。
+		// 维护连接是惰性打开的，这里通过 with_conn 触发首次打开并读取 PRAGMA。
+		let maint_auto: i64 = maintainer
+			.with_conn(
+				|conn| Ok(conn.pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))?),
+			)
+			.unwrap();
+		assert_eq!(maint_auto, 0);
+		let store_auto: i64 = store
+			.conn
+			.pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))
+			.unwrap();
+		assert_eq!(store_auto, WAL_AUTOCHECKPOINT_PAGES);
+		// 维护连接不应带 query_only（否则 checkpoint 无法回写）。
+		let query_only: i64 = maintainer
+			.with_conn(|conn| Ok(conn.pragma_query_value(None, "query_only", |r| r.get(0))?))
+			.unwrap();
+		assert_eq!(query_only, 0);
 	}
 }

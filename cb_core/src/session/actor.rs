@@ -37,6 +37,7 @@ use crate::proto::{
 	PROTOCOL_VERSION, TRANSFER_HEADER_LEN_BYTES,
 };
 use crate::store::Store;
+use crate::store::StoreReader;
 use crate::store::{validate_inbound_item_meta, MetaLimitViolation};
 use crate::transport::{Connection, RecvStream, SendStream};
 use crate::util::{now_ms, sha256_hex};
@@ -505,6 +506,14 @@ where
 }
 
 /// TOFU 指纹校验/首次固定（在阻塞池里打开 DB，避免占住 Tokio worker）。
+///
+/// **安全关键，绝不上只读池**：TOFU pin 是“是否信任这个对端”的唯一判据，
+/// 必须看到最新已提交的 `trusted_peers` 行，并在首次配对时把它写回。这里刻意
+/// 用独立的 `Store::open`（不在 `Mutex<Store>` 上、也不走 `StoreReader`）：
+/// - 读的是写语义的连接（没有 `query_only=ON`），首次固定才能落库；
+/// - 不排队等写连接的 `Mutex<Store>`，避免大规模握手时把主会话循环拖住。
+///
+/// 连接随 spawn_blocking 结束即关闭，不会长期占用。
 async fn tofu_check_and_pin(
 	data_dir: String,
 	account_uid: String,
@@ -2653,6 +2662,9 @@ pub struct SessionActor {
 	handshake_timeout: Duration,
 	cmd_rx: mpsc::Receiver<SessionCmd>,
 	store: Arc<Mutex<Store>>,
+	/// 查询只读连接池：只用于**非授权**的信息性读取（例如 `CONTENT_CACHED`
+	/// 事件里的展示性 MIME）。授权判定/写操作一律留在 `store` 的写连接上。
+	store_reader: Arc<StoreReader>,
 	log_sink: crate::logs::LogSink,
 	opaque_client_state: Option<CbClientLoginState>,
 	opaque_server_state: Option<CbServerLoginState>,
@@ -2692,6 +2704,8 @@ impl SessionActor {
 	///
 	/// 生产路径（`net.rs`）使用 [`SessionActor::spawn_with_sink`]，让所有会话共享
 	/// `Core` 的同一个 writer；这里保留给直接持有 `LogStore` 的调用方/测试。
+	/// 本入口没有外部传入的只读池，会按 `config.data_dir` 自建一个（连接惰性
+	/// 打开，测试里没有额外成本）。
 	#[allow(clippy::too_many_arguments)]
 	pub fn spawn(
 		role: SessionRole,
@@ -2703,12 +2717,14 @@ impl SessionActor {
 		expected_peer_id: Option<String>,
 		log_store: Arc<Mutex<crate::logs::LogStore>>,
 	) -> SessionHandle {
+		let store_reader = Arc::new(StoreReader::open(&config.data_dir));
 		Self::spawn_with_sink(
 			role,
 			conn,
 			config,
 			sink,
 			store,
+			store_reader,
 			cas,
 			expected_peer_id,
 			crate::logs::LogSink::new(log_store),
@@ -2724,6 +2740,9 @@ impl SessionActor {
 	///   轮转，让并发 peer 落到不同的数据 endpoint）；
 	/// - 数据会话与控制会话走完全相同的 TLS/OPAQUE/TOFU 握手，只是不对外发
 	///   `PEER_ONLINE`/`PEER_OFFLINE`，也不参与 `list_peers`。
+	///
+	/// `store_reader` 是查询只读池：只承载展示/统计类读取；授权与写操作仍用
+	/// `store` 的写连接（见各调用点的注释）。
 	#[allow(clippy::too_many_arguments)]
 	pub fn spawn_with_sink(
 		role: SessionRole,
@@ -2731,6 +2750,7 @@ impl SessionActor {
 		config: CoreConfig,
 		sink: Arc<dyn CoreEventSink>,
 		store: Arc<Mutex<Store>>,
+		store_reader: Arc<StoreReader>,
 		cas: crate::cas::Cas,
 		expected_peer_id: Option<String>,
 		log_sink: crate::logs::LogSink,
@@ -2790,6 +2810,7 @@ impl SessionActor {
 				config_arc,
 				sink,
 				store,
+				store_reader,
 				cas,
 				state_ref_clone,
 				peer_id_ref_clone,
@@ -2834,6 +2855,7 @@ impl SessionActor {
 		config: Arc<CoreConfig>,
 		sink: Arc<dyn CoreEventSink>,
 		store: Arc<Mutex<Store>>,
+		store_reader: Arc<StoreReader>,
 		cas: crate::cas::Cas,
 		state_ref: Arc<Mutex<SessionState>>,
 		peer_id_ref: Arc<Mutex<Option<String>>>,
@@ -2903,6 +2925,7 @@ impl SessionActor {
 			config,
 			sink,
 			store,
+			store_reader,
 			log_sink,
 			state_ref,
 			peer_id_ref,
@@ -3332,6 +3355,11 @@ impl SessionActor {
 
 	/// 查询当前对端的共享策略规则（PeerRule）。
 	///
+	/// 【授权关键，保留写连接】`share_to_peer` / `accept_from_peer` 决定本次
+	/// 内容是否允许发送/接收；必须读**写连接**上的最新已提交状态，不能容忍
+	/// 只读池的陈旧快照（否则用户刚关闭共享开关后仍可能放行一次）。
+	/// 同一张表的展示性读取（`list_peers`）才走只读池，见 net.rs。
+	///
 	/// DB 访问统一放进 spawn_blocking，避免阻塞异步线程；对端设备 ID 未知时返回 None。
 	async fn load_peer_rule(&self) -> Result<Option<crate::store::PeerRule>> {
 		let Some(device_id) = self.peer_identity.committed().map(str::to_string) else {
@@ -3371,6 +3399,11 @@ impl SessionActor {
 	}
 
 	/// 归类入站传输的类型，用于选择 size_limits 中的硬上限。
+	///
+	/// 【安全相关（大小限制），保留写连接】本地 mime 被当作比 `ContentBegin.mime`
+	/// 更可信的分类依据，直接决定 text/image/file 的硬上限；若改用只读池的陈旧
+	/// 快照，可能在元数据刚更新时选错上限。`file_id` 非空时无需查库，直接按
+	/// FileList 处理；只有真正需要本地 mime 时才读**写连接**。
 	///
 	/// - `file_id` 非空：FileList 的子文件传输，按 file 上限处理；
 	/// - 否则优先用本地 item 的 mime（本地元数据比对端声明更可信），
@@ -3670,6 +3703,9 @@ impl SessionActor {
 					);
 				}
 				// 认证闸门已在 handle_control_msg 顶部保证此时必然 Online，无需重复判断。
+				// 【授权 + 写入，保留写连接】`accept_from_peer` 决定是否接收这条元数据，
+				// 这是安全决策；同一事务里还要 INSERT items/history。两者必须看到同一份
+				// 最新状态，且绝不能用只读池的陈旧快照来放行/丢弃。
 				let store = self.store.clone();
 				let account_uid = self.config.account_uid.clone();
 				let item_clone = item.clone();
@@ -3814,6 +3850,10 @@ impl SessionActor {
 				// 任何在线 peer 都能删掉别人的 item，甚至把多个 item 共享的 blob
 				// 一起删掉。现在：owner 必须是发送方；blob 仅在没有其他存活 item
 				// 引用同一 sha 时才删除（共享内容保留）。
+				//
+				// 【授权 + 写入，保留写连接】owner 校验（`get_item_owner`）与软删除
+				// 必须在同一份最新状态上完成；用只读池会让“刚被改/刚被删”的 item
+				// 出现不一致的授权结论。只读池不参与任何删除授权。
 				let Some(remote_device_id) = self.peer_identity.committed().map(str::to_string)
 				else {
 					// Online 状态必然已提交身份；防御性拒绝，不杀会话。
@@ -4086,6 +4126,9 @@ impl SessionActor {
 			.unwrap_or("unknown")
 			.to_string();
 		let facts = {
+			// 【授权关键，保留写连接】`ContentBeginFacts`（owner / item sha / 长度 /
+			// FileList 子文件事实）是准入判据：必须读最新已提交的元数据，否则可能
+			// 用陈旧 owner/sha 放行一次越权写入。这里绝不使用只读池。
 			let store = self.store.clone();
 			let item_id_bg = item_id.clone();
 			let file_id_bg = file_id.clone();
@@ -4333,6 +4376,10 @@ impl SessionActor {
 							// C. 决定落地路径 (Materialize)
 							let final_path = if let Some(real_fid) = fid {
 								// FileList 模式
+								// 【保留写连接】这不是授权读取，但它决定刚通过准入的内容
+								// 落到哪个 materialize 文件名（持久化结果的一部分）；与
+								// ContentBegin 准入读同一份已提交元数据更稳妥，也不值得
+								// 为一次 O(1) 主键查询去和只读池争连接。
 								let store = store_clone.lock().unwrap();
 								if let Some(fmeta) = store.get_file_meta(&iid, &real_fid)? {
 									cas_clone.materialize_file(
@@ -5189,54 +5236,54 @@ impl SessionActor {
 					Some(&format!("入站传输成功完成: 传输ID={}，字节数={}/{}，耗时={elapsed_ms}ms，SHA256={}，持久化状态={:?}", done.transfer_id, done.received_bytes, done.total_bytes, done.expected_sha256, outcome.durability)),
 				);
 
-				let store = self.store.clone();
+				// 【写入，保留写连接】`mark_item_content_cached` 会按 item 自身
+				// content.sha256 标记缓存并保留命中行数；只有需要后台补同步时才写
+				// durable=0（其余模式为 1）。这是持久化写入，不能走只读池。
+				//
 				// 注意：B2 的 ContentBegin.sha256 是**整文件** hash（区间哈希不在控制面）；
 				// FileList 传输时它只是其中一个文件的 sha，不能直接用来标记
 				// content_cache（见 mark_item_content_cached）。
+				let store = self.store.clone();
 				let transfer_sha = done.expected_sha256.clone();
 				let iid = done.item_id.clone();
-				let fid = done.file_id.clone();
 				let final_path_str = final_path.to_string_lossy().to_string();
 				let item_id = done.item_id.clone();
 				let file_id = done.file_id.clone();
 				let expected_sha256 = done.expected_sha256.clone();
 
-				// 【新增】查询 DB 获取完整元数据
-				let meta_info = tokio::task::spawn_blocking(move || {
+				let (marked_sha, marked_rows) = tokio::task::spawn_blocking(move || {
 					let mut guard = store.lock().unwrap();
-					// 按 item 自身 content.sha256 标记缓存并保留命中行数；
-					// 只有需要后台补同步时才写 durable=0（其余模式为 1）。
-					let (marked_sha, marked_rows) = mark_item_content_cached(
+					mark_item_content_cached(
 						&mut guard,
 						&iid,
 						&transfer_sha,
 						now_ms(),
 						!durability_pending,
-					)?;
-
-					// 补充查询
-					let mime = guard.get_item_mime(&iid)?.unwrap_or_default();
-					// 简单判断类型
-					let kind = if fid.is_some() {
-						"file"
-					} else if mime.starts_with("text/") {
-						"text"
-					} else if mime.starts_with("image/") {
-						"image"
-					} else {
-						"file" // 或 "binary"，但要和文档一致
-					};
-
-					Ok::<(String, String, String, usize), anyhow::Error>((
-						mime,
-						kind.to_string(),
-						marked_sha,
-						marked_rows,
-					))
+					)
 				})
 				.await??;
 
-				let (mime, kind, marked_sha, marked_rows) = meta_info;
+				// 【已移到只读池】MIME 只用于 `CONTENT_CACHED` 事件的展示字段
+				// (`local_ref.mime` / `kind`)，不参与任何授权或持久化：陈旧快照最多
+				// 让事件里的 MIME 落后于元数据更新，不会放行/拒绝任何内容；写连接上
+				// 刚完成的 present/durable 标记也不受这条只读查询影响。
+				let mime = {
+					let reader = self.store_reader.clone();
+					let iid_for_mime = item_id.clone();
+					tokio::task::spawn_blocking(move || reader.get_item_mime(&iid_for_mime))
+						.await??
+						.unwrap_or_default()
+				};
+				// 简单判断类型（纯展示）
+				let kind = if file_id.is_some() {
+					"file"
+				} else if mime.starts_with("text/") {
+					"text"
+				} else if mime.starts_with("image/") {
+					"image"
+				} else {
+					"file" // 或 "binary"，但要和文档一致
+				};
 				if marked_rows == 0 {
 					// 0 行说明 content_cache 里没有该 item 的记录（例如元数据已被删除）；
 					// 传输本身仍然成功，只记警告，不硬失败。
@@ -5259,11 +5306,13 @@ impl SessionActor {
 						.cas
 						.enqueue_background_sync(expected_sha256.clone(), marked_sha.clone());
 					// 无论入队成功与否都要确保 worker 存在（sweep 兜底路径）。
-					// 历史保留的周期任务只由 `Core::init` 启动的唯一 worker 承担，
-					// 这里传 None 避免第二个调用者覆盖配置。
+					// 历史保留/WAL checkpoint 的周期任务只由 `Core::init` 启动的
+					// 唯一 worker 承担；`claim_durability_worker` 保证这里的调用是
+					// no-op，所以传空配置（None / default）不会覆盖已启动的配置。
 					crate::api::ensure_durability_worker(
 						&self.cas,
 						self.store.clone(),
+						crate::api::WalCheckpointers::default(),
 						&self.log_sink,
 						None,
 					);
@@ -5479,6 +5528,11 @@ impl SessionActor {
 		}
 
 		// [修改] 1. 查找文件路径 (补全了 CAS 和 Local Path 的双重查找)
+		//
+		// 【授权关键，保留写连接】owner 校验决定 `files[].local_path` 是否可信
+		// （只有本机拥有的 item 才能把本地路径流给对端），target sha 决定读哪个
+		// blob。这是内容外泄的最后一道闸门，必须读最新已提交的元数据，绝不能用
+		// 只读池的陈旧快照。
 		//
 		// DB 查询与 `Path::exists` 都是同步阻塞操作，整体放进 spawn_blocking：
 		// 大目录 / 慢磁盘 / SQLite busy 都不能占住 Tokio worker。错误传播保持原样

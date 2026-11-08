@@ -4,7 +4,7 @@ use std::sync::{
 	atomic::{AtomicBool, Ordering},
 	Arc, Mutex,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
 
@@ -18,6 +18,7 @@ use crate::{
 	logs::LogStore,
 	store::Store,
 	store::StoreReader,
+	store::WalMaintainer,
 	util::now_ms,
 };
 
@@ -39,6 +40,270 @@ const DURABILITY_SWEEP_BATCH: i64 = 64;
 /// 历史行就永远不会被清理。这里复用已有的 `cb-durability-sync` 维护线程，
 /// 在它自己的 ticker 上做周期保留（不是每条消息/每次写都做）。
 const HISTORY_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
+
+/// P5：维护线程检查 WAL 大小的节奏（同时也是“积压时更急切”的最短周期）。
+const WAL_CHECKPOINT_TICK: Duration = Duration::from_secs(1);
+
+/// P5：WAL 正常（低于阈值）时的 PASSIVE checkpoint 周期。
+const WAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// P5：`core.db` 的 -wal 超过该值时触发「PASSIVE 回填 + RESTART 复位」。
+const CORE_WAL_BACKLOG_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
+
+/// P5：`logs.db` 写入频率高、单次很小，用更低的阈值保持 -wal 很小。
+const LOGS_WAL_BACKLOG_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+
+/// P5：阈值 RESTART 允许在“持有 WAL 写锁”期间回填的最大剩余帧数（约 4 MiB）。
+///
+/// PASSIVE 之后只剩这么多帧时，RESTART 的写锁持有时间只有毫秒级；剩余更多就
+/// 推迟到下一个 1 s 节拍，避免在持锁期间做大批量回填而挡住写者。
+const WAL_RESTART_MAX_REMAINING_FRAMES: i64 = 1024;
+
+/// P5：由维护线程持有的 WAL checkpoint 连接（core.db / logs.db 各一条）。
+///
+/// 两个库的自动 checkpoint 阈值都被抬高到 [`crate::store::WAL_AUTOCHECKPOINT_PAGES`]
+/// （4000 页 ≈ 16 MB）作为**缺失维护线程时的安全网**；正常运行时 WAL 的收尾
+/// 完全由这里负责：
+/// - 维护线程每 [`WAL_CHECKPOINT_TICK`] 检查一次 `-wal` 大小；
+/// - 低于阈值时每 [`WAL_CHECKPOINT_INTERVAL`] 做一次 `PASSIVE`（不阻塞写者）；
+/// - 超过阈值（core 32 MiB / logs 8 MiB）时改为每 1 s 一次
+///   「PASSIVE + RESTART」：PASSIVE 先回填，RESTART 再复位 WAL 头，让下一次
+///   提交把 `-wal` 截回 `journal_size_limit`（≈8 MiB）。只做 PASSIVE 时
+///   SQLite 不会复位/截断 WAL 文件，`-wal` 会随写入无限增长——这是实测结论，
+///   见 `checkpoint_wal_threshold` 的注释；
+/// - 关闭时对两者各做一次尽力而为的 `TRUNCATE`。
+///
+/// 连接打开失败只会让对应库退化为“不做周期 checkpoint”，不影响业务。
+#[derive(Clone, Default)]
+pub(crate) struct WalCheckpointers {
+	core: Option<Arc<WalMaintainer>>,
+	logs: Option<Arc<WalMaintainer>>,
+}
+
+impl WalCheckpointers {
+	/// 构造 core.db / logs.db 的维护器。
+	///
+	/// 连接由 [`WalMaintainer`] **惰性**打开：这里只保存路径，不在 `Core::init`
+	/// 的关键路径上做 SQLite open（实测两次 open 约 17 ms）。首次 checkpoint 在
+	/// 维护线程的 1 s 节拍上发生，打开失败只会让对应库跳过周期 checkpoint 并在
+	/// 日志中记录 warn，不影响业务。
+	fn new(data_dir: &str) -> Self {
+		Self {
+			core: Some(Arc::new(WalMaintainer::open_core(data_dir))),
+			logs: Some(Arc::new(WalMaintainer::open_logs(data_dir))),
+		}
+	}
+
+	/// 是否有任何需要关闭时 TRUNCATE 的库。
+	fn is_empty(&self) -> bool {
+		self.core.is_none() && self.logs.is_none()
+	}
+
+	/// 关闭时尽力把 core.db / logs.db 的 `-wal` 清空（TRUNCATE）。
+	///
+	/// 只有 shutdown 才调用：此时已通知维护线程退出，不再有新的周期 checkpoint
+	/// 与它竞争；若仍有读者/写者持有快照，SQLite 会在较短的 busy_timeout 后返回
+	/// busy，这里只记录结果、绝不让关闭流程卡住。PASSIVE/RESTART/TRUNCATE 的
+	/// 分工：周期维护用 PASSIVE（超阈值时追加 RESTART），TRUNCATE 仅此一次。
+	fn shutdown_truncate(&self, log_sink: &LogSink) {
+		for (label, maintainer) in [("core.db", &self.core), ("logs.db", &self.logs)] {
+			let Some(maintainer) = maintainer else {
+				continue;
+			};
+			// 从未做过周期 checkpoint 时不为了 TRUNCATE 再付一次 open 成本：
+			// WAL 为空或很小，最后一个连接关闭时 SQLite 自己会收尾。
+			if !maintainer.is_open() {
+				continue;
+			}
+			match maintainer.checkpoint_truncate() {
+				Ok(outcome) => {
+					let detail = format!(
+						"{label} shutdown TRUNCATE checkpoint: busy={}, wal_frames={}, \
+                         checkpointed_frames={}, wal_bytes={} -> {}",
+						outcome.busy,
+						outcome.wal_frames,
+						outcome.checkpointed_frames,
+						outcome.wal_bytes_before,
+						outcome.wal_bytes_after
+					);
+					log_sink.log_debug("Store", &detail, None);
+				}
+				Err(error) => log_sink.log_warn(
+					"Store",
+					&format!("{label} shutdown TRUNCATE checkpoint failed: {error}"),
+					Some(&format!("{label} 关闭时 TRUNCATE checkpoint 失败: {error}")),
+				),
+			}
+		}
+	}
+}
+
+/// P5：周期执行的 PASSIVE checkpoint（在 `spawn_blocking` 里），并记录结果。
+///
+/// 常规 no-op checkpoint 只在 debug 级别记录；失败/未完成用 warn。
+async fn checkpoint_wal_passive(
+	maintainer: Arc<WalMaintainer>,
+	label: &'static str,
+	log_sink: &LogSink,
+) {
+	let result = tokio::task::spawn_blocking(move || maintainer.checkpoint_passive()).await;
+	match result {
+		Ok(Ok(outcome)) => {
+			let detail = format!(
+				"{label} PASSIVE checkpoint: busy={}, wal_frames={}, checkpointed_frames={}, \
+                 wal_bytes={} -> {}",
+				outcome.busy,
+				outcome.wal_frames,
+				outcome.checkpointed_frames,
+				outcome.wal_bytes_before,
+				outcome.wal_bytes_after
+			);
+			if outcome.busy {
+				log_sink.log_warn(
+					"Store",
+					&format!(
+						"{detail}: readers/writer held snapshots; remaining frames will be retried"
+					),
+					Some(&format!(
+						"{label} PASSIVE checkpoint 未完成（仍有读者/写者持有快照），剩余帧稍后重试"
+					)),
+				);
+			} else {
+				log_sink.log_debug("Store", &detail, None);
+			}
+		}
+		Ok(Err(error)) => log_sink.log_warn(
+			"Store",
+			&format!("{label} PASSIVE checkpoint failed: {error}"),
+			Some(&format!("{label} PASSIVE checkpoint 失败: {error}")),
+		),
+		Err(error) => log_sink.log_warn(
+			"Store",
+			&format!("{label} PASSIVE checkpoint task failed: {error}"),
+			Some(&format!("{label} PASSIVE checkpoint 后台任务失败: {error}")),
+		),
+	}
+}
+
+/// P5：`-wal` 超过阈值时执行一次「PASSIVE 回填 + RESTART 复位」。
+///
+/// 为什么不能只跑 PASSIVE：SQLite 的 PASSIVE checkpoint 只把帧回填到主库，
+/// **不复位也不截断 WAL 文件**；WAL 的复位只发生在 RESTART/TRUNCATE 模式（或
+/// 写连接下一次提交恰好满足 `walLock` 条件，在持续写入时几乎不可达）。实测
+/// 单靠 PASSIVE 时 `-wal` 会随写入持续增长到几百 MB（db_contention_probe 中
+/// 378 MiB / 长事务 900 MiB），并拖慢所有读者。
+///
+/// 做法：
+/// 1. 先 PASSIVE（不拿 WAL 写锁），把绝大部分帧回填掉；
+/// 2. 回填到只剩少量帧（≤ [`WAL_RESTART_MAX_REMAINING_FRAMES`]）后再 RESTART：
+///    它只需要回填“两次调用之间新增的少量帧”，然后在持有 WAL 写锁的极短时间
+///    内复位 WAL 头。下一次写连接的提交会把 `-wal` 截到 `journal_size_limit`。
+/// 3. PASSIVE 未完成（有读者快照）或剩余帧太多就跳过 RESTART，下一个 1 s 节拍
+///    重试；绝不让 RESTART 在持有写锁的情况下回填大 backlog。
+async fn checkpoint_wal_threshold(
+	maintainer: Arc<WalMaintainer>,
+	label: &'static str,
+	threshold_bytes: u64,
+	log_sink: &LogSink,
+) {
+	let passive_maintainer = Arc::clone(&maintainer);
+	let passive =
+		tokio::task::spawn_blocking(move || passive_maintainer.checkpoint_passive()).await;
+	let passive = match passive {
+		Ok(Ok(outcome)) => outcome,
+		Ok(Err(error)) => {
+			log_sink.log_warn(
+				"Store",
+				&format!("{label} WAL backlog PASSIVE failed: {error}"),
+				Some(&format!("{label} WAL 积压 PASSIVE 失败: {error}")),
+			);
+			return;
+		}
+		Err(error) => {
+			log_sink.log_warn(
+				"Store",
+				&format!("{label} WAL backlog PASSIVE task failed: {error}"),
+				Some(&format!("{label} WAL 积压 PASSIVE 任务失败: {error}")),
+			);
+			return;
+		}
+	};
+	let remaining = if passive.wal_frames < 0 {
+		i64::MAX
+	} else {
+		passive
+			.wal_frames
+			.saturating_sub(passive.checkpointed_frames)
+	};
+	if passive.busy || remaining > WAL_RESTART_MAX_REMAINING_FRAMES {
+		log_sink.log_warn(
+			"Store",
+			&format!(
+				"{label} WAL backlog remains above {threshold_bytes} bytes; PASSIVE left \
+                 {remaining} frame(s) un-backfilled (busy={}, frames={}, checkpointed={}, \
+                 bytes={}); RESTART deferred to the next tick",
+				passive.busy,
+				passive.wal_frames,
+				passive.checkpointed_frames,
+				passive.wal_bytes_after
+			),
+			Some(&format!(
+				"{label} WAL 积压仍超过 {threshold_bytes} 字节；PASSIVE 后仍有 {remaining} 帧未回填\
+                 （busy={}，帧={}，已回填={}，字节={}），RESTART 推迟到下一个节拍",
+				passive.busy,
+				passive.wal_frames,
+				passive.checkpointed_frames,
+				passive.wal_bytes_after
+			)),
+		);
+		return;
+	}
+
+	let restart_maintainer = Arc::clone(&maintainer);
+	let restart =
+		tokio::task::spawn_blocking(move || restart_maintainer.checkpoint_restart()).await;
+	match restart {
+		Ok(Ok(outcome)) => {
+			let detail = format!(
+				"{label} WAL threshold reset: PASSIVE backfilled={}/{}; RESTART busy={}, \
+                 frames={}, checkpointed={}, wal_bytes={} -> {} ({threshold_bytes} byte threshold; \
+                 the next commit truncates -wal to journal_size_limit)",
+				passive.checkpointed_frames,
+				passive.wal_frames,
+				outcome.busy,
+				outcome.wal_frames,
+				outcome.checkpointed_frames,
+				outcome.wal_bytes_before,
+				outcome.wal_bytes_after
+			);
+			if outcome.busy {
+				log_sink.log_warn(
+					"Store",
+					&format!("{detail}: RESTART incomplete; retrying on the next tick"),
+					Some(&format!(
+						"{label} WAL 阈值复位未完成（读者/写者仍持有快照），下一个节拍重试"
+					)),
+				);
+			} else {
+				log_sink.log_info(
+					"Store",
+					&detail,
+					Some(&format!("{label} WAL 超过阈值，已 PASSIVE+RESTART 复位")),
+				);
+			}
+		}
+		Ok(Err(error)) => log_sink.log_warn(
+			"Store",
+			&format!("{label} WAL threshold RESTART failed: {error}"),
+			Some(&format!("{label} WAL 阈值 RESTART 失败: {error}")),
+		),
+		Err(error) => log_sink.log_warn(
+			"Store",
+			&format!("{label} WAL threshold RESTART task failed: {error}"),
+			Some(&format!("{label} WAL 阈值 RESTART 任务失败: {error}")),
+		),
+	}
+}
 
 /// P3：单次维护窗口最多归还给文件系统多少个 `freelist` 页
 /// （`PRAGMA incremental_vacuum(N)` 的 N）。有界是为了不长时间占住写连接。
@@ -294,6 +559,17 @@ impl Core {
 	pub fn init(cfg: CoreConfig, sink: Arc<dyn CoreEventSink>) -> Self {
 		// 初始化日志存储（需要先创建才能记录日志）
 		let log_store = LogStore::open(&cfg.data_dir).expect("open log store");
+		// `logs.db` 与 `core.db` 一样把 WAL 自动 checkpoint 阈值抬高到安全网值
+		// （理由见 `store::Store::init_pragmas`）：正常路径由 `cb-durability-sync`
+		// 维护线程用独立连接对 logs.db 做 PASSIVE（见 `WalCheckpointers::logs`），
+		// 阈值只在维护线程缺失时兜底，避免 `-wal` 无界增长拖慢读。
+		if let Err(error) = log_store.conn.pragma_update(
+			None,
+			"wal_autocheckpoint",
+			crate::store::WAL_AUTOCHECKPOINT_PAGES,
+		) {
+			eprintln!("[logs] failed to raise WAL auto-checkpoint threshold: {error}");
+		}
 		let logs_rebuilt = log_store.rebuilt;
 		let log_store_arc = Arc::new(Mutex::new(log_store));
 		// 专用日志 writer 线程：运行时（NetManager / SessionActor）只调用
@@ -433,6 +709,14 @@ impl Core {
 		let store_rebuilt = store.rebuilt;
 		let store_arc = Arc::new(Mutex::new(store));
 
+		// Task B：查询只读连接池。写路径继续使用 `store_arc`（唯一写连接）；
+		// FFI 的 history / item / cache·activity stats 查询、以及 NetManager /
+		// SessionActor 里**非授权**的只读查询都改走独立只读连接，不再排在写连接
+		// （WAL checkpoint/落盘）持有的 `Mutex<Store>` 后面。
+		// 池在 `Store::open` 完成 schema 迁移之后创建，保证读连接看到 v5 结构；
+		// 连接本身惰性打开，不增加启动耗时。
+		let store_reader = Arc::new(StoreReader::open(&cfg.data_dir));
+
 		let cas = match Cas::new_with_policy(&cfg.cache_dir, fsync_policy) {
 			Ok(c) => {
 				let mut log_store = log_store_arc.lock().unwrap();
@@ -554,6 +838,7 @@ impl Core {
 				cfg.clone(),
 				sink.clone(),
 				store_arc.clone(),
+				store_reader.clone(),
 				cas.clone(),
 				log_sink.clone(),
 			) {
@@ -586,12 +871,11 @@ impl Core {
 				.as_deref(),
 		);
 
-		// Task B：查询只读连接池。写路径继续使用 `store_arc`（唯一写连接）；
-		// FFI 的 history / item / cache·activity stats 查询改走独立只读连接，
-		// 不再排在写连接（WAL 自动 checkpoint/落盘）持有的 `Mutex<Store>` 后面。
-		// 池在 `Store::open` 完成 schema 迁移之后创建，保证读连接看到 v5 结构。
-		// 连接本身惰性打开，不增加启动耗时。
-		let store_reader = StoreReader::open(&cfg.data_dir);
+		// P5：WAL checkpoint 维护器（core.db + logs.db）。两条独立连接在启动时
+		// 打开一次，之后只由 `cb-durability-sync` 维护线程使用；打开失败时降级为
+		// “不做周期 checkpoint”（自动 checkpoint 已关闭，最坏情况是 WAL 变大，
+		// 关闭时仍有 TRUNCATE 兜底），只记录 warn，绝不影响启动。
+		let wal_checkpointers = WalCheckpointers::new(&cfg.data_dir);
 
 		let inner = Inner {
 			core_config: cfg,
@@ -599,6 +883,7 @@ impl Core {
 			is_shutdown: AtomicBool::new(false),
 			store: store_arc,
 			store_reader,
+			wal_checkpointers: wal_checkpointers.clone(),
 			log_store: log_store_arc,
 			log_sink,
 			cas,
@@ -610,10 +895,12 @@ impl Core {
 		};
 		// 每 Core 一个后台 durability worker：启动时先扫一次，覆盖上次进程退出/
 		// 崩溃遗留的 `durable=0` 行；随后由接收路径的 pending 标记唤醒，并每 30 s
-		// 周期 sweep 兜底（队列满的行不会丢）。
+		// 周期 sweep 兜底（队列满的行不会丢）。同一个线程按 ticker 执行历史行数
+		// 保留与 WAL PASSIVE checkpoint。
 		ensure_durability_worker(
 			&core.inner.cas,
 			core.inner.store.clone(),
+			wal_checkpointers,
 			&core.inner.log_sink,
 			// F12：同一个维护线程按 ticker 执行历史行数保留（远端元数据不会触发
 			// `run_gc`，所以必须有周期路径，否则长期运行会话的历史会无限增长）。
@@ -1566,6 +1853,7 @@ impl Core {
 pub(crate) fn ensure_durability_worker(
 	cas: &Cas,
 	store: Arc<Mutex<Store>>,
+	wal_checkpointers: WalCheckpointers,
 	log_sink: &LogSink,
 	history_retention: Option<HistoryRetention>,
 ) {
@@ -1599,6 +1887,7 @@ pub(crate) fn ensure_durability_worker(
 				stop_rx,
 				worker_cas,
 				store,
+				wal_checkpointers,
 				worker_log,
 				history_retention,
 			));
@@ -1675,12 +1964,14 @@ async fn run_history_retention(
 	}
 }
 
-/// 后台 durability 主循环：处理队列 + 每 30 s 兜底 sweep + F12 周期历史保留。
+/// 后台 durability 主循环：处理队列 + 每 30 s 兜底 sweep + F12 周期历史保留 +
+/// P5 WAL PASSIVE checkpoint。
 async fn durability_worker(
 	mut rx: mpsc::Receiver<PendingSync>,
 	mut stop_rx: tokio::sync::watch::Receiver<bool>,
 	cas: Cas,
 	store: Arc<Mutex<Store>>,
+	wal_checkpointers: WalCheckpointers,
 	log_sink: LogSink,
 	history_retention: Option<HistoryRetention>,
 ) {
@@ -1695,6 +1986,35 @@ async fn durability_worker(
 	let mut retention_ticker = interval(HISTORY_RETENTION_INTERVAL);
 	retention_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 	retention_ticker.tick().await;
+
+	// P5：WAL checkpoint 的 1 s 检查节拍。它只 stat 一个文件；真正执行
+	// checkpoint 的条件是「超过阈值」或「距上次已满 WAL_CHECKPOINT_INTERVAL」。
+	// 第一次 tick 立刻消费，避免在启动路径上重复做 Core::init 已经做过的收尾。
+	let mut wal_ticker = interval(WAL_CHECKPOINT_TICK);
+	wal_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+	wal_ticker.tick().await;
+	let mut last_core_checkpoint = Instant::now();
+	let mut last_logs_checkpoint = Instant::now();
+	let wal_maintenance_active = !wal_checkpointers.is_empty();
+	if wal_maintenance_active {
+		log_sink.log_info(
+			"Store",
+			&format!(
+				"WAL maintenance started: automatic checkpoints are off; PASSIVE every \
+                 {WAL_CHECKPOINT_INTERVAL:?}, and PASSIVE+RESTART reset every {WAL_CHECKPOINT_TICK:?} \
+                 above core={} MiB / logs={} MiB",
+				CORE_WAL_BACKLOG_THRESHOLD_BYTES / (1024 * 1024),
+				LOGS_WAL_BACKLOG_THRESHOLD_BYTES / (1024 * 1024)
+			),
+			Some(&format!(
+				"WAL 维护已启动：自动 checkpoint 已关闭；每 {WAL_CHECKPOINT_INTERVAL:?} 做一次 \
+                 PASSIVE（core 超过 {} MiB / logs 超过 {} MiB 时每 {WAL_CHECKPOINT_TICK:?} 做一次 \
+                 PASSIVE+RESTART 复位）",
+				CORE_WAL_BACKLOG_THRESHOLD_BYTES / (1024 * 1024),
+				LOGS_WAL_BACKLOG_THRESHOLD_BYTES / (1024 * 1024)
+			)),
+		);
+	}
 
 	// 启动先扫一次：上次进程在 `durable=0` 状态下退出/崩溃时，这些内容必须
 	// 在本次启动后补同步，而不是等下一次大文件传输来“顺带”唤醒队列。
@@ -1718,6 +2038,44 @@ async fn durability_worker(
 			_ = retention_ticker.tick() => {
 				if let Some(cfg) = &history_retention {
 					run_history_retention(&store, cfg, &log_sink).await;
+				}
+			},
+			_ = wal_ticker.tick() => {
+				// core.db：写入量最大，阈值 32 MiB。低于阈值时每 5 s 做一次
+				// PASSIVE；超过阈值时每 1 s 走 PASSIVE+RESTART，真正复位 -wal
+				// （只 PASSIVE 不会复位，见 `checkpoint_wal_threshold`）。
+				if let Some(maintainer) = &wal_checkpointers.core {
+					let wal_bytes = maintainer.wal_size_bytes();
+					if wal_bytes >= CORE_WAL_BACKLOG_THRESHOLD_BYTES {
+						checkpoint_wal_threshold(
+							Arc::clone(maintainer),
+							"core.db",
+							CORE_WAL_BACKLOG_THRESHOLD_BYTES,
+							&log_sink,
+						)
+						.await;
+						last_core_checkpoint = Instant::now();
+					} else if last_core_checkpoint.elapsed() >= WAL_CHECKPOINT_INTERVAL {
+						checkpoint_wal_passive(Arc::clone(maintainer), "core.db", &log_sink).await;
+						last_core_checkpoint = Instant::now();
+					}
+				}
+				// logs.db：写入频率高但每行很小，用 8 MiB 阈值保持 -wal 很小。
+				if let Some(maintainer) = &wal_checkpointers.logs {
+					let wal_bytes = maintainer.wal_size_bytes();
+					if wal_bytes >= LOGS_WAL_BACKLOG_THRESHOLD_BYTES {
+						checkpoint_wal_threshold(
+							Arc::clone(maintainer),
+							"logs.db",
+							LOGS_WAL_BACKLOG_THRESHOLD_BYTES,
+							&log_sink,
+						)
+						.await;
+						last_logs_checkpoint = Instant::now();
+					} else if last_logs_checkpoint.elapsed() >= WAL_CHECKPOINT_INTERVAL {
+						checkpoint_wal_passive(Arc::clone(maintainer), "logs.db", &log_sink).await;
+						last_logs_checkpoint = Instant::now();
+					}
 				}
 			}
 		}
@@ -1979,9 +2337,14 @@ pub struct Inner {
 	pub store: Arc<Mutex<Store>>,
 	/// 查询专用只读连接池（WAL 快照；`query_only=ON`）。
 	///
-	/// 只服务只读查询（history/item/stats）；写路径与需要事务一致性的读取
-	/// （GC、对账、actor 元数据）继续用 `store` 的写连接。
-	pub store_reader: StoreReader,
+	/// 只服务**非授权**的只读查询（FFI history/item/stats、`list_peers` 展示、
+	/// 会话里不影响准入/持久化的展示字段）；写路径与需要事务一致性的读取
+	/// （GC、对账、TOFU、peer 策略授权、内容准入、删除/serve 的 owner 校验）
+	/// 继续用 `store` 的写连接。
+	pub store_reader: Arc<StoreReader>,
+	/// P5：core.db / logs.db 的 WAL 维护器（周期 PASSIVE，超阈值 PASSIVE+RESTART，
+	/// 关闭时 TRUNCATE）。
+	pub(crate) wal_checkpointers: WalCheckpointers,
 	/// 查询/删除路径共享的同步 LogStore（FFI 线程使用，允许阻塞）。
 	pub log_store: Arc<Mutex<LogStore>>,
 	/// 运行时路径使用的非阻塞日志入口（内部有专用 writer 线程）。
@@ -2016,6 +2379,10 @@ impl Inner {
 		// 通知后台 durability worker 退出（不 join：与 NetManager 一样尽力而为，
 		// 正在进行的单次 sync_data 会自然完成）。
 		self.cas.stop_durability_worker();
+
+		// P5：关闭前做一次尽力而为的 TRUNCATE checkpoint（周期维护只用 PASSIVE，
+		// 这是唯一会 truncate 的时机）。放在 flush 之前，让结果日志也能落库。
+		self.wal_checkpointers.shutdown_truncate(&self.log_sink);
 
 		// 顺序：先通知 NetManager 停机（此后它多数日志会自然减少），再关闭 sink。
 		// `flush_and_join` 先停止接收新记录，再让 writer 排空已入队的记录并
