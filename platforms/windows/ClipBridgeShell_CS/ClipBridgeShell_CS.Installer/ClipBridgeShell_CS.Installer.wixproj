@@ -35,7 +35,8 @@
     <AppTargetFramework Condition=" '$(AppTargetFramework)' == '' ">net10.0-windows10.0.26100.0</AppTargetFramework>
     <BasePubDir>$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS\bin\$(PublishConfiguration)\$(AppTargetFramework)\$(RID)\publish</BasePubDir>
     <!-- 显式定义变量，供 candle.exe 使用 -->
-    <DefineConstants>$(DefineConstants);PublishDir=$(BasePubDir)</DefineConstants>
+    <AppProjectDir>$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS</AppProjectDir>
+    <DefineConstants>$(DefineConstants);PublishDir=$(BasePubDir);AppProjectDir=$(AppProjectDir)</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -43,13 +44,7 @@
     <Compile Include="$(IntermediateOutputPath)HeatGenerated.wxs" />
   </ItemGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="..\ClipBridgeShell_CS\ClipBridgeShell_CS.csproj">
-      <Name>ClipBridgeShell_CS</Name>
-      <Project>{a1b2c3d4-e5f6-7890-abcd-ef1234567897}</Project>
-      <Private>False</Private>
-    </ProjectReference>
-  </ItemGroup>
+
 
   <ItemGroup>
     <WixExtension Include="WixUtilExtension"><HintPath>$(WixExtDir)\WixUtilExtension.dll</HintPath></WixExtension>

@@ -22,7 +22,7 @@
     
     <MediaTemplate EmbedCab="yes" />
     
-    <Icon Id="AppIcon" SourceFile="$(var.ClipBridgeShell_CS.ProjectDir)Assets\WindowIcon.ico" />
+    <Icon Id="AppIcon" SourceFile="$(var.AppProjectDir)\Assets\WindowIcon.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
     
     <!-- 安装目录：默认 C:\Program Files\ClipBridge -->
@@ -32,6 +32,47 @@
     <UIRef Id="WixUI_InstallDir" />
     <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <!--
+      卸载时是否同时删除用户数据（%LOCALAPPDATA%\ClipBridge：core.db/logs.db/Cache/tls）。
+      默认 0 = 保留（重装后可继续使用）；卸载向导会弹出自定义对话框让用户勾选，
+      静默卸载可用：msiexec /x ClipBridgeShell_CS.msi REMOVEUSERDATA=1 /qn
+    -->
+    <Property Id="REMOVEUSERDATA" Value="0" />
+
+    <!-- 卸载向导：在「维护类型」页点“删除”后插入我们的数据清理对话框。 -->
+    <UI>
+      <DialogRef Id="RemoveUserDataDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="RemoveUserDataDlg" Order="2">1</Publish>
+      <Publish Dialog="RemoveUserDataDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2">1</Publish>
+      <Publish Dialog="RemoveUserDataDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="2">1</Publish>
+      <Publish Dialog="RemoveUserDataDlg" Control="Cancel" Event="SpawnDialog" Value="CancelDlg" Order="2">1</Publish>
+    </UI>
+
+    <!--
+      卸载清理动作（deferred，Impersonate=yes 让 %LOCALAPPDATA% 指向执行卸载的用户）：
+      1) CleanupStartupEntryCA：总是移除开机自启项与旧版计划任务（这些是应用运行时写入的，
+         MSI 组件不跟踪，必须显式清理，否则卸载后残留“开机启动”死项）。
+      2) RemoveUserDataCA：仅在用户勾选（REMOVEUSERDATA=1）时删除用户数据目录。
+      两者都 Return="ignore"：清理失败不能阻断卸载。
+    -->
+    <CustomAction Id="CleanupStartupEntryCA"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore"
+                  Directory="SystemFolder"
+                  ExeCommand="cmd.exe /c reg delete &quot;HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run&quot; /v ClipBridge /f &amp; schtasks /Delete /TN ClipBridge_AutoStart /F" />
+    <CustomAction Id="RemoveUserDataCA"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore"
+                  Directory="SystemFolder"
+                  ExeCommand="cmd.exe /c rd /s /q &quot;%LOCALAPPDATA%\ClipBridge&quot;" />
+
+    <InstallExecuteSequence>
+      <Custom Action="CleanupStartupEntryCA" Before="InstallFinalize">Installed AND (REMOVE~=&quot;ALL&quot;)</Custom>
+      <Custom Action="RemoveUserDataCA" Before="InstallFinalize">REMOVEUSERDATA=&quot;1&quot; AND Installed AND (REMOVE~=&quot;ALL&quot;)</Custom>
+    </InstallExecuteSequence>
     
     <Feature Id="ProductFeature" Title="ClipBridge Shell" Level="1">
       <ComponentGroupRef Id="RuntimeFiles" />
@@ -49,6 +90,8 @@
         <Directory Id="ApplicationProgramsFolder" Name="ClipBridge" />
       </Directory>
       <Directory Id="DesktopFolder" Name="Desktop" />
+      <!-- 自定义动作（deferred cmd.exe）的工作目录引用：SystemFolder 是标准目录，必须在 Directory 树中出现一次。 -->
+      <Directory Id="SystemFolder" />
     </Directory>
   </Product>
   
@@ -100,5 +143,30 @@
         </RegistryKey>
       </Component>
     </ComponentGroup>
+  </Fragment>
+  <!-- 卸载时的“是否删除用户数据”对话框。 -->
+  <Fragment>
+    <UI>
+      <Dialog Id="RemoveUserDataDlg" Width="370" Height="270" Title="卸载 ClipBridge Shell" NoMinimize="yes">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}卸载 ClipBridge Shell" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="320" Height="15"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="是否同时删除本机的用户数据？" />
+        <Control Id="RemoveUserDataCheckBox" Type="CheckBox" X="25" Y="50" Width="320" Height="18"
+                 Property="REMOVEUSERDATA" CheckBoxValue="1"
+                 Text="删除用户数据（历史记录、缓存、设备证书与配对信任）" />
+        <Control Id="DataDetail" Type="Text" X="25" Y="72" Width="320" Height="90"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="删除后无法恢复：将移除 %LOCALAPPDATA%\ClipBridge 下的数据库、缓存、设备证书，其他设备上的数据不受影响。不勾选则保留，重新安装后可继续使用（推荐）。" />
+        <Control Id="StartupDetail" Type="Text" X="25" Y="165" Width="320" Height="40"
+                 Transparent="yes" NoPrefix="yes"
+                 Text="无论是否勾选，卸载都会移除开机自启项和开始菜单/桌面快捷方式。" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)" />
+      </Dialog>
+    </UI>
   </Fragment>
 </Wix>

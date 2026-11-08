@@ -2,8 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using System.Text.Json;
+using System.Threading.Tasks;
 
 namespace ClipBridgeShell_CS.Core.Services;
 
@@ -19,22 +19,23 @@ public sealed class CoreConfigBuilder
 
     public Paths BuildPaths(string appName = "ClipBridge")
     {
-        // MSIX 与非打包：你现在 LocalSettingsService 已区分了 RuntimeHelper.IsMSIX（可复用同策略）
-        // 这里用最保守、可落地的路径：LocalAppData\<appName>\
+        // 真实布局（与 CoreHostService.InitializeAsync 传给 cb_init 的字段一致）：
+        //   %LOCALAPPDATA%\<appName>\            ← data_dir：core.db / logs.db / tls/ / startup.log
+        //   %LOCALAPPDATA%\<appName>\Cache\      ← cache_dir：blobs/ + tmp/
+        //
+        // 历史遗留：这里曾经创建 `<appName>\shell`、`<appName>\core\{data,cache,logs}`，
+        // 但运行中的 core 从来没用过它们（data_dir 一直是根目录），结果是每次启动都
+        // 留下几个空目录，误导用户和排障。现在只创建真正会用到的两个目录，并对旧布局
+        // 的空目录做一次性清理（见 CoreHostService.TryRemoveEmptyLegacyDirs）。
         var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var appDataDir = Path.Combine(root, appName, "shell");
-        var coreRoot = Path.Combine(root, appName, "core");  // core_data_dir（总根）
-        var dataDir = Path.Combine(coreRoot, "data");       // SQLite + 其它持久
-        var cacheDir = Path.Combine(coreRoot, "cache");      // CAS + tmp
-        var logDir = Path.Combine(coreRoot, "logs");
+        var appRoot = Path.Combine(root, appName);
+        var cacheDir = Path.Combine(appRoot, "Cache");
 
-        Directory.CreateDirectory(appDataDir);
-        Directory.CreateDirectory(coreRoot);
-        Directory.CreateDirectory(dataDir);
+        Directory.CreateDirectory(appRoot);
         Directory.CreateDirectory(cacheDir);
-        Directory.CreateDirectory(logDir);
 
-        return new Paths(appDataDir, coreRoot, dataDir, cacheDir, logDir);
+        // LogDir 与 data_dir 同根：core 把 logs.db 写在 data_dir 下。
+        return new Paths(appRoot, appRoot, appRoot, cacheDir, appRoot);
     }
 
     public string BuildConfigJson(Paths p)

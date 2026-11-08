@@ -145,10 +145,15 @@ public sealed class CoreHostService : ICoreHostService
         }
         else
         {
-            localFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
-            cacheFolder = Path.Combine(localFolder, "Cache");
-            if (!Directory.Exists(localFolder)) Directory.CreateDirectory(localFolder);
-            if (!Directory.Exists(cacheFolder)) Directory.CreateDirectory(cacheFolder);
+            // 不再在这里重复拼路径：统一用 BuildPaths 的结果，避免出现“诊断显示的路径”
+            // 与“真正传给 core 的路径”不一致（历史 bug 的来源之一）。
+            localFolder = paths.DataDir;
+            cacheFolder = paths.CacheDir;
+            Directory.CreateDirectory(localFolder);
+            Directory.CreateDirectory(cacheFolder);
+
+            // 一次性清理旧布局留下的空目录（core/、logs/、shell/）。
+            TryRemoveEmptyLegacyDirs(paths.AppDataDir);
         }
 
         // 更新当前账号 UID（用于后续检测账号切换）
@@ -533,6 +538,41 @@ public sealed class CoreHostService : ICoreHostService
         LastError = CredentialsUnavailableMessage;
         Diagnostics.LastInitSummary = "Core degraded: account credentials unavailable.";
         SetState(CoreState.Degraded);
+    }
+
+    /// <summary>
+    /// 一次性清理旧布局遗留的空目录（`%LOCALAPPDATA%\ClipBridge\{core,logs,shell}`）。
+    ///
+    /// 这些目录是历史 `BuildPaths` 创建的，但运行中的 core 从未使用（data_dir 一直是
+    /// LocalAppData\ClipBridge 根目录）。只删除**完全为空**的目录；任何包含文件的目录
+    /// 都保留（可能是用户的旧数据，不能替用户做决定）。异常一律吞掉——清理属于尽力而为。
+    /// </summary>
+    private void TryRemoveEmptyLegacyDirs(string appRoot)
+    {
+        foreach (var name in new[] { "core", "logs", "shell" })
+        {
+            try
+            {
+                var dir = Path.Combine(appRoot, name);
+                if (!Directory.Exists(dir))
+                {
+                    continue;
+                }
+
+                // 递归检查：只要有任何文件/子项就不动它。
+                if (Directory.EnumerateFileSystemEntries(dir, "*", SearchOption.AllDirectories).Any())
+                {
+                    continue;
+                }
+
+                Directory.Delete(dir, recursive: true);
+                _logger?.LogDebug("Removed empty legacy data directory {Dir}", dir);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogDebug(ex, "Failed to remove legacy data directory {Name}", name);
+            }
+        }
     }
 
     private void SetState(CoreState s)
