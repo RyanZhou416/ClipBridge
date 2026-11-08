@@ -119,6 +119,20 @@
   <PropertyGroup>
     <CliBridgeRepoRoot>$(MSBuildThisFileDirectory)..\..\..\..</CliBridgeRepoRoot>
     <SkipRustBuild Condition="'$(SkipRustBuild)' == ''">false</SkipRustBuild>
+    <!--
+      发布瘦身：默认开启（`-p:TrimPublishOutput=false` 可关闭）。
+      - 移除 Windows App SDK 的 AI/ML 组件：onnxruntime.dll(20.7MB) + DirectML.dll(17.8MB)
+        + Microsoft.Windows.AI.* / Microsoft.ML.OnnxRuntime.*（合计约 42.4MB）。本应用
+        不调用任何 Windows.AI/ML API（代码里没有任何引用），这些文件是
+        Microsoft.WindowsAppSDK 元包顺带带进来的；缺失只会在调用 AI API 时才报错。
+      - 移除除保留语言外的 WinUI 运行时 MUI 目录（86 个语言约 3.4MB）。应用自身
+        文案走 Strings/*.resw（WinUI3Localizer），WinUI 运行时 MUI 只在系统语言
+        不是保留语言时才被用到，缺失时按 en-US 回退。
+      实测（release x64 publish）：287.1MB → 244.9MB（-42.2MB）。
+    -->
+    <TrimPublishOutput Condition="'$(TrimPublishOutput)' == ''">true</TrimPublishOutput>
+    <!-- 保留的发布输出子目录（大小写按实际目录名）；语言目录只留这些。 -->
+    <TrimKeepPublishDirs Condition="'$(TrimKeepPublishDirs)' == ''">Assets;Strings;Microsoft.UI.Xaml;zh-CN;zh-TW;en-us;en-US</TrimKeepPublishDirs>
   </PropertyGroup>
 
   <Target Name="BuildCoreFfi" BeforeTargets="BeforeBuild" Condition="'$(SkipRustBuild)' != 'true'">
@@ -144,5 +158,39 @@
     <Warning Condition="'$(Configuration)' == 'Release' and '$(SkipCoreFfiCheck)' != 'true' and !Exists('$(RustTargetDir)\core_ffi_windows.dll')"
              Text="core_ffi_windows.dll was not found in '$(RustTargetDir)'. The resulting app will fail at runtime with DllNotFoundException (CoreHostService reports 'Degraded'). Build the Rust core-ffi crate (cargo build -p core_ffi_windows --release --target x86_64-pc-windows-msvc) or pass -p:RustTargetDir=&lt;dir&gt;. Set -p:SkipCoreFfiCheck=true to suppress this warning." />
     <Copy SourceFiles="$(RustTargetDir)\core_ffi_windows.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('$(RustTargetDir)\core_ffi_windows.dll')" />
+  </Target>
+
+  <!--
+    发布瘦身（见上面的 TrimPublishOutput 注释）：只作用于 publish 产物，不影响
+    dotnet build / 测试 / 运行时调试。宿主若将来要用 Windows.AI，把
+    -p:TrimPublishOutput=false 传给 publish 即可。
+  -->
+  <Target Name="TrimPublishOutputs" AfterTargets="Publish" Condition="'$(TrimPublishOutput)' != 'false'">
+    <!-- 1) AI/ML 组件（本应用不使用）。 -->
+    <ItemGroup>
+      <_AiPublishFile Include="$(PublishDir)onnxruntime.dll" />
+      <_AiPublishFile Include="$(PublishDir)DirectML.dll" />
+      <_AiPublishFile Include="$(PublishDir)Microsoft.Windows.AI*.dll" />
+      <_AiPublishFile Include="$(PublishDir)Microsoft.Windows.AI*.winmd" />
+      <_AiPublishFile Include="$(PublishDir)Microsoft.ML.OnnxRuntime*.dll" />
+    </ItemGroup>
+    <ItemGroup>
+      <_AiPublishFileExisting Include="@(_AiPublishFile)" Condition="Exists('%(Identity)')" />
+    </ItemGroup>
+    <Delete Files="@(_AiPublishFileExisting)" />
+
+    <!-- 2) 未保留语言的 WinUI 运行时 MUI 目录。
+         用 Directory.GetDirectories 枚举（MSBuild 的 * 通配符无法只匹配目录）。 -->
+    <ItemGroup>
+      <_PublishSubDir Include="$([System.IO.Directory]::GetDirectories('$(PublishDir)'))" />
+      <!-- 属性要先拆成 item 才能做 %(Identity) 变换。 -->
+      <_TrimKeepName Include="$(TrimKeepPublishDirs)" />
+      <_TrimKeepDir Include="@(_TrimKeepName->'$(PublishDir)%(Identity)')" />
+      <_PublishDirToRemove Include="@(_PublishSubDir)" Exclude="@(_TrimKeepDir)" />
+    </ItemGroup>
+    <RemoveDir Directories="@(_PublishDirToRemove)" />
+
+    <Message Importance="high"
+             Text="[trim] removed @(_AiPublishFileExisting->Count()) AI/ML file(s) and @(_PublishDirToRemove->Count()) unused culture dir(s) from $(PublishDir)" />
   </Target>
 </Project>
