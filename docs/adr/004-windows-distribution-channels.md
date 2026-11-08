@@ -2,6 +2,7 @@
 
 - 状态：**待决策**（已由三路独立评审：MSI/WiX/Burn、MSIX/Store、winget/CI/版本）
 - 日期：2026-11-08（v1 同日；v2 为评审后修订）
+- 研究：`docs/windows-distribution-practices.md`（真实项目案例与官方文档）
 - 关联：`docs/distribution-strategy.md`、`docs/windows-distribution.md`、
   `platforms/windows/ClipBridgeShell_CS/`
 - 范围：**仅 Windows 壳**。本文不含实现；实现需在决策确认后另开变更。
@@ -35,14 +36,14 @@ MSI/EXE 走 SignPath Foundation（免费 OSS）或备选 Certum 个人版（约 
 | D1 | 产物关系 | 一次 `publish` 派生四种产物；但 MSIX 走 build 布局（见 §4），不是 publish 目录 |
 | D2′ | MSI/便携数据根 | `%LOCALAPPDATA%\ClipBridge`（与 MSIX 解耦，可独立实施） |
 | D2″ | MSIX 数据根 | `ApplicationData.Current.LocalFolder`（LocalState）+ 首启从真实 `%LOCALAPPDATA%` **只读导入** + 显式导出；**不做**包外共享 |
-| D3 | MSI 范围 | 双用途：per-user 默认（免 UAC）/ per-machine 可选；按 §5.2 正确配方 |
+| D3 | MSI 范围 | 双用途：per-user 默认（免 UAC）/ per-machine 可选；按 §5.2 正确配方（**研究后建议改为两个安装器，见 §11 / D16**） |
 | D4 | 签名 | 本轮不买证书；Store 代签 + SignPath（后续） |
 | D5 | MSIX 定位 | 仅 Store 渠道；不做自签名侧载分发 |
 | D6 | winget | **多文件三件套**；P1 先 machine-only（可选：双条目支持双用途） |
 | D7 | 更新责任 | 本轮先不做自研更新器；Store/winget/手动 |
 | D8 | 版本与发布 | `Version.props` 单一来源 + 修复 release-please + 重写 Release 流水线 |
 | D9 | 共存 | 跨格式单实例互斥（命名互斥量 + 命名管道 + 冲突提示） |
-| D10 | EXE | Burn，**固定 per-user**；per-machine 走 MSI/winget |
+| D10 | EXE | Burn，**固定 per-user**；per-machine 走 MSI/winget（**研究后建议：user EXE + machine MSI，见 §11 / D17**） |
 | D11 | MSI 工具链 | **待确认**：WiX 3.14 手工双用途（推荐）vs 迁 WiX 5 |
 | D12 | 设置存储 | **待确认**：统一到数据根 `settings.json`（含迁移） |
 | D13 | 便携默认 | 数据随 exe（标记）；不可写回退 LocalAppData 并提示 |
@@ -285,5 +286,29 @@ MSI/EXE 走 SignPath Foundation（免费 OSS）或备选 Certum 个人版（约 
 | **D6** | winget P1 machine-only / 双条目（user 用 `ALLUSERS=2 MSIINSTALLPERUSER=1`） | P1 machine-only，P2 再加 user 条目 |
 | **D11** | WiX 3 手工双用途 / 迁 WiX 5 | WiX 3（改动可控），除非 D15 要 EXE 切 scope |
 | **D15** | EXE 固定 per-user / 一个 EXE 切 scope（→ WiX 5） | 固定 per-user |
+| **D16（研究后新增）** | 安装器形态：单个双用途 MSI / **per-user EXE + per-machine MSI**（VS Code、PowerToys 模式） | 后者：scope 构建期固定，winget 两条 Scope 自然对齐 |
+| **D17（研究后新增）** | EXE：单 per-user bundle / user+machine 两个 bundle / 换 Inno·NSIS 实现运行时切 scope | 单 per-user bundle + machine MSI |
+
 | **Store 首发版本** | `1.0.0.0` 起 / 其他 | `1.0.0.0`，与 release-please 建立映射 |
 | **探针** | 现在跑 V1/V2 / 留到实现阶段 | 现在跑（唯一能定 D2″ 的实验） |
+
+## 11. 成熟实践研究结论（2026-11-08，待并入决策）
+
+证据与出处见 `docs/windows-distribution-practices.md`。要点：
+
+1. **主流项目不用"单个双用途 MSI"**：VS Code / PowerToys 用 user/machine 两个安装器；
+   Git / Python 用一个 EXE 按参数/提权选 scope；7-Zip 的 MSI 只做 per-machine。
+   微软官方 Single Package Authoring 确实定义了双用途 MSI（ALLUSERS=2 + MSIINSTALLPERUSER、ICE105、
+   ProgramFiles64Folder 自动重定向），但真实项目少见；WiX v3 无原生支持，v4+ 有 perUserOrMachine，
+   v7 才有 perMachineOrUser。
+2. **MSIX 默认 AppData 写虚拟化**（官方文档明确）：共享真实 AppData 需 unvirtualizedResources +
+   关闭写虚拟化；Files（WinUI3、Store 上架）就是这样做的，但它是文件管理器，理由充分。
+   CB 默认仍采用 LocalState + 首启导入，把受限能力留作备选。
+3. **WinUI3 的 startupTask 应用 uap5:Extension + uap5:StartupTask**（Files 的写法）；
+   现有 desktop:Extension + Executable/EntryPoint 会出现"登录启动但窗口不出现"。
+4. **单实例**：AppInstance 按应用版本/用户分列表；unpackaged 官方建议命名互斥量——跨格式仍需互斥量 + 管道。
+5. **签名**：Store 对 MSIX 免费重签；MSI/EXE 提交 Store 必须自己 Authenticode 签名——与 D4 路线一致。
+6. **便携**：VS Code 约定是"ZIP + exe 旁 data 目录"，不支持从安装版切换；CB 的标记方案与之等价。
+
+据此建议把 **D3/D10 改为"per-user EXE + per-machine MSI"**（D16/D17），其余决策不变。
+确认后再更新 §3 矩阵、§5.2/§5.3 与实现计划。
