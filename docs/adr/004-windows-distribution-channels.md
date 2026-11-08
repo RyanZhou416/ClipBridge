@@ -1,30 +1,31 @@
-# ADR-004：Windows 分发渠道与安装形态（v3，定稿待评审）
+# ADR-004：Windows 分发渠道与安装形态（v4，定稿）
 
-- 状态：**设计定稿，待并行评审**（无实现）
-- 日期：2026-11-08（v1 初稿；v2 三路评审后修订；v3 采纳成熟实践，确定安装器形态）
-- 研究：`docs/windows-distribution-practices.md`（真实项目案例与官方文档）
-- 关联：`docs/distribution-strategy.md`、`docs/windows-distribution.md`
+- 状态：**定稿，待实施**（v1 初稿 → v2 三路评审 → v3 成熟实践采纳 → v4 四路评审 + 源码对照）
+- 日期：2026-11-08
+- 参考实现：`docs/windows-distribution-practices.md`、PowerToys 安装器源码、VS Code/Git/Python 的 winget 清单、Files 的 MSIX manifest
 - 范围：**仅 Windows 壳**；本文不含实现。
 
-## 0. 修订摘要
+## 0. 争议点的成熟答案（不再自行推演）
 
-### v1 → v2（三路评审）
-- D2 拆分为 D2′（MSI/便携统一数据根）与 D2″（MSIX = LocalState + 首启导入）。
-- D3 的 WiX 3 双用途配方修正（删 `InstallScope`、`ALLUSERS=2`+`MSIINSTALLPERUSER`、`HKMU`、`ProgramFiles64Folder` 自动重定向）。
-- D10 的"一个 EXE 切 scope"在 Burn 下不可行。
-- D6 winget 不能用 singleton 提交，必须多文件。
-- D8 版本源上移、release-please 修复、`publish.yml` 重写。
+这些问题是行业里反复解决过的，直接采用成熟项目的做法：
 
-### v2 → v3（成熟实践研究，**已采纳**）
-- **D16 = A**：放弃"单个双用途 MSI"，改为 **per-machine MSI + per-user EXE**（VS Code / PowerToys 模式）。
-- **D17**：**单 per-user Burn bundle**（内部包一个隐藏的 per-user MSI）+ **独立的 per-machine MSI**。
-- 随之确定：
-  - 两个 MSI 变体（machine 独立分发；user 藏在 EXE 里，ARP 隐藏）；
-  - 两套 `UpgradeCode`（避免 Windows Installer 把另一个 scope 当"相关产品"误升级/误删）；
-  - 安装时**互斥检测**：检测到另一个 scope 已安装则阻断并提示先卸载；
-  - winget 两条 Scope：machine MSI + user EXE；
-  - MSIX 维持 D2″；startupTask 改 `uap5` 写法；单实例用命名互斥量；
-  - WiX 3.14 即可（不再需要双用途/ICE105，也无需迁 WiX 5）。
+| 问题 | 成熟答案 | 依据 |
+|---|---|---|
+| 两个 MSI 怎么构建 | **一个 wixproj，`PerUser` 定义构建两遍**；`OutputName`/`OutputPath`/`IntermediateOutputPath` 按变体分开（MachineSetup / UserSetup），共享 `Product.wxs` | PowerToys `PowerToysInstallerVNext.wixproj`（`PerUser` 定义 + 两套 OutputPath） |
+| machine / user 的 UpgradeCode | **两套独立 UpgradeCode**；machine 沿用现有 GUID（可升级现场），user 用新 GUID；bundle 用 `util:ProductSearch` **同时探测两者** | PowerToys `PowerToys.wxs:41-42`（ProductSearch 两个 UpgradeCode） |
+| per-user MSI 的 ARP 会不会落 HKLM | 会（WiX 官方承认"pure per-user package writes Uninstall key to HKLM"），但 **Burn 包 MSI 时会自动传 `ARPSYSTEMCOMPONENT=1`**，winget 跳过 SystemComponent 条目 → 用户看到的是 **bundle 的 HKCU ARP** | Burn 行为（SO 19803280）、winget-cli#6063、FireGiant 2026-08-26 会议纪要 |
+| 安装目录 | machine：`[ProgramFiles64Folder]\ClipBridge`；user：**显式** `[LocalAppDataFolder]\Programs\ClipBridge`（不依赖隐式重定向） | MS Installation Context（per-user 重定向存在，但显式更稳；A 的 spike 建议） |
+| 注册表根/开始菜单要不要参数化 | **不需要**：注册表根用 `HKMU`（-1 → machine=HKLM / user=HKCU）；`ProgramMenuFolder` 随 ALLUSERS 自动切换 | MS Installation Context |
+| DesktopFolder 含义 | per-machine 下 `DesktopFolder` 本身就是 **All Users 桌面**，不是"安装者桌面"；MSI **没有** `CommonDesktopFolder` | MS Installation Context（A/B 一致） |
+| RemoveFolderEx | **目录 id 不可用**：属性必须在 `CostInitialize` 之前解析，而 Directory 属性要到 `CostFinalize` 才有值 → 用 **Remember Property**（安装时写注册表，卸载时 RegistrySearch 读回） | WiX 官方 RemoveFolderEx 文档 |
+| MSIX 数据 | `LocalState` + 首启导入；导入用 **`export_backup`（VACUUM INTO 一致性快照）**，不要直接拷活库 | 官方虚拟化文档 + 仓库已有 `export_backup` |
+| WinUI3 开机启动 | **`uap5:Extension` + `uap5:StartupTask`**，不要 `desktop:Extension` + Executable/EntryPoint | Files 的 manifest、MS Q&A |
+| 单实例 | `AppInstance` 按身份/版本分列表、跨 MSIX/MSI 不互通 → **`Global\ClipBridge-<SID>-<数据根哈希>` 互斥量 + 命名管道**；`Local\` 不够（RDP 多会话） | AppLifecycle 文档 + C/D 评审合并 |
+| release-please 触发发布 | `GITHUB_TOKEN` 创建的 tag **不触发**其它 workflow → 配 **PAT/App token**，或发布并入同一 workflow | GitHub 递归保护（多个真实仓库的修复 commit） |
+| 版本映射 | MSI 只吃 **3 段**（第 4 段被忽略）；MSIX **4 段、Major≠0、Revision=0**；`AppxVersion = max(1,major).minor.patch.0` | MS ProductVersion / Store 包版本文档 |
+| PDB 入包 | heat 直接吃 publish 目录会把 `.pdb` 打进去 → **stage 目录**（去 pdb/xml）后 heat + ZIP 共用 | 现有 `HeatGenerated.wxs` 实测含 2 个 pdb |
+| 组件 GUID 随机 | heat `-gg` 每次构建生成随机 GUID → 改 **`-ag`（Guid="*"）并只 heat 一次**，两变体共用 | 现有 heat 产物 385 个随机 GUID |
+| 卸载"删数据"在 bundle 下 | WixStdBA 不显示 MSI UI、winget `/qn` → `REMOVEUSERDATA` 永远拿不到 → **user 版默认保留数据**；machine MSI 保留对话框 | PowerToys `bal:DisplayInternalUICondition=false` 同类做法 |
 
 ## 1. 背景与目标
 
@@ -35,66 +36,62 @@ Windows 壳已有 WinUI 3 应用、WiX 3.14 MSI、MSTest；目前只有 per-mach
 |---|---|---|
 | 官网 | per-user EXE（双击装，免 UAC）+ per-machine MSI（管理员/企业）+ 便携 ZIP | 普通用户 / 企业 / 绿色版 |
 | Microsoft Store | MSIX | 商店用户 |
-| winget | 清单（machine MSI + user EXE 两条 Scope） | 命令行用户 |
+| winget | 多文件清单：machine MSI + user EXE 两条 Scope | 命令行用户 |
 
-**本轮不做**（D7）：自研更新器（清单/签名校验/差量/回滚）。更新方式按渠道走：
-Store 自动、winget upgrade、MSI/EXE/便携手动。
-**签名方向**（D4，本轮不申请）：MSIX 走 Store 个人开发者（免费、代签）；
-MSI/EXE 走 SignPath Foundation（免费 OSS）或备选 Certum 个人版（约 ¥600/年）。
+**本轮不做**（D7）：自研更新器。
+**签名方向**（D4，本轮不申请）：MSIX 走 Store（免费代签）；MSI/EXE 走 SignPath（免费 OSS）或 Certum（约 ¥600/年）。
 
-## 2. 决策记录（v3）
+## 2. 决策记录（v4）
 
 | 编号 | 决策 | 选择 |
 |---|---|---|
-| D1 | 产物关系 | 一次构建派生：machine MSI、user MSI→EXE、便携 ZIP；MSIX 走 build 布局单独出包 |
+| D1 | 产物关系 | 一次构建派生：machine MSI、user MSI→EXE、便携 ZIP；MSIX 走 build 布局 |
 | D2′ | MSI/便携数据根 | `%LOCALAPPDATA%\ClipBridge` |
 | D2″ | MSIX 数据根 | `LocalState` + 首启从真实 `%LOCALAPPDATA%` 只读导入 + 显式导出 |
-| D3 | **安装器形态** | **per-machine MSI（独立）**；per-user 走 EXE bundle（内含 per-user MSI） |
+| D3 | 安装器形态 | per-machine MSI + per-user EXE（两套 UpgradeCode，互斥） |
 | D4 | 签名 | 本轮不买证书；Store 代签 MSIX + SignPath 签 MSI/EXE（后续） |
 | D5 | MSIX 定位 | 仅 Store 渠道；不做自签名侧载分发 |
-| D6 | winget | 多文件清单；两条 Scope：machine MSI、user EXE |
+| D6 | winget | 多文件三件套；两条 Scope（machine MSI / user Burn EXE） |
 | D7 | 更新责任 | 本轮不做自研更新器 |
-| D8 | 版本与发布 | `Version.props` 单一来源 + 修复 release-please + 重写 Release 流水线 |
-| D9 | 共存 | 安装期互斥检测 + 运行期命名互斥量/管道 |
-| D10 | EXE | Burn，fixed per-user；内部包 per-user MSI（ARP 隐藏） |
-| D11 | MSI 工具链 | **WiX 3.14**（不再需要双用途；不迁 WiX 5） |
+| D8 | 版本与发布 | `Version.props` 单一来源 + release-please（PAT）+ 重写 Release 流水线 |
+| D9 | 共存 | 安装期互斥（专用键 + ProductSearch/RegistrySearch）+ 运行期互斥量/管道 |
+| D10 | EXE | Burn，fixed per-user；内部包 per-user MSI（ARP 由 Burn 自动 SystemComponent） |
+| D11 | MSI 工具链 | WiX 3.14（`InstallScope="perMachine|perUser"`；不需要双用途/ICE105） |
 | D12 | 设置存储 | 统一到数据根（MSIX 为 LocalState）`settings.json`，含迁移 |
 | D13 | 便携默认 | 数据随 exe（标记）；不可写回退并提示 |
-| D14 | MSIX 包外数据 | 不采用（受限能力仅作跨渠道硬需求时的备选） |
+| D14 | MSIX 包外数据 | 不采用（受限能力仅作备选） |
 | D15 | EXE scope | 仅 per-user；per-machine 只走 MSI |
-| D16 | 安装器形态 | **A：per-user EXE + per-machine MSI**（已确认） |
-| D17 | EXE 形态 | **单 per-user bundle + machine MSI**（已确认） |
+| D16 | 安装器形态 | A：per-user EXE + per-machine MSI（已确认） |
+| D17 | EXE 形态 | 单 per-user bundle + machine MSI（已确认） |
 
-## 3. 渠道与产物矩阵（v3）
+## 3. 渠道与产物矩阵
 
 | 产物 | 生成方式 | 安装位置 | 数据 | 卸载 | 签名 | 更新 |
 |---|---|---|---|---|---|---|
-| per-machine MSI | WiX 3.14，`InstallScope="perMachine"` | `C:\Program Files\ClipBridge` | `%LOCALAPPDATA%\ClipBridge`（按用户） | 保留数据（可选删除） | SignPath（后续） | 手动/winget |
-| per-user EXE | WiX Burn 包 per-user MSI（隐藏 ARP） | `%LOCALAPPDATA%\Programs\ClipBridge` | 同上 | 同 MSI | SignPath（后续） | 手动 |
-| 便携 ZIP | 压缩 publish 目录 + 标记 + 顶层目录 | 用户选择 | exe 旁 `data\`（可回退） | 手动 | 无 | 手动 |
-| MSIX | `dotnet build` 布局 + `StoreUpload` | Store 管理（`WindowsApps`） | `LocalState` + 首启导入 | 卸载包；LocalState 随包删 | Store 代签 | Store 自动 |
-| winget 清单 | 三文件，两条 Scope | 由对应安装器决定 | 同安装器 | 同安装器 | 不需要（SHA256） | `winget upgrade` |
+| per-machine MSI | wixproj `PerUser=false` | `C:\Program Files\ClipBridge` | `%LOCALAPPDATA%\ClipBridge`（每用户） | 保留数据（对话框可选删） | SignPath（后续） | 手动/winget |
+| per-user EXE | wixproj `PerUser=true` + Burn | `%LOCALAPPDATA%\Programs\ClipBridge` | 同上 | 保留数据（无 UI） | SignPath（后续） | 手动 |
+| 便携 ZIP | publish + 标记 + 顶层目录 | 用户选择 | exe 旁 `data\`（可回退） | 手动 | 无 | 手动 |
+| MSIX | build 布局 + `StoreUpload` | Store 管理 | `LocalState` + 导入 | 包删 LocalState | Store 代签 | Store 自动 |
+| winget 清单 | 三文件 | 由安装器决定 | 同安装器 | 同安装器 | SHA256 | `winget upgrade` |
 
-## 4. 构建与产物派生（v3）
+## 4. 构建与产物派生
 
 ```
-dotnet publish（Release、win-x64、self-contained、R2R、瘦身）
-  └─ <publishDir>
-       ├─ 便携 ZIP：publishDir + ClipBridge.portable + 顶层目录（过滤 *.pdb/*.xml）
-       ├─ machine MSI：heat(publishDir) → candle/light（InstallScope=perMachine）
-       ├─ user MSI：heat(publishDir) → candle/light（InstallScope=perUser）
-       │    └─ Burn bundle（WixStdBA，fixed per-user）→ ClipBridge-Setup-<ver>-user.exe
-       └─ MSIX：dotnet build -p:GenerateAppxPackageOnBuild -p:UapAppxPackageBuildMode=StoreUpload
+dotnet publish（Release、win-x64、self-contained、R2R、瘦身）→ stage（删 *.pdb/*.xml）
+  ├─ 便携 ZIP（P1）：stage + ClipBridge.portable + 顶层目录
+  ├─ machine MSI：heat(stage, -ag) 一次 → candle/light（PerUser=false）
+  ├─ user MSI：共用 heat 输出 → candle/light（PerUser=true）
+  │    └─ Burn bundle（WixStdBA，PerUser=true）→ ClipBridge-Setup-<ver>-win-x64-user.exe
+  └─ MSIX：dotnet build 布局 + StoreUpload（裁剪对 build 布局生效）
 ```
 
-- **版本**：单一来源 `platforms/windows/ClipBridgeShell_CS/Version.props`；三个 MSI/WiX 变量与
-  MSIX 4 段版本由它派生（见 §5.8）。
-- **两个 MSI 的差异**：`InstallScope`、`UpgradeCode`、`OutputName`、注册表根（HKLM vs HKCU）、
-  开始菜单（公共 vs 用户）、ARP（machine 可见；user 由 bundle 隐藏）。
-- **瘦身**：移除未使用的 WindowsAppSDK AI/ML；只保留 zh-CN/zh-TW/en-us。量级参考：
-  publish 287→241MB；MSI 87.9MB；MSIX 109→90MB；ZIP 91.7MB。
-- **MSIX** 不走 publish：由 MSBuild 处理 `$targetnametoken$`/`x-generate`/PRI；
-  载荷裁剪对构建布局生效并重生成/校验 PRI。
+- **one wixproj, two builds**：`-p:PerUser=false|true`；`OutputName`/`OutputPath`/`IntermediateOutputPath`
+  按变体分开（PowerToys 同款）；共享 `Product.wxs`。
+- **heat 只跑一次**（`-ag`），两个 candle 共用 `HeatGenerated.wxs`；stage 是唯一载荷来源。
+- **MSIX** 不走 publish：MSBuild 处理 `$targetnametoken$`/`x-generate`/PRI；裁剪后重生成/校验 PRI。
+- **瘦身**：移除未使用 WindowsAppSDK AI/ML；保留 zh-CN/zh-TW/en-us。量级：publish 287→241MB；MSI 87.9MB；MSIX 109→90MB；ZIP 91.7MB。
+- 资产命名：`ClipBridge-<ver>-win-x64.msi`、`ClipBridge-Setup-<ver>-win-x64-user.exe`、
+  `ClipBridge-<ver>-win-x64.zip`（arch 后缀必带；不能含 `/`）。
 
 ## 5. 详细设计
 
@@ -106,205 +103,223 @@ dotnet publish（Release、win-x64、self-contained、R2R、瘦身）
 `StartupTrace.cs:36-40`、`FrameTrace.cs:2010-2015`。
 
 - **MSI / 便携**：`%LOCALAPPDATA%\ClipBridge`；便携标记（exe 旁 `ClipBridge.portable`）→
-  `<exeDir>\data`；不可写回退并**明确提示**。
+  `<exeDir>\data`；不可写回退并明确提示。
 - **MSIX**：`LocalFolder`（LocalState）+ `LocalCacheFolder`；设置统一到 `<LocalState>\settings.json`（D12）。
-  - **依据**：MSIX 默认 AppData 写虚拟化（新建文件进私有位置、跨进程不可见、卸载即删）；
-    共享真实 AppData 需 `rescap:unvirtualizedResources` + 关闭写虚拟化（Files 有先例，但需 Store 理由）。
-  - **换渠道**：首启检测 LocalState 无 `core.db` 且真实 `%LOCALAPPDATA%\ClipBridge\core.db` 存在 →
-    复制 DB + `tls\` + 设置 + `device_id`，打 sentinel，一次性提示。
+  - **导入规格**（C 的 blocker）：
+    1. 检测：LocalState 无 `core.db` 且真实 `%LOCALAPPDATA%\ClipBridge\core.db` 存在；
+    2. **用 `export_backup`（VACUUM INTO）生成一致性快照**，复制快照到 LocalState（不直接拷活库）；
+    3. 复制 `tls\`、设置、`device_id`（设置键 `Core_DeviceId`）；CAS 缓存可选导入（否则历史图片/文件悬空，需提示）；
+    4. 写 sentinel（记录来源版本/时间）；失败则删除半成品、保留原数据、下次重试；
+    5. 导入后**必须重新登录**（PasswordVault 按包身份隔离，旧凭证读不到 → fail-closed Degraded）；
+    6. 卸载重装后 sentinel 随 LocalState 消失 → 会再次导入旧真实数据：UI 明确提示"已从旧版本导入"，并提供"不再导入"开关。
   - **禁止**两个渠道同时指向同一 DB（真实 `core.db` + 私有 `-wal/-shm` = 混合损坏态）。
-- **设置/设备身份**：`device_id` 与 `tls\` 跟随数据根迁移；设置统一（D12）。
-- **WAL 风险**：便携数据在 U 盘/网络盘时 WAL 可能损坏 → 禁用 WAL 或明确警告。
-- **卸载语义**：machine MSI 询问删数据（默认保留）；user MSI 同；MSIX 卸载删 LocalState；
-  便携手动。注意 machine MSI 的"删数据"只覆盖执行卸载的用户（`%LOCALAPPDATA%` 是每用户）。
-- **诊断/日志**：packaged 下 EventLog 与 `%LOCALAPPDATA%` 日志不可见 → 改写 LocalState + 导出诊断；
-  `Diagnostics` 显示实际传入路径（现状错：取 BuildPaths 而非 LocalState）。
+- **device_id 语义**：一台机器 N 个用户 = N 个 device_id（各自数据根）；换渠道导入保留 device_id，
+  但**不要**让两个渠道同时运行（mDNS 实例名相同 → TOFU 冲突）。
+- **WAL**：便携数据在 U 盘/网络盘时 WAL 可能损坏 → 检测 `DriveType`（Removable/Network）时拒绝或只读回退并提示；
+  **不**静默改 core 的 WAL（core 硬编码 `journal_mode=WAL`，测试有断言）。
+- **卸载**：machine MSI 有"删数据"对话框（默认保留）；user EXE 无 UI → **默认保留**；MSIX 卸载删 LocalState；
+  便携手动。machine 的"删数据"仅覆盖执行卸载的用户。
+- **诊断**：packaged 下 EventLog/真实 LocalAppData 日志不可见 → 写 LocalState + 设置页导出；
+  `Diagnostics` 显示实际传入路径。
 
-### 5.2 per-machine MSI（D3/D16，v3 重写）
+### 5.2 per-machine MSI
 
-- **WiX 3.14 直接用 `Package InstallScope="perMachine"`**（原生支持）；不需要双用途、不需要
-  `ALLUSERS=2`/`MSIINSTALLPERUSER`、不需要 scope 对话框、不需要 ICE105。
-- **目录**：`[ProgramFiles64Folder]ClipBridge`；保留现有 `Directory` 树。
-- **注册表**：`HKLM\SOFTWARE\ClipBridge\ClipBridgeShell`；快捷方式 keypath 用 `HKLM`（machine）。
-- **开始菜单**：`ProgramMenuFolder`（所有用户）；桌面快捷方式按现有 `DesktopFolder`（安装者桌面，
-  若希望所有用户桌面则用 `CommonDesktopFolder`——产品决策）。
-- **ARP**：machine 范围自动注册；`Product/@Version` 用 `$(var.ProductVersion)`，注册表值 `[ProductVersion]`。
-- **卸载清理**：
-  - `RemoveFolderEx` 不能直接吃 Directory id：用 **Remember Property**（安装时写 `HKLM\...\InstallPath`，
-    卸载时 `RegistrySearch` 读入属性再清理），或删除该组件。
-  - `REMOVEUSERDATA` 等属性 `Secure="yes"`；deferred CA 的 `Impersonate`/`%LOCALAPPDATA%` 语义要写清
-    （per-machine 卸载只删当前用户数据）。
-  - 修正现有 bug：`CleanupStartupEntryCA` 缺 `NOT UPGRADINGPRODUCTCODE`，major upgrade 会误删自启。
-- **自启**：应用只写 `HKCU\...\Run`（每个用户各自启用）；machine MSI 卸载只清当前用户。
-  文档明确"per-machine 安装后，每个用户需自行开启自启"。
-- **升级**：machine 专用 `UpgradeCode`；`MajorUpgrade` 正常。
-- **跨 scope 检测**：安装前检查 `HKCU` 的 per-user 安装标记（user MSI/EXE 写入），
-  若存在则 `LaunchCondition` 阻断，提示"请先卸载当前用户版"；反之 user MSI 检查 HKLM 标记。
-- **ICE**：恢复被抑制的关键 ICE（至少 ICE03/ICE30 复核）；`RemoveFolderEx` 修正后再评估。
-- **测试矩阵**：install / major-upgrade / repair / uninstall；与 user 版互斥；数据保留。
+- `Package InstallScope="perMachine"`（WiX 3 原生）；`UpgradeCode` 沿用现有 `…ef1234567891`。
+- 目录：`[ProgramFiles64Folder]\ClipBridge`；删除 `SetDirectory`（`Product.wxs:29`），让 Directory 表解析。
+- 注册表：`Root="HKMU"`（machine→HKLM）；快捷方式 keypath 改 `HKMU`；ARP 显示名统一 `ClipBridge`。
+- 桌面：`DesktopFolder` 在 per-machine 下即 All Users 桌面（无需 `CommonDesktopFolder`）。
+- 自启：应用写 `HKCU\...\Run`（每用户各自启用）；卸载只清当前用户。
+- 修现有 bug：
+  - `RemoveFolderEx` 改 **Remember Property**（安装写 `HKLM\...\InstallPath`，卸载 RegistrySearch 读回）；
+  - `REMOVEUSERDATA` 设 `Secure="yes"`；
+  - `CleanupStartupEntryCA` 加 `NOT UPGRADINGPRODUCTCODE`（否则 major upgrade 删自启）；
+  - `Product/@Version` 3 段 `$(var.ProductVersion)`，ARP `[ProductVersion]`；
+  - heat 去 `.pdb`；恢复被抑制的 ICE03/30（先跑一遍看）。
+- 升级：machine 专用 UpgradeCode + `MajorUpgrade`。
+- 互斥：安装前检测 user 版标记（**专用键**，见 §5.7）；`LaunchCondition` 必须带 `NOT Installed`
+  （卸载/修复走同一序列，否则死锁）；静默路径用 `util:RegistrySearch`（AppSearch 只在 UI 序列）。
+- 测试矩阵：install / major-upgrade / repair / uninstall；与 user 版互斥；数据保留；`/qn`。
 
-### 5.3 per-user EXE（D10/D17，Burn）
+### 5.3 per-user EXE（Burn）
 
-- **结构**：Burn bundle（`WixBalExtension`）+ 内部 **per-user MSI**（`InstallScope="perUser"`）。
-  - per-user MSI：装到 `%LOCALAPPDATA%\Programs\ClipBridge`（`ProgramFiles64Folder` 在 per-user 上下文
-    自动重定向，无需 `SetDirectory`）；注册表 HKCU；用户开始菜单；ARP 由 bundle 隐藏。
-  - bundle：`MsiPackage Visible="no"`（MSI 不单独出现在 ARP），bundle 自身为 ARP 入口；
-    独立 `Bundle/@UpgradeCode`（永久不变），`Version` 来自 Version.props。
-- **scope**：构建期固定 per-user（Burn 按 MSI 摘要 bit 8 固定提权/scope；StdBA 无 scope 选择）。
-  `/quiet`、`/passive` 由 Burn 处理；`MsiProperty` 传 `MSIINSTALLPERUSER=1`（per-user MSI 也可用
-  `InstallScope="perUser"` 直接声明，二者选一，避免冲突）。
-- **ARP/卸载**：bundle 是唯一 ARP 入口；卸载 bundle 时 MSI 一并卸载；清理自启/数据按 §5.2 的 CA 规则。
-- **签名顺序**：签 per-user MSI → 打进 bundle → 签 EXE。
-- **跨 scope 检测**：安装前检查 `HKLM\SOFTWARE\ClipBridge\ClipBridgeShell` 标记（machine MSI 写入），
-  存在则阻断提示先卸载机器版。
-- **不做**：一个 EXE 里选 scope（WiX 3 Burn 做不到，D15）；per-machine 由 MSI/winget 提供。
+- **per-user MSI**（`PerUser=true`）：
+  - `InstallScope="perUser"`；目录**显式** `[LocalAppDataFolder]\Programs\ClipBridge`（不依赖隐式重定向）；
+  - 注册表 `HKMU`（user→HKCU）；无 WixUI/License；`ARPSYSTEMCOMPONENT=1`（burn 也会自动传，双保险）；
+  - 新 `UpgradeCode`（与 machine 不同）。
+- **bundle**（`PerUser=true`）：
+  - Burn + WixStdBA；`MsiPackage Visible="no"`（默认）+ `bal:DisplayInternalUICondition="false"`；
+  - bundle 自身 `UpgradeCode`（第三个 GUID）、`Version` 来自 Version.props；
+  - 链中**不能有需要提权的包**（否则 bundle 变成 per-machine）；文档禁止"以管理员身份运行"；
+  - 安装前 `util:ProductSearch` 查 machine UpgradeCode + `bal:Condition` 阻断（apply 前，无回滚）；
+  - 卸载：bundle 显示 ARP；MSI 隐藏；**默认保留用户数据**（无 UI）。
+- **静默**：Burn `-quiet/-passive`；winget 用内置 burn 开关（`Silent=/quiet` 等）。
+- **签名顺序**：签 per-user MSI → 打 bundle → 签 EXE。
+- 不做：一个 EXE 选 scope（Burn 做不到；D15）。
 
-### 5.4 MSIX 与 Store（D2″/D5）
+### 5.4 MSIX 与 Store
 
-- **身份**：仓库 manifest 保留开发身份；构建期注入 Partner Center 的
-  `Identity/@Name`、`@Publisher`（`CN=<PublisherGuid>`）、`@Version`、`Properties/@DisplayName`、
-  `PublisherDisplayName`、`mp:PhoneIdentity`。开发/上架 manifest 分离；Publisher 必须等于重签证书主体。
-- **能力**：`runFullTrust` 必需；`internetClient`/`privateNetworkClientServer` 对 mediumIL 惰性
-  （声明无害，不解决防火墙/组播）。`unvirtualizedResources` 不申请（备选）。
-- **TargetDeviceFamily**：只留 `Windows.Desktop`；`MinVersion` 按实测最低 OS；
-  `MaxVersionTested` 提到当前 OS。
-- **startupTask**：改用 **`uap5:Extension Category="windows.startupTask"` + `uap5:StartupTask`**
-  （Files 的写法）；不要 `desktop:Extension` + `Executable/EntryPoint`（WinUI3 下"登录启动但窗口不出现"）。
-  通过 `AppInstance.GetActivatedEventArgs().Kind == ExtendedActivationKind.StartupTask` 判断自启启动（V4 验证）。
-- **通知**：toast COM 结构保留；self-contained 的 AppNotification 依赖 Singleton 包 → V5 验证，
-  必要时补 `PackageDependency`；重定向激活按 `Kind` 分发（不要只 `ActivateMainWindow`）；
-  移除 `AppNotificationService` 终结器里的 `Unregister`。
-- **Strings**：packaged 下验证 `Strings\...\resw` 是否以松散文件进包；否则改用 PRI/ResourceLoader。
-- **数据**：LocalState + 首启导入（§5.1）。
-- **版本**：四段、Major≠0、Revision=0、单调递增；建议首发 `1.0.0.0`。
-- **出包**：`-p:GenerateAppxPackageOnBuild=true -p:UapAppxPackageBuildMode=StoreUpload`
-  → `.msixupload`；载荷裁剪对构建布局生效并重生成 PRI。
-- **本地调试**：开发者模式 + `Add-AppxPackage -Register <layout>\AppxManifest.xml`（不要自签名分发给用户）。
-- **Store 准入**：隐私政策、年龄分级、截图、`runFullTrust` 说明；提交前跑 WACK。
+- **身份**：构建期注入 Partner Center 的 `Name`/`Publisher(CN=GUID)`/`PublisherDisplayName`/`DisplayName`/`Version`；
+  开发/上架 manifest 分离；Publisher 必须等于重签证书主体。
+- **能力**：`runFullTrust` 必需；`internetClient`/`privateNetworkClientServer` 对 mediumIL 惰性；
+  `unvirtualizedResources` 不申请（备选）。
+- **TargetDeviceFamily**：只留 `Windows.Desktop`；MinVersion 按实测；MaxVersionTested 提到当前 OS。
+- **startupTask**：`uap5:Extension` + `uap5:StartupTask`；用 `ExtendedActivationKind.StartupTask` 识别自启；
+  MSIX 下 **Registry 自启方式必须 NotSupported**（否则写 WindowsApps 路径/丢身份）。
+- **通知**：保留 toast COM；self-contained 的 AppNotification 依赖 Singleton 包 → V5 验证，必要时补
+  `PackageDependency`；重定向激活按 `Kind` 分发；移除终结器里的 `Unregister`。
+- **Strings**：验证包内 `Strings\...\resw` 存在；否则改 PRI/ResourceLoader。
+- **数据**：LocalState + 导入（§5.1）。
+- **版本**：4 段、Major≠0、Revision=0；首发 `1.0.0.0`。
+- **出包**：`-p:GenerateAppxPackageOnBuild=true -p:UapAppxPackageBuildMode=StoreUpload` → `.msixupload`；
+  裁剪对构建布局生效并重生成 PRI。
+- **本地调试**：开发者模式 + `Add-AppxPackage -Register <layout>\AppxManifest.xml`；不自签名分发。
+- **Store 准入**：隐私政策、年龄分级、截图、`runFullTrust` 说明；WACK。
 
-### 5.5 winget（D6，v3）
+### 5.5 winget（两条 Scope）
 
-- **多文件三件套**（version / installer / locale）；**不用 singleton 提交**（仅 verified developers）。
-- **两条 Scope**：
-  - `Scope: machine` + `InstallerType: msi` → machine MSI；
-  - `Scope: user` + `InstallerType: burn`（或 `exe`）→ per-user EXE，`InstallerSwitches` 静默参数。
-- URL 指向 GitHub Release；`InstallerSha256` 在**签名后**计算；资产上传后冻结。
-- `InstallerLocale: zh-CN`；显示名与 ARP 统一（`ClipBridge`）；不写死 ProductCode。
-- 升级：`winget upgrade` 按各自 scope 调对应安装器；**不要**让 winget 把 user 版升级成 machine 版
-  （两条 Scope 各自独立）。
-- 提交流程：build → sign → hash → upload（冻结）→ 清单 → `winget validate` → PR。
-- 便携 ZIP 不进 winget（`portable` 会把文件复制到 WinGet 目录，语义不同）。
+```yaml
+PackageIdentifier: Ryan416.ClipBridge
+PackageVersion: <ver>
+InstallerLocale: zh-CN
+Platform: [Windows.Desktop]
+InstallModes: [interactive, silent, silentWithProgress]
+Installers:
+  - Architecture: x64
+    InstallerType: msi
+    Scope: machine
+    ElevationRequirement: elevatesSelf
+    InstallerUrl: <release>/ClipBridge-<ver>-win-x64.msi
+    InstallerSha256: <签名后>
+    AppsAndFeaturesEntries:
+      - DisplayName: ClipBridge
+        Publisher: Ryan416
+        UpgradeCode: "{……7891}"
+  - Architecture: x64
+    InstallerType: burn
+    Scope: user
+    ElevationRequirement: elevationProhibited
+    InstallerUrl: <release>/ClipBridge-Setup-<ver>-win-x64-user.exe
+    InstallerSha256: <签名后>
+    InstallerSwitches: {Silent: /quiet, SilentWithProgress: /passive, Uninstall: /uninstall /quiet}
+    AppsAndFeaturesEntries:
+      - DisplayName: ClipBridge
+        Publisher: Ryan416
+```
 
-### 5.6 便携版（D13）
+- 多文件三件套；提交到 winget-pkgs（singleton 仅 verified developers，不能提交）。
+- 两条 Scope 各自独立升级；hash 在签名后计算；资产上传后冻结。
+- 显示名与 ARP 统一；不写死 `ProductCode`（每版变化），用 `AppsAndFeaturesEntries.UpgradeCode`。
+- 便携 ZIP 不进 winget。
 
-- ZIP 顶层目录 `ClipBridge-<ver>-win-x64/`；内含 exe/依赖 + `ClipBridge.portable` + `version.txt`/`README`。
-- 数据默认 exe 旁 `data\`；不可写回退 LocalAppData 并提示；可移动/网络盘禁用 WAL 或警告。
-- 不写卸载项；开机自启仍写 HKCU Run → 文档"先关自启再删目录"；与安装版共存会抢 Run 键/双托盘 → 互斥提示。
-- 无签名 → SmartScreen/MOTW 提示。
+### 5.6 便携版（P1）
 
-### 5.7 共存、单实例与激活（D9）
+- ZIP 顶层 `ClipBridge-<ver>-win-x64/`，含 exe/依赖 + 空标记 `ClipBridge.portable` + `version.txt`/README；
+  不含 `data\`；过滤 `.pdb/.xml`。
+- 数据默认 `<exeDir>\data`；不可写回退 LocalAppData 并提示；可移动/网络盘拒绝或只读回退。
+- 默认**不写** HKCU Run；用户手动开自启时检测冲突；与安装版共存用互斥量提示。
+- 无卸载项；删除目录前先关自启；无签名 → SmartScreen 提示。
 
-- **安装期互斥**：两个 MSI 各自写 scope 标记（machine → HKLM，user → HKCU）；安装器用
-  `RegistrySearch` + `LaunchCondition` 检测另一 scope 并阻断；错误文案要求先卸载。
-- **运行期单实例**：`AppInstance` 按应用版本/用户分列表，**MSI 与 MSIX 之间不互通** →
-  加 `Local\ClipBridge-<UserSID>` 命名互斥量 + 命名管道 `\\.\pipe\ClipBridge-<SID>`；
-  冲突时提示"另一渠道/版本正在运行"。
-- **激活**：`Activated` 按 `ExtendedActivationKind` 分发；窗口未建好时排队。
-- **自启**：MSIX 用 StartupTask（uap5），MSI/EXE 用 HKCU Run；同一渠道内二选一。
+### 5.7 共存与单实例
 
-### 5.8 版本与 CI（D8）
+- **安装期互斥**：
+  - 专用标记：`HKLM\SOFTWARE\ClipBridge\Installer`（Scope=machine, ProductCode, Version）/
+    `HKCU\Software\ClipBridge\Installer`（Scope=user, …）；**不复用**现有 `ClipBridgeShell\Installed`（machine 也写）。
+  - bundle：`util:ProductSearch` 查 machine UpgradeCode + `bal:Condition`；
+  - MSI：`util:RegistrySearch`（execute 序列）+ `LaunchCondition`（带 `NOT Installed`）；
+  - 已知局限：machine 安装者看不到其他用户的 HKCU（best effort + 运行期兜底）。
+- **运行期单实例**：`Global\ClipBridge-<UserSID>-<数据根哈希>` 互斥量 + 命名管道
+  `\\.\pipe\ClipBridge-<SID>-<dataHash>`；冲突提示"另一渠道/版本正在运行"；
+  `AppInstance` 仅用于同身份内的激活转发；`Activated` 按 Kind 分发，窗口未建好时排队。
+- **自启**：MSIX StartupTask（uap5）；MSI/EXE HKCU Run；便携默认不注册。
+- 卸载守卫：`LaunchCondition` 必须 `NOT Installed`，否则另一 scope 存在时无法卸载/修复。
 
-- `platforms/windows/ClipBridgeShell_CS/Version.props`（app/Core/Tests 由父级 `Directory.Build.props` 继承；
-  wixproj 显式 Import）。删除 `AssemblyVersion`/`FileVersion` 字面量。
-- `Product.wxs`：`Version="$(var.ProductVersion)"`、ARP `[ProductVersion]`；两个 MSI 都从同一来源。
-- MSIX：构建期注入 4 段版本（Major≥1、Revision=0）。
-- `scripts/version.ps1`：semver → `MsiVersion`（3 段，x/y≤255、z≤65535）与 `AppxVersion`（4 段）；
-  越界/预发布不支持时构建失败；构建后回读三产物版本并断言一致。
-- **release-please 修复**：`manifest-file: release-please-manifest.json`；extra-file 用
-  `{type: xml, path: <真实路径>, xpath: //Project/PropertyGroup/Version}`；tag 方案统一为
-  `platforms/windows/ClipBridgeShell_CS-x.y.z`（现有配置：组件前缀、无 v）。
+### 5.8 版本与 CI
+
+- `platforms/windows/ClipBridgeShell_CS/Version.props`（唯一真值）；`Directory.Build.props` **上移**到该目录并
+  Import Version.props；app 级那份删除；wixproj 显式 Import 或 `-p:ProductVersion`。
+- `scripts/version.ps1`：`MsiVersion = major.minor.patch`（x/y≤255、z≤65535，越界 fail）；
+  `AppxVersion = max(1,major).minor.patch.0`；`BundleVersion = MsiVersion`；构建后回读断言。
+- **release-please**：`manifest-file: release-please-manifest.json`；extra-file
+  `{type: xml, path: platforms/windows/ClipBridgeShell_CS/Version.props, xpath: //Project/PropertyGroup/Version}`；
+  workflow 配 **PAT/App token**（GITHUB_TOKEN 的 tag 不触发发布）；tag 方案
+  `platforms/windows/ClipBridgeShell_CS-x.y.z`。
 - **CI**：
-  - 新增 `windows-installer` job：下载固定版 wix314-binaries.zip → `-WixInstallPath` →
-    构建两个 MSI + bundle + ZIP → 断言 MSI 内无 `.pdb`；PR 先 `continue-on-error`。
-  - `publish.yml` 删除/重写（现为 .NET 9、restore 目录、artifact 名含 `/` 的桩）。
-  - Release（tag 触发）：machine MSI、user EXE、便携 ZIP + `SHA256SUMS`；MSIX 暂只作 CI 工件；
-    上传后回读校验；`paths-filter` 纳入 `scripts/**`、`.github/workflows/**`。
-- 架构：本轮只 x64；arm64 后续。
+  - `windows-installer` job（可复用 `workflow_call`）：setup .NET 10 + Rust + 固定版 WiX zip（校验 SHA256）
+    → publish → stage（去 pdb/xml）→ heat 一次（`-ag`）→ 两个 MSI（`PerUser=false|true`，独立 obj/OutputName）
+    → bundle → ZIP（P1）→ 断言 → 签名占位 → hash → upload（`compression-level: 0`）。
+  - 断言：MSI `Product/@Version == MsiVersion`、MSI 无 `.pdb`、`core_ffi_windows.dll` 存在、
+    bundle ProductVersion、user 变体 WordCount bit3=1 / machine=0、ZIP 标记。
+  - `publish.yml` 整体重写（现为 .NET 9/restore 目录/tag 含 `/` 的桩）；Release 先 draft → 回读 hash → publish。
+  - `ci.yml` 增加 `installer` filter 与 job（初期 `continue-on-error`）；release 不设 cancel-in-progress。
+- 架构：本轮只 x64；arm64 后续（wixproj 对非 x64 显式报错，避免 harvest 错目录）。
 
-## 6. 签名与信任路线（D4）
+## 6. 签名与信任
 
 | 阶段 | MSI/EXE | MSIX | 成本 |
 |---|---|---|---|
-| 现在 | 未签名（SmartScreen 提示） | 不发布（本地松散注册调试） | 0 |
-| 近期 | SignPath Foundation（MIT 符合；需复核依赖许可） | Store 个人开发者（免费、代签） | 0 |
-| 备选 | Certum 个人版 ~¥600/年；Azure Artifact Signing ~$10/月 | 同上 | 低 |
+| 现在 | 未签名（SmartScreen） | 不发布（本地 Register 调试） | 0 |
+| 近期 | SignPath Foundation（MIT 符合；复核依赖许可） | Store 个人开发者（免费、代签） | 0 |
+| 备选 | Certum ~¥600/年；Azure Artifact Signing ~$10/月 | 同上 | 低 |
 
-签名 ≠ 无 SmartScreen（信誉积累期数周）；Store 渠道天然可信。
+签名 ≠ 无 SmartScreen（信誉积累期数周）；MSIX 由 Store 重签后 hash 会变，**不进** SHA256SUMS。
 
-## 7. 验证计划（V1–V11）
+## 7. 验证计划
 
-| # | 验证 | 判定 | 阻塞 |
+| # | 验证 | 判定 | 阶段 |
 |---|---|---|---|
-| V1 | MSIX AppData 写虚拟化：runFullTrust 包写 `%LOCALAPPDATA%\ClipBridgeProbe\probe.txt`，对比真实路径 vs `Packages\<PFN>\LocalCache` | 真实路径出现 = PASS；仅私有 = FAIL（维持 D2″） | D2″ |
-| V2 | MSI 造真实 DB → 装 MSIX 启动：检查 `-wal/-shm` 落点、对端是否见新设备、DB 混合 | 无混合 = PASS | D2″/D9 |
-| V3 | 托盘：图标、菜单、Explorer 重启后恢复 | 正常 = PASS | MSIX |
-| V4 | StartupTask：uap5 写法下登录启动 + 识别 `ExtendedActivationKind.StartupTask` | 正常 = PASS | 自启 |
-| V5 | Toast：运行/未运行/重定向后 payload | 三场景可用 = PASS | 通知 |
-| V6 | UDP/mDNS/防火墙：首启、升级一版后、双实例 | 升级后仍发现 = PASS | 网络 |
-| V7 | Strings：包内 resw 存在，zh/en 正常 | PASS/FAIL 决定 PRI 方案 | 本地化 |
-| V8 | 单实例：MSI + MSIX 各启一次，托盘数/重复采集/互斥提示 | 单进程+提示 = PASS | D9 |
-| V9 | Store 身份/版本：草稿提交确认报错、版本规则、runFullTrust 说明 | 掌握规则 = PASS | P2 |
-| V10 | 签名安装形态重跑 V3–V7 | 一致 = PASS | Store |
-| V11 | **machine MSI + user EXE 互斥**：先装一种再装另一种，检查阻断/提示；卸载后另一种可装；数据保留 | 阻断且提示清晰 = PASS | D3/D16 |
-
-> V1/V2 是判定 D2″ 的实验；V11 是判定 v3 安装器形态的实验。**用户确认后才执行**。
+| V1 | MSIX 写虚拟化探针（真实路径 vs LocalCache） | 真实 = PASS；仅私有 = 维持 D2″ | P0/P2 |
+| V2 | MSI 真实 DB → MSIX 导入：WAL 落点/设备重复/混合 | 无混合 = PASS | P2 |
+| V3 | 托盘（图标/菜单/Explorer 重启） | 正常 | P2 |
+| V4 | `uap5` StartupTask 登录启动 + Kind 识别 | 正常 | P2 |
+| V5 | Toast（运行/未运行/重定向 payload） | 三场景 | P2 |
+| V6 | UDP/mDNS/防火墙（首启/升级后/双实例） | 升级后仍发现 | P2 |
+| V7 | Strings/PRI | 包内 resw 存在 | P2 |
+| V8 | 单实例（MSI+MSIX，双会话） | 单进程+提示 | P2 |
+| V9 | Store 身份/版本草稿提交 | 掌握规则 | P2 |
+| V10 | 签名安装形态重跑 V3–V7 | 一致 | P2 |
+| V11 | **per-user MSI + bundle 机制 spike**：标准用户 `/qn` 安装 → 查 3 处 ARP（HKLM/HKCU/bundle）、`SystemComponent`、`winget list --scope user`、卸载残留、管理员运行 | 用户版 ARP 只在 HKCU/bundle；winget 识别 user | **P0** |
+| V12 | 两 scope 互斥矩阵：machine↔user、同版本/跨版本、`/qn`、另一 scope 存在时卸载 | 阻断且可卸载；日志无跨删 | P1 |
+| V13 | 导入中断/回滚/重装再导入 | 半成品清理、可重试 | P2 |
 
 ## 8. 阶段计划
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **P0** | V1/V2/V11 探针；`Version.props`+`version.ps1`；release-please 修复；`windows-installer` CI；`publish.yml` 重写；修 `CleanupStartupEntryCA` | 探针结论、版本一致、安装器进 CI |
-| **P1** | `DataRootResolver`；machine MSI；per-user MSI+EXE；便携 ZIP；winget 三文件两 Scope；Release 流水线（未签名） | 三产物可重复构建；安装/升级/卸载/互斥矩阵通过；winget validate |
-| **P2** | Store 账号 + MSIX 提交；SignPath；V3–V10 | Store 通过、签名产物 |
+| **P0（机制 spike）** | 最小 per-user MSI + Burn bundle（V11）；`Version.props`+`version.ps1`；release-please 修复（PAT）；stage/heat 改造；`windows-installer` 骨架；修 `CleanupStartupEntryCA` | V11 结论；版本可复算；安装器能出两 MSI + bundle |
+| **P1** | `DataRootResolver`；machine MSI 定稿（HKMU/Remember Property/Secure/CA）；user 变体；便携 ZIP；winget 清单+validate；Release 流水线；V12 | 三产物可重复构建；互斥矩阵通过 |
+| **P2** | Store 账号 + MSIX 提交；SignPath；V1–V10/V13 | Store 通过、签名产物 |
 | **P3** | 自研更新器（本轮不做） | 后续 ADR |
 
-## 9. 风险与待验证
+## 9. 风险
 
 | # | 风险 | 处理 |
 |---|---|---|
-| R1 | 两个 MSI 的 UpgradeCode/检测/互斥设计 | V11 + 评审 |
-| R2 | per-user MSI 的 ARP 行为（HKLM 仍写卸载键，winget 可能当 machine） | 评审/实测，必要时用 `ARPSYSTEMCOMPONENT=1` 或 bundle 隐藏 |
-| R3 | Burn 内部 per-user MSI 的 scope 与 `MsiProperty` 冲突 | 评审 + 实测 |
-| R4 | MSIX AppData 虚拟化 | V1/V2 |
-| R5 | StartupTask uap5/激活种类 | V4 |
-| R6 | Toast Singleton 依赖/重定向丢参 | V5 |
-| R7 | 跨格式单实例 | 互斥量 + 管道 |
-| R8 | winget 两条 Scope/hash 时机 | CI pin 版本 + 签名后 hash |
-| R9 | Store 版本规则 | version.ps1 + 断言 |
-| R10 | 便携 WAL on 可移动/网络卷 | 禁用 WAL 或警告 |
-| R11 | 安装器首次进 CI 就发布 | P0 先加 job（continue-on-error） |
-| R12 | 2052 单语言 vs winget/Store 本地化 | `InstallerLocale: zh-CN`；Store 补英文资源 |
+| R1 | per-user MSI ARP 落 HKLM 导致 winget 误判 | V11 + `ARPSYSTEMCOMPONENT`（Burn 自动）+ bundle ARP |
+| R2 | 两 UpgradeCode 的升级/降级跨 scope | V12 + 专用标记 + `NOT Installed` |
+| R3 | `/qn` 下互斥条件失效（AppSearch 只在 UI） | 用 `util:RegistrySearch`/ProductSearch；V11 |
+| R4 | MSIX 导入/凭证/缓存 | 导入规格（§5.1）+ V2/V13 |
+| R5 | StartupTask/Toast | V4/V5 |
+| R6 | 双渠道 mDNS/TOFU 冲突 | 互斥量 + 文档"先退另一个" |
+| R7 | winget hash/冻结 | 签名后 hash；draft→回读→publish |
+| R8 | Store 版本规则 | version.ps1 + 首发 1.0.0.0 |
+| R9 | 便携 WAL 可移动盘 | DriveType 检测 + 提示 |
+| R10 | 安装器首次进 CI 就发布 | P0 骨架 + continue-on-error |
+| R11 | 2052 单语言 | winget `InstallerLocale: zh-CN`；Store 补英文 |
 
-## 10. 仍待确认的决策
+## 10. 仍待确认
 
-| 决策 | 选项 | 建议 |
-|---|---|---|
-| **D2** | 接受 D2″（LocalState + 导入）/ 先跑 V1/V2 再定 | 先跑 V1/V2 |
-| **Store 首发版本** | `1.0.0.0` / 其他 | `1.0.0.0` |
-| **探针** | 现在跑 V1/V2/V11 / 留到实现阶段 | 现在跑（V11 决定安装器形态） |
-| D12 设置统一 | 统一到数据根 / 维持分叉 | 统一（含迁移） |
+| 决策 | 建议 |
+|---|---|
+| D2 是否先跑 V1/V2 | 先跑（P0 顺手做 V1；V2 在 P2 前） |
+| Store 首发版本 | `1.0.0.0` |
+| P0 范围 | 仅 V11 机制 spike + 版本/CI 地基，不做完整安装器 |
 
-## 11. 成熟实践采纳记录
+## 11. 成熟实现参考
 
-见 `docs/windows-distribution-practices.md`。已采纳：
-- **VS Code / PowerToys 模式**：per-user 与 per-machine 分开构建（D16/D17）。
-- **MSIX 官方虚拟化**：LocalState + 导入（D2″）；`unvirtualizedResources` 仅作备选。
-- **WinUI3 startupTask**：`uap5:Extension` + `uap5:StartupTask`。
-- **Store 签名**：MSIX 免费代签；MSI/EXE 必须自签。
-- **便携**：VS Code 的 ZIP + `data` 目录约定。
-
-被否决：
-- 单个双用途 MSI（官方支持但主流不用，复杂度高）。
-- 一个 EXE 运行时切 scope（WiX 3 Burn 做不到）。
-- winget singleton 提交（仅 verified developers）。
-- MSIX 包外共享 AppData（需受限能力，Store 理由不足）。
+- PowerToys：`installer/PowerToysSetupVNext/{PowerToysInstallerVNext.wixproj, Product.wxs, PowerToys.wxs}` —
+  一个 wixproj `PerUser` 两变体、两 UpgradeCode、bundle `ProductSearch` 两者、`DisplayInternalUICondition=false`。
+- VS Code：`VSCodeUserSetup`/`VSCodeSetup` 两条 winget Scope；便携 ZIP + `data` 目录。
+- Git / Python：单个 EXE、winget 同一 URL 两条 Scope（不用双用途 MSI）。
+- Files：WinUI3 Store + 侧载；`unvirtualizedResources`（文件管理器正当理由）、`uap5:StartupTask`。
+- 官方文档：Single Package Authoring（仅作对照，已否决）、MSIX flexible virtualization、Store 包版本/签名、
+  WiX RemoveFolderEx、AppLifecycle instancing。
