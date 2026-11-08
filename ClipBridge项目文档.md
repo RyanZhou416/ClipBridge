@@ -3054,7 +3054,7 @@ v1 使用 **单一事件回调**：
 * `cb_init` 的实际签名是 `cb_init(const char* cfg_json, cb_on_event_fn on_event, void* user_data)`；它不接收 `cb_callbacks_t`，也不通过出参交付句柄，成功时在 envelope 的 `data.handle` 中返回句柄。
 * `cb_logs_*` 返回 `int`，JSON 通过 `const char**` 出参返回；`cb_get_ffi_version` 通过 `uint32_t*` 出参返回 ABI 版本。
 
-实际导出共 33 个函数：
+实际导出共 34 个函数：
 
 | 序号 | 函数 | C 声明 |
 |---:|---|---|
@@ -3091,8 +3091,9 @@ v1 使用 **单一事件回调**：
 | 31 | `cb_query_net_stats` | `const char* cb_query_net_stats(cb_handle* h, const char* query_json);` |
 | 32 | `cb_query_activity_stats` | `const char* cb_query_activity_stats(cb_handle* h, const char* query_json);` |
 | 33 | `cb_get_ffi_version` | `void cb_get_ffi_version(uint32_t* out_major, uint32_t* out_minor);` |
+| 34 | `cb_export_backup` | `const char* cb_export_backup(cb_handle* h, const char* request_json);` |
 
-> 以上 33 个声明与三份头文件一致；旧的 `cb_callbacks_t`、`cb_free`、`cb_set_global_policy`、`cb_delete_local`、`cb_cache_control` 和 `CB_CALL` 在仓库中不存在。修改 ABI 时，必须同步更新 `exports.rs` 与三份头文件，并运行上面的校验脚本。
+> 以上 34 个声明与三份头文件一致；旧的 `cb_callbacks_t`、`cb_free`、`cb_set_global_policy`、`cb_delete_local`、`cb_cache_control` 和 `CB_CALL` 在仓库中不存在。修改 ABI 时，必须同步更新 `exports.rs` 与三份头文件，并运行上面的校验脚本。
 
 ---
 

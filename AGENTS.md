@@ -13,7 +13,7 @@ Primary components:
 - `platforms/macos/ClipBridgeShell_macOS`: macOS SwiftUI/Xcode shell; the Xcode target contains the `dlopen` bridge, while the SwiftPM package is a stub.
 
 Current status from `STATUS.md`:
-- One Rust core (`cb_core`) plus one shared C ABI implementation (`crates/cb_core_ffi`); the Windows, Android, and macOS `core-ffi` crates re-export the same 33-function surface.
+- One Rust core (`cb_core`) plus one shared C ABI implementation (`crates/cb_core_ffi`); the Windows, Android, and macOS `core-ffi` crates re-export the same 34-function surface.
 - The Windows shell is complete and its MSTest suite runs in CI.
 - The Android APK needs a cross-compiled `libcore_ffi_android.so`; the macOS Xcode target uses the `dlopen` bridge while the SwiftPM package remains a stub.
 
