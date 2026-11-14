@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <!--
+    per-user 双击安装入口：Burn bundle 包一个隐藏的 per-user MSI。
+    scope 在构建期固定为 per-user（链里没有需要提权的包）；
+    若检测到机器版已安装，在 apply 之前用 bal:Condition 中止。
+  -->
+  <Bundle Name="ClipBridge"
+          Version="$(var.BundleVersion)"
+          Manufacturer="Ryan416"
+          UpgradeCode="{c3d4e5f6-a7b8-9012-cdef-123456789012}"
+          IconSourceFile="$(var.AppIcon)"
+          Copyright="Copyright (c) 2025 Xiran Zhou">
+
+    <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
+      <bal:WixStandardBootstrapperApplication LicenseUrl=""
+                                              SuppressOptionsUI="yes"
+                                              ShowVersion="yes" />
+    </BootstrapperApplicationRef>
+
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+
+    <!-- 机器版标记写在 HKLM（machine MSI 的 InstallerMarker）。 -->
+    <util:RegistrySearch Id="MachineScopeSearch"
+                         Root="HKLM"
+                         Key="Software\ClipBridge\Installer"
+                         Value="Scope"
+                         Variable="MachineScope"
+                         Result="value"
+                         Win64="yes" />
+    <bal:Condition Message="检测到已安装机器版 ClipBridge。请先在 设置 → 应用 中卸载它，再安装当前用户版。">MachineScope != &quot;machine&quot;</bal:Condition>
+
+    <Chain>
+      <MsiPackage Id="ClipBridgeUserMsi"
+                  SourceFile="$(var.UserMsiPath)"
+                  Compressed="yes"
+                  Vital="yes"
+                  Visible="no"
+                  DisplayInternalUI="no">
+        <!-- 双保险：bundle 侧显式隐藏 MSI 的 ARP（Burn 也会加，但不同版本行为有差异）。 -->
+        <MsiProperty Name="ARPSYSTEMCOMPONENT" Value="1" />
+      </MsiPackage>
+    </Chain>
+  </Bundle>
+</Wix>

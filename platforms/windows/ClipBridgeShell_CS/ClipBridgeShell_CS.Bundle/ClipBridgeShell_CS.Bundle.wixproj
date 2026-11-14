@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="..\Version.props" />
+
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
+    <ProductVersion>3.10</ProductVersion>
+    <ProjectGuid>b2c3d4e5-f6a7-8901-bcde-f12345678902</ProjectGuid>
+    <SchemaVersion>2.0</SchemaVersion>
+    <OutputType>Bundle</OutputType>
+    <OutputName>ClipBridge-$(Version)-win-$(Platform)-user</OutputName>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <IntermediateOutputPath>obj\$(Configuration)\</IntermediateOutputPath>
+    <WixTargetsPath Condition=" '$(WixTargetsPath)' == '' AND '$(MSBuildExtensionsPath32)' != '' ">$(MSBuildExtensionsPath32)\Microsoft\WiX\v3.x\Wix.targets</WixTargetsPath>
+    <WixTargetsPath Condition=" '$(WixTargetsPath)' == '' ">$(MSBuildExtensionsPath)\Microsoft\WiX\v3.x\Wix.targets</WixTargetsPath>
+    <WixExtDir Condition=" '$(WixExtDir)' == '' ">$(WixInstallPath)</WixExtDir>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <BundleVersion Condition=" '$(BundleVersion)' == '' ">$(Version)</BundleVersion>
+    <AppIcon Condition=" '$(AppIcon)' == '' ">$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS\Assets\WindowIcon.ico</AppIcon>
+    <UserMsiPath Condition=" '$(UserMsiPath)' == '' ">$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS.Installer\bin\$(Configuration)\user\ClipBridge-$(Version)-win-$(Platform)-user.msi</UserMsiPath>
+    <DefineConstants>$(DefineConstants);BundleVersion=$(BundleVersion);UserMsiPath=$(UserMsiPath);AppIcon=$(AppIcon)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Bundle.wxs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <WixExtension Include="WixBalExtension"><HintPath>$(WixExtDir)\WixBalExtension.dll</HintPath></WixExtension>
+    <WixExtension Include="WixUtilExtension"><HintPath>$(WixExtDir)\WixUtilExtension.dll</HintPath></WixExtension>
+  </ItemGroup>
+
+  <Import Project="$(WixTargetsPath)" />
+
+  <Target Name="EnsureWixToolsetInstalled" Condition=" '$(WixTargetsImported)' != 'true' ">
+    <Error Text="WiX Toolset 未安装。" />
+  </Target>
+</Project>
