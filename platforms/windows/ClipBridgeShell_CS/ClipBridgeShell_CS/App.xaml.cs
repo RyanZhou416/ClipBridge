@@ -475,6 +475,71 @@ public partial class App : Application
         // 初始化托盘图标
         // 托盘菜单文本来自 Localizer.Get()，必须等本地化器就绪；此时窗口已经可见，等待不影响首帧。
         await InitializeTrayAsync();
+
+        // 便携模式回退提示：必须在窗口/托盘就绪之后提示（解析器结果已缓存，这里不重复探测）。
+        NotifyPortableDataRootFallback();
+    }
+
+    /// <summary>
+    /// 便携模式回退提示：exe 旁存在 <c>ClipBridge.portable</c>，但 <c>&lt;exeDir&gt;\data</c> 不可写时，
+    /// <see cref="CoreConfigBuilder.ResolveDataRootInfo"/> 已整体回退到 <c>%LOCALAPPDATA%\ClipBridge</c>。
+    /// 这里把原因明确告诉用户（对话框；失败则退化为托盘气泡），避免“以为在用便携版、
+    /// 数据却写到了别处”的静默半分裂。
+    /// </summary>
+    private static void NotifyPortableDataRootFallback()
+    {
+        var resolution = CoreConfigBuilder.ResolveDataRootInfo();
+        if (string.IsNullOrEmpty(resolution.PortableFallbackReason))
+        {
+            return;
+        }
+
+        var window = MainWindow;
+        if (window == null)
+        {
+            return;
+        }
+
+        window.DispatcherQueue.TryEnqueue(async () =>
+        {
+            // 让“未登录提醒”等已有启动弹窗先走；避免同时打开两个 ContentDialog。
+            await Task.Delay(1500);
+            try
+            {
+                await WaitLocalizerReadyAsync();
+                var isChinese = Localizer.Get().GetCurrentLanguage()
+                    .StartsWith("zh", StringComparison.OrdinalIgnoreCase);
+
+                var title = isChinese ? "便携模式已回退" : "Portable mode fallback";
+                var content = string.Format(
+                    isChinese
+                        ? "检测到 ClipBridge.portable，但程序目录下的 data 文件夹不可写，数据已改存到：\n{0}\n\n原因：{1}\n\n如需真正的便携模式，请把整个文件夹解压/复制到可写位置后重新启动。"
+                        : "ClipBridge.portable was found, but the data folder next to the executable is not writable. Data is stored in:\n{0}\n\nReason: {1}\n\nFor real portable mode, extract/copy the whole folder to a writable location and restart.",
+                    resolution.Root,
+                    resolution.PortableFallbackReason);
+
+                await window.ShowMessageDialogAsync(content, title);
+            }
+            catch (Exception ex)
+            {
+                // 对话框失败（例如另一个 ContentDialog 还开着）时退化为托盘气泡；
+                // 提示本身绝不能影响启动。
+                System.Diagnostics.Debug.WriteLine($"[App] Portable fallback dialog failed: {ex.Message}");
+                try
+                {
+                    var isChinese = Localizer.Get().GetCurrentLanguage()
+                        .StartsWith("zh", StringComparison.OrdinalIgnoreCase);
+                    App.GetService<TrayService>().ShowBalloonTip(
+                        isChinese ? "便携模式已回退" : "Portable mode fallback",
+                        isChinese
+                            ? $"data 文件夹不可写，数据已改存到 {resolution.Root}"
+                            : $"The data folder is not writable; data is stored in {resolution.Root}");
+                }
+                catch
+                {
+                }
+            }
+        });
     }
 
     /// <summary>
@@ -710,8 +775,9 @@ public partial class App : Application
         }
         catch (InvalidOperationException)
         {
-            // 非打包模式下，使用标准的 LocalAppData 路径
-            localFolderPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+            // 非打包模式：本地化缓存目录跟随统一解析的数据根
+            // （默认 %LOCALAPPDATA%\ClipBridge，便携模式下是 <exeDir>\data）。
+            localFolderPath = CoreConfigBuilder.ResolveDataRoot("ClipBridge");
             if (!Directory.Exists(localFolderPath)) Directory.CreateDirectory(localFolderPath);
         }
         StartupTrace.Mark("localizer-folder-done");

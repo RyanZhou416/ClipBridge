@@ -1,5 +1,6 @@
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
+using ClipBridgeShell_CS.Core.Services;
 using ClipBridgeShell_CS.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -175,7 +176,8 @@ public sealed partial class SettingsPage : Page
         }
         else
         {
-            path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+            // 与 core 使用同一个解析器：便携模式下这里显示的必须是 <exeDir>\data。
+            path = CoreConfigBuilder.ResolveDataRoot("ClipBridge");
         }
 
         var dlg = new ContentDialog
@@ -657,7 +659,8 @@ public sealed partial class SettingsPage : Page
             }
             else
             {
-                var localFolderPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+                // 背景图也跟随数据根目录，避免便携版把用户数据留在 LocalAppData。
+                var localFolderPath = CoreConfigBuilder.ResolveDataRoot("ClipBridge");
                 var imagesFolderPath = Path.Combine(localFolderPath, "BackgroundImages");
                 if (!Directory.Exists(imagesFolderPath)) Directory.CreateDirectory(imagesFolderPath);
                 imagesFolder = await StorageFolder.GetFolderFromPathAsync(imagesFolderPath);

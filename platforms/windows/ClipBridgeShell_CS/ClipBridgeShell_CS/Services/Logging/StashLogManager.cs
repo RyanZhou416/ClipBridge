@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using ClipBridgeShell_CS.Core.Services;
 using Windows.Storage;
 
 namespace ClipBridgeShell_CS.Services.Logging;
@@ -25,7 +26,8 @@ public sealed class StashLogManager
         }
         else
         {
-            localFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+            // 统一走 Core 的解析器：便携模式下日志也要落在 <exeDir>\data，不能继续写 LocalAppData。
+            localFolder = CoreConfigBuilder.ResolveDataRoot("ClipBridge");
         }
         
         var logsDir = Path.Combine(localFolder, "logs");

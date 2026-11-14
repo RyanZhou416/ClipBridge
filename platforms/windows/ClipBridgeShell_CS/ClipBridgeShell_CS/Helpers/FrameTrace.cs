@@ -12,6 +12,8 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 
+using ClipBridgeShell_CS.Core.Services;
+
 namespace ClipBridgeShell_CS.Helpers;
 
 /// <summary>
@@ -59,7 +61,8 @@ namespace ClipBridgeShell_CS.Helpers;
 ///    CPU 毫秒，作为 UI/进程 CPU 的主口径；GetThreadTimes 原值保留为对照字段。
 ///    帧间隔只能证明“节拍没掉”，成本采样才能回答“这一帧到底花了多少个 6.25ms 预算里的毫秒”。
 ///
-/// 输出（都写在 <c>%LOCALAPPDATA%\ClipBridge\</c>）：
+/// 输出（都写在 &lt;dataRoot&gt;，由 <see cref="CoreConfigBuilder.ResolveDataRoot"/> 决定：
+/// 默认 <c>%LOCALAPPDATA%\ClipBridge</c>，便携模式下为 <c>&lt;exeDir&gt;\data</c>）：
 /// - <c>frames-&lt;scenario&gt;-&lt;timestamp&gt;.csv</c>：<c>wallcloack_us,delta_us,scenario</c>；
 /// - <c>stalls-&lt;scenario&gt;-&lt;timestamp&gt;.csv</c>：<c>wallcloack_us,stall_us,scenario,queue_depth</c>；
 /// - <c>uiops-&lt;scenario&gt;-&lt;timestamp&gt;.csv</c>：<c>wallcloack_us,duration_us,label,scenario</c>；
@@ -2009,9 +2012,7 @@ internal static class FrameTrace
 
     private static string TraceDirectory()
     {
-        return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "ClipBridge");
+        return CoreConfigBuilder.ResolveDataRoot();
     }
 
     private static string EscapeCsv(string value)

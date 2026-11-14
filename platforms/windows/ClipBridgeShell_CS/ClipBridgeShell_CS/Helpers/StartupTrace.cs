@@ -2,6 +2,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using ClipBridgeShell_CS.Core.Services;
 
 namespace ClipBridgeShell_CS.Helpers;
 
@@ -9,7 +10,9 @@ namespace ClipBridgeShell_CS.Helpers;
 /// 启动耗时打点（默认关闭）。
 ///
 /// 用法：设置环境变量 <c>CB_STARTUP_TRACE=1</c> 后启动应用，会把每个阶段的
-/// “距进程创建”的毫秒数追加写入 <c>%LOCALAPPDATA%\ClipBridge\startup.log</c>。
+/// “距进程创建”的毫秒数追加写入 &lt;dataRoot&gt;\startup.log。
+/// dataRoot 由 <see cref="CoreConfigBuilder.ResolveDataRoot"/> 统一决定：
+/// 默认 <c>%LOCALAPPDATA%\ClipBridge</c>，便携模式下为 <c>&lt;exeDir&gt;\data</c>。
 ///
 /// 设计要点：
 /// - 用 <see cref="Process.StartTime"/> 作为零点，因此能覆盖到 <c>App</c> 构造之前的
@@ -33,9 +36,7 @@ public static class StartupTrace
         _initialized = true;
         try
         {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "ClipBridge");
+            var dir = CoreConfigBuilder.ResolveDataRoot();
             Directory.CreateDirectory(dir);
             var path = Path.Combine(dir, "startup.log");
             // 每次进程启动写入分隔线，便于把多次运行的记录分开

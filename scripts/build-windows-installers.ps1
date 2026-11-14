@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    构建 Windows 安装器：machine MSI + user MSI + per-user Burn EXE。
+    构建 Windows 安装器：machine MSI + user MSI + per-user Burn EXE + 便携 ZIP。
 
 .DESCRIPTION
     流程（按 ADR-004 v4.1）：
@@ -10,7 +10,9 @@
       4. heat（一次）→ machine MSI、user MSI（两次 light，独立 obj/输出）
       5. Burn bundle 包 user MSI
       6. 断言：版本、无 pdb、user WordCount bit3、ARP 隐藏
-    产物复制到 dist/：ClipBridge-<ver>-win-<arch>-machine.msi、ClipBridge-<ver>-win-<arch>-user.exe
+      7. 便携 ZIP（stage 全部 + ClipBridge.portable + version.txt，放在删除 stage 之前）
+    产物复制到 dist/：ClipBridge-<ver>-win-<arch>-machine.msi、ClipBridge-<ver>-win-<arch>-user.exe、
+    ClipBridge-<ver>-win-<arch>-portable.zip
 
 .EXAMPLE
     pwsh scripts/build-windows-installers.ps1 -WixInstallPath C:\tools\wix314
@@ -115,7 +117,7 @@ New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
 
 # ---------- Rust ----------
 if (-not $SkipRust) {
-    Write-Host '[1/5] cargo build core-ffi-windows'
+    Write-Host '[1/6] cargo build core-ffi-windows'
     Push-Location $repoRoot
     try {
         & cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc
@@ -139,28 +141,28 @@ $commonArgs = @(
 )
 
 # ---------- machine MSI（顺带 publish + heat） ----------
-Write-Host '[2/5] machine MSI（publish + heat + light）'
+Write-Host '[2/6] machine MSI（publish + heat + light）'
 & $msbuild $wixproj @commonArgs -p:PerUser=false
 if ($LASTEXITCODE -ne 0) { throw 'machine MSI 构建失败' }
 $machineMsi = Join-Path $installerDir "bin\Release\machine\ClipBridge-$msiVersion-win-$Platform-machine.msi"
 if (-not (Test-Path $machineMsi)) { throw "找不到 $machineMsi" }
 
 # ---------- user MSI（复用 stage/heat） ----------
-Write-Host '[3/5] user MSI'
+Write-Host '[3/6] user MSI'
 & $msbuild $wixproj @commonArgs -p:PerUser=true -p:SkipPublish=true -p:SkipHeat=true
 if ($LASTEXITCODE -ne 0) { throw 'user MSI 构建失败' }
 $userMsi = Join-Path $installerDir "bin\Release\user\ClipBridge-$msiVersion-win-$Platform-user.msi"
 if (-not (Test-Path $userMsi)) { throw "找不到 $userMsi" }
 
 # ---------- bundle ----------
-Write-Host '[4/5] Burn bundle'
+Write-Host '[4/6] Burn bundle'
 & $msbuild $bundleProj @commonArgs -p:UserMsiPath="$(($userMsi -replace '\\','/'))"
 if ($LASTEXITCODE -ne 0) { throw 'bundle 构建失败' }
 $userExe = Join-Path $bundleDir "bin\Release\ClipBridge-$msiVersion-win-$Platform-user.exe"
 if (-not (Test-Path $userExe)) { throw "找不到 $userExe" }
 
 # ---------- 断言 ----------
-Write-Host '[5/5] 断言'
+Write-Host '[5/6] 断言'
 $fail = @()
 
 $dbM = Open-Msi $machineMsi
@@ -187,6 +189,75 @@ if ($fail.Count -gt 0) {
     throw "断言失败 $($fail.Count) 项"
 }
 
+# ---------- 便携 ZIP（stage 已去 pdb/xml；必须在删除 stage 之前） ----------
+# 解压即用：顶层目录与资产名一致，避免“解压到当前目录”时把上百个文件散落一地。
+Write-Host '[6/6] 便携 ZIP'
+$portableName = "ClipBridge-$msiVersion-win-$Platform"
+$portableStageRoot = Join-Path $outRoot 'portable'
+$portableDir = Join-Path $portableStageRoot $portableName
+$portableZip = Join-Path $outRoot "$portableName-portable.zip"
+
+if (Test-Path $portableStageRoot) { Remove-Item $portableStageRoot -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+
+# 1) stage 全部内容（publish 时已删除 pdb/xml）复制进顶层目录。
+Copy-Item -Path (Join-Path $stageDir '*') -Destination $portableDir -Recurse -Force
+
+# 2) 空标记：exe 旁存在 ClipBridge.portable 时，数据写到 <exeDir>\data。
+New-Item -ItemType File -Path (Join-Path $portableDir 'ClipBridge.portable') -Force | Out-Null
+
+# 3) 版本 + 简短说明。
+@(
+    "ClipBridge $msiVersion portable (win-$Platform)"
+    ''
+    'How to use:'
+    "  1. Extract the whole $portableName folder to a writable location."
+    '  2. Run ClipBridgeShell_CS.exe.'
+    ''
+    'Portable mode:'
+    "  The empty marker file 'ClipBridge.portable' next to the executable keeps all data"
+    "  (core.db, tls, Cache, logs, Strings) in the 'data' subfolder next to the executable."
+    '  If that folder is not writable (e.g. Program Files, read-only USB drive), ClipBridge'
+    '  falls back to %LOCALAPPDATA%\ClipBridge, shows a warning, and appends the reason to'
+    '  %LOCALAPPDATA%\ClipBridge\portable-fallback.log.'
+    '  Delete ClipBridge.portable to use the per-user %LOCALAPPDATA%\ClipBridge location.'
+) | Set-Content -Path (Join-Path $portableDir 'version.txt') -Encoding utf8
+
+# 4) 打包：includeBaseDirectory=$true 才会把顶层目录写进 zip。
+if (Test-Path $portableZip) { Remove-Item $portableZip -Force }
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::CreateFromDirectory(
+    $portableDir,
+    $portableZip,
+    [System.IO.Compression.CompressionLevel]::Optimal,
+    $true)
+
+# 5) 断言：marker、core_ffi_windows.dll、无 pdb、顶层目录正确。
+$zipFail = @()
+$zipEntryCount = 0
+$zip = [System.IO.Compression.ZipFile]::OpenRead($portableZip)
+try {
+    $entries = @($zip.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+    $zipEntryCount = $entries.Count
+    $prefix = "$portableName/"
+    if ($entries -notcontains "${prefix}ClipBridge.portable") { $zipFail += '便携 zip 缺少 ClipBridge.portable' }
+    if ($entries -notcontains "${prefix}core_ffi_windows.dll") { $zipFail += '便携 zip 缺少 core_ffi_windows.dll' }
+    $zipPdbs = @($entries | Where-Object { $_ -match '\.pdb$' })
+    if ($zipPdbs.Count -gt 0) { $zipFail += "便携 zip 含 .pdb：$($zipPdbs -join ', ')" }
+    $topDirs = @($entries | ForEach-Object { ($_ -split '/')[0] } | Sort-Object -Unique)
+    if ($topDirs.Count -ne 1 -or $topDirs[0] -ne $portableName) {
+        $zipFail += "便携 zip 顶层目录应为 $portableName，实际：$($topDirs -join ', ')"
+    }
+} finally {
+    $zip.Dispose()
+}
+if ($zipFail.Count -gt 0) {
+    $zipFail | ForEach-Object { Write-Error $_ }
+    throw "便携 ZIP 断言失败 $($zipFail.Count) 项"
+}
+Remove-Item $portableStageRoot -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host ("便携 ZIP: {0}  ({1:N1} MB, {2} 个条目)" -f $portableName, ((Get-Item $portableZip).Length / 1MB), $zipEntryCount)
+
 # ---------- 输出 ----------
 Copy-Item $machineMsi (Join-Path $outRoot "ClipBridge-$msiVersion-win-$Platform-machine.msi") -Force
 Copy-Item $userExe (Join-Path $outRoot "ClipBridge-$msiVersion-win-$Platform-user.exe") -Force
@@ -199,4 +270,4 @@ Get-ChildItem $outRoot -File | Sort-Object Name | ForEach-Object {
     "{0,-48} {1,8:N1} MB  sha256:{2}" -f $_.Name, ($_.Length / 1MB), (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.Substring(0, 16)
 }
 Write-Host ''
-Write-Host '安装器验证通过：machine MSI（提权）+ user EXE（免 UAC，ARP 隐藏）。'
+Write-Host '安装器验证通过：machine MSI（提权）+ user EXE（免 UAC，ARP 隐藏）+ 便携 ZIP（ClipBridge.portable）。'

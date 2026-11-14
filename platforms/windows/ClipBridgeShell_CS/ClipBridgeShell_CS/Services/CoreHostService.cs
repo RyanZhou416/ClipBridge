@@ -128,12 +128,28 @@ public sealed class CoreHostService : ICoreHostService
 
         var deviceId = await GetOrCreateDeviceIdAsync();
 
-        // 1. 路径构建
+        // 1. 路径构建（唯一解析入口：便携 / LocalAppData 由 CoreConfigBuilder 决定）
+        var dataRoot = CoreConfigBuilder.ResolveDataRootInfo("ClipBridge");
         var paths = _cfgBuilder.BuildPaths("ClipBridge");
         Diagnostics.AppDataDir = paths.AppDataDir;
         Diagnostics.CoreDataDir = paths.CoreDataDir;
         Diagnostics.CacheDir = paths.CacheDir;
         Diagnostics.LogDir = paths.LogDir;
+
+        // 便携模式被请求但 <exeDir>\data 不可写时，解析器已经整体回退到 %LOCALAPPDATA%
+        // （不会一半写便携目录、一半写 LocalAppData）。这里必须留下日志；App 启动时还会
+        // 弹一次明确的用户提示（见 App.NotifyPortableDataRootFallback）。
+        if (dataRoot.PortableFallbackReason is { Length: > 0 } fallbackReason)
+        {
+            _logger?.LogWarning(
+                "Portable data root is not usable; falling back to {Fallback}. Reason: {Reason}",
+                dataRoot.Root,
+                fallbackReason);
+        }
+        else if (dataRoot.IsPortable)
+        {
+            _logger?.LogInformation("Portable data root in use: {Root}", dataRoot.Root);
+        }
 
         string localFolder;
         string cacheFolder;
@@ -375,7 +391,8 @@ public sealed class CoreHostService : ICoreHostService
             }
             else
             {
-                localFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+                // 与 CoreConfigBuilder.BuildPaths 用同一个解析器：便携模式下证书也在 <exeDir>\data。
+                localFolder = CoreConfigBuilder.ResolveDataRoot("ClipBridge");
             }
 
             var tlsDir = System.IO.Path.Combine(localFolder, "tls");
