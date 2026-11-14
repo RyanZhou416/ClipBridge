@@ -49,7 +49,7 @@
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
     <!-- 双变体共用：卸载时是否删除用户数据（user 版无 UI，默认 0）。 -->
-    <Property Id="REMOVEUSERDATA" Value="0" Secure="yes" />
+    <Property Id="REMOVEUSERDATA" Value="1" Secure="yes" />
 
     <!-- 卸载时从安装时写入的注册表读回安装目录（RemoveFolderEx 需要 CostInitialize 前有值）。 -->
     <Property Id="REMEMBERED_INSTALLDIR" Secure="yes">

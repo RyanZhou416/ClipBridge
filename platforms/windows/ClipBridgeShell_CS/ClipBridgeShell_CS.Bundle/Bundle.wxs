@@ -33,7 +33,7 @@
                          Win64="yes" />
     <bal:Condition Message="检测到已安装机器版 ClipBridge。请先在 设置 → 应用 中卸载它，再安装当前用户版。">MachineScope &lt;&gt; &quot;machine&quot;</bal:Condition>
 
-    <Variable Name="RemoveUserData" Value="0" bal:Overridable="yes" />
+    <Variable Name="RemoveUserData" Value="1" bal:Overridable="yes" />
 
     <Chain>
       <MsiPackage Id="ClipBridgeUserMsi"

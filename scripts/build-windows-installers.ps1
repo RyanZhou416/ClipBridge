@@ -281,6 +281,7 @@ if ($needMsi) {
     if ($needMachineMsi) {
         $dbM = Open-Msi $machineMsi
         if ((Msi-Property $dbM 'ProductVersion') -ne $msiVersion) { $fail += "machine ProductVersion != $msiVersion" }
+if ((Msi-Property $dbM 'REMOVEUSERDATA') -ne '1') { $fail += 'machine REMOVEUSERDATA 默认应为 1（干净优先）' }
         if ((Msi-Property $dbM 'ALLUSERS') -ne '1') { $fail += 'machine ALLUSERS != 1' }
         if ((Msi-WordCount $dbM) -band 8) { $fail += 'machine WordCount bit3 应为 0（需要提权）' }
         if (@(Msi-Query $dbM "SELECT FileName FROM File") | Where-Object { $_ -match '\.pdb$' }) { $fail += 'machine MSI 含 .pdb' }
@@ -289,6 +290,7 @@ if ($needMsi) {
     if ($needUserMsi) {
         $dbU = Open-Msi $userMsi
         if ((Msi-Property $dbU 'ProductVersion') -ne $msiVersion) { $fail += "user ProductVersion != $msiVersion" }
+if ((Msi-Property $dbU 'REMOVEUSERDATA') -ne '1') { $fail += 'user REMOVEUSERDATA 默认应为 1（干净优先）' }
         if ((Msi-Property $dbU 'ALLUSERS') -ne '2') { $fail += 'user ALLUSERS 应为 2（双用途授权）' }
         if ((Msi-Property $dbU 'MSIINSTALLPERUSER') -ne '1') { $fail += 'user MSIINSTALLPERUSER 应为 1' }
         if ((Msi-Property $dbU 'ARPSYSTEMCOMPONENT') -ne '1') { $fail += 'user ARPSYSTEMCOMPONENT != 1' }
