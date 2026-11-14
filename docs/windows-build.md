@@ -78,3 +78,20 @@ pwsh scripts/build-windows-all.ps1 -WixInstallPath C:\tools\wix314 -SkipRust -Ke
 # 等价的主脚本调用
 pwsh scripts/build-windows-installers.ps1 -Only MachineMsi -WixInstallPath C:\tools\wix314
 ```
+## 安装 / 卸载与数据保留
+
+用户数据在 `%LOCALAPPDATA%\ClipBridge`（MSI/EXE）或便携目录的 `data\`（便携 ZIP）。
+
+| 渠道 | 卸载是否清理程序 | 用户数据默认 | 用户能否选择删除 |
+|---|---|---|---|
+| machine MSI | 程序目录、HKLM 注册表、开始菜单/桌面快捷方式、ARP | 保留 | ✅ 卸载向导勾选；静默：`msiexec /x {ProductCode} /qn REMOVEUSERDATA=1` |
+| user EXE | 安装目录、HKCU 键、开机自启、bundle ARP（已实测） | 保留 | ✅ 命令行：`ClipBridge-<ver>-win-x64-user.exe -uninstall -quiet RemoveUserData=1`（WixStdBA 无复选框 UI） |
+| 便携 ZIP | 无卸载器：删除目录即删除 | 保留（在 `data\` 内） | ✅ 保留 `data\` 即保留数据；删除整个目录即全删；开启过自启的先关闭（Run 键） |
+| winget | 调底层安装器静默卸载 | 保留 | ❌ winget 不支持传 `REMOVEUSERDATA`；需要删除时手工清 `%LOCALAPPDATA%\ClipBridge` |
+| MSIX（P2，未实现） | Store 卸载包 | **删除**（LocalState 随包删除） | ❌ 系统语义；需要的话要额外做导出/备份 |
+
+注意事项：
+- machine MSI 的"删除用户数据"只覆盖**执行卸载的当前用户**（`%LOCALAPPDATA%` 是每用户目录）；其它用户的数据不会被枚举删除。
+- user EXE 的 `RemoveUserData=1` 是 Burn 可覆盖变量：默认 0（保留）；实测传 1 后数据目录被删除。
+- 本机开发环境有早期测试残留的 2 个 hidden ARP 项（`SystemComponent=1`）和对应快捷方式组件引用，会让"新装再卸"看起来有残留；干净 VM/干净用户下按标准 MSI 行为清理。
+- machine MSI 尚未做管理员实机安装验证（需要 UAC 提权）。

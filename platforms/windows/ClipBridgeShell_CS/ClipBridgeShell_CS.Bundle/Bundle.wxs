@@ -33,6 +33,8 @@
                          Win64="yes" />
     <bal:Condition Message="检测到已安装机器版 ClipBridge。请先在 设置 → 应用 中卸载它，再安装当前用户版。">MachineScope &lt;&gt; &quot;machine&quot;</bal:Condition>
 
+    <Variable Name="RemoveUserData" Value="0" bal:Overridable="yes" />
+
     <Chain>
       <MsiPackage Id="ClipBridgeUserMsi"
                   SourceFile="$(var.UserMsiPath)"
@@ -42,6 +44,7 @@
                   DisplayInternalUI="no">
         <!-- 双保险：bundle 侧显式隐藏 MSI 的 ARP（Burn 也会加，但不同版本行为有差异）。 -->
         <MsiProperty Name="ARPSYSTEMCOMPONENT" Value="1" />
+        <MsiProperty Name="REMOVEUSERDATA" Value="[RemoveUserData]" />
       </MsiPackage>
     </Chain>
   </Bundle>
