@@ -1,42 +1,35 @@
+using System.Diagnostics;
+
 using ClipBridgeShell_CS.Contracts.Services;
-using Windows.Security.Credentials;
+using ClipBridgeShell_CS.Credentials;
 
 namespace ClipBridgeShell_CS.Services;
 
+/// <summary>
+/// 账号服务：用户名快速检查走 <see cref="ILocalSettingsService"/>，密码走
+/// <see cref="ICredentialStore"/>（默认 PasswordVault；便携模式为 DPAPI 文件）。
+/// </summary>
 public class AccountService : IAccountService
 {
-    private const string VAULT_RESOURCE = "ClipBridge";
     private const string USERNAME_KEY = "Account_Username";
 
     private readonly ILocalSettingsService _localSettings;
+    private readonly ICredentialStore _credentialStore;
 
     public event EventHandler<bool>? AccountStatusChanged;
 
-    public AccountService(ILocalSettingsService localSettings)
+    public AccountService(ILocalSettingsService localSettings, ICredentialStore credentialStore)
     {
         _localSettings = localSettings;
+        _credentialStore = credentialStore;
     }
 
     public async Task SaveAccountAsync(string username, string password)
     {
-        var vault = new PasswordVault();
+        // 先写凭据：写失败（例如便携目录突然不可写）必须向上抛，不能先留下“已配置用户名”。
+        await _credentialStore.SaveAsync(username, password);
 
-        // 先删除旧的（如果存在）
-        try
-        {
-            var oldCreds = vault.FindAllByResource(VAULT_RESOURCE);
-            foreach (var oldCred in oldCreds)
-            {
-                vault.Remove(oldCred);
-            }
-        }
-        catch { }
-
-        // 保存新的
-        var newCred = new PasswordCredential(VAULT_RESOURCE, username, password);
-        vault.Add(newCred);
-
-        // 保存账号名到LocalSettings（用于快速检查）
+        // 保存账号名到 LocalSettings（用于快速检查；便携模式下该文件在 <dataRoot>\settings.json）。
         await _localSettings.SaveSettingAsync(USERNAME_KEY, username);
 
         // 触发状态变化事件
@@ -55,7 +48,7 @@ public class AccountService : IAccountService
     }
 
     /// <summary>
-    /// 读取账号状态（审计 F11）：本地设置里有账号名、但 PasswordVault 读不出密码时，
+    /// 读取账号状态（审计 F11）：本地设置里有账号名、但凭据存储读不出密码时，
     /// 返回 <see cref="AccountLoadResult.Unavailable"/>，由调用方 fail-closed；
     /// 只有用户名和密码都不存在时才返回 <see cref="AccountLoadResult.NotConfigured"/>（首次运行）。
     /// </summary>
@@ -74,42 +67,33 @@ public class AccountService : IAccountService
 
         var configuredUsername = string.IsNullOrWhiteSpace(settingsUsername) ? null : settingsUsername;
 
-        var vaultCredentialFound = false;
-        string? vaultUsername = null;
-        string? vaultPassword = null;
+        CredentialReadResult stored;
         try
         {
-            var vault = new PasswordVault();
-            var creds = vault.FindAllByResource(VAULT_RESOURCE);
-            if (creds.Count > 0)
-            {
-                // 凭据存在但 RetrievePassword 失败（被清空/迁移/Windows Hello 失败）也必须算“已配置”。
-                vaultCredentialFound = true;
-                var cred = creds[0];
-                cred.RetrievePassword(); // 解密密码
-                vaultUsername = string.IsNullOrWhiteSpace(cred.UserName) ? null : cred.UserName;
-                vaultPassword = string.IsNullOrWhiteSpace(cred.Password) ? null : cred.Password;
-            }
+            stored = await _credentialStore.ReadAsync();
         }
-        catch
+        catch (Exception ex)
         {
-            // 凭据缺失/解密失败：保持 vaultPassword == null，由下面的分支 fail-closed。
+            // 存储自身异常也必须 fail-closed（不能证明没有账号）。
+            Debug.WriteLine($"[AccountService] Credential store '{_credentialStore.Kind}' read failed: {ex.GetType().Name}");
+            stored = CredentialReadResult.Unavailable(null, "Credential store read failed.");
         }
 
-        if (!string.IsNullOrWhiteSpace(vaultPassword))
+        if (stored.PasswordAvailable && !string.IsNullOrWhiteSpace(stored.Password))
         {
-            // 成功路径沿用旧行为：优先使用 PasswordVault 里的用户名（即登录时输入的值）。
-            var username = vaultUsername ?? configuredUsername;
+            // 成功路径沿用旧行为：优先使用凭据存储里的用户名（即登录时输入的值）。
+            var username = string.IsNullOrWhiteSpace(stored.Username) ? configuredUsername : stored.Username;
             if (!string.IsNullOrWhiteSpace(username))
             {
-                return AccountLoadResult.Available(username, vaultPassword);
+                return AccountLoadResult.Available(username, stored.Password);
             }
         }
 
-        // 本地设置或 PasswordVault 任一处仍有账号痕迹：不能当作“未配置”，必须 fail-closed。
-        if (configuredUsername != null || vaultCredentialFound)
+        // 本地设置或凭据存储任一处仍有账号痕迹：不能当作“未配置”，必须 fail-closed。
+        // 损坏的 credentials.bin 也属于“有痕迹但不可用”，绝不静默当成首次运行。
+        if (configuredUsername != null || stored.Found)
         {
-            return AccountLoadResult.Unavailable(configuredUsername ?? vaultUsername);
+            return AccountLoadResult.Unavailable(configuredUsername ?? stored.Username);
         }
 
         return AccountLoadResult.NotConfigured;
@@ -127,16 +111,15 @@ public class AccountService : IAccountService
 
     public async Task ClearAccountAsync()
     {
-        var vault = new PasswordVault();
         try
         {
-            var creds = vault.FindAllByResource(VAULT_RESOURCE);
-            foreach (var cred in creds)
-            {
-                vault.Remove(cred);
-            }
+            await _credentialStore.ClearAsync();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // 与旧实现一致：清理失败不阻止退出登录；凭据若残留，下次读取会 fail-closed 提示重新登录。
+            Debug.WriteLine($"[AccountService] Credential store '{_credentialStore.Kind}' clear failed: {ex.GetType().Name}");
+        }
 
         await _localSettings.SaveSettingAsync<string>(USERNAME_KEY, null!);
 

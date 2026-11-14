@@ -1,4 +1,7 @@
 using ClipBridgeShell_CS.Contracts.Services;
+using ClipBridgeShell_CS.Core.Services;
+using ClipBridgeShell_CS.Credentials;
+using ClipBridgeShell_CS.Services;
 
 namespace ClipBridgeShell_CS.Tests.MSTest;
 
@@ -78,6 +81,73 @@ internal sealed class StubAccountService : IAccountService
     public Task ClearAccountAsync()
     {
         State = AccountLoadResult.NotConfigured;
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// 测试用数据根目录：把 <see cref="DataRootResolution"/> 固定成指定结果，
+/// 让便携/默认分支的测试不依赖测试进程 exe 目录里有没有 marker。
+/// </summary>
+internal sealed class StubDataRootProvider : IDataRootProvider
+{
+    public StubDataRootProvider(DataRootResolution resolution)
+    {
+        Current = resolution;
+    }
+
+    public DataRootResolution Current
+    {
+        get;
+    }
+
+    public static DataRootResolution Portable(string dataRoot)
+        => new(dataRoot, DataRootMode.Portable, Path.Combine(dataRoot, CoreConfigBuilder.PortableMarkerFileName), null);
+
+    public static DataRootResolution Default(string localAppDataRoot, string? portableFallbackReason = null)
+        => new(localAppDataRoot, DataRootMode.LocalAppData, null, portableFallbackReason);
+}
+
+/// <summary>
+/// 测试用 <see cref="ICredentialStore"/>：记录调用、可注入读取结果/写入失败。
+/// </summary>
+internal sealed class StubCredentialStore : ICredentialStore
+{
+    public CredentialReadResult Result { get; set; } = CredentialReadResult.NotFound;
+
+    public (string Username, string Password)? SavedCredential { get; private set; }
+
+    public int ClearCount { get; private set; }
+
+    public bool ThrowOnSave { get; set; }
+
+    public bool ThrowOnClear { get; set; }
+
+    public string Kind => "stub";
+
+    public Task<CredentialReadResult> ReadAsync() => Task.FromResult(Result);
+
+    public Task SaveAsync(string username, string password)
+    {
+        if (ThrowOnSave)
+        {
+            throw new IOException("simulated credential write failure");
+        }
+
+        SavedCredential = (username, password);
+        Result = CredentialReadResult.Available(username, password);
+        return Task.CompletedTask;
+    }
+
+    public Task ClearAsync()
+    {
+        if (ThrowOnClear)
+        {
+            throw new IOException("simulated credential delete failure");
+        }
+
+        ClearCount++;
+        Result = CredentialReadResult.NotFound;
         return Task.CompletedTask;
     }
 }

@@ -34,7 +34,10 @@ public class CoreHostSmokeTests
             LocalSettingsFile = "LocalSettings.json"
         });
 
-        var localSettingsService = new LocalSettingsService(fileService, options);
+        var localSettingsService = new LocalSettingsService(
+            fileService,
+            options,
+            new StubDataRootProvider(StubDataRootProvider.Default(testDataDir)));
 
         // 审计 F11 之后，缺少可用账号凭据时 CoreHostService 会 fail-closed；
         // 冒烟测试需要真实初始化核心，因此注入一组固定的可用凭据。

@@ -8,6 +8,7 @@ using ClipBridgeShell_CS.Activation;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Contracts.Services;
 using ClipBridgeShell_CS.Core.Services;
+using ClipBridgeShell_CS.Credentials;
 using ClipBridgeShell_CS.Helpers;
 using ClipBridgeShell_CS.Models;
 using ClipBridgeShell_CS.Notifications;
@@ -190,6 +191,11 @@ public partial class App : Application
 
         // Services
         services.AddSingleton<IAppNotificationService, AppNotificationService>();
+        // 数据根目录解析结果（便携/默认）与凭据存储。只有 ResolveDataRootInfo().Mode == Portable
+        // 时凭据才走 DPAPI 文件（<dataRoot>\credentials.bin）；默认模式仍用 PasswordVault。
+        services.AddSingleton<IDataRootProvider, DefaultDataRootProvider>();
+        services.AddSingleton<ICredentialStore>(sp =>
+            CredentialStoreSelector.Create(sp.GetRequiredService<IDataRootProvider>().Current));
         services.AddSingleton<ILocalSettingsService, LocalSettingsService>();
         services.AddSingleton<IThemeSelectorService, ThemeSelectorService>();
         services.AddSingleton<IAccountService, AccountService>();
