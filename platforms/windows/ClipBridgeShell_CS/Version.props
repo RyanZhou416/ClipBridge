@@ -1,0 +1,10 @@
+<Project>
+  <!--
+    Windows 侧唯一版本真值。
+    release-please 只改这一处；MSI（3 段）、MSIX（4 段）、bundle、winget 清单
+    全部由 scripts/version.ps1 从这里派生。不要再在 Product.wxs / appxmanifest 里写死版本。
+  -->
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+</Project>

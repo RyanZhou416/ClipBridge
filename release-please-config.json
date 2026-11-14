@@ -24,8 +24,9 @@
       "path": "platforms/windows/ClipBridgeShell_CS",
       "release-type": "simple",
       "extra-files": [
-        "platforms/windows/ClipBridgeShell_CS/Directory.Build.props"
+        { "type": "xml", "path": "platforms/windows/ClipBridgeShell_CS/Version.props", "xpath": "//Project/PropertyGroup/Version" }
       ]
     }
   }
 }
+

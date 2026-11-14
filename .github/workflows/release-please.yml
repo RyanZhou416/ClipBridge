@@ -14,5 +14,9 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
-          manifest-file: .release-please-manifest.json
+          manifest-file: release-please-manifest.json
           config-file: release-please-config.json
+          # GITHUB_TOKEN 创建的 release/tag 不会触发其它 workflow（GitHub 递归保护）；
+          # 发布流水线需要 PAT/App token，未配置时降级为 GITHUB_TOKEN（发布需手动触发）。
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+

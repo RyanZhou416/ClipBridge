@@ -1,0 +1,4 @@
+<Project>
+  <!-- 父级 Directory.Build.props：app / Core / Tests 自动继承（wixproj 显式 Import）。 -->
+  <Import Project="$(MSBuildThisFileDirectory)Version.props" />
+</Project>
