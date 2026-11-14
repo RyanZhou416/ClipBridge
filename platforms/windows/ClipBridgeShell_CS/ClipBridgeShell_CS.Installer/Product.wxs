@@ -71,10 +71,13 @@
                       Win64="yes" />
     </Property>
     <Condition Message="$(var.OtherScopeMessage)">
-      NOT Installed AND OTHER_SCOPE_MARKER &lt;&gt; "$(var.OtherScopeValue)"
+      Installed OR OTHER_SCOPE_MARKER &lt;&gt; "$(var.OtherScopeValue)"
     </Condition>
 
     <?if $(var.PerUser) = "true" ?>
+      <!-- 双用途授权：强制 per-user 上下文（卸载/修复也沿用同一上下文）。 -->
+      <Property Id="ALLUSERS" Value="2" Secure="yes" />
+      <Property Id="MSIINSTALLPERUSER" Value="1" Secure="yes" />
       <!-- MSI 的 ARP 由 bundle 隐藏（bundle 里也会显式传 MsiProperty，双保险）。 -->
       <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
     <?else?>
@@ -109,12 +112,22 @@
                   Return="ignore"
                   Directory="SystemFolder"
                   ExeCommand="cmd.exe /c rd /s /q &quot;%LOCALAPPDATA%\ClipBridge&quot;" />
+    <!-- per-user 变体：MSI 在服务上下文卸载时可能清不到用户 HKCU，这里用用户身份的 deferred CA 兜底。 -->
+    <CustomAction Id="CleanupInstallTraceCA"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore"
+                  Directory="SystemFolder"
+                  ExeCommand="cmd.exe /c reg delete &quot;HKCU\Software\ClipBridge&quot; /f &amp; rd /s /q &quot;%LOCALAPPDATA%\Programs\ClipBridge&quot;" />
 
     <InstallExecuteSequence>
       <!-- /qn 下 AppSearch 必须在 execute 序列里，否则 LaunchCondition 读不到标记。 -->
       <AppSearch Before="LaunchConditions" />
       <Custom Action="CleanupStartupEntryCA" Before="InstallFinalize">Installed AND (REMOVE~=&quot;ALL&quot;) AND NOT UPGRADINGPRODUCTCODE</Custom>
       <Custom Action="RemoveUserDataCA" Before="InstallFinalize">REMOVEUSERDATA=&quot;1&quot; AND Installed AND (REMOVE~=&quot;ALL&quot;) AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <?if $(var.PerUser) = "true" ?>
+      <Custom Action="CleanupInstallTraceCA" Before="InstallFinalize">Installed AND (REMOVE~=&quot;ALL&quot;) AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <?endif?>
     </InstallExecuteSequence>
 
     <Feature Id="ProductFeature" Title="ClipBridge" Level="1">

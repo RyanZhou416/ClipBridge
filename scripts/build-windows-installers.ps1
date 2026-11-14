@@ -171,7 +171,8 @@ if (@(Msi-Query $dbM "SELECT FileName FROM File") | Where-Object { $_ -match '\.
 
 $dbU = Open-Msi $userMsi
 if ((Msi-Property $dbU 'ProductVersion') -ne $msiVersion) { $fail += "user ProductVersion != $msiVersion" }
-if ((Msi-Property $dbU 'ALLUSERS')) { $fail += 'user ALLUSERS 应为空' }
+if ((Msi-Property $dbU 'ALLUSERS') -ne '2') { $fail += 'user ALLUSERS 应为 2（双用途授权）' }
+if ((Msi-Property $dbU 'MSIINSTALLPERUSER') -ne '1') { $fail += 'user MSIINSTALLPERUSER 应为 1' }
 if ((Msi-Property $dbU 'ARPSYSTEMCOMPONENT') -ne '1') { $fail += 'user ARPSYSTEMCOMPONENT != 1' }
 if (-not ((Msi-WordCount $dbU) -band 8)) { $fail += 'user WordCount bit3 应为 1（per-user 免提权）' }
 if (@(Msi-Query $dbU "SELECT FileName FROM File") | Where-Object { $_ -match '\.pdb$' }) { $fail += 'user MSI 含 .pdb' }

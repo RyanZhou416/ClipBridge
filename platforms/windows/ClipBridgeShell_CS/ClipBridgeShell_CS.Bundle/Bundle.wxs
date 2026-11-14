@@ -31,7 +31,7 @@
                          Variable="MachineScope"
                          Result="value"
                          Win64="yes" />
-    <bal:Condition Message="检测到已安装机器版 ClipBridge。请先在 设置 → 应用 中卸载它，再安装当前用户版。">MachineScope != &quot;machine&quot;</bal:Condition>
+    <bal:Condition Message="检测到已安装机器版 ClipBridge。请先在 设置 → 应用 中卸载它，再安装当前用户版。">MachineScope &lt;&gt; &quot;machine&quot;</bal:Condition>
 
     <Chain>
       <MsiPackage Id="ClipBridgeUserMsi"
