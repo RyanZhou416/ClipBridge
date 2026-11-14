@@ -22,6 +22,7 @@
     },
     "platforms/windows/ClipBridgeShell_CS": {
       "path": "platforms/windows/ClipBridgeShell_CS",
+      "component": "clipbridge-windows",
       "release-type": "simple",
       "extra-files": [
         { "type": "xml", "path": "platforms/windows/ClipBridgeShell_CS/Version.props", "xpath": "//Project/PropertyGroup/Version" }

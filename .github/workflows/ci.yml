@@ -69,6 +69,7 @@ jobs:
               - 'platforms/windows/ClipBridgeShell_CS/Directory.Build.props'
               - 'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/ClipBridgeShell_CS.csproj'
               - 'scripts/build-windows-installers.ps1'
+              - 'scripts/build-winget-manifest.ps1'
               - 'scripts/version.ps1'
               - '.github/workflows/ci.yml'
 
@@ -434,11 +435,23 @@ jobs:
         shell: pwsh
         run: pwsh scripts/build-windows-installers.ps1 -WixInstallPath (Join-Path $env:RUNNER_TEMP 'wix314')
 
+      # 从 dist/ 的真实产物生成多文件三件套（version / installer / defaultLocale），
+      # SHA256 直接取自刚构建的文件；结构自检在脚本内部完成。
+      - name: Generate winget manifests
+        shell: pwsh
+        run: pwsh scripts/build-winget-manifest.ps1
+
+      # 三件套完整时 validate 应通过；对单个 yaml 运行会报 multi-file incomplete（预期）。
+      - name: Validate winget manifests
+        shell: pwsh
+        run: winget validate --manifest dist/winget --disable-interactivity
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installers
           path: |
             dist/*.msi
             dist/*.exe
+            dist/winget/**
           if-no-files-found: error
           compression-level: 0
