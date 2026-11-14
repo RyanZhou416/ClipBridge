@@ -23,6 +23,7 @@ jobs:
       csharp: ${{ steps.filter.outputs.csharp }}
       android: ${{ steps.filter.outputs.android }}
       macos: ${{ steps.filter.outputs.macos }}
+      installer: ${{ steps.filter.outputs.installer }}
     steps:
       - uses: actions/checkout@v4
       # 过滤器的职责是“只有相关文件变了才启动对应 job”：
@@ -61,6 +62,15 @@ jobs:
               - 'scripts/check-android-shell-contracts.sh'
             macos:
               - 'platforms/macos/ClipBridgeShell_macOS/**'
+            installer:
+              - 'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Installer/**'
+              - 'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Bundle/**'
+              - 'platforms/windows/ClipBridgeShell_CS/Version.props'
+              - 'platforms/windows/ClipBridgeShell_CS/Directory.Build.props'
+              - 'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/ClipBridgeShell_CS.csproj'
+              - 'scripts/build-windows-installers.ps1'
+              - 'scripts/version.ps1'
+              - '.github/workflows/ci.yml'
 
   rust:
     needs: changes
@@ -385,3 +395,50 @@ jobs:
       # test project itself emits its own runtimeconfig.json, which VSTest requires.
       - name: Test (MSTest)
         run: dotnet test platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Tests.MSTest/ClipBridgeShell_CS.Tests.MSTest.csproj -c Release -p:Platform=x64 --no-restore
+
+  # Windows 安装器（machine MSI + per-user EXE）。独立 job，不塞进 csharp：
+  # csharp 有意只做 restore/format/build/test，不碰 wixproj（目录 restore 会硬失败）。
+  windows-installer:
+    needs: changes
+    if: needs.changes.outputs.installer == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-installer
+
+      # 固定 WiX 3.14 二进制（不 winget install：runner 可复现、可校验）。
+      - name: Download WiX 3.14
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'wix314-binaries.zip'
+          $dir = Join-Path $env:RUNNER_TEMP 'wix314'
+          Invoke-WebRequest -Uri 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip' -OutFile $zip
+          $h = (Get-FileHash -Algorithm SHA256 $zip).Hash
+          if ($h -ne '6AC824E1642D6F7277D0ED7EA09411A508F6116BA6FAE0AA5F2C7DAA2FF43D31') {
+            throw "WiX zip hash mismatch: $h"
+          }
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+
+      - name: Build installers
+        shell: pwsh
+        run: pwsh scripts/build-windows-installers.ps1 -WixInstallPath (Join-Path $env:RUNNER_TEMP 'wix314')
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: |
+            dist/*.msi
+            dist/*.exe
+          if-no-files-found: error
+          compression-level: 0
