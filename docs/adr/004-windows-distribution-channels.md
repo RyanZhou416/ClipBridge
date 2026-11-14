@@ -14,7 +14,7 @@
 | 两个 MSI 怎么构建 | **一个 wixproj，`PerUser` 定义构建两遍**；`OutputName`/`OutputPath`/`IntermediateOutputPath` 按变体分开（MachineSetup / UserSetup），共享 `Product.wxs` | PowerToys `PowerToysInstallerVNext.wixproj`（`PerUser` 定义 + 两套 OutputPath） |
 | machine / user 的 UpgradeCode | **两套独立 UpgradeCode**；machine 沿用现有 GUID（可升级现场），user 用新 GUID；bundle 用 `util:ProductSearch` **同时探测两者** | PowerToys `PowerToys.wxs:41-42`（ProductSearch 两个 UpgradeCode） |
 | per-user MSI 的 ARP 会不会落 HKLM | 会；**Burn 不会自动传 ARPSYSTEMCOMPONENT**（WiX Burn 源码 0 命中）→ bundle 里必须显式 MsiProperty ARPSYSTEMCOMPONENT=1；winget 跳过 SystemComponent 条目 → 用户看到 **bundle 的 HKCU ARP** | WiX Burn 源码 + winget-cli#6063 |
-| 安装目录 | machine：`[ProgramFiles64Folder]\ClipBridge`；user：**显式** `[LocalAppDataFolder]\Programs\ClipBridge`（不依赖隐式重定向） | MS Installation Context（per-user 重定向存在，但显式更稳；A 的 spike 建议） |
+| 安装目录 | machine：`[ProgramFiles64Folder]\ClipBridge`；user：**显式** `[LocalAppDataFolder]\Programs\ClipBridge`（不依赖隐式重定向） | MS Installation Context（官方文档明确 per-user 重定向；显式目录便于审阅） |
 | 注册表根/开始菜单要不要参数化 | **不需要**：注册表根用 `HKMU`（-1 → machine=HKLM / user=HKCU）；`ProgramMenuFolder` 随 ALLUSERS 自动切换 | MS Installation Context |
 | DesktopFolder 含义 | per-machine 下 `DesktopFolder` 本身就是 **All Users 桌面**，不是"安装者桌面"；MSI **没有** `CommonDesktopFolder` | MS Installation Context（A/B 一致） |
 | RemoveFolderEx | **目录 id 不可用**：属性必须在 `CostInitialize` 之前解析，而 Directory 属性要到 `CostFinalize` 才有值 → 用 **Remember Property**（安装时写注册表，卸载时 RegistrySearch 读回） | WiX 官方 RemoveFolderEx 文档 |
@@ -268,7 +268,7 @@ Installers:
 
 | # | 验证 | 判定 | 阶段 |
 |---|---|---|---|
-| V1 | MSIX 写虚拟化探针（真实路径 vs LocalCache） | 真实 = PASS；仅私有 = 维持 D2″ | P0/P2 |
+| V1 | MSIX 写虚拟化环境确认（真实路径 vs LocalCache） | 真实 = PASS；仅私有 = 维持 D2″ | P0/P2 |
 | V2 | MSI 真实 DB → MSIX 导入：WAL 落点/设备重复/混合 | 无混合 = PASS | P2 |
 | V3 | 托盘（图标/菜单/Explorer 重启） | 正常 | P2 |
 | V4 | `uap5` StartupTask 登录启动 + Kind 识别 | 正常 | P2 |
@@ -278,7 +278,7 @@ Installers:
 | V8 | 单实例（MSI+MSIX，双会话） | 单进程+提示 | P2 |
 | V9 | Store 身份/版本草稿提交 | 掌握规则 | P2 |
 | V10 | 签名安装形态重跑 V3–V7 | 一致 | P2 |
-| V11 | **per-user MSI + bundle 机制 spike**：标准用户 `/qn` 安装 → 查 3 处 ARP（HKLM/HKCU/bundle）、`SystemComponent`、`winget list --scope user`、卸载残留、管理员运行 | 用户版 ARP 只在 HKCU/bundle；winget 识别 user | **P0** |
+| V11 | **per-user MSI + bundle 首次安装验收**：标准用户 `/qn` 安装 → 查 3 处 ARP（HKLM/HKCU/bundle）、`SystemComponent`、`winget list --scope user`、卸载残留、管理员运行 | 用户版 ARP 只在 HKCU/bundle；winget 识别 user | **P0** |
 | V12 | 两 scope 互斥矩阵：machine↔user、同版本/跨版本、`/qn`、另一 scope 存在时卸载 | 阻断且可卸载；日志无跨删 | P1 |
 | V13 | 导入中断/回滚/重装再导入 | 半成品清理、可重试 | P2 |
 
@@ -286,7 +286,7 @@ Installers:
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **P0（机制 spike）** | 最小 per-user MSI + Burn bundle（V11）；`Version.props`+`version.ps1`；release-please 修复（PAT）；stage/heat 改造；`windows-installer` 骨架；修 `CleanupStartupEntryCA` | V11 结论；版本可复算；安装器能出两 MSI + bundle |
+| **P0（首次构建 + 常规安装验收）** | 最小 per-user MSI + Burn bundle（V11）；`Version.props`+`version.ps1`；release-please 修复（PAT）；stage/heat 改造；`windows-installer` 骨架；修 `CleanupStartupEntryCA` | 安装结果；版本可复算；安装器能出两 MSI + bundle |
 | **P1** | `DataRootResolver`；machine MSI 定稿（HKMU/Remember Property/Secure/CA）；user 变体；便携 ZIP；winget 清单+validate；Release 流水线；V12 | 三产物可重复构建；互斥矩阵通过 |
 | **P2** | Store 账号 + MSIX 提交；SignPath；V1–V10/V13 | Store 通过、签名产物 |
 | **P3** | 自研更新器（本轮不做） | 后续 ADR |
@@ -313,7 +313,7 @@ Installers:
 |---|---|
 | D2 是否先跑 V1/V2 | 先跑（P0 顺手做 V1；V2 在 P2 前） |
 | Store 首发版本 | `1.0.0.0` |
-| P0 范围 | 仅 V11 机制 spike + 版本/CI 地基，不做完整安装器 |
+| P0 范围 | 仅首次安装验收 + 版本/CI 地基，不做完整安装器 |
 
 ## 11. 成熟实现参考
 
