@@ -1,60 +1,101 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
      xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
-  <Product Id="*" 
-           Name="ClipBridge Shell" 
-           Language="2052" 
+
+  <!--
+    同一份 Product.wxs 由 wixproj 构建两次：
+      PerUser=false → machine MSI（Program Files / HKLM）
+      PerUser=true  → user MSI（%LOCALAPPDATA%\Programs / HKCU），再被 Burn bundle 包起来
+    传入变量：ProductVersion / InstallScope / UpgradeCode / PerUser / RegRoot / OtherRegRoot /
+              ScopeName / AppProjectDir / PublishDir
+  -->
+  <?if $(var.PerUser) = "true" ?>
+    <?define RegRoot = "HKCU" ?>
+    <?define OtherRegRoot = "HKLM" ?>
+    <?define OtherScopeValue = "machine" ?>
+    <?define OtherScopeMessage = "检测到已安装机器版 ClipBridge。请先在 设置 → 应用 中卸载它，再安装当前用户版。" ?>
+    <?define InstallPrivileges = "limited" ?>
+  <?else?>
+    <?define RegRoot = "HKLM" ?>
+    <?define OtherRegRoot = "HKCU" ?>
+    <?define OtherScopeValue = "user" ?>
+    <?define OtherScopeMessage = "检测到当前用户已安装 ClipBridge。请先在 设置 → 应用 中卸载用户版，再安装机器版。" ?>
+    <?define InstallPrivileges = "elevated" ?>
+  <?endif?>
+
+  <Product Id="*"
+           Name="ClipBridge"
+           Language="2052"
            Codepage="936"
-           Version="1.0.9.0" 
-           Manufacturer="Ryan416" 
-           UpgradeCode="a1b2c3d4-e5f6-7890-abcd-ef1234567891">
-    
-    <Package InstallerVersion="200" 
-             Compressed="yes" 
-             InstallScope="perMachine"
+           Version="$(var.ProductVersion)"
+           Manufacturer="Ryan416"
+           UpgradeCode="$(var.UpgradeCode)">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="$(var.InstallScope)"
              Languages="2052"
              SummaryCodepage="936"
-             Description="ClipBridge Shell 安装程序"
-             Comments="ClipBridge Shell - 跨设备剪贴板同步工具"
+             Description="ClipBridge 安装程序"
+             Comments="ClipBridge - 跨设备剪贴板同步工具"
              Manufacturer="Ryan416" />
-    
-    <MajorUpgrade DowngradeErrorMessage="检测到更高版本的 ClipBridge Shell 已安装。请先卸载旧版本。" />
-    
+
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="检测到更高版本的 ClipBridge 已安装。请先卸载旧版本。" />
+
     <MediaTemplate EmbedCab="yes" />
-    
+
     <Icon Id="AppIcon" SourceFile="$(var.AppProjectDir)\Assets\WindowIcon.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
-    
-    <!-- 安装目录：默认 C:\Program Files\ClipBridge -->
-    <SetDirectory Id="INSTALLFOLDER" Value="[ProgramFiles64Folder]ClipBridge" />
-    
-    <!-- 允许用户修改路径 -->
-    <UIRef Id="WixUI_InstallDir" />
-    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
-    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <!-- 双变体共用：卸载时是否删除用户数据（user 版无 UI，默认 0）。 -->
+    <Property Id="REMOVEUSERDATA" Value="0" Secure="yes" />
+
+    <!-- 卸载时从安装时写入的注册表读回安装目录（RemoveFolderEx 需要 CostInitialize 前有值）。 -->
+    <Property Id="REMEMBERED_INSTALLDIR" Secure="yes">
+      <RegistrySearch Id="RememberedInstallDirSearch"
+                      Root="$(var.RegRoot)"
+                      Key="Software\ClipBridge\ClipBridgeShell"
+                      Name="InstallPath"
+                      Type="raw"
+                      Win64="yes" />
+    </Property>
+
+    <!-- 跨 scope 检测：安装前查另一个 scope 的标记。 -->
+    <Property Id="OTHER_SCOPE_MARKER">
+      <RegistrySearch Id="OtherScopeSearch"
+                      Root="$(var.OtherRegRoot)"
+                      Key="Software\ClipBridge\Installer"
+                      Name="Scope"
+                      Type="raw"
+                      Win64="yes" />
+    </Property>
+    <Condition Message="$(var.OtherScopeMessage)">
+      NOT Installed AND OTHER_SCOPE_MARKER &lt;&gt; "$(var.OtherScopeValue)"
+    </Condition>
+
+    <?if $(var.PerUser) = "true" ?>
+      <!-- MSI 的 ARP 由 bundle 隐藏（bundle 里也会显式传 MsiProperty，双保险）。 -->
+      <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
+    <?else?>
+      <!-- 机器版保留卸载向导与目录选择；user 版无 UI、由 bundle 驱动。 -->
+      <UIRef Id="WixUI_InstallDir" />
+      <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+      <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+      <UI>
+        <DialogRef Id="RemoveUserDataDlg" />
+        <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="RemoveUserDataDlg" Order="2">1</Publish>
+        <Publish Dialog="RemoveUserDataDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2">1</Publish>
+        <Publish Dialog="RemoveUserDataDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="2">1</Publish>
+        <Publish Dialog="RemoveUserDataDlg" Control="Cancel" Event="SpawnDialog" Value="CancelDlg" Order="2">1</Publish>
+      </UI>
+    <?endif?>
 
     <!--
-      卸载时是否同时删除用户数据（%LOCALAPPDATA%\ClipBridge：core.db/logs.db/Cache/tls）。
-      默认 0 = 保留（重装后可继续使用）；卸载向导会弹出自定义对话框让用户勾选，
-      静默卸载可用：msiexec /x ClipBridgeShell_CS.msi REMOVEUSERDATA=1 /qn
-    -->
-    <Property Id="REMOVEUSERDATA" Value="0" />
-
-    <!-- 卸载向导：在「维护类型」页点“删除”后插入我们的数据清理对话框。 -->
-    <UI>
-      <DialogRef Id="RemoveUserDataDlg" />
-      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="RemoveUserDataDlg" Order="2">1</Publish>
-      <Publish Dialog="RemoveUserDataDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2">1</Publish>
-      <Publish Dialog="RemoveUserDataDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="2">1</Publish>
-      <Publish Dialog="RemoveUserDataDlg" Control="Cancel" Event="SpawnDialog" Value="CancelDlg" Order="2">1</Publish>
-    </UI>
-
-    <!--
-      卸载清理动作（deferred，Impersonate=yes 让 %LOCALAPPDATA% 指向执行卸载的用户）：
-      1) CleanupStartupEntryCA：总是移除开机自启项与旧版计划任务（这些是应用运行时写入的，
-         MSI 组件不跟踪，必须显式清理，否则卸载后残留“开机启动”死项）。
-      2) RemoveUserDataCA：仅在用户勾选（REMOVEUSERDATA=1）时删除用户数据目录。
-      两者都 Return="ignore"：清理失败不能阻断卸载。
+      卸载清理动作（deferred, Impersonate=yes）：
+      - CleanupStartupEntryCA：移除开机自启项/旧计划任务；升级时不能执行（NOT UPGRADINGPRODUCTCODE）。
+      - RemoveUserDataCA：仅 REMOVEUSERDATA=1 时删用户数据；同样排除升级。
     -->
     <CustomAction Id="CleanupStartupEntryCA"
                   Execute="deferred"
@@ -70,47 +111,56 @@
                   ExeCommand="cmd.exe /c rd /s /q &quot;%LOCALAPPDATA%\ClipBridge&quot;" />
 
     <InstallExecuteSequence>
-      <Custom Action="CleanupStartupEntryCA" Before="InstallFinalize">Installed AND (REMOVE~=&quot;ALL&quot;)</Custom>
-      <Custom Action="RemoveUserDataCA" Before="InstallFinalize">REMOVEUSERDATA=&quot;1&quot; AND Installed AND (REMOVE~=&quot;ALL&quot;)</Custom>
+      <!-- /qn 下 AppSearch 必须在 execute 序列里，否则 LaunchCondition 读不到标记。 -->
+      <AppSearch Before="LaunchConditions" />
+      <Custom Action="CleanupStartupEntryCA" Before="InstallFinalize">Installed AND (REMOVE~=&quot;ALL&quot;) AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="RemoveUserDataCA" Before="InstallFinalize">REMOVEUSERDATA=&quot;1&quot; AND Installed AND (REMOVE~=&quot;ALL&quot;) AND NOT UPGRADINGPRODUCTCODE</Custom>
     </InstallExecuteSequence>
-    
-    <Feature Id="ProductFeature" Title="ClipBridge Shell" Level="1">
+
+    <Feature Id="ProductFeature" Title="ClipBridge" Level="1">
       <ComponentGroupRef Id="RuntimeFiles" />
       <ComponentGroupRef Id="ApplicationShortcuts" />
       <ComponentGroupRef Id="DesktopShortcut" />
       <ComponentGroupRef Id="RegistryEntries" />
+      <ComponentGroupRef Id="InstallerMarker" />
       <ComponentGroupRef Id="CleanupComponents" />
     </Feature>
-    
+
     <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFiles64Folder">
-        <Directory Id="INSTALLFOLDER" Name="ClipBridge" />
-      </Directory>
+      <?if $(var.PerUser) = "true" ?>
+        <Directory Id="LocalAppDataFolder">
+          <Directory Id="ProgramsFolder" Name="Programs">
+            <Directory Id="INSTALLFOLDER" Name="ClipBridge" />
+          </Directory>
+        </Directory>
+      <?else?>
+        <Directory Id="ProgramFiles64Folder">
+          <Directory Id="INSTALLFOLDER" Name="ClipBridge" />
+        </Directory>
+      <?endif?>
       <Directory Id="ProgramMenuFolder">
         <Directory Id="ApplicationProgramsFolder" Name="ClipBridge" />
       </Directory>
       <Directory Id="DesktopFolder" Name="Desktop" />
-      <!-- 自定义动作（deferred cmd.exe）的工作目录引用：SystemFolder 是标准目录，必须在 Directory 树中出现一次。 -->
       <Directory Id="SystemFolder" />
     </Directory>
   </Product>
-  
-  <!-- 辅助组件组：负责清理和目录创建 -->
+
   <Fragment>
     <ComponentGroup Id="CleanupComponents" Directory="INSTALLFOLDER">
       <Component Id="CleanupMainDir" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567892">
         <CreateFolder />
-        <util:RemoveFolderEx On="uninstall" Property="INSTALLFOLDER" />
+        <util:RemoveFolderEx On="uninstall" Property="REMEMBERED_INSTALLDIR" />
       </Component>
     </ComponentGroup>
   </Fragment>
-  
+
   <Fragment>
     <ComponentGroup Id="ApplicationShortcuts" Directory="ApplicationProgramsFolder">
       <Component Id="ApplicationShortcut" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567894">
         <Shortcut Id="ApplicationStartMenuShortcut"
-                  Name="ClipBridge Shell"
-                  Description="ClipBridge Shell - 跨设备剪贴板同步工具"
+                  Name="ClipBridge"
+                  Description="ClipBridge - 跨设备剪贴板同步工具"
                   Target="[INSTALLFOLDER]ClipBridgeShell_CS.exe"
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="AppIcon" />
@@ -119,13 +169,13 @@
       </Component>
     </ComponentGroup>
   </Fragment>
-  
+
   <Fragment>
     <ComponentGroup Id="DesktopShortcut" Directory="DesktopFolder">
       <Component Id="DesktopShortcutComponent" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567895">
         <Shortcut Id="DesktopShortcut"
-                  Name="ClipBridge Shell"
-                  Description="ClipBridge Shell - 跨设备剪贴板同步工具"
+                  Name="ClipBridge"
+                  Description="ClipBridge - 跨设备剪贴板同步工具"
                   Target="[INSTALLFOLDER]ClipBridgeShell_CS.exe"
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="AppIcon" />
@@ -133,24 +183,38 @@
       </Component>
     </ComponentGroup>
   </Fragment>
-  
+
   <Fragment>
     <ComponentGroup Id="RegistryEntries" Directory="INSTALLFOLDER">
       <Component Id="RegistryEntries" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567896">
-        <RegistryKey Root="HKLM" Key="SOFTWARE\ClipBridge\ClipBridgeShell">
-          <RegistryValue Name="InstallPath" Type="string" Value="[INSTALLFOLDER]" />
-          <RegistryValue Name="Version" Type="string" Value="1.0.9.0" />
+        <RegistryKey Root="$(var.RegRoot)" Key="Software\ClipBridge\ClipBridgeShell">
+          <RegistryValue Name="InstallPath" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+          <RegistryValue Name="Version" Type="string" Value="[ProductVersion]" />
         </RegistryKey>
       </Component>
     </ComponentGroup>
   </Fragment>
-  <!-- 卸载时的“是否删除用户数据”对话框。 -->
+
+  <Fragment>
+    <ComponentGroup Id="InstallerMarker" Directory="INSTALLFOLDER">
+      <Component Id="InstallerMarkerComponent" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567897">
+        <RegistryKey Root="$(var.RegRoot)" Key="Software\ClipBridge\Installer">
+          <RegistryValue Name="Scope" Type="string" Value="$(var.ScopeName)" KeyPath="yes" />
+          <RegistryValue Name="ProductCode" Type="string" Value="[ProductCode]" />
+          <RegistryValue Name="Version" Type="string" Value="[ProductVersion]" />
+        </RegistryKey>
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <?if $(var.PerUser) != "true" ?>
+  <!-- 机器版的卸载向导：“是否删除用户数据”对话框。 -->
   <Fragment>
     <UI>
-      <Dialog Id="RemoveUserDataDlg" Width="370" Height="270" Title="卸载 ClipBridge Shell" NoMinimize="yes">
+      <Dialog Id="RemoveUserDataDlg" Width="370" Height="270" Title="卸载 ClipBridge" NoMinimize="yes">
         <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15"
                  Transparent="yes" NoPrefix="yes"
-                 Text="{\WixUI_Font_Title}卸载 ClipBridge Shell" />
+                 Text="{\WixUI_Font_Title}卸载 ClipBridge" />
         <Control Id="Description" Type="Text" X="25" Y="23" Width="320" Height="15"
                  Transparent="yes" NoPrefix="yes"
                  Text="是否同时删除本机的用户数据？" />
@@ -169,4 +233,5 @@
       </Dialog>
     </UI>
   </Fragment>
+  <?endif?>
 </Wix>

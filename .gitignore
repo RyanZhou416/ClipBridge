@@ -157,3 +157,7 @@ DerivedData/
 artifacts/
 inspection_results/
 clippy_*.txt
+
+# 本地打包产物
+dist/
+

@@ -1,50 +1,63 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" DefaultTargets="Build" InitialTargets="EnsureWixToolsetInstalled" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="..\Version.props" />
+
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
+    <!-- WiX 3 工具集版本（不是应用版本）。 -->
     <ProductVersion>3.10</ProductVersion>
     <ProjectGuid>a1b2c3d4-e5f6-7890-abcd-ef1234567890</ProjectGuid>
     <SchemaVersion>2.0</SchemaVersion>
-    <OutputName>ClipBridgeShell_CS</OutputName>
     <OutputType>Package</OutputType>
     <Cultures>zh-CN</Cultures>
     <WixTargetsPath Condition=" '$(WixTargetsPath)' == '' AND '$(MSBuildExtensionsPath32)' != '' ">$(MSBuildExtensionsPath32)\Microsoft\WiX\v3.x\Wix.targets</WixTargetsPath>
     <WixTargetsPath Condition=" '$(WixTargetsPath)' == '' ">$(MSBuildExtensionsPath)\Microsoft\WiX\v3.x\Wix.targets</WixTargetsPath>
-    <SuppressIces>ICE03;ICE30;ICE82;ICE90</SuppressIces>
-  </PropertyGroup>
-  
-  <PropertyGroup>
-    <OutputPath>bin\$(Configuration)\</OutputPath>
-    <IntermediateOutputPath>obj\$(Configuration)\</IntermediateOutputPath>
+    <!-- 先不抑制 ICE；若新结构触发已知无关项再按需加回。 -->
+    <!-- 默认不抑制 ICE。user 变体必然触发 ICE64/ICE91（实际由 RemoveFolderEx 清理；该变体只做 per-user）；machine 不抑制。 -->
+    <SuppressIces Condition=" '$(PerUser)' == 'true' ">ICE38;ICE64;ICE91</SuppressIces>
   </PropertyGroup>
 
-  <!-- 预定义发布路径，确保在整个构建生命周期内可用 -->
+  <!-- 双变体：PerUser=false → machine；true → user（由 bundle 包起来）。 -->
+  <PropertyGroup>
+    <PerUser Condition=" '$(PerUser)' == '' ">false</PerUser>
+    <InstallScope Condition=" '$(PerUser)' == 'true' ">perUser</InstallScope>
+    <InstallScope Condition=" '$(PerUser)' != 'true' ">perMachine</InstallScope>
+    <ScopeName Condition=" '$(PerUser)' == 'true' ">user</ScopeName>
+    <ScopeName Condition=" '$(PerUser)' != 'true' ">machine</ScopeName>
+    <!-- machine 沿用既有 UpgradeCode，保证已装 1.0.x 的机器能被识别为旧产品；
+         user 用全新 GUID（两 scope 不能互相 RemoveExistingProducts）。 -->
+    <UpgradeCode Condition=" '$(PerUser)' == 'true' ">{b2c3d4e5-f6a7-8901-bcde-f12345678901}</UpgradeCode>
+    <UpgradeCode Condition=" '$(PerUser)' != 'true' ">{a1b2c3d4-e5f6-7890-abcd-ef1234567891}</UpgradeCode>
+  </PropertyGroup>
+
   <PropertyGroup>
     <PublishConfiguration Condition=" '$(Configuration)' == 'Debug' ">Release</PublishConfiguration>
     <PublishConfiguration Condition=" '$(PublishConfiguration)' == '' ">$(Configuration)</PublishConfiguration>
     <RID Condition=" '$(Platform)' == 'x64' ">win-x64</RID>
-    <RID Condition=" '$(Platform)' == 'x86' ">win-x86</RID>
     <RID Condition=" '$(Platform)' == 'arm64' ">win-arm64</RID>
     <RID Condition=" '$(RID)' == '' ">win-x64</RID>
-    <!--
-      应用工程的 TargetFramework。此前这里硬编码 net9.0，而应用已升到 net10.0，
-      导致安装器去 harvest 一个不存在的目录（要么构建失败，要么打包到旧产物）。
-      用属性集中定义，升级 TFM 时只改这里；也可用 -p:AppTargetFramework=... 覆盖。
-    -->
     <AppTargetFramework Condition=" '$(AppTargetFramework)' == '' ">net10.0-windows10.0.26100.0</AppTargetFramework>
-    <BasePubDir>$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS\bin\$(PublishConfiguration)\$(AppTargetFramework)\$(RID)\publish</BasePubDir>
-    <!-- 显式定义变量，供 candle.exe 使用 -->
+
+    <!-- 载荷 stage：publish 一次、heat 一次、两个变体共用。 -->
+    <StageDir Condition=" '$(StageDir)' == '' ">$(MSBuildProjectDirectory)\obj\stage</StageDir>
+    <HeatFile Condition=" '$(HeatFile)' == '' ">$(MSBuildProjectDirectory)\obj\HeatGenerated.wxs</HeatFile>
+    <SkipPublish Condition=" '$(SkipPublish)' == '' ">false</SkipPublish>
+    <SkipHeat Condition=" '$(SkipHeat)' == '' ">false</SkipHeat>
+
+    <OutputName>ClipBridge-$(Version)-win-$(Platform)-$(ScopeName)</OutputName>
+    <OutputPath>bin\$(Configuration)\$(ScopeName)\</OutputPath>
+    <IntermediateOutputPath>obj\$(Configuration)\$(ScopeName)\</IntermediateOutputPath>
+
     <AppProjectDir>$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS</AppProjectDir>
-    <DefineConstants>$(DefineConstants);PublishDir=$(BasePubDir);AppProjectDir=$(AppProjectDir)</DefineConstants>
+    <WixExtDir Condition=" '$(WixExtDir)' == '' ">$(WixInstallPath)</WixExtDir>
+    <DefineConstants>$(DefineConstants);PublishDir=$(StageDir);AppProjectDir=$(AppProjectDir);ProductVersion=$(Version);InstallScope=$(InstallScope);UpgradeCode=$(UpgradeCode);PerUser=$(PerUser);ScopeName=$(ScopeName)</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="Product.wxs" />
-    <Compile Include="$(IntermediateOutputPath)HeatGenerated.wxs" />
+    <Compile Include="$(HeatFile)" />
   </ItemGroup>
-
-
 
   <ItemGroup>
     <WixExtension Include="WixUtilExtension"><HintPath>$(WixExtDir)\WixUtilExtension.dll</HintPath></WixExtension>
@@ -59,13 +72,23 @@
       <HeatPath Condition="!Exists('$(HeatPath)')">C:\Program Files (x86)\WiX Toolset v3.14\bin\heat.exe</HeatPath>
     </PropertyGroup>
 
-    <Message Text="[Setup] 1. dotnet publish" Importance="high" />
-    <Exec Command="dotnet publish &quot;$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS\ClipBridgeShell_CS.csproj&quot; -p:PublishProfile=Installer-$(Platform) -c $(PublishConfiguration)" />
-    
-    <Message Text="[Setup] 2. Running Heat with variable: PublishDir" Importance="high" />
-    <MakeDir Directories="$(IntermediateOutputPath)" />
-    <!-- 使用 -var var.PublishDir，这样生成的 wxs 会引用该变量 -->
-    <Exec Command="&quot;$(HeatPath)&quot; dir &quot;$(BasePubDir)&quot; -cg RuntimeFiles -gg -sfrag -srd -scom -sreg -dr INSTALLFOLDER -var var.PublishDir -out &quot;$(IntermediateOutputPath)HeatGenerated.wxs&quot;" />
+    <!-- 1) publish（只跑一次；后续变体用 -p:SkipPublish=true） -->
+    <Message Text="[Setup] publish → $(StageDir)" Importance="high" Condition="'$(SkipPublish)' != 'true'" />
+    <Exec Condition="'$(SkipPublish)' != 'true'"
+          Command="dotnet publish &quot;$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS\ClipBridgeShell_CS.csproj&quot; -c $(PublishConfiguration) -p:Platform=$(Platform) -p:PublishProfile=win10-$(Platform) -p:SkipRustBuild=true -o &quot;$(StageDir)&quot;" />
+    <ItemGroup Condition="'$(SkipPublish)' != 'true'">
+      <_StagePdbs Include="$(StageDir)\**\*.pdb" />
+      <_StageXml Include="$(StageDir)\**\*.xml" />
+    </ItemGroup>
+    <Delete Condition="'$(SkipPublish)' != 'true'" Files="@(_StagePdbs);@(_StageXml)" />
+
+    <!-- 2) heat（只跑一次；两个变体共用） -->
+    <Message Text="[Setup] heat → $(HeatFile)" Importance="high" Condition="'$(SkipHeat)' != 'true'" />
+    <MakeDir Directories="$(MSBuildProjectDirectory)\obj" Condition="'$(SkipHeat)' != 'true'" />
+    <Exec Condition="'$(SkipHeat)' != 'true'"
+          Command="&quot;$(HeatPath)&quot; dir &quot;$(StageDir)&quot; -cg RuntimeFiles -ag -sfrag -srd -scom -sreg -dr INSTALLFOLDER -var var.PublishDir -out &quot;$(HeatFile)&quot;" />
+    <Error Condition="'$(SkipHeat)' == 'true' AND !Exists('$(HeatFile)')"
+           Text="Heat 文件不存在：$(HeatFile)。先不带 -p:SkipHeat=true 构建一次。" />
   </Target>
 
   <Target Name="EnsureWixToolsetInstalled" Condition=" '$(WixTargetsImported)' != 'true' ">
