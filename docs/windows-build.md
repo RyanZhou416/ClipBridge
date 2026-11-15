@@ -1,5 +1,7 @@
 # Windows 打包渠道（按产物拆分）
 
+> 设计与实现差异见 [ADR-005](adr/005-windows-distribution-implementation.md)；各渠道卸载/数据保留行为以该文为准。
+
 主入口是 `scripts/build-windows-installers.ps1`，用 `-Only` 选择渠道；每个渠道另有一个薄封装脚本，
 便于 CI / 本地只构建需要的产物。版本唯一真值仍是
 `platforms/windows/ClipBridgeShell_CS/Version.props`，经 `scripts/version.ps1` 派生
@@ -12,7 +14,7 @@
 | 全部（All，默认） | `pwsh scripts/build-windows-all.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-machine.msi`、`-user.exe`、`-user.msi`（内部）、`-portable.zip` | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 已实测 exit 0（2026-11-14，66.1s），4 类产物齐全、断言通过；未做真机安装 |
 | per-machine MSI | `pwsh scripts/build-windows-machine-msi.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-machine.msi` | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 已实测 exit 0（32.2s），结构断言通过；**2026-11-15 已用管理员权限实测安装/卸载成功**（程序目录/HKLM/快捷方式/ARP/数据目录全部清除） |
 | per-user EXE（Burn） | `pwsh scripts/build-windows-user-exe.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-user.exe`（+ 内部 `-user.msi`） | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 已实测 exit 0（34.3s），结构断言通过；**真机安装验证本次未做** |
-| 便携 ZIP | `pwsh scripts/build-windows-portable-zip.ps1` | `ClipBridge-<ver>-win-<arch>-portable.zip` | .NET 10 SDK + Rust 目标（**不经过 WiX**） | 已实测 exit 0（10.3s），ZIP 结构断言通过；**未解压实跑** |
+| 便携 ZIP | `pwsh scripts/build-windows-portable-zip.ps1` | `ClipBridge-<ver>-win-<arch>-portable.zip` | .NET 10 SDK + Rust 目标（**不经过 WiX**） | 已实测 exit 0（10.3s），ZIP 结构断言通过；**已解压实测便携/无 marker/不可写回退三种模式** |
 | winget 清单 | `pwsh scripts/build-windows-winget.ps1` | `dist/winget/` 下三件套 YAML | `dist/` 已有 machine MSI 与 user EXE；winget CLI（可选，缺失时跳过 validate） | 已实测 exit 0（约 1s），`winget validate` 通过；**真实安装需先发布 Release** |
 | MSIX | —（**未实现，P2**） | — | 签名证书 + MSIX 打包 + 数据目录迁移（P2） | 未实现，不在本次交付范围内 |
 
