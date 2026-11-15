@@ -10,7 +10,7 @@
 | 渠道 | 命令 | 产物（`<ver>=0.1.0`，`<arch>=x64`） | 前置条件 | 验证状态 |
 |---|---|---|---|---|
 | 全部（All，默认） | `pwsh scripts/build-windows-all.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-machine.msi`、`-user.exe`、`-user.msi`（内部）、`-portable.zip` | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 已实测 exit 0（2026-11-14，66.1s），4 类产物齐全、断言通过；未做真机安装 |
-| per-machine MSI | `pwsh scripts/build-windows-machine-msi.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-machine.msi` | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 已实测 exit 0（32.2s），结构断言通过；**需管理员权限在真实机器上安装验证（本次未做）** |
+| per-machine MSI | `pwsh scripts/build-windows-machine-msi.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-machine.msi` | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 已实测 exit 0（32.2s），结构断言通过；**2026-11-15 已用管理员权限实测安装/卸载成功**（程序目录/HKLM/快捷方式/ARP/数据目录全部清除） |
 | per-user EXE（Burn） | `pwsh scripts/build-windows-user-exe.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-user.exe`（+ 内部 `-user.msi`） | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 已实测 exit 0（34.3s），结构断言通过；**真机安装验证本次未做** |
 | 便携 ZIP | `pwsh scripts/build-windows-portable-zip.ps1` | `ClipBridge-<ver>-win-<arch>-portable.zip` | .NET 10 SDK + Rust 目标（**不经过 WiX**） | 已实测 exit 0（10.3s），ZIP 结构断言通过；**未解压实跑** |
 | winget 清单 | `pwsh scripts/build-windows-winget.ps1` | `dist/winget/` 下三件套 YAML | `dist/` 已有 machine MSI 与 user EXE；winget CLI（可选，缺失时跳过 validate） | 已实测 exit 0（约 1s），`winget validate` 通过；**真实安装需先发布 Release** |
@@ -95,4 +95,15 @@ pwsh scripts/build-windows-installers.ps1 -Only MachineMsi -WixInstallPath C:\to
 - machine MSI 的"删除用户数据"只覆盖**执行卸载的当前用户**（`%LOCALAPPDATA%` 是每用户目录）；其它用户的数据不会被枚举删除。
 - user EXE 的 `RemoveUserData` 是 Burn 可覆盖变量：默认 1（删除）；实测传 0 后数据目录保留。
 - 本机开发环境有早期测试残留的 2 个 hidden ARP 项（`SystemComponent=1`）和对应快捷方式组件引用，会让"新装再卸"看起来有残留；干净 VM/干净用户下按标准 MSI 行为清理。
-- machine MSI 尚未做管理员实机安装验证（需要 UAC 提权）。
+- machine MSI 已于 2026-11-15 用管理员权限实测：安装 exit 0，卸载后程序目录、HKLM 键、公共开始菜单/桌面快捷方式、ARP、`%LOCALAPPDATA%\ClipBridge` 全部清除（默认删除数据）。
+## 卸载实测记录（2026-11-15）
+
+| 渠道 | 结果 |
+|---|---|
+| machine MSI（提权） | 安装 → 卸载 exit 0；`Program Files\ClipBridge`、HKLM 标记、公共开始菜单/桌面、ARP、`%LOCALAPPDATA%\ClipBridge` 全部清除 |
+| user EXE | 安装 → 卸载 exit 0；安装目录、开始菜单/桌面快捷方式、HKCU 键、HKCU Run、HKCU ARP、数据目录全部清除 |
+| 便携 ZIP | 便携模式写 `data\`；无 marker 回退 LocalAppData；不可写回退并提示（此前已测） |
+| winget | `winget validate` 通过；真实安装待 Release 发布 |
+
+> 本机在测试早期曾留下两个 phantom 产品，阻塞了手工组件的卸载；清掉其 Installer 组件引用后，
+> 上述 machine/user 卸载均为全清。干净机器不会出现该问题。
