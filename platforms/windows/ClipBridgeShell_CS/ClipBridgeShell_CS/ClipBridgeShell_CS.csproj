@@ -48,6 +48,17 @@
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
 
+  <!--
+    MSIX 专用：scripts/build-windows-msix.ps1 在构建前把带最终身份/版本的 manifest
+    生成到 obj/msix/Package.appxmanifest，并通过 -p:ClipBridgeAppxManifest=<path> 传入。
+    这样 PRI（resources.pri 的 resource map 名就是 Identity Name）与包身份在生成时就一致，
+    不需要出包后再改 manifest（出包后改身份会破坏 ms-resource 查找）。
+    不传该属性时行为不变：MSIX targets 仍自动使用项目里的 Package.appxmanifest。
+  -->
+  <ItemGroup Condition="'$(ClipBridgeAppxManifest)' != ''">
+    <AppxManifest Include="$(ClipBridgeAppxManifest)" />
+  </ItemGroup>
+
 <ItemGroup>
   <Content Include="Assets\**\*">
     <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

@@ -1,31 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
 
+<!--
+  源 manifest（开发默认值）。
+  - 正式 MSIX 由 scripts/build-windows-msix.ps1 在构建前生成到 obj/msix/Package.appxmanifest，
+    并注入 Identity Name / Publisher / Version、DisplayName、PublisherDisplayName；
+    这里不写死发布版本（0.0.0.0 只是占位，脚本必须传入 4 段版本）。
+  - 启动项使用 uap5:Extension + uap5:StartupTask：官方 StartupTask API 文档给 packaged
+    desktop app 的示例就是这一形式（desktop: 是 Windows 10 1703 时代的等价旧命名空间）。
+    StartupService 用 Windows.ApplicationModel.StartupTask.GetAsync("ClipBridgeStartupTask") 控制。
+-->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
-  xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   xmlns:genTemplate="http://schemas.microsoft.com/appx/developer/templatestudio"
   xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
-  IgnorableNamespaces="uap rescap genTemplate">
+  IgnorableNamespaces="uap uap5 rescap genTemplate">
 
   <Identity
     Name="40a26821-a97d-4eb8-ae89-804c2cccf4a0"
     Publisher="CN=Ryan416"
-    Version="1.0.9.0" />
-    
-  <mp:PhoneIdentity PhoneProductId="40a26821-a97d-4eb8-ae89-804c2cccf4a0" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
-    
+    Version="0.0.0.0" />
+
   <Properties>
-    <DisplayName>ClipBridgeShell_CS</DisplayName>
+    <DisplayName>ClipBridge</DisplayName>
     <PublisherDisplayName>Ryan416</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 
   <Dependencies>
-    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.19041.0" />
-    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.19041.0" />
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
   </Dependencies>
 
   <Resources>
@@ -46,9 +52,11 @@
         <uap:SplashScreen Image="Assets\SplashScreen.png" />
       </uap:VisualElements>
       <Extensions>
-          <desktop:Extension Category="windows.startupTask" Executable="ClipBridgeShell_CS.exe" EntryPoint="Windows.FullTrustApplication">
-              <desktop:StartupTask TaskId="ClipBridgeStartupTask" Enabled="false" DisplayName="ClipBridge" />
-          </desktop:Extension>
+          <uap5:Extension Category="windows.startupTask"
+                           Executable="ClipBridgeShell_CS.exe"
+                           EntryPoint="Windows.FullTrustApplication">
+              <uap5:StartupTask TaskId="ClipBridgeStartupTask" Enabled="false" DisplayName="ClipBridge" />
+          </uap5:Extension>
 
           <desktop:Extension Category="windows.toastNotificationActivation">
               <desktop:ToastNotificationActivation ToastActivatorCLSID="f6062d3d-26c1-48db-a0ba-c5477d628897" />

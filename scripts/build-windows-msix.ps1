@@ -1,0 +1,775 @@
+<#
+.SYNOPSIS
+    构建 Windows MSIX（Microsoft Store 渠道）安装包：注入身份/版本、裁剪 AI/ML、重打包、断言、可选自签名。
+
+.DESCRIPTION
+    只做 MSIX 渠道，不影响 MSI / EXE / 便携 / winget 的既有流程。
+
+    流程：
+      1. 版本：默认从 scripts/version.ps1 -Json 取。major<1 时默认直接失败
+         （Store 要求 MSIX 版本 >= 1.0.0）；用 -Version 1.0.0 或 -AllowPreviewVersion
+         显式覆盖。最终包版本固定为 4 段：<major>.<minor>.<patch>.0。
+      2. 生成 manifest：把源 Package.appxmanifest 复制到项目 obj/msix 并注入
+         Identity Name / Publisher / Version、DisplayName / PublisherDisplayName。
+         通过 -p:ClipBridgeAppxManifest=<生成的 manifest> 传给 MSIX 构建。
+         原因：Microsoft.Windows.SDK.BuildTools.MSIX（WindowsAppSDK 单项目 MSIX 工具链）
+         没有 AppxPackageVersion 属性；manifest 的 Identity/@Version 才是权威，
+         而且 resources.pri 的 resource map 名就是 Identity Name，必须在 MakePri 之前定稿。
+      3. dotnet build Release x64：GenerateAppxPackageOnBuild=true、AppxBundle=Never、
+         AppxPackageDir=<obj/appx>、AppxPackageSigningEnabled=false。
+      4. makeappx unpack → 裁剪：
+         - 删除未使用的 WindowsAppSDK AI/ML（onnxruntime / DirectML / Microsoft.Windows.AI* /
+           Microsoft.Windows.Internal.AI* / Microsoft.ML.OnnxRuntime*）；
+         - 删除 *.pdb；
+         - 删除未保留语言的 WinUI MUI 目录，只留 zh-CN / zh-TW / en-us（en-US 兼容大小写）。
+      5. 校验 PRI（makepri dump 的 ResourceMap 名 == Identity Name、AppDisplayName 存在）、
+         Assets、Strings，然后 makeappx pack 重打包。
+      6. 断言最终包：版本 4 段且 major>=1、无 pdb、无 AI/ML、Assets/资源存在、
+         DisplayName/Publisher/TargetDeviceFamily/startupTask 正确。
+      7. -SelfSign（仅本地验收，默认关闭）：生成/复用 CN=<Publisher CN> 自签名证书，
+         导入 CurrentUser\TrustedPeople，用 signtool 签最终 .msix。
+         生产 Store 由 Store 重签，不要用 -SelfSign 产物提交 Store。
+
+    产物（默认 OutDir=dist/msix）：
+      dist/msix/ClipBridge-<ver>-win-x64.msix                 最终包（-SelfSign 时已签名）
+      dist/msix/unsigned/ClipBridge-<ver>-win-x64-unsigned.msix  未签名包（-SelfSign 时保留）
+      dist/msix/layout/ClipBridge-<ver>-win-x64/              裁剪后的布局（-KeepLayout 时保留）
+      dist/msix/logs/build-msix.log                           本次构建完整日志
+      dist/msix/logs/msix-summary.json                        机器可读摘要（路径/大小/SHA256/身份）
+      dist/msix/certs/*.cer                                   -SelfSign 的公开证书
+
+.PARAMETER Version
+    覆盖版本，接受 3 段（1.0.0）或 4 段（1.0.0.0，第 4 段必须为 0）。
+    不传时使用 Version.props 经 version.ps1 派生的 AppxVersion。
+    0.x 版本需要配合 -AllowPreviewVersion。
+
+.PARAMETER AllowPreviewVersion
+    允许 major<1 的开发/验收版本（映射为 max(1,major).minor.patch.0）。
+    仅用于开发/Store 预演，不能替代正式抬版本。
+
+.PARAMETER IdentityName
+    MSIX Identity Name。默认开发值 40a26821-...；Store 提交时换成 Partner Center 分配的名称。
+
+.PARAMETER Publisher
+    MSIX Publisher（必须是 CN=... 形式的 X.500 名称）。默认 CN=Ryan416；
+    Store 提交时换成 Partner Center 的 CN=<GUID>。自签名证书的 Subject 必须与它一致。
+
+.PARAMETER PublisherDisplayName
+    控制面板/Store 显示的发布者名称，默认 Ryan416。
+
+.PARAMETER DisplayName
+    包显示名，默认 ClipBridge。
+
+.PARAMETER SelfSign
+    生成/复用自签名证书并签名最终包（本地验收用，不得作为 Store 产物）。
+
+.PARAMETER OutDir
+    产物根目录，默认 dist/msix（相对仓库根目录）。
+
+.PARAMETER WindowsSdkBin
+    Windows SDK x64 工具目录（含 makeappx.exe/signtool.exe/makepri.exe）。
+    不传时在 C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64 下自动找最高版本。
+
+.PARAMETER SkipRust
+    跳过 cargo 构建（要求 target\x86_64-pc-windows-msvc\release\core_ffi_windows.dll 已存在）。
+
+.PARAMETER KeepLayout
+    保留裁剪后的解包布局（dist/msix/layout/...）。本地用 Add-AppxPackage -Register 验收时需要。
+
+.EXAMPLE
+    # 正式版本（Version.props 已 >= 1.0.0）
+    pwsh scripts/build-windows-msix.ps1
+
+.EXAMPLE
+    # 当前 Version.props 是 0.1.0，开发/验收时显式用 1.0.0
+    pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 -SelfSign -KeepLayout
+
+.EXAMPLE
+    # Store 身份替换
+    pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 `
+        -IdentityName '12345Ryan416.ClipBridge' -Publisher 'CN=01234567-89ab-cdef-0123-456789abcdef' `
+        -PublisherDisplayName 'Ryan416'
+
+.EXAMPLE
+    # 说明：AppxPackageVersion 在 Microsoft.Windows.SDK.BuildTools.MSIX 中不被识别，
+    # 版本通过生成 manifest 注入（见脚本 DESCRIPTION 第 2 步）。
+#>
+[CmdletBinding()]
+param(
+    [string]$Version = '',
+    [switch]$AllowPreviewVersion,
+    [string]$IdentityName = '40a26821-a97d-4eb8-ae89-804c2cccf4a0',
+    [string]$Publisher = 'CN=Ryan416',
+    [string]$PublisherDisplayName = 'Ryan416',
+    [string]$DisplayName = 'ClipBridge',
+    [switch]$SelfSign,
+    [string]$OutDir = 'dist/msix',
+    [string]$WindowsSdkBin = '',
+    [switch]$SkipRust,
+    [switch]$KeepLayout
+)
+
+$ErrorActionPreference = 'Stop'
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$appProject = Join-Path $repoRoot 'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/ClipBridgeShell_CS.csproj'
+$appDir = Split-Path -Parent $appProject
+$sourceManifest = Join-Path $appDir 'Package.appxmanifest'
+$platform = 'x64'
+
+$outRoot = if ([System.IO.Path]::IsPathRooted($OutDir)) { $OutDir } else { Join-Path $repoRoot $OutDir }
+$logsDir = Join-Path $outRoot 'logs'
+$objDir = Join-Path $outRoot 'obj'
+$appxOutDir = Join-Path $objDir 'appx'
+$layoutRoot = Join-Path $outRoot 'layout'
+$unsignedDir = Join-Path $outRoot 'unsigned'
+$certsDir = Join-Path $outRoot 'certs'
+$genManifestDir = Join-Path $appDir 'obj/msix'
+$genManifest = Join-Path $genManifestDir 'Package.appxmanifest'
+$buildLog = Join-Path $logsDir 'build-msix.log'
+
+New-Item -ItemType Directory -Force -Path $outRoot, $logsDir, $objDir | Out-Null
+
+function Write-Log {
+    param([Parameter(ValueFromRemainingArguments = $true)]$Parts)
+    $line = ($Parts | ForEach-Object { [string]$_ }) -join ' '
+    Write-Host $line
+    Add-Content -LiteralPath $buildLog -Value $line -Encoding utf8
+}
+
+Set-Content -LiteralPath $buildLog -Value "ClipBridge MSIX build log - $(Get-Date -Format o)" -Encoding utf8
+
+$exitCode = 0
+$summary = [ordered]@{}
+try {
+    Write-Log "==== ClipBridge MSIX build ===="
+    Write-Log ("repo     : {0}" -f $repoRoot)
+    Write-Log ("out      : {0}" -f $outRoot)
+    Write-Log ("started  : {0:O}" -f [DateTimeOffset]::Now)
+
+    if (-not (Test-Path -LiteralPath $sourceManifest)) { throw "找不到源 manifest: $sourceManifest" }
+    if (-not (Test-Path -LiteralPath $appProject)) { throw "找不到项目: $appProject" }
+    if ($Publisher -notmatch '^CN=') { throw "Publisher 必须是 CN=... 形式（实际: '$Publisher'）" }
+
+    # ---------------------------------------------------------------- 版本
+    function Resolve-MsixVersion {
+        param([string]$VersionOverride, [bool]$AllowPreview)
+
+        $requested = $null
+        if ($VersionOverride) {
+            $requested = $VersionOverride.Trim()
+        } else {
+            $json = & (Join-Path $PSScriptRoot 'version.ps1') -Json | ConvertFrom-Json
+            if ($json.AppxVersion) {
+                $requested = [string]$json.AppxVersion
+            } else {
+                if ($AllowPreview) {
+                    $requested = [string]$json.SemVer
+                    Write-Log ("[version] Version.props={0}，-AllowPreviewVersion 映射为 MSIX 版本（开发用）" -f $json.SemVer)
+                } else {
+                    throw (("MSIX 需 >=1.0.0：Version.props 当前为 {0}（major=0，Store 不允许）。" +
+                        "请先把 Version.props 升到 1.0.0，或用 -Version 1.0.0（开发/验收），或 -AllowPreviewVersion。") -f $json.SemVer)
+                }
+            }
+        }
+
+        if ($requested -notmatch '^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$') {
+            throw "版本必须是 3 段或 4 段数字（如 1.0.0 / 1.0.0.0），实际: '$requested'"
+        }
+        $major = [int]$Matches[1]
+        $minor = [int]$Matches[2]
+        $patch = [int]$Matches[3]
+        $revision = if ($Matches[4]) { [int]$Matches[4] } else { 0 }
+
+        if ($revision -ne 0) { throw "MSIX 版本第 4 段（Revision）必须为 0，实际: '$requested'" }
+        if ($major -lt 1) {
+            if ($AllowPreview) {
+                Write-Log ("[version] major=0 仅用于开发/验收；包版本映射为 1.{0}.{1}.0" -f $minor, $patch)
+                $major = 1
+            } else {
+                throw (("MSIX 需 >=1.0.0：请求版本为 {0}。开发/验收请加 -AllowPreviewVersion，" +
+                    "正式发布请把 Version.props 抬到 >=1.0.0。") -f $requested)
+            }
+        }
+        if ($major -gt 65535 -or $minor -gt 65535 -or $patch -gt 65535) {
+            throw "版本越界：每段必须 <= 65535，实际 $major.$minor.$patch.0"
+        }
+
+        return [pscustomobject]@{
+            AppxVersion = "$major.$minor.$patch.0"
+            SemVer     = "$major.$minor.$patch"
+            Requested  = $requested
+        }
+    }
+
+    $ver = Resolve-MsixVersion -VersionOverride $Version -AllowPreview ([bool]$AllowPreviewVersion)
+    $appxVersion = $ver.AppxVersion
+    $semVer = $ver.SemVer
+    Write-Log ("[version] requested={0}  package={1}  filename={2}" -f $ver.Requested, $appxVersion, $semVer)
+    if ($Version) {
+        Write-Log "[version] 注意：-Version 覆盖只作用于本次构建，Version.props 未被修改。"
+    }
+
+    # ------------------------------------------------------------ Windows SDK
+    function Resolve-WindowsSdkTools {
+        param([string]$ExplicitBin, [bool]$NeedSignTool)
+
+        $bins = @()
+        if ($ExplicitBin) {
+            $bins = @($ExplicitBin)
+        } else {
+            $roots = @(
+                (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'),
+                (Join-Path $env:ProgramFiles 'Windows Kits\10\bin')
+            ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+            foreach ($root in $roots) {
+                $bins += Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '^10\.\d+' } |
+                    Sort-Object { try { [version]$_.Name } catch { [version]'0.0.0.0' } } -Descending |
+                    ForEach-Object { Join-Path $_.FullName 'x64' }
+            }
+        }
+
+        foreach ($bin in $bins) {
+            $makeappx = Join-Path $bin 'makeappx.exe'
+            if (-not (Test-Path -LiteralPath $makeappx)) { continue }
+            $signtool = Join-Path $bin 'signtool.exe'
+            $makepri = Join-Path $bin 'makepri.exe'
+            if ($NeedSignTool -and -not (Test-Path -LiteralPath $signtool)) { continue }
+            return [pscustomobject]@{
+                Bin      = $bin
+                MakeAppx = $makeappx
+                SignTool = if (Test-Path -LiteralPath $signtool) { $signtool } else { $null }
+                MakePri  = if (Test-Path -LiteralPath $makepri) { $makepri } else { $null }
+            }
+        }
+
+        throw ((("未找到 Windows SDK x64 工具（makeappx.exe{0}）。请安装 Windows 10/11 SDK" +
+            "（含 MakeAppx/SignTool），或用 -WindowsSdkBin 指定 ...\Windows Kits\10\bin\<version>\x64。") -f
+            $(if ($NeedSignTool) { '/signtool.exe' } else { '' })))
+    }
+
+    $sdk = Resolve-WindowsSdkTools -ExplicitBin $WindowsSdkBin -NeedSignTool ([bool]$SelfSign)
+    Write-Log ("[sdk] bin      = {0}" -f $sdk.Bin)
+    Write-Log ("[sdk] makeappx = {0}" -f $sdk.MakeAppx)
+    if ($sdk.SignTool) { Write-Log ("[sdk] signtool = {0}" -f $sdk.SignTool) }
+    if ($sdk.MakePri) { Write-Log ("[sdk] makepri  = {0}" -f $sdk.MakePri) }
+
+    # -------------------------------------------------------- 生成 manifest
+    function New-MsixManifest {
+        param(
+            [string]$SourcePath, [string]$DestinationPath,
+            [string]$IdName, [string]$IdPublisher, [string]$AppxVer,
+            [string]$PackageDisplayName, [string]$PublisherDisplay
+        )
+
+        [xml]$doc = Get-Content -LiteralPath $SourcePath -Raw
+        $ns = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+        $ns.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+
+        $identity = $doc.SelectSingleNode('/f:Package/f:Identity', $ns)
+        if (-not $identity) { throw "源 manifest 缺少 /Package/Identity: $SourcePath" }
+        $identity.SetAttribute('Name', $IdName)
+        $identity.SetAttribute('Publisher', $IdPublisher)
+        $identity.SetAttribute('Version', $AppxVer)
+
+        $props = $doc.SelectSingleNode('/f:Package/f:Properties', $ns)
+        if (-not $props) { throw "源 manifest 缺少 /Package/Properties" }
+        $displayNode = $props.SelectSingleNode('f:DisplayName', $ns)
+        if (-not $displayNode) {
+            $displayNode = $doc.CreateElement('DisplayName', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+            [void]$props.AppendChild($displayNode)
+        }
+        $displayNode.InnerText = $PackageDisplayName
+        $publisherNode = $props.SelectSingleNode('f:PublisherDisplayName', $ns)
+        if (-not $publisherNode) {
+            $publisherNode = $doc.CreateElement('PublisherDisplayName', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+            [void]$props.AppendChild($publisherNode)
+        }
+        $publisherNode.InnerText = $PublisherDisplay
+
+        # TargetDeviceFamily 只留 Windows.Desktop。
+        $deps = $doc.SelectSingleNode('/f:Package/f:Dependencies', $ns)
+        if (-not $deps) { throw "源 manifest 缺少 /Package/Dependencies" }
+        $families = @($deps.SelectNodes('f:TargetDeviceFamily', $ns))
+        $desktop = $families | Where-Object { $_.GetAttribute('Name') -eq 'Windows.Desktop' } | Select-Object -First 1
+        if (-not $desktop) { throw "源 manifest 缺少 TargetDeviceFamily Name=Windows.Desktop" }
+        foreach ($family in $families) {
+            if (-not [object]::ReferenceEquals($family, $desktop)) {
+                [void]$deps.RemoveChild($family)
+            }
+        }
+
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DestinationPath) | Out-Null
+        $settings = New-Object System.Xml.XmlWriterSettings
+        $settings.Indent = $true
+        $settings.Encoding = New-Object System.Text.UTF8Encoding($false)
+        $writer = [System.Xml.XmlWriter]::Create($DestinationPath, $settings)
+        try { $doc.Save($writer) } finally { $writer.Close() }
+    }
+
+    Write-Log "[manifest] 生成构建用 manifest（注入身份/版本/显示名）"
+    New-MsixManifest -SourcePath $sourceManifest -DestinationPath $genManifest `
+        -IdName $IdentityName -IdPublisher $Publisher -AppxVer $appxVersion `
+        -PackageDisplayName $DisplayName -PublisherDisplay $PublisherDisplayName
+    Copy-Item -LiteralPath $genManifest -Destination (Join-Path $logsDir 'AppxManifest.generated.xml') -Force
+    Write-Log ("[manifest] {0}" -f $genManifest)
+
+    # 生成后先做一次低成本校验，避免把明显错误带入 30s 的构建。
+    [xml]$check = Get-Content -LiteralPath $genManifest -Raw
+    $checkNs = New-Object System.Xml.XmlNamespaceManager($check.NameTable)
+    $checkNs.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+    if ($check.SelectSingleNode('/f:Package/f:Identity', $checkNs).GetAttribute('Version') -ne $appxVersion) {
+        throw "生成的 manifest 版本不匹配: $genManifest"
+    }
+
+    # ---------------------------------------------------------------- 构建
+    if (-not $SkipRust) {
+        $rustDll = Join-Path $repoRoot 'target\x86_64-pc-windows-msvc\release\core_ffi_windows.dll'
+        if (-not (Test-Path -LiteralPath $rustDll)) {
+            Write-Log "[rust] 未找到已有 core_ffi_windows.dll，先 cargo build"
+            Push-Location $repoRoot
+            try {
+                & cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc 2>&1 |
+                    Tee-Object -FilePath (Join-Path $logsDir 'cargo.log') -Append | Out-Host
+                if ($LASTEXITCODE -ne 0) { throw "cargo build 失败（exit $LASTEXITCODE）" }
+            } finally { Pop-Location }
+        }
+    }
+
+    if (Test-Path -LiteralPath $appxOutDir) { Remove-Item -LiteralPath $appxOutDir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $appxOutDir | Out-Null
+
+    $skipRustValue = if ($SkipRust) { 'true' } else { 'false' }
+    $buildArgs = @(
+        'build', $appProject,
+        '-c', 'Release',
+        '-nologo',
+        '-v:minimal',
+        "-p:Platform=$platform",
+        '-p:GenerateAppxPackageOnBuild=true',
+        '-p:AppxBundle=Never',
+        '-p:AppxPackageSigningEnabled=false',
+        '-p:UapAppxPackageBuildMode=SideloadOnly',
+        "-p:AppxPackageDir=$appxOutDir\",
+        "-p:ClipBridgeAppxManifest=$genManifest",
+        "-p:SkipRustBuild=$skipRustValue"
+    )
+    Write-Log "[build] dotnet $($buildArgs -join ' ')"
+    $buildStart = Get-Date
+    Push-Location $repoRoot
+    try {
+        & dotnet @buildArgs 2>&1 | Tee-Object -FilePath (Join-Path $logsDir 'dotnet-build.log') -Append | Out-Host
+    } finally { Pop-Location }
+    $buildExit = $LASTEXITCODE
+    Write-Log ("[build] exit={0} elapsed={1:N1}s" -f $buildExit, ((Get-Date) - $buildStart).TotalSeconds)
+    if ($buildExit -ne 0) {
+        throw "dotnet build 失败（exit $buildExit）；完整输出: $(Join-Path $logsDir 'dotnet-build.log')"
+    }
+
+    $builtMsix = Get-ChildItem -LiteralPath $appxOutDir -Recurse -File -Filter '*.msix' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $builtMsix) { throw "dotnet build 成功但没有找到 .msix（$appxOutDir）" }
+    Write-Log ("[build] msix={0}  {1:N1} MB" -f $builtMsix.FullName, ($builtMsix.Length / 1MB))
+    $originalSize = $builtMsix.Length
+
+    # ------------------------------------------------------ unpack + 裁剪
+    $layout = Join-Path $layoutRoot "ClipBridge-$semVer-win-$platform"
+    if (Test-Path -LiteralPath $layout) { Remove-Item -LiteralPath $layout -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $layout | Out-Null
+
+    function Invoke-MakeAppx {
+        param([string[]]$Arguments, [string]$LogName, [string]$What)
+        $log = Join-Path $logsDir $LogName
+        & $sdk.MakeAppx @Arguments *> $log
+        $code = $LASTEXITCODE
+        if ($code -ne 0) {
+            Write-Log "[makeappx] $What failed (exit $code): $log"
+            Get-Content -LiteralPath $log -Tail 40 | ForEach-Object { Write-Log "  | $_" }
+            throw "$What 失败（makeappx exit $code）"
+        }
+    }
+
+    Write-Log "[unpack] $($builtMsix.FullName) → $layout"
+    Invoke-MakeAppx -Arguments @('unpack', '/p', $builtMsix.FullName, '/d', $layout, '/o') `
+        -LogName 'makeappx-unpack.log' -What 'makeappx unpack'
+
+    Write-Log "[trim] 移除 AI/ML、pdb、未保留语言的 MUI 目录"
+    $aiLeafPatterns = @(
+        'onnxruntime*.dll',
+        'DirectML*.dll',
+        'Microsoft.Windows.AI*',
+        'Microsoft.Windows.Internal.AI*',
+        'Microsoft.ML.OnnxRuntime*'
+    )
+    $layoutFiles = @(Get-ChildItem -LiteralPath $layout -Recurse -File -ErrorAction SilentlyContinue)
+    $aiFiles = @($layoutFiles | Where-Object {
+        $leaf = $_.Name
+        ($aiLeafPatterns | Where-Object { $leaf -like $_ }).Count -gt 0
+    })
+    $pdbFiles = @($layoutFiles | Where-Object { $_.Extension -ieq '.pdb' })
+    $aiBytes = ($aiFiles | Measure-Object Length -Sum).Sum
+    $pdbBytes = ($pdbFiles | Measure-Object Length -Sum).Sum
+    if ($aiFiles.Count -gt 0) { $aiFiles | Remove-Item -Force }
+    if ($pdbFiles.Count -gt 0) { $pdbFiles | Remove-Item -Force }
+    Write-Log ("[trim] AI/ML: {0} file(s), {1:N1} MB" -f $aiFiles.Count, ($aiBytes / 1MB))
+    Write-Log ("[trim] pdb  : {0} file(s), {1:N1} MB" -f $pdbFiles.Count, ($pdbBytes / 1MB))
+
+    $keepCulture = @('zh-CN', 'zh-TW', 'en-us', 'en-US')
+    $cultureRegex = '^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$'
+    $cultureDirs = @(Get-ChildItem -LiteralPath $layout -Directory | Where-Object {
+        $_.Name -match $cultureRegex -and $keepCulture -notcontains $_.Name
+    })
+    $cultureBytes = 0
+    foreach ($dir in $cultureDirs) {
+        $cultureBytes += (Get-ChildItem -LiteralPath $dir.FullName -Recurse -File | Measure-Object Length -Sum).Sum
+        Remove-Item -LiteralPath $dir.FullName -Recurse -Force
+    }
+    Write-Log ("[trim] 未保留语言目录: {0} 个, {1:N1} MB" -f $cultureDirs.Count, ($cultureBytes / 1MB))
+
+    $keptFiles = @(Get-ChildItem -LiteralPath $layout -Recurse -File)
+    Write-Log ("[trim] 布局: {0} file(s), {1:N1} MB" -f $keptFiles.Count, (($keptFiles | Measure-Object Length -Sum).Sum / 1MB))
+
+    # 裁剪后的布局完整性（PRI/资源/主程序）
+    $requiredLayoutFiles = @(
+        'AppxManifest.xml',
+        'ClipBridgeShell_CS.exe',
+        'core_ffi_windows.dll',
+        'resources.pri',
+        'Assets\StoreLogo.png',
+        'Assets\Square150x150Logo.scale-200.png',
+        'Assets\Square44x44Logo.scale-200.png',
+        'Assets\Wide310x150Logo.scale-200.png',
+        'Assets\SplashScreen.scale-200.png',
+        'Strings\en-us\Resources.resw',
+        'Strings\zh-cn\Resources.resw'
+    )
+    foreach ($rel in $requiredLayoutFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $layout $rel))) { throw "裁剪后布局缺少: $rel" }
+    }
+    foreach ($culture in @('zh-CN', 'zh-TW', 'en-us')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $layout $culture))) { throw "裁剪后布局缺少语言目录: $culture" }
+    }
+    if ((Get-Item -LiteralPath (Join-Path $layout 'resources.pri')).Length -lt 100KB) {
+        throw "resources.pri 异常偏小，可能资源未生成"
+    }
+
+    # PRI 校验：ResourceMap 名 == Identity Name，且 AppDisplayName 存在。
+    $priDump = Join-Path $logsDir 'resources.pri.xml'
+    if ($sdk.MakePri) {
+        & $sdk.MakePri dump /if (Join-Path $layout 'resources.pri') /of $priDump /o *> (Join-Path $logsDir 'makepri.log')
+        if ($LASTEXITCODE -ne 0) { throw "makepri dump 失败（exit $LASTEXITCODE）" }
+        [xml]$pri = Get-Content -LiteralPath $priDump -Raw
+        $resourceMap = $pri.SelectSingleNode('/PriInfo/ResourceMap')
+        if (-not $resourceMap) { throw "resources.pri 没有 ResourceMap" }
+        $priName = $resourceMap.GetAttribute('name')
+        Write-Log ("[pri] ResourceMap='{0}'" -f $priName)
+        if ($priName -ne $IdentityName) {
+            throw "resources.pri 的 ResourceMap('$priName') != Identity Name('$IdentityName')；身份必须在构建前注入"
+        }
+        $appDisplay = $pri.SelectSingleNode("/PriInfo/ResourceMap/ResourceMapSubtree[@name='Resources']/NamedResource[@name='AppDisplayName']")
+        if (-not $appDisplay) { throw "resources.pri 缺少 AppDisplayName 资源（PRI/资源不可用）" }
+        $stringsTree = $pri.SelectSingleNode("//*[local-name()='ResourceMapSubtree' and @name='Strings']")
+        if (-not $stringsTree) { throw "resources.pri 缺少 Strings 资源树" }
+    } else {
+        Write-Log "[pri] 警告：未找到 makepri.exe，跳过 PRI 结构校验"
+    }
+
+    # ---------------------------------------------------------------- 重打包
+    New-Item -ItemType Directory -Force -Path $unsignedDir | Out-Null
+    $unsignedMsix = Join-Path $unsignedDir "ClipBridge-$semVer-win-$platform-unsigned.msix"
+    if (Test-Path -LiteralPath $unsignedMsix) { Remove-Item -LiteralPath $unsignedMsix -Force }
+    Write-Log "[pack] → $unsignedMsix"
+    Invoke-MakeAppx -Arguments @('pack', '/d', $layout, '/p', $unsignedMsix, '/o') `
+        -LogName 'makeappx-pack.log' -What 'makeappx pack'
+    $trimmedSize = (Get-Item -LiteralPath $unsignedMsix).Length
+    Write-Log ("[pack] {0:N1} MB（原始 {1:N1} MB，-{2:N1} MB / -{3:P1}）" -f
+        ($trimmedSize / 1MB), ($originalSize / 1MB), (($originalSize - $trimmedSize) / 1MB),
+        (1 - ($trimmedSize / $originalSize)))
+    if ($trimmedSize -ge $originalSize) {
+        throw "裁剪后包没有变小（原始 $originalSize，裁剪后 $trimmedSize 字节），裁剪未生效"
+    }
+
+    # ------------------------------------------------------------ 校验最终包
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+    function Get-PackageEntryNames {
+        param([string]$Path)
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        try { return @($zip.Entries | ForEach-Object { $_.FullName }) } finally { $zip.Dispose() }
+    }
+    function Get-PackageEntryText {
+        param([string]$Path, [string]$EntryName)
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        try {
+            $entry = $zip.GetEntry($EntryName)
+            if (-not $entry) { throw "包里没有 $EntryName" }
+            $reader = New-Object System.IO.StreamReader($entry.Open())
+            try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+        } finally { $zip.Dispose() }
+    }
+
+    function Assert-MsixPackage {
+        param([string]$Path, [string]$AppxVer, [string]$IdName, [string]$IdPublisher,
+              [string]$PackageDisplayName, [string]$PublisherDisplay)
+
+        $errors = New-Object System.Collections.Generic.List[string]
+        $names = @(Get-PackageEntryNames -Path $Path)
+        $manifestXml = Get-PackageEntryText -Path $Path -EntryName 'AppxManifest.xml'
+        [xml]$manifest = $manifestXml
+        $ns = New-Object System.Xml.XmlNamespaceManager($manifest.NameTable)
+        $ns.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+        $ns.AddNamespace('uap5', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/5')
+        $ns.AddNamespace('rescap', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities')
+
+        $identity = $manifest.SelectSingleNode('/f:Package/f:Identity', $ns)
+        if ($identity.GetAttribute('Version') -ne $AppxVer) { $errors.Add("Identity Version != $AppxVer（实际 $($identity.GetAttribute('Version'))）") }
+        if ($identity.GetAttribute('Name') -ne $IdName) { $errors.Add("Identity Name != $IdName（实际 $($identity.GetAttribute('Name'))）") }
+        if ($identity.GetAttribute('Publisher') -ne $IdPublisher) { $errors.Add("Identity Publisher != $IdPublisher") }
+        if ($identity.GetAttribute('ProcessorArchitecture') -ne 'x64') { $errors.Add("ProcessorArchitecture != x64（实际 $($identity.GetAttribute('ProcessorArchitecture'))）") }
+        if ($AppxVer -notmatch '^\d+\.\d+\.\d+\.0$') { $errors.Add("包版本不是 4 段且 Revision=0: $AppxVer") }
+        if ([int]($AppxVer.Split('.')[0]) -lt 1) { $errors.Add("包版本 major < 1: $AppxVer") }
+
+        $props = $manifest.SelectSingleNode('/f:Package/f:Properties', $ns)
+        if ($props.SelectSingleNode('f:DisplayName', $ns).InnerText -ne $PackageDisplayName) {
+            $errors.Add("DisplayName != $PackageDisplayName（实际 $($props.SelectSingleNode('f:DisplayName', $ns).InnerText)）")
+        }
+        if ($props.SelectSingleNode('f:PublisherDisplayName', $ns).InnerText -ne $PublisherDisplay) {
+            $errors.Add("PublisherDisplayName != $PublisherDisplay")
+        }
+
+        $deviceFamilies = @($manifest.SelectNodes('/f:Package/f:Dependencies/f:TargetDeviceFamily', $ns))
+        if ($deviceFamilies.Count -ne 1 -or $deviceFamilies[0].GetAttribute('Name') -ne 'Windows.Desktop') {
+            $errors.Add("TargetDeviceFamily 必须只有 Windows.Desktop（实际 $((@($deviceFamilies | ForEach-Object { $_.GetAttribute('Name') })) -join ','))")
+        }
+
+        $startup = $manifest.SelectSingleNode('/f:Package/f:Applications/f:Application/f:Extensions/uap5:Extension[@Category="windows.startupTask"]/uap5:StartupTask', $ns)
+        if (-not $startup) {
+            $errors.Add("缺少 uap5:Extension Category=windows.startupTask / uap5:StartupTask")
+        } else {
+            if ($startup.GetAttribute('TaskId') -ne 'ClipBridgeStartupTask') { $errors.Add("StartupTask TaskId != ClipBridgeStartupTask") }
+            if ($startup.GetAttribute('Enabled') -ne 'false') { $errors.Add("StartupTask Enabled 应为 false（用户从设置里启用）") }
+            if ($startup.GetAttribute('DisplayName') -ne 'ClipBridge') { $errors.Add("StartupTask DisplayName != ClipBridge") }
+            $startupExtension = $startup.ParentNode
+            if ($startupExtension.GetAttribute('Executable') -ne 'ClipBridgeShell_CS.exe') { $errors.Add("startupTask Executable != ClipBridgeShell_CS.exe") }
+            if ($startupExtension.GetAttribute('EntryPoint') -ne 'Windows.FullTrustApplication') { $errors.Add("startupTask EntryPoint != Windows.FullTrustApplication") }
+        }
+
+        if (-not $manifest.SelectSingleNode('/f:Package/f:Capabilities/rescap:Capability[@Name="runFullTrust"]', $ns)) {
+            $errors.Add("缺少 runFullTrust 能力")
+        }
+
+        foreach ($required in @(
+                'ClipBridgeShell_CS.exe', 'core_ffi_windows.dll', 'resources.pri',
+                'Assets/StoreLogo.png', 'Assets/Square150x150Logo.scale-200.png',
+                'Assets/Square44x44Logo.scale-200.png', 'Assets/Square44x44Logo.targetsize-24_altform-unplated.png',
+                'Assets/Wide310x150Logo.scale-200.png', 'Assets/SplashScreen.scale-200.png',
+                'Strings/en-us/Resources.resw', 'Strings/zh-cn/Resources.resw')) {
+            if ($names -notcontains $required) { $errors.Add("包内缺少 $required") }
+        }
+
+        $pdb = @($names | Where-Object { $_ -match '\.pdb$' })
+        if ($pdb.Count -gt 0) { $errors.Add("包内仍有 pdb: $($pdb -join ', ')") }
+
+        $ai = @($names | Where-Object {
+            $leaf = ($_ -split '/')[-1]
+            ($aiLeafPatterns | Where-Object { $leaf -like $_ }).Count -gt 0
+        })
+        if ($ai.Count -gt 0) { $errors.Add("包内仍有 AI/ML: $($ai -join ', ')") }
+
+        $cultureTop = @($names | ForEach-Object {
+            $parts = $_ -split '/'
+            if ($parts.Count -gt 1 -and $parts[0] -match $cultureRegex) { $parts[0] } else { $null }
+        } | Where-Object { $_ } | Sort-Object -Unique)
+        $unexpectedCulture = @($cultureTop | Where-Object { $keepCulture -notcontains $_ })
+        if ($unexpectedCulture.Count -gt 0) { $errors.Add("包内有未保留语言目录: $($unexpectedCulture -join ', ')") }
+        foreach ($culture in @('zh-CN', 'zh-TW', 'en-us')) {
+            if ($cultureTop -notcontains $culture) { $errors.Add("包内缺少语言目录 $culture") }
+        }
+
+        if ($names -notcontains 'AppxManifest.xml') { $errors.Add("包内缺少 AppxManifest.xml") }
+        if ($names -notcontains 'AppxBlockMap.xml') { $errors.Add("包内缺少 AppxBlockMap.xml") }
+        if ($names -notcontains '[Content_Types].xml') { $errors.Add("包内缺少 [Content_Types].xml") }
+
+        return $errors
+    }
+
+    # ------------------------------------------------------------ 签名
+    $finalMsix = Join-Path $outRoot "ClipBridge-$semVer-win-$platform.msix"
+    if (Test-Path -LiteralPath $finalMsix) { Remove-Item -LiteralPath $finalMsix -Force }
+    $signThumbprint = $null
+    $signatureStatus = 'unsigned'
+    $signatureMessage = ''
+
+    if ($SelfSign) {
+        if (-not $sdk.SignTool) { throw "-SelfSign 需要 signtool.exe；请用 -WindowsSdkBin 指定 SDK x64 目录" }
+        New-Item -ItemType Directory -Force -Path $certsDir | Out-Null
+        Write-Log "[sign] 查找/创建自签名证书 Subject='$Publisher'"
+
+        function Get-CodeSigningCertificate {
+            param([string]$Subject)
+            $certs = @(Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue | Where-Object {
+                $_.Subject -eq $Subject -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date).AddDays(30)
+            })
+            foreach ($candidate in ($certs | Sort-Object NotAfter -Descending)) {
+                # EnhancedKeyUsageList 的元素是 EnhancedKeyUsageRepresentation，
+                # 它的 ObjectId 是字符串（不是 Oid 对象），所以直接取 .ObjectId。
+                $eku = @($candidate.EnhancedKeyUsageList | ForEach-Object { [string]$_.ObjectId })
+                if ($eku -contains '1.3.6.1.5.5.7.3.3') { return $candidate }
+            }
+            return $null
+        }
+
+        $cert = Get-CodeSigningCertificate -Subject $Publisher
+        if (-not $cert) {
+            Write-Log "[sign] 当前用户证书库没有匹配证书，创建 CN 自签名证书"
+            $cert = New-SelfSignedCertificate `
+                -Type Custom -Subject $Publisher `
+                -KeyUsage DigitalSignature -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 `
+                -KeyExportPolicy Exportable -CertStoreLocation Cert:\CurrentUser\My `
+                -NotAfter (Get-Date).AddYears(3) -FriendlyName 'ClipBridge MSIX dev' `
+                -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
+        }
+        $signThumbprint = $cert.Thumbprint
+        Write-Log ("[sign] cert={0} thumbprint={1} notAfter={2:yyyy-MM-dd}" -f $cert.Subject, $cert.Thumbprint, $cert.NotAfter)
+
+        $safeSubject = ($Publisher -replace '[^A-Za-z0-9._-]', '_')
+        $cerPath = Join-Path $certsDir "ClipBridge-$safeSubject.cer"
+        Export-Certificate -Cert $cert -FilePath $cerPath -Type CERT | Out-Null
+        Write-Log ("[sign] 导出公钥证书: {0}" -f $cerPath)
+
+        # 任务要求：CurrentUser\TrustedPeople（不需要管理员）。
+        $userTrusted = @(Get-ChildItem Cert:\CurrentUser\TrustedPeople -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $signThumbprint })
+        if ($userTrusted.Count -eq 0) {
+            Import-Certificate -FilePath $cerPath -CertStoreLocation Cert:\CurrentUser\TrustedPeople | Out-Null
+            Write-Log "[sign] 已导入 CurrentUser\TrustedPeople"
+        } else {
+            Write-Log "[sign] CurrentUser\TrustedPeople 已有该证书"
+        }
+
+        # 若当前进程已提权，再导入 LocalMachine\TrustedPeople（Add-AppxPackage 真正要求的位置）。
+        $isElevated = $false
+        try {
+            $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+            $isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        } catch { }
+        if ($isElevated) {
+            $machineTrusted = @(Get-ChildItem Cert:\LocalMachine\TrustedPeople -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $signThumbprint })
+            if ($machineTrusted.Count -eq 0) {
+                Import-Certificate -FilePath $cerPath -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+                Write-Log "[sign] 已导入 LocalMachine\TrustedPeople（提权会话）"
+            }
+        } else {
+            Write-Log "[sign] 当前会话未提权：跳过 LocalMachine\TrustedPeople；Add-AppxPackage 需要管理员导入后才能真正信任自签名包"
+        }
+
+        Copy-Item -LiteralPath $unsignedMsix -Destination $finalMsix -Force
+        Write-Log "[sign] signtool sign → $finalMsix"
+        & $sdk.SignTool sign /fd SHA256 /sha1 $signThumbprint $finalMsix 2>&1 |
+            Tee-Object -FilePath (Join-Path $logsDir 'signtool-sign.log') -Append | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "signtool sign 失败（exit $LASTEXITCODE）" }
+
+        $sig = Get-AuthenticodeSignature -LiteralPath $finalMsix
+        $signatureStatus = [string]$sig.Status
+        $signatureMessage = [string]$sig.StatusMessage
+        Write-Log ("[sign] AuthenticodeStatus={0}  message={1}" -f $signatureStatus, $signatureMessage)
+        if (-not $sig.SignerCertificate) { throw "签名后没有 SignerCertificate：$finalMsix" }
+
+        # 只报告验证结果，不因自签名根不受信而让构建失败（本机验收说明见 docs/windows-build.md）。
+        & $sdk.SignTool verify /pa /v $finalMsix *> (Join-Path $logsDir 'signtool-verify.log')
+        $verifyExit = $LASTEXITCODE
+        Write-Log ("[sign] signtool verify exit={0}（1=自签名根不在 LocalMachine 信任链，属预期；详见 signtool-verify.log）" -f $verifyExit)
+    } else {
+        Copy-Item -LiteralPath $unsignedMsix -Destination $finalMsix -Force
+        Write-Log "[sign] 未指定 -SelfSign：输出未签名包（Store 提交由 Store 重签）"
+    }
+
+    # ------------------------------------------------------------ 断言与摘要
+    Write-Log "[assert] 校验最终包结构/身份/manifest"
+    $finalNames = @(Get-PackageEntryNames -Path $finalMsix)
+    if ($SelfSign) {
+        if ($finalNames -notcontains 'AppxSignature.p7x') { throw "签名包缺少 AppxSignature.p7x：$finalMsix" }
+    } else {
+        if ($finalNames -contains 'AppxSignature.p7x') { throw "未签名包却包含 AppxSignature.p7x：$finalMsix" }
+    }
+    $assertErrors = @(Assert-MsixPackage -Path $finalMsix -AppxVer $appxVersion -IdName $IdentityName `
+        -IdPublisher $Publisher -PackageDisplayName $DisplayName -PublisherDisplay $PublisherDisplayName)
+    if ($assertErrors.Count -gt 0) {
+        foreach ($e in $assertErrors) { Write-Log "  [X] $e" }
+        throw ("MSIX 断言失败 {0} 项" -f $assertErrors.Count)
+    }
+    Write-Log "[assert] OK"
+
+    $finalItem = Get-Item -LiteralPath $finalMsix
+    $sha256 = (Get-FileHash -LiteralPath $finalMsix -Algorithm SHA256).Hash
+    Write-Log ("[result] path   : {0}" -f $finalItem.FullName)
+    Write-Log ("[result] size   : {0:N1} MB ({1} bytes)" -f ($finalItem.Length / 1MB), $finalItem.Length)
+    Write-Log ("[result] sha256 : {0}" -f $sha256)
+    Write-Log ("[result] version: {0}（Identity Version）" -f $appxVersion)
+    Write-Log ("[result] identity: {0} / {1} / {2}" -f $IdentityName, $Publisher, $PublisherDisplayName)
+    Write-Log ("[result] signed : {0}" -f $signatureStatus)
+    if ($SelfSign) {
+        Write-Log ("[result] 签名证书: {0}" -f $signThumbprint)
+    }
+
+    # 便于本地 Add-AppxPackage -Register 的布局（默认删除，-KeepLayout 保留）。
+    if (-not $KeepLayout) {
+        if (Test-Path -LiteralPath $layout) { Remove-Item -LiteralPath $layout -Recurse -Force }
+        Write-Log "[cleanup] 已删除布局（-KeepLayout 可保留）"
+    } else {
+        Write-Log ("[layout] {0}" -f $layout)
+    }
+
+    $summary = [ordered]@{
+        schemaVersion         = 1
+        builtAt               = [DateTimeOffset]::Now.ToString('o')
+        semVer                = $semVer
+        appxVersion           = $appxVersion
+        identityName          = $IdentityName
+        publisher             = $Publisher
+        publisherDisplayName  = $PublisherDisplayName
+        displayName           = $DisplayName
+        architecture          = $platform
+        packagePath           = $finalItem.FullName
+        packageSizeBytes      = $finalItem.Length
+        sha256                = $sha256
+        unsignedPackagePath   = $unsignedMsix
+        layoutPath            = if ($KeepLayout) { $layout } else { $null }
+        generatedManifestPath = $genManifest
+        originalPackageSizeBytes = $originalSize
+        trimmedPackageSizeBytes  = $trimmedSize
+        removedAiMlFiles      = $aiFiles.Count
+        removedAiMlBytes      = $aiBytes
+        removedPdbFiles       = $pdbFiles.Count
+        removedCultureDirs    = $cultureDirs.Count
+        selfSigned            = [bool]$SelfSign
+        signerThumbprint      = $signThumbprint
+        signatureStatus       = $signatureStatus
+        buildExitCode         = $buildExit
+        elapsedSeconds        = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    }
+    $summaryPath = Join-Path $logsDir 'msix-summary.json'
+    $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+    Write-Log ("[summary] {0}" -f $summaryPath)
+    Write-Log ("[done] {0:N1}s" -f $sw.Elapsed.TotalSeconds)
+} catch {
+    $exitCode = 1
+    Write-Log ""
+    Write-Log "ERROR: $($_.Exception.Message)"
+    if ($_.ScriptStackTrace) { Write-Log $_.ScriptStackTrace }
+    Write-Log "[failed] 现场保留在 $outRoot（日志: $buildLog）"
+} finally {
+    $sw.Stop()
+}
+
+if ($exitCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $logsDir 'msix-summary.json'))) {
+    Write-Host ''
+    Write-Host '========== MSIX 产物 =========='
+    $s = Get-Content -LiteralPath (Join-Path $logsDir 'msix-summary.json') -Raw | ConvertFrom-Json
+    Write-Host ("  {0}" -f $s.packagePath)
+    Write-Host ("  {0:N1} MB   SHA256 {1}" -f ($s.packageSizeBytes / 1MB), $s.sha256)
+    Write-Host ("  Identity {0} / {1}" -f $s.identityName, $s.publisher)
+    Write-Host ("  Version  {0}   Signed={1}" -f $s.appxVersion, $s.selfSigned)
+}
+Write-Host ("耗时: {0:N1}s   exit code: {1}" -f $sw.Elapsed.TotalSeconds, $exitCode)
+exit $exitCode

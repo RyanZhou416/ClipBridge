@@ -2,7 +2,7 @@
 
 > **实现状态（2026-11-15）**：本 ADR 是 v4.1 设计稿；P0/P1 已落地，实际行为与差异以
 > [ADR-005](005-windows-distribution-implementation.md) 为准（显式 RegRoot、RegistrySearch、卸载默认删数据、
-> 便携 DPAPI/settings、winget schema 修正、MSIX 未实现）。与 005 冲突处以 005 为准。
+> 便携 DPAPI/settings、winget schema 修正、MSIX 构建已实现/Store 未提交）。与 005 冲突处以 005 为准。
 
 - 状态：**定稿；P0/P1 实现与差异见 [ADR-005](005-windows-distribution-implementation.md)**（v1 初稿 → v2 三路评审 → v3 成熟实践采纳 → v4 四路评审 + 源码对照）
 - 日期：2026-11-08
