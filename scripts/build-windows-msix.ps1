@@ -441,11 +441,13 @@ try {
     New-Item -ItemType Directory -Force -Path $appxOutDir | Out-Null
 
     $skipRustValue = if ($SkipRust) { 'true' } else { 'false' }
+    # --no-incremental：身份/显示名变化时必须强制重生成 resources.pri（否则增量构建会复用旧 ResourceMap）。
     $buildArgs = @(
         'build', $appProject,
         '-c', 'Release',
         '-nologo',
         '-v:minimal',
+        '--no-incremental',
         "-p:Platform=$platform",
         '-p:GenerateAppxPackageOnBuild=true',
         '-p:AppxBundle=Never',

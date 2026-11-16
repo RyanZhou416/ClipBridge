@@ -1,6 +1,6 @@
 # MSIX / Microsoft Store 提交材料与命令清单
 
-- 状态：**准备中**（Partner Center 账号、保留名、身份值尚未确定）
+- 状态：**准备中**（Partner Center 身份已取得并本地验证；截图/隐私政策/测试账号待准备）
 - 适用产物：`dist/msix/ClipBridge-<ver>-win-x64.msixupload`（StoreUpload，未签名，Store 重签）
 - 相关：[ADR-005](adr/005-windows-distribution-implementation.md) §7、[windows-build.md](windows-build.md) MSIX 段
 
@@ -82,6 +82,8 @@ pwsh scripts/build-windows-msix.ps1 `
 - 未签名（内部无 `AppxSignature.p7x`）。
 
 ## 3. 预提交验证
+
+> 本地已验证：用真实身份构建的 `.msixupload`，开发者模式安装后 PFN 与 Store 显示的 PFN 一致（`Ryan416.ClipBridge_x7bq0vy4t3gtr`）；版本 `1.0.0.0`。真实身份值只存在本地 `store/identity.local.json`，未提交。
 
 ### 3.1 包结构
 
