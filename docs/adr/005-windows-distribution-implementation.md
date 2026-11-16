@@ -117,11 +117,10 @@ CI：`.github/workflows/ci.yml` 的 `windows-installer` job（windows-latest、.
 剩余：
 
 1. **Store 身份**：Partner Center 的 Identity Name / Publisher CN / PublisherDisplayName；`-IdentityName`/`-Publisher`/`-PublisherDisplayName` 参数已就绪。
-2. **StoreUpload**：当前脚本出 `.msix`（SideloadOnly）；提交 Store 需 `UapAppxPackageBuildMode=StoreUpload` 生成 `.msixupload`。
-3. **Partner Center 提交**：用 `-StoreUpload` 产物（未签名，Store 重签），注入 Partner Center 的 Identity Name/Publisher CN/PublisherDisplayName，提交年龄分级/截图/隐私政策并过 WACK。
-4. **签名包真机安装**：需管理员把自签名证书导入 `LocalMachine\TrustedPeople` 后 `Add-AppxPackage`；Store 由 Store 重签，不走自签名。
-5. **V1–V10/V13**：虚拟化落点、导入、托盘、StartupTask、Toast、mDNS、Strings/PRI、单实例、签名、Store 草稿。
-6. 本地调试：开发者模式 + `Add-AppxPackage -Register`；不做自签名侧载分发。
+2. **Partner Center 提交**：用 `-StoreUpload` 产物（未签名，Store 重签），注入 Partner Center 身份，提交年龄分级/截图/隐私政策并过 WACK。
+3. **签名包真机安装**：需管理员把自签名证书导入 `LocalMachine\TrustedPeople` 后 `Add-AppxPackage`；Store 由 Store 重签，不走自签名。
+4. **V1–V10/V13**：虚拟化落点、导入、托盘、StartupTask、Toast、mDNS、Strings/PRI、单实例、签名、Store 草稿。
+5. 本地调试：开发者模式 + `Add-AppxPackage -Register`；不做自签名侧载分发。
 
 ## 8. 风险/限制
 
