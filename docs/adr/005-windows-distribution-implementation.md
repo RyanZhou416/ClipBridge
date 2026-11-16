@@ -118,7 +118,7 @@ CI：`.github/workflows/ci.yml` 的 `windows-installer` job（windows-latest、.
 
 剩余：
 
-1. **Store 身份**：Partner Center 的 Identity Name / Publisher CN / PublisherDisplayName；`-IdentityName`/`-Publisher`/`-PublisherDisplayName` 参数已就绪。
+1. **Store 身份**：Partner Center 的 Identity Name / Publisher CN / PublisherDisplayName；`-IdentityName`/`-Publisher`/`-PublisherDisplayName` 参数已就绪；也支持 `-IdentityFile store/identity.local.json`（本地未跟踪，真实值不进仓库）。
 2. **Partner Center 提交**：用 `-StoreUpload` 产物（未签名，Store 重签），注入 Partner Center 身份，提交年龄分级/截图/隐私政策并过 WACK。
 3. **签名包真机安装**：需管理员把自签名证书导入 `LocalMachine\TrustedPeople` 后 `Add-AppxPackage`；Store 由 Store 重签，不走自签名。
 4. **V1–V10/V13**：虚拟化落点、导入、托盘、StartupTask、Toast、mDNS、Strings/PRI、单实例、签名、Store 草稿。

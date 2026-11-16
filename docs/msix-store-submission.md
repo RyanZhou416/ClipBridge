@@ -31,20 +31,32 @@
 
 ## 2. 注入身份并构建 StoreUpload
 
-```powershell
-# 先把 Version.props 抬到 >=1.0.0（release-please 或手工；首发 1.0.0）
-$IdentityName        = '12345Ryan416.ClipBridge'     # Partner Center 值
-$Publisher           = 'CN=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
-$PublisherDisplayName = 'Ryan416'
+推荐用**本地未跟踪文件**（不把真实身份提交到仓库）：
 
+```powershell
+# 1) 复制模板，填 Partner Center 的真实值；identity.local.json 已被 .gitignore 忽略
+Copy-Item store\identity.example.json store\identity.local.json
+notepad store\identity.local.json
+
+# 2) 构建（先把 Version.props 抬到 >=1.0.0）
 pwsh scripts/build-windows-msix.ps1 `
   -Version 1.0.0.0 `
   -StoreUpload `
-  -IdentityName $IdentityName `
-  -Publisher $Publisher `
-  -PublisherDisplayName $PublisherDisplayName `
-  -DisplayName 'ClipBridge'
+  -IdentityFile store/identity.local.json
 ```
+
+`store/identity.local.json` 格式：
+
+```json
+{
+  "identityName": "12345Ryan416.ClipBridge",
+  "publisher": "CN=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "publisherDisplayName": "Ryan416",
+  "displayName": "ClipBridge"
+}
+```
+
+也可以不用文件、直接传 `-IdentityName/-Publisher/-PublisherDisplayName`（显式参数优先于文件）。
 
 约束：
 
@@ -52,6 +64,15 @@ pwsh scripts/build-windows-msix.ps1 `
 - 不要用 `-AllowPreviewVersion` 提交 Store（0.1.0 会映射成 1.1.0.0，高于将来真正的 1.0.0）。
 - 产物：`dist/msix/ClipBridge-1.0.0-win-x64.msixupload`（约 91 MB，未签名）。
 - 后续每次更新版本号必须**严格递增**且 Revision=0（如 `1.0.1.0`）。
+
+### 2.1 身份值不要提交 repo
+
+`Identity Name`、`Publisher CN`、`PublisherDisplayName` **不是秘密**（安装包 manifest、Store 页面、winget 清单里都可见），但也没必要写进仓库文档/源码：
+
+- 仓库内只保留 [store/identity.example.json](../store/identity.example.json) 占位符；
+- 真实值写 `store/identity.local.json`（已加入 `.gitignore`）；
+- CI/自动化时把这三个值放 GitHub **Variables**（公开值），Partner Center/Entra 凭据才放 **Secrets**；
+- **绝不能提交**：`.pfx` 私钥、Partner Center 密码、Entra client secret、测试账号密码。
 
 期望断言（脚本自动执行）：
 

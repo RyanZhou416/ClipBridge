@@ -125,6 +125,7 @@ param(
     [string]$Publisher = 'CN=Ryan416',
     [string]$PublisherDisplayName = 'Ryan416',
     [string]$DisplayName = 'ClipBridge',
+    [string]$IdentityFile = '',
     [switch]$SelfSign,
     [switch]$StoreUpload,
     [string]$OutDir = 'dist/msix',
@@ -140,6 +141,22 @@ $appProject = Join-Path $repoRoot 'platforms/windows/ClipBridgeShell_CS/ClipBrid
 $appDir = Split-Path -Parent $appProject
 $sourceManifest = Join-Path $appDir 'Package.appxmanifest'
 $platform = 'x64'
+
+# 可选：从本地未跟踪的 identity.local.json 读取 Store 身份（避免把真实 Publisher/Name 写进仓库）。
+# 显式参数优先于文件；文件必须包含 identityName/publisher/publisherDisplayName。
+if ($IdentityFile) {
+    $identityPath = if ([System.IO.Path]::IsPathRooted($IdentityFile)) { $IdentityFile } else { Join-Path $repoRoot $IdentityFile }
+    if (-not (Test-Path -LiteralPath $identityPath)) { throw "IdentityFile 不存在: $identityPath" }
+    $identityJson = Get-Content -Raw -LiteralPath $identityPath | ConvertFrom-Json
+    foreach ($field in @('identityName', 'publisher', 'publisherDisplayName')) {
+        if (-not $identityJson.$field) { throw "IdentityFile 缺少字段: $field" }
+    }
+    if (-not $PSBoundParameters.ContainsKey('IdentityName')) { $IdentityName = [string]$identityJson.identityName }
+    if (-not $PSBoundParameters.ContainsKey('Publisher')) { $Publisher = [string]$identityJson.publisher }
+    if (-not $PSBoundParameters.ContainsKey('PublisherDisplayName')) { $PublisherDisplayName = [string]$identityJson.publisherDisplayName }
+    if (-not $PSBoundParameters.ContainsKey('DisplayName') -and $identityJson.displayName) { $DisplayName = [string]$identityJson.displayName }
+    Write-Host "[identity] loaded from $identityPath"
+}
 
 $outRoot = if ([System.IO.Path]::IsPathRooted($OutDir)) { $OutDir } else { Join-Path $repoRoot $OutDir }
 $logsDir = Join-Path $outRoot 'logs'

@@ -161,3 +161,6 @@ clippy_*.txt
 # 本地打包产物
 dist/
 
+# Store 身份（本地；不要提交）
+store/identity.local.json
+store/*.local.json
