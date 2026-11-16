@@ -112,6 +112,8 @@ CI：`.github/workflows/ci.yml` 的 `windows-installer` job（windows-latest、.
 
 ## 7. MSIX 剩余待办（P2）
 
+> 提交材料与命令清单：[msix-store-submission.md](../msix-store-submission.md)。
+
 已实现：`scripts/build-windows-msix.ps1`（版本守卫、manifest 注入、AI/ML/pdb/语言裁剪、Sideload + StoreUpload、自签名、断言）；`Package.appxmanifest` 的 `uap5:StartupTask`、Desktop-only、DisplayName=ClipBridge；开发者模式安装/启动/卸载验收；旧数据导入（VACUUM INTO 快照 + tls/settings + sentinel/回滚 + 一次性提示）。
 
 剩余：

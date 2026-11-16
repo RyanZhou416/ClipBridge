@@ -58,6 +58,7 @@ MSIX 是**独立脚本** `scripts/build-windows-msix.ps1`（不进 `build-window
 
 ## MSIX 渠道（Store）
 
+> Store 提交材料/清单见 [msix-store-submission.md](msix-store-submission.md)。
 > MSIX 首次启动会从真实 `%LOCALAPPDATA%\ClipBridge` 做一致性快照导入到 LocalState（core.db/logs.db 用 `VACUUM INTO`，复制 tls 与设置，CAS 缓存默认跳过）；失败回滚、源目录只读，sentinel/一次性提示见 ADR-005。
 
 ### 命令与前置条件
