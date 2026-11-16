@@ -19,7 +19,7 @@ MSIX 是**独立脚本** `scripts/build-windows-msix.ps1`（不进 `build-window
 | per-user EXE（Burn） | `pwsh scripts/build-windows-user-exe.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-user.exe`（+ 内部 `-user.msi`） | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 已实测 exit 0（34.3s），结构断言通过；**真机安装验证本次未做** |
 | 便携 ZIP | `pwsh scripts/build-windows-portable-zip.ps1` | `ClipBridge-<ver>-win-<arch>-portable.zip` | .NET 10 SDK + Rust 目标（**不经过 WiX**） | 已实测 exit 0（10.3s），ZIP 结构断言通过；**已解压实测便携/无 marker/不可写回退三种模式** |
 | winget 清单 | `pwsh scripts/build-windows-winget.ps1` | `dist/winget/` 下三件套 YAML | `dist/` 已有 machine MSI 与 user EXE；winget CLI（可选，缺失时跳过 validate） | 已实测 exit 0（约 1s），`winget validate` 通过；**真实安装需先发布 Release** |
-| MSIX（Store） | `pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 [-SelfSign -KeepLayout]` | `dist/msix/ClipBridge-<ver>-win-x64.msix`（+ `unsigned/`、可选 `layout/`） | .NET 10 SDK + Rust target + Windows SDK（makeappx/signtool/makepri）；不需要 WiX | 已实测 exit 0（1.0.0，30.3s）：109.4→89.9 MB，AI/ML/pdb/资源断言通过，自签名成功；**真机 `Add-AppxPackage` 被自签名根信任阻止（0x800B0109）**，已用开发者模式 `-Register` 完成安装/启动/卸载验收 |
+| MSIX（Store） | `pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 [-SelfSign -KeepLayout]`；Partner Center 提交用 `-StoreUpload` | `dist/msix/ClipBridge-<ver>-win-x64.msix`（默认）；`dist/msix/ClipBridge-<ver>-win-x64.msixupload`（`-StoreUpload`）；+ `unsigned/`、可选 `layout/` | .NET 10 SDK + Rust target + Windows SDK（makeappx/signtool/makepri）；不需要 WiX | 已实测 exit 0（1.0.0，30s 量级）：109.4→89.9 MB，AI/ML/pdb/资源断言通过，自签名成功；**真机 `Add-AppxPackage` 被自签名根信任阻止（0x800B0109）**，已用开发者模式 `-Register` 完成安装/启动/卸载验收；**StoreUpload 已实测 exit 0（31.4s），91.2 MB `.msixupload`，内部包 398 文件、身份/裁剪/未签名断言通过**（未提交 Partner Center） |
 
 ## 参数
 
@@ -29,8 +29,9 @@ MSIX 是**独立脚本** `scripts/build-windows-msix.ps1`（不进 `build-window
 - 主脚本：`-Only All|MachineMsi|UserExe|PortableZip`（默认 `All`，行为与旧版一致）。
 - winget wrapper：`-Version`、`-ReleaseUrlBase`、`-ReleaseTag`、`-OutDir`；清单固定按 `x64` 产物生成。
 - MSIX（独立脚本）：`-Version`、`-AllowPreviewVersion`、`-IdentityName`、`-Publisher`、
-  `-PublisherDisplayName`、`-DisplayName`、`-SelfSign`、`-OutDir`（默认 `dist/msix`）、
-  `-WindowsSdkBin`、`-SkipRust`、`-KeepLayout`。`-SelfSign` **不是默认**，只用于本地验收。
+  `-PublisherDisplayName`、`-DisplayName`、`-SelfSign`、`-StoreUpload`、`-OutDir`（默认 `dist/msix`）、
+  `-WindowsSdkBin`、`-SkipRust`、`-KeepLayout`。`-SelfSign` **不是默认**，只用于本地验收；
+  `-StoreUpload` 与 `-SelfSign` **互斥**（Store 提交包必须未签名）。
 - 每个 wrapper 都有注释帮助，可直接 `Get-Help scripts/<脚本名>.ps1 -Full` 查看。
 
 ## 共享的 publish / heat 与断言
@@ -76,6 +77,9 @@ pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 `
   -IdentityName '12345Ryan416.ClipBridge' `
   -Publisher 'CN=01234567-89ab-cdef-0123-456789abcdef' `
   -PublisherDisplayName 'Ryan416'
+
+# Partner Center 提交包（未签名 .msixupload，内部 .msix 已裁剪）
+pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 -StoreUpload
 ```
 
 前置条件：.NET 10 SDK、Rust `x86_64-pc-windows-msvc` target（或用 `-SkipRust` 复用已有 DLL）、
@@ -152,15 +156,17 @@ Windows 10/11 SDK 的 x64 工具 `makeappx.exe` / `signtool.exe` / `makepri.exe`
 | 路径 | 说明 |
 |---|---|
 | `dist/msix/ClipBridge-<ver>-win-x64.msix` | 最终包；`-SelfSign` 时已签名 |
+| `dist/msix/ClipBridge-<ver>-win-x64.msixupload` | `-StoreUpload` 的 Partner Center 提交包（未签名） |
 | `dist/msix/unsigned/ClipBridge-<ver>-win-x64-unsigned.msix` | 未签名包（始终保留） |
 | `dist/msix/layout/ClipBridge-<ver>-win-x64/` | 裁剪后布局（`-KeepLayout`） |
 | `dist/msix/certs/*.cer` | `-SelfSign` 的公开证书 |
 | `dist/msix/logs/build-msix.log` | 本次构建脚本日志 |
 | `dist/msix/logs/dotnet-build.log` | dotnet 构建输出 |
 | `dist/msix/logs/makeappx-{unpack,pack}.log` | makeappx 输出 |
-| `dist/msix/logs/resources.pri.xml` | PRI dump（身份/资源校验依据） |
+| `dist/msix/logs/resources.pri.xml` | 裁剪布局的 PRI dump（身份/资源校验依据） |
+| `dist/msix/logs/resources.pri.inner.xml` | `-StoreUpload` 内部包的 PRI dump |
 | `dist/msix/logs/signtool-{sign,verify}.log` | 签名/验证输出 |
-| `dist/msix/logs/msix-summary.json` | 版本/身份/大小/SHA256/签名状态的机器可读摘要 |
+| `dist/msix/logs/msix-summary.json` | 版本/身份/大小/SHA256/模式/签名状态的机器可读摘要 |
 
 ### 签名与 Store
 
@@ -176,6 +182,74 @@ Windows 10/11 SDK 的 x64 工具 `makeappx.exe` / `signtool.exe` / `makepri.exe`
 - `signtool verify /pa` 在非管理员机器上会因同样的根信任问题 exit 1；这是预期，不代表包结构坏，
   脚本不会因此失败，但会在日志里明确打印。`Get-AuthenticodeSignature` 的
   `Status=UnknownError` + `SignerCertificate` 非空同样表示签名已写入、链不受信。
+
+### StoreUpload 模式（Partner Center 提交）
+
+Store 提交用 `.msixupload`（Partner Center 的 MSIX 上传包），不是 `.msix`。脚本用
+`-p:UapAppxPackageBuildMode=StoreUpload`（WindowsAppSDK 单项目 MSIX 工具链里的旧名，等价
+`StoreAndSideload`）构建，并保持 `AppxBundle=Never`、`AppxPackageSigningEnabled=false`：
+
+- MSBuild 中间产物：`<obj>/appx/ClipBridgeShell_CS_1.0.0.0_x64.msixupload`（内部单个 `.msix`），
+  同时还会生成 Sideload `.msix`（StoreAndSideload 语义，脚本不使用它）。
+- 实测 upload 内部的 `.msix` 与 Sideload `.msix` 的 payload 完全一致（587 个文件同 hash，
+  仅 `AppxBlockMap.xml` 不同），所以现有裁剪流程可以原样复用。
+
+裁剪必须进入 upload（否则 Store 会收到未裁剪的原始包：本机实测内部 `.msix` 为
+116,069,783 B，含约 42.5 MB AI/ML）。脚本流程：
+
+1. 从 `.msixupload`（zip；内部 `.msix` 为 stored 不压缩）取出内部 `.msix`；
+2. `makeappx unpack` → 删除 AI/ML、pdb、未保留语言目录 → `makeappx pack` 得到裁剪后的未签名 `.msix`；
+3. 用 `System.IO.Compression.ZipArchive`（`Update` 模式）把裁剪后的 `.msix` 写回同名内部条目，
+   **其它外层条目（如 `AppxMetadata/`）原样保留**；
+4. 重新从最终 upload 里提取内部包做断言（见下）。
+
+命令与实测（2026-11-16，`-Version 1.0.0`，默认身份）：
+
+```powershell
+pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 -StoreUpload
+# exit 0，31.4s
+# dist/msix/ClipBridge-1.0.0-win-x64.msixupload  95,609,394 B
+# SHA256 81EDF0D8C040417A07CF8B989B1525D65E10F67BEACC01D51623C2744DE68B24
+# 原始 upload 内部包 116,069,783 B → 裁剪后 95,609,226 B（-19.5 MB，-17.6%）
+# 内部 msix 398 文件；entry=ClipBridgeShell_CS_1.0.0.0_x64.msix
+```
+
+产物：
+
+| 路径 | 说明 |
+|---|---|
+| `dist/msix/ClipBridge-<ver>-win-x64.msixupload` | **提交 Partner Center 的文件**；未签名，由 Store 重签 |
+| `dist/msix/unsigned/ClipBridge-<ver>-win-x64-unsigned.msix` | upload 内部的裁剪后 `.msix`（未签名，便于对照/本地验收） |
+| `dist/msix/logs/msix-summary.json` | `buildMode=StoreUpload`、`uploadInnerEntry`、`uploadOuterEntries` 等 |
+| `dist/msix/logs/resources.pri.inner.xml` | 从最终 upload 提取的内部包 PRI dump |
+
+断言（任一失败即 exit 1）：
+
+- upload 是有效 zip；至少一个 `.msix` 条目；外层条目集合与构建产物一致（`AppxMetadata/` 不丢）；
+- 内部 `.msix` 可被 `makeappx unpack`；manifest `Identity Version` 为 4 段、major>=1，
+  `Identity Name/Publisher`、`DisplayName/PublisherDisplayName` 与参数一致；
+- 无 `.pdb`、无 AI/ML（`onnxruntime*` / `DirectML*` / `Microsoft.Windows.AI*` /
+  `Microsoft.Windows.Internal.AI*` / `Microsoft.ML.OnnxRuntime*`）；
+- 保留 `e_sqlite3.dll`、`Microsoft.Data.Sqlite.dll`、`resources.pri`、Assets、Strings、三种语言目录；
+- `makepri dump`：ResourceMap 名 == Identity Name，`AppDisplayName` / `Strings` 资源树存在；
+- 内部 `.msix` **不含** `AppxSignature.p7x`（Store 只接收未签名 upload）。
+
+限制：当前只支持单主包 upload（`AppxBundle=Never`）；不产出 `.msixbundle`、resource packs 或
+`.appxsym`。将来若需要 bundle，需要扩展为替换 bundle 内的每个平台 `.msix`。
+
+### Partner Center 提交流程（无签名）
+
+1. 在 Partner Center 预留应用名，拿到 **Identity Name**、**Publisher（`CN=<GUID>`）**、
+   **PublisherDisplayName**，用脚本参数注入，保证与 Store 记录一致。
+2. `-Version` 必须 >= 1.0.0 且严格递增（Store 不接受同版本重复提交）；`-Version` 只覆盖本次构建，
+   正式发布前把 `Version.props` 抬到对应版本。
+3. **不要**对 `-StoreUpload` 产物自签名（脚本互斥），也不要对内部 `.msix` 做 `signtool`；
+   Store 会在认证通过后重签，upload 的 SHA256 仅供参考。
+4. 在 Partner Center 的包页面上传 `dist/msix/ClipBridge-<ver>-win-x64.msixupload`；
+   Store 会做包结构/身份校验。若提示身份不匹配，检查 `-IdentityName` / `-Publisher`
+   是否与 Partner Center 完全一致（区分大小写/空格）。
+5. 本地可用 `makeappx unpack` + `makepri dump` 先自检（脚本已自动做）；`.msixupload` 不能直接
+   `Add-AppxPackage`，本地安装验收仍用 Sideload `.msix` / `-SelfSign`。
 
 ### 本地安装 / 启动 / 卸载验收（2026-11-15 实测）
 
@@ -204,7 +278,8 @@ Windows 10/11 SDK 的 x64 工具 `makeappx.exe` / `signtool.exe` / `makepri.exe`
   因此 `build-windows-all.ps1` 不自动生成 winget，避免签名前把 hash 固化。
 - **MSIX 已接入（独立脚本）**：`-Version 1.0.0` 验收通过（构建/裁剪/自签名/结构断言）；
   签名包 `Add-AppxPackage` 受自签名根信任限制（本机非管理员，`0x800B0109`），已用开发者模式
-  `-Register` 完成安装/启动/卸载验收。Store 正式提交仍待 Partner Center 身份与 Store 重签。
+  `-Register` 完成安装/启动/卸载验收。**StoreUpload（`.msixupload`）已实现并实测 exit 0**，
+  内部包已裁剪、未签名、身份正确；Store 正式提交仍待 Partner Center 身份与重签。
 - **MSIX 未做 MSI→MSIX 数据导入**（ADR-005 P2 待办）：打包后应用数据根是 `LocalState` /
   `LocalCache`，不会自动导入 `%LOCALAPPDATA%\ClipBridge`；本机因 PasswordVault 账号可复用，
   core 能正常初始化，但旧 core.db/tls 不会迁移。
@@ -225,6 +300,7 @@ pwsh scripts/build-windows-winget.ps1
 # MSIX（0.1.0 不可发；开发/验收显式 1.0.0）
 pwsh scripts/build-windows-msix.ps1 -Version 1.0.0
 pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 -SelfSign -KeepLayout
+pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 -StoreUpload
 
 # 复用已有 Rust 产物 / 保留 stage
 pwsh scripts/build-windows-all.ps1 -WixInstallPath C:\tools\wix314 -SkipRust -KeepStage

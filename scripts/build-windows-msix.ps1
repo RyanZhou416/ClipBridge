@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    构建 Windows MSIX（Microsoft Store 渠道）安装包：注入身份/版本、裁剪 AI/ML、重打包、断言、可选自签名。
+    构建 Windows MSIX（Microsoft Store 渠道）安装包：注入身份/版本、裁剪 AI/ML、重打包、断言、可选自签名或 StoreUpload。
 
 .DESCRIPTION
     只做 MSIX 渠道，不影响 MSI / EXE / 便携 / winget 的既有流程。
@@ -16,26 +16,40 @@
          没有 AppxPackageVersion 属性；manifest 的 Identity/@Version 才是权威，
          而且 resources.pri 的 resource map 名就是 Identity Name，必须在 MakePri 之前定稿。
       3. dotnet build Release x64：GenerateAppxPackageOnBuild=true、AppxBundle=Never、
-         AppxPackageDir=<obj/appx>、AppxPackageSigningEnabled=false。
-      4. makeappx unpack → 裁剪：
+         AppxPackageDir=<obj/appx>、AppxPackageSigningEnabled=false；
+         UapAppxPackageBuildMode 默认 SideloadOnly，-StoreUpload 时用 StoreUpload
+         （旧名，等价 StoreAndSideload：同时产出 .msix 与 .msixupload）。
+      4. 取待裁剪的包：
+         - 默认模式：dotnet build 直接产出的 .msix；
+         - -StoreUpload：从 .msixupload（zip）里取出唯一的内部 .msix。
+         然后 makeappx unpack → 裁剪：
          - 删除未使用的 WindowsAppSDK AI/ML（onnxruntime / DirectML / Microsoft.Windows.AI* /
            Microsoft.Windows.Internal.AI* / Microsoft.ML.OnnxRuntime*）；
          - 删除 *.pdb；
          - 删除未保留语言的 WinUI MUI 目录，只留 zh-CN / zh-TW / en-us（en-US 兼容大小写）。
       5. 校验 PRI（makepri dump 的 ResourceMap 名 == Identity Name、AppDisplayName 存在）、
          Assets、Strings，然后 makeappx pack 重打包。
-      6. 断言最终包：版本 4 段且 major>=1、无 pdb、无 AI/ML、Assets/资源存在、
+      6. -StoreUpload：把裁剪后的 .msix 用 ZipArchive（Update 模式）写回 .msixupload 的内部
+         条目，保留 AppxMetadata/ 等其它外层条目。不裁剪时 Store 会收到 116MB 原始包
+         （含 42.5MB AI/ML），所以裁剪必须进入 upload。
+      7. 断言最终包：版本 4 段且 major>=1、无 pdb、无 AI/ML、Assets/资源存在、
          DisplayName/Publisher/TargetDeviceFamily/startupTask 正确。
-      7. -SelfSign（仅本地验收，默认关闭）：生成/复用 CN=<Publisher CN> 自签名证书，
+         -StoreUpload 额外断言：upload 是有效 zip、至少一个 .msix、内部 msix 可 makeappx
+         unpack、内部包未签名、外层条目全部保留。
+      8. -SelfSign（仅本地验收，默认关闭）：生成/复用 CN=<Publisher CN> 自签名证书，
          导入 CurrentUser\TrustedPeople，用 signtool 签最终 .msix。
          生产 Store 由 Store 重签，不要用 -SelfSign 产物提交 Store。
+         与 -StoreUpload 互斥（Store 不接收自签名产物；upload 内部包保持未签名）。
 
     产物（默认 OutDir=dist/msix）：
-      dist/msix/ClipBridge-<ver>-win-x64.msix                 最终包（-SelfSign 时已签名）
-      dist/msix/unsigned/ClipBridge-<ver>-win-x64-unsigned.msix  未签名包（-SelfSign 时保留）
+      dist/msix/ClipBridge-<ver>-win-x64.msix                 最终包（默认模式；-SelfSign 时已签名）
+      dist/msix/ClipBridge-<ver>-win-x64.msixupload           Store 提交包（-StoreUpload；未签名）
+      dist/msix/unsigned/ClipBridge-<ver>-win-x64-unsigned.msix  裁剪后未签名 .msix（两种模式都保留；
+                                                              -StoreUpload 时它就是 upload 的内部包）
       dist/msix/layout/ClipBridge-<ver>-win-x64/              裁剪后的布局（-KeepLayout 时保留）
       dist/msix/logs/build-msix.log                           本次构建完整日志
-      dist/msix/logs/msix-summary.json                        机器可读摘要（路径/大小/SHA256/身份）
+      dist/msix/logs/msix-summary.json                        机器可读摘要（路径/大小/SHA256/身份/模式）
+      dist/msix/logs/resources.pri.inner.xml                  -StoreUpload 内部包的 PRI dump
       dist/msix/certs/*.cer                                   -SelfSign 的公开证书
 
 .PARAMETER Version
@@ -61,7 +75,12 @@
     包显示名，默认 ClipBridge。
 
 .PARAMETER SelfSign
-    生成/复用自签名证书并签名最终包（本地验收用，不得作为 Store 产物）。
+    生成/复用自签名证书并签名最终包（本地验收用，不得作为 Store 产物）。与 -StoreUpload 互斥。
+
+.PARAMETER StoreUpload
+    产出 Partner Center 用的 .msixupload（MSBuild UapAppxPackageBuildMode=StoreUpload、
+    AppxBundle=Never、签名关闭）。裁剪后的 .msix 通过 ZipArchive 写回 .msixupload 的内部条目，
+    外层其它条目（如 AppxMetadata/）原样保留。产物保持未签名，由 Store 重签；与 -SelfSign 互斥。
 
 .PARAMETER OutDir
     产物根目录，默认 dist/msix（相对仓库根目录）。
@@ -91,6 +110,10 @@
         -PublisherDisplayName 'Ryan416'
 
 .EXAMPLE
+    # Partner Center 提交包（.msixupload，未签名，内部 .msix 已裁剪）
+    pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 -StoreUpload
+
+.EXAMPLE
     # 说明：AppxPackageVersion 在 Microsoft.Windows.SDK.BuildTools.MSIX 中不被识别，
     # 版本通过生成 manifest 注入（见脚本 DESCRIPTION 第 2 步）。
 #>
@@ -103,6 +126,7 @@ param(
     [string]$PublisherDisplayName = 'Ryan416',
     [string]$DisplayName = 'ClipBridge',
     [switch]$SelfSign,
+    [switch]$StoreUpload,
     [string]$OutDir = 'dist/msix',
     [string]$WindowsSdkBin = '',
     [switch]$SkipRust,
@@ -129,6 +153,7 @@ $genManifest = Join-Path $genManifestDir 'Package.appxmanifest'
 $buildLog = Join-Path $logsDir 'build-msix.log'
 
 New-Item -ItemType Directory -Force -Path $outRoot, $logsDir, $objDir | Out-Null
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 function Write-Log {
     param([Parameter(ValueFromRemainingArguments = $true)]$Parts)
@@ -150,6 +175,13 @@ try {
     if (-not (Test-Path -LiteralPath $sourceManifest)) { throw "找不到源 manifest: $sourceManifest" }
     if (-not (Test-Path -LiteralPath $appProject)) { throw "找不到项目: $appProject" }
     if ($Publisher -notmatch '^CN=') { throw "Publisher 必须是 CN=... 形式（实际: '$Publisher'）" }
+
+    # Store 只接收由 Store 重签的未签名 .msixupload；自签名产物会被 Partner Center 拒绝。
+    if ($SelfSign -and $StoreUpload) {
+        throw "-SelfSign 与 -StoreUpload 互斥：Store 提交包必须保持未签名（由 Store 重签），自签名 .msix 只用于本地验收。"
+    }
+    $buildMode = if ($StoreUpload) { 'StoreUpload' } else { 'SideloadOnly' }
+    Write-Log ("mode     : {0}{1}" -f $buildMode, $(if ($StoreUpload) { '（Partner Center .msixupload，未签名）' } else { '' }))
 
     # ---------------------------------------------------------------- 版本
     function Resolve-MsixVersion {
@@ -323,6 +355,57 @@ try {
         throw "生成的 manifest 版本不匹配: $genManifest"
     }
 
+    # ------------------------------------------------- .msixupload 内部包读写
+    # StoreUpload 的 upload 是 zip（stored 不压缩），里层是待裁剪的 .msix；
+    # 只替换这一个条目，AppxMetadata/ 等其它外层条目必须原样留给 Partner Center。
+    function Expand-MsixUploadPayload {
+        param([string]$UploadPath, [string]$DestinationPath)
+
+        try {
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($UploadPath)
+        } catch {
+            throw "不是有效的 zip/.msixupload: $UploadPath（$($_.Exception.Message)）"
+        }
+        try {
+            $names = @($zip.Entries | ForEach-Object { $_.FullName })
+            $msixEntries = @($zip.Entries | Where-Object { $_.FullName -match '(?i)\.msix$' })
+            if ($msixEntries.Count -eq 0) {
+                throw ".msixupload 内没有 .msix 条目（$UploadPath）；条目: $($names -join ', ')"
+            }
+            if ($msixEntries.Count -gt 1) {
+                $entryList = ($msixEntries | ForEach-Object { $_.FullName }) -join ', '
+                throw ((".msixupload 内有 {0} 个 .msix（{1}）；当前脚本只支持单主包（AppxBundle=Never），" +
+                    "多包 upload 需要先确认主包再裁剪。") -f $msixEntries.Count, $entryList)
+            }
+            $entry = $msixEntries[0]
+            $destDir = Split-Path -Parent $DestinationPath
+            if (-not (Test-Path -LiteralPath $destDir)) {
+                New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $DestinationPath, $true)
+            return [pscustomobject]@{
+                EntryName       = $entry.FullName
+                OuterEntryNames = $names
+                Length          = $entry.Length
+            }
+        } finally { $zip.Dispose() }
+    }
+
+    function Update-MsixUploadPayload {
+        param([string]$UploadPath, [string]$PayloadMsixPath, [string]$InnerEntryName)
+
+        # Update 模式只改目标条目，其余条目（含 AppxMetadata/）原样保留。
+        $zip = [System.IO.Compression.ZipFile]::Open($UploadPath, [System.IO.Compression.ZipArchiveMode]::Update)
+        try {
+            $entry = $zip.GetEntry($InnerEntryName)
+            if (-not $entry) { throw "更新失败：$UploadPath 内找不到条目 '$InnerEntryName'" }
+            $entry.Delete()
+            # 与 MSBuild 产出的 upload 一致：内部 .msix 用 NoCompression（stored）保存。
+            [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $zip, $PayloadMsixPath, $InnerEntryName, [System.IO.Compression.CompressionLevel]::NoCompression)
+        } finally { $zip.Dispose() }
+    }
+
     # ---------------------------------------------------------------- 构建
     if (-not $SkipRust) {
         $rustDll = Join-Path $repoRoot 'target\x86_64-pc-windows-msvc\release\core_ffi_windows.dll'
@@ -350,7 +433,7 @@ try {
         '-p:GenerateAppxPackageOnBuild=true',
         '-p:AppxBundle=Never',
         '-p:AppxPackageSigningEnabled=false',
-        '-p:UapAppxPackageBuildMode=SideloadOnly',
+        "-p:UapAppxPackageBuildMode=$buildMode",
         "-p:AppxPackageDir=$appxOutDir\",
         "-p:ClipBridgeAppxManifest=$genManifest",
         "-p:SkipRustBuild=$skipRustValue"
@@ -367,11 +450,40 @@ try {
         throw "dotnet build 失败（exit $buildExit）；完整输出: $(Join-Path $logsDir 'dotnet-build.log')"
     }
 
-    $builtMsix = Get-ChildItem -LiteralPath $appxOutDir -Recurse -File -Filter '*.msix' -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $builtMsix) { throw "dotnet build 成功但没有找到 .msix（$appxOutDir）" }
-    Write-Log ("[build] msix={0}  {1:N1} MB" -f $builtMsix.FullName, ($builtMsix.Length / 1MB))
-    $originalSize = $builtMsix.Length
+    # dotnet build 产物：默认模式是 .msix；StoreUpload 模式额外产出 .msixupload（内含 .msix）。
+    # 两种模式最后都归一到「待裁剪的 .msix」，后面 unpack/trim/pack 流程完全共用。
+    $builtUpload = $null
+    $payloadMsixPath = $null
+    $uploadInnerEntry = $null
+    $uploadOuterEntries = @()
+    if ($StoreUpload) {
+        $builtUpload = Get-ChildItem -LiteralPath $appxOutDir -Recurse -File -Filter '*.msixupload' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $builtUpload) {
+            throw (("dotnet build 成功但没有找到 .msixupload（StoreUpload 模式，{0}）；" +
+                "检查 UapAppxPackageBuildMode / AppxBundle / Configuration 属性") -f $appxOutDir)
+        }
+        Write-Log ("[build] msixupload={0}  {1:N1} MB" -f $builtUpload.FullName, ($builtUpload.Length / 1MB))
+
+        $uploadStage = Join-Path $objDir 'storeupload'
+        if (Test-Path -LiteralPath $uploadStage) { Remove-Item -LiteralPath $uploadStage -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $uploadStage | Out-Null
+        $payloadMsixPath = Join-Path $uploadStage "ClipBridge-$semVer-win-$platform-inner.msix"
+        $extracted = Expand-MsixUploadPayload -UploadPath $builtUpload.FullName -DestinationPath $payloadMsixPath
+        $uploadInnerEntry = $extracted.EntryName
+        $uploadOuterEntries = @($extracted.OuterEntryNames)
+        Write-Log ("[upload] 外层条目 {0} 个: {1}" -f $uploadOuterEntries.Count, ($uploadOuterEntries -join ', '))
+        Write-Log ("[upload] 内部 msix entry='{0}'，提取 {1:N1} MB" -f $uploadInnerEntry, ((Get-Item -LiteralPath $payloadMsixPath).Length / 1MB))
+        $builtMsix = Get-Item -LiteralPath $payloadMsixPath
+        $originalSize = $builtMsix.Length
+    } else {
+        $builtMsix = Get-ChildItem -LiteralPath $appxOutDir -Recurse -File -Filter '*.msix' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $builtMsix) { throw "dotnet build 成功但没有找到 .msix（$appxOutDir）" }
+        Write-Log ("[build] msix={0}  {1:N1} MB" -f $builtMsix.FullName, ($builtMsix.Length / 1MB))
+        $payloadMsixPath = $builtMsix.FullName
+        $originalSize = $builtMsix.Length
+    }
 
     # ------------------------------------------------------ unpack + 裁剪
     $layout = Join-Path $layoutRoot "ClipBridge-$semVer-win-$platform"
@@ -390,8 +502,8 @@ try {
         }
     }
 
-    Write-Log "[unpack] $($builtMsix.FullName) → $layout"
-    Invoke-MakeAppx -Arguments @('unpack', '/p', $builtMsix.FullName, '/d', $layout, '/o') `
+    Write-Log "[unpack] $payloadMsixPath → $layout"
+    Invoke-MakeAppx -Arguments @('unpack', '/p', $payloadMsixPath, '/d', $layout, '/o') `
         -LogName 'makeappx-unpack.log' -What 'makeappx unpack'
 
     Write-Log "[trim] 移除 AI/ML、pdb、未保留语言的 MUI 目录"
@@ -461,16 +573,21 @@ try {
         throw "resources.pri 异常偏小，可能资源未生成"
     }
 
-    # PRI 校验：ResourceMap 名 == Identity Name，且 AppDisplayName 存在。
-    $priDump = Join-Path $logsDir 'resources.pri.xml'
-    if ($sdk.MakePri) {
-        & $sdk.MakePri dump /if (Join-Path $layout 'resources.pri') /of $priDump /o *> (Join-Path $logsDir 'makepri.log')
-        if ($LASTEXITCODE -ne 0) { throw "makepri dump 失败（exit $LASTEXITCODE）" }
-        [xml]$pri = Get-Content -LiteralPath $priDump -Raw
+    # PRI 校验：ResourceMap 名 == Identity Name，且 AppDisplayName/Strings 存在。
+    function Assert-PriFile {
+        param([string]$PriPath, [string]$DumpPath, [string]$LogName)
+
+        if (-not $sdk.MakePri) {
+            Write-Log "[pri] 警告：未找到 makepri.exe，跳过 PRI 结构校验"
+            return
+        }
+        & $sdk.MakePri dump /if $PriPath /of $DumpPath /o *> (Join-Path $logsDir $LogName)
+        if ($LASTEXITCODE -ne 0) { throw "makepri dump 失败（exit $LASTEXITCODE；$PriPath）" }
+        [xml]$pri = Get-Content -LiteralPath $DumpPath -Raw
         $resourceMap = $pri.SelectSingleNode('/PriInfo/ResourceMap')
-        if (-not $resourceMap) { throw "resources.pri 没有 ResourceMap" }
+        if (-not $resourceMap) { throw "resources.pri 没有 ResourceMap（$PriPath）" }
         $priName = $resourceMap.GetAttribute('name')
-        Write-Log ("[pri] ResourceMap='{0}'" -f $priName)
+        Write-Log ("[pri] ResourceMap='{0}'（{1}）" -f $priName, $PriPath)
         if ($priName -ne $IdentityName) {
             throw "resources.pri 的 ResourceMap('$priName') != Identity Name('$IdentityName')；身份必须在构建前注入"
         }
@@ -478,9 +595,10 @@ try {
         if (-not $appDisplay) { throw "resources.pri 缺少 AppDisplayName 资源（PRI/资源不可用）" }
         $stringsTree = $pri.SelectSingleNode("//*[local-name()='ResourceMapSubtree' and @name='Strings']")
         if (-not $stringsTree) { throw "resources.pri 缺少 Strings 资源树" }
-    } else {
-        Write-Log "[pri] 警告：未找到 makepri.exe，跳过 PRI 结构校验"
     }
+
+    $priDump = Join-Path $logsDir 'resources.pri.xml'
+    Assert-PriFile -PriPath (Join-Path $layout 'resources.pri') -DumpPath $priDump -LogName 'makepri.log'
 
     # ---------------------------------------------------------------- 重打包
     New-Item -ItemType Directory -Force -Path $unsignedDir | Out-Null
@@ -498,8 +616,6 @@ try {
     }
 
     # ------------------------------------------------------------ 校验最终包
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-
     function Get-PackageEntryNames {
         param([string]$Path)
         $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
@@ -606,14 +722,93 @@ try {
         return $errors
     }
 
-    # ------------------------------------------------------------ 签名
+    # StoreUpload 专用：外层 upload（zip）+ 内部 msix（复用 Assert-MsixPackage）。
+    function Assert-MsixUpload {
+        param([string]$Path, [string[]]$OriginalOuterEntries, [string]$InnerEntryName,
+              [string]$WorkspaceDir, [string]$AppxVer, [string]$IdName, [string]$IdPublisher,
+              [string]$PackageDisplayName, [string]$PublisherDisplay)
+
+        $errors = New-Object System.Collections.Generic.List[string]
+
+        try {
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        } catch {
+            throw "upload 不是有效 zip：$Path（$($_.Exception.Message)）"
+        }
+        try {
+            $names = @($zip.Entries | ForEach-Object { $_.FullName })
+            $msixEntries = @($zip.Entries | Where-Object { $_.FullName -match '(?i)\.msix$' })
+            if ($msixEntries.Count -eq 0) { $errors.Add("upload 内没有 .msix 条目") }
+            if ($msixEntries.Count -gt 1) { $errors.Add("upload 内有多个 .msix（$($msixEntries.Count)），不符合当前单主包约定") }
+            $inner = $msixEntries | Where-Object { $_.FullName -eq $InnerEntryName } | Select-Object -First 1
+            if (-not $inner) { $errors.Add("upload 内找不到内部包条目 '$InnerEntryName'") }
+
+            # AppxMetadata/ 等外层条目必须原样保留（Update 模式只应替换内部 msix）。
+            foreach ($name in $OriginalOuterEntries) {
+                if ($names -notcontains $name) { $errors.Add("upload 丢失外层条目: $name") }
+            }
+            $unexpected = @($names | Where-Object { $OriginalOuterEntries -notcontains $_ })
+            if ($unexpected.Count -gt 0) { $errors.Add("upload 出现意外外层条目: $($unexpected -join ', ')") }
+
+            if ($errors.Count -gt 0) { return $errors }
+
+            # 从最终 upload 里重新提取内部 msix，验证写回的就是它。
+            $verifyDir = Join-Path $WorkspaceDir 'verify'
+            if (Test-Path -LiteralPath $verifyDir) { Remove-Item -LiteralPath $verifyDir -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $verifyDir | Out-Null
+            $verifyMsix = Join-Path $verifyDir "ClipBridge-$AppxVer-inner.msix"
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($inner, $verifyMsix, $true)
+        } finally { $zip.Dispose() }
+
+        $innerNames = @(Get-PackageEntryNames -Path $verifyMsix)
+        if ($innerNames -contains 'AppxSignature.p7x') {
+            $errors.Add("upload 内部 msix 是签名包（Store 只接收未签名 upload；-StoreUpload 不要配合 -SelfSign）")
+        }
+        $verifyMsixItem = Get-Item -LiteralPath $verifyMsix
+        $innerHash = (Get-FileHash -LiteralPath $verifyMsix -Algorithm SHA256).Hash
+        Write-Log ("[assert] upload 内部 msix: entry='{0}'，{1:N1} MB，{2} file(s)，SHA256 {3}" -f
+            $InnerEntryName, ($verifyMsixItem.Length / 1MB), $innerNames.Count, $innerHash)
+        Write-Log ("[assert] upload 外层条目 {0} 个: {1}" -f $OriginalOuterEntries.Count, ($OriginalOuterEntries -join ', '))
+
+        $msixErrors = @(Assert-MsixPackage -Path $verifyMsix -AppxVer $AppxVer -IdName $IdName `
+            -IdPublisher $IdPublisher -PackageDisplayName $PackageDisplayName -PublisherDisplay $PublisherDisplay)
+        foreach ($e in $msixErrors) { $errors.Add("内部 msix: $e") }
+
+        # Store 侧同样会解包校验；这里用 makeappx 真实解开最终 upload 的内部包。
+        $verifyLayout = Join-Path $verifyDir 'layout'
+        Invoke-MakeAppx -Arguments @('unpack', '/p', $verifyMsix, '/d', $verifyLayout, '/o') `
+            -LogName 'makeappx-upload-unpack.log' -What 'makeappx unpack（upload 内部 msix）'
+        foreach ($rel in @('AppxManifest.xml', 'ClipBridgeShell_CS.exe', 'core_ffi_windows.dll', 'resources.pri',
+                'Microsoft.Data.Sqlite.dll', 'e_sqlite3.dll')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $verifyLayout $rel))) {
+                $errors.Add("upload 内部 msix 解包后缺少 $rel")
+            }
+        }
+        $verifyFiles = @(Get-ChildItem -LiteralPath $verifyLayout -Recurse -File)
+        Write-Log ("[assert] upload 内部 msix 解包: {0} file(s)" -f $verifyFiles.Count)
+        Assert-PriFile -PriPath (Join-Path $verifyLayout 'resources.pri') `
+            -DumpPath (Join-Path $logsDir 'resources.pri.inner.xml') -LogName 'makepri-inner.log'
+
+        return $errors
+    }
+
+    # ------------------------------------------------------------ 签名 / 组装
     $finalMsix = Join-Path $outRoot "ClipBridge-$semVer-win-$platform.msix"
-    if (Test-Path -LiteralPath $finalMsix) { Remove-Item -LiteralPath $finalMsix -Force }
+    $finalUpload = Join-Path $outRoot "ClipBridge-$semVer-win-$platform.msixupload"
+    $finalArtifact = if ($StoreUpload) { $finalUpload } else { $finalMsix }
     $signThumbprint = $null
     $signatureStatus = 'unsigned'
     $signatureMessage = ''
 
-    if ($SelfSign) {
+    if ($StoreUpload) {
+        # 用裁剪后的 .msix 替换 upload 内部条目；外层其它条目原样保留，产物保持未签名。
+        if (Test-Path -LiteralPath $finalUpload) { Remove-Item -LiteralPath $finalUpload -Force }
+        Copy-Item -LiteralPath $builtUpload.FullName -Destination $finalUpload -Force
+        Write-Log ("[upload] 写回裁剪后内部包: {0} ← {1}" -f $uploadInnerEntry, $unsignedMsix)
+        Update-MsixUploadPayload -UploadPath $finalUpload -PayloadMsixPath $unsignedMsix -InnerEntryName $uploadInnerEntry
+        Write-Log "[sign] -StoreUpload：产物未签名（Partner Center/Store 重签）；不自签名"
+    } elseif ($SelfSign) {
+        if (Test-Path -LiteralPath $finalMsix) { Remove-Item -LiteralPath $finalMsix -Force }
         if (-not $sdk.SignTool) { throw "-SelfSign 需要 signtool.exe；请用 -WindowsSdkBin 指定 SDK x64 目录" }
         New-Item -ItemType Directory -Force -Path $certsDir | Out-Null
         Write-Log "[sign] 查找/创建自签名证书 Subject='$Publisher'"
@@ -706,29 +901,41 @@ try {
     }
 
     # ------------------------------------------------------------ 断言与摘要
-    Write-Log "[assert] 校验最终包结构/身份/manifest"
-    $finalNames = @(Get-PackageEntryNames -Path $finalMsix)
-    if ($SelfSign) {
-        if ($finalNames -notcontains 'AppxSignature.p7x') { throw "签名包缺少 AppxSignature.p7x：$finalMsix" }
+    Write-Log "[assert] 校验最终产物结构/身份/manifest"
+    if ($StoreUpload) {
+        $assertErrors = @(Assert-MsixUpload -Path $finalUpload -OriginalOuterEntries $uploadOuterEntries `
+            -InnerEntryName $uploadInnerEntry -WorkspaceDir (Join-Path $objDir 'storeupload') `
+            -AppxVer $appxVersion -IdName $IdentityName -IdPublisher $Publisher `
+            -PackageDisplayName $DisplayName -PublisherDisplay $PublisherDisplayName)
     } else {
-        if ($finalNames -contains 'AppxSignature.p7x') { throw "未签名包却包含 AppxSignature.p7x：$finalMsix" }
+        $finalNames = @(Get-PackageEntryNames -Path $finalMsix)
+        if ($SelfSign) {
+            if ($finalNames -notcontains 'AppxSignature.p7x') { throw "签名包缺少 AppxSignature.p7x：$finalMsix" }
+        } else {
+            if ($finalNames -contains 'AppxSignature.p7x') { throw "未签名包却包含 AppxSignature.p7x：$finalMsix" }
+        }
+        $assertErrors = @(Assert-MsixPackage -Path $finalMsix -AppxVer $appxVersion -IdName $IdentityName `
+            -IdPublisher $Publisher -PackageDisplayName $DisplayName -PublisherDisplay $PublisherDisplayName)
     }
-    $assertErrors = @(Assert-MsixPackage -Path $finalMsix -AppxVer $appxVersion -IdName $IdentityName `
-        -IdPublisher $Publisher -PackageDisplayName $DisplayName -PublisherDisplay $PublisherDisplayName)
     if ($assertErrors.Count -gt 0) {
         foreach ($e in $assertErrors) { Write-Log "  [X] $e" }
-        throw ("MSIX 断言失败 {0} 项" -f $assertErrors.Count)
+        $what = if ($StoreUpload) { '.msixupload' } else { '.msix' }
+        throw ("{0} 断言失败 {1} 项" -f $what, $assertErrors.Count)
     }
     Write-Log "[assert] OK"
 
-    $finalItem = Get-Item -LiteralPath $finalMsix
-    $sha256 = (Get-FileHash -LiteralPath $finalMsix -Algorithm SHA256).Hash
+    $finalItem = Get-Item -LiteralPath $finalArtifact
+    $sha256 = (Get-FileHash -LiteralPath $finalArtifact -Algorithm SHA256).Hash
     Write-Log ("[result] path   : {0}" -f $finalItem.FullName)
     Write-Log ("[result] size   : {0:N1} MB ({1} bytes)" -f ($finalItem.Length / 1MB), $finalItem.Length)
     Write-Log ("[result] sha256 : {0}" -f $sha256)
     Write-Log ("[result] version: {0}（Identity Version）" -f $appxVersion)
     Write-Log ("[result] identity: {0} / {1} / {2}" -f $IdentityName, $Publisher, $PublisherDisplayName)
+    Write-Log ("[result] mode   : {0}" -f $buildMode)
     Write-Log ("[result] signed : {0}" -f $signatureStatus)
+    if ($StoreUpload) {
+        Write-Log ("[result] upload : inner='{0}'，裁剪后 .msix={1}" -f $uploadInnerEntry, $unsignedMsix)
+    }
     if ($SelfSign) {
         Write-Log ("[result] 签名证书: {0}" -f $signThumbprint)
     }
@@ -744,6 +951,8 @@ try {
     $summary = [ordered]@{
         schemaVersion         = 1
         builtAt               = [DateTimeOffset]::Now.ToString('o')
+        buildMode             = $buildMode
+        storeUpload           = [bool]$StoreUpload
         semVer                = $semVer
         appxVersion           = $appxVersion
         identityName          = $IdentityName
@@ -755,6 +964,8 @@ try {
         packageSizeBytes      = $finalItem.Length
         sha256                = $sha256
         unsignedPackagePath   = $unsignedMsix
+        uploadInnerEntry      = $uploadInnerEntry
+        uploadOuterEntries    = @($uploadOuterEntries)
         layoutPath            = if ($KeepLayout) { $layout } else { $null }
         generatedManifestPath = $genManifest
         originalPackageSizeBytes = $originalSize
@@ -790,7 +1001,10 @@ if ($exitCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $logsDir 'msix-summa
     Write-Host ("  {0}" -f $s.packagePath)
     Write-Host ("  {0:N1} MB   SHA256 {1}" -f ($s.packageSizeBytes / 1MB), $s.sha256)
     Write-Host ("  Identity {0} / {1}" -f $s.identityName, $s.publisher)
-    Write-Host ("  Version  {0}   Signed={1}" -f $s.appxVersion, $s.selfSigned)
+    Write-Host ("  Version  {0}   Mode={1}   Signed={2}" -f $s.appxVersion, $s.buildMode, $s.selfSigned)
+    if ($s.storeUpload) {
+        Write-Host ("  Upload   inner='{0}'   trimmedMsix={1}" -f $s.uploadInnerEntry, $s.unsignedPackagePath)
+    }
 }
 Write-Host ("耗时: {0:N1}s   exit code: {1}" -f $sw.Elapsed.TotalSeconds, $exitCode)
 exit $exitCode

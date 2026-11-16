@@ -1,9 +1,9 @@
 # ADR-005：Windows 分发渠道实现记录（v4.2）
 
-- 状态：**P0/P1 已实现并验收；MSIX 构建与旧数据导入已实现并本地验收，StoreUpload/Store 提交待做**
+- 状态：**P0/P1 已实现并验收；MSIX 构建、旧数据导入、StoreUpload 已实现并本地验收；Partner Center 提交待做**
 - 日期：2026-11-15
 - 关系：本文是 [ADR-004](004-windows-distribution-channels.md)（v4.1 设计稿）的实现记录与差异说明。004 的争议答案、评审历史继续有效；**具体行为以本文为准**，004 中与本文冲突处（HKMU、ProductSearch、默认保留数据、MSIX 状态等）按本文执行。
-- 范围：Windows 壳的 MSI / Burn EXE / 便携 ZIP / winget 已落地；MSIX 构建/旧数据导入/本地验收已落地，StoreUpload 与 Store 提交待做。
+- 范围：Windows 壳的 MSI / Burn EXE / 便携 ZIP / winget 已落地；MSIX 构建/旧数据导入/StoreUpload/本地验收已落地，Partner Center 提交待做。
 
 ## 1. 与 v4.1 的差异（实现修正）
 
@@ -19,7 +19,7 @@
 | release tag | `platforms/windows/ClipBridgeShell_CS-x.y.z` | release-please `component: "clipbridge-windows"` → tag **`clipbridge-windows-<ver>`** | 无 `/`，可直接做资产下载 URL |
 | 便携数据 | 仅 core 数据 | **core + logs/tls/Cache/Strings/背景图 + `settings.json` + DPAPI `credentials.bin`** | 用户要求"用户信息在文件夹内" |
 | 便携自启 | 默认不写 Run | **保持现有 HKCU Run**（用户已确认接受） | 自启必须有一个外部指针；写入仅为 exe 路径 |
-| MSIX | 设计完成即可提交 | **构建渠道 + 旧数据导入已实现**（unsigned/自签名，开发者模式安装验收通过）；版本需 ≥1.0.0；Store 身份/StoreUpload 未做 | 先完成四条非 MSIX 渠道 |
+| MSIX | 设计完成即可提交 | **构建 + 旧数据导入 + StoreUpload 已实现**（unsigned/自签名，开发者模式安装验收通过）；版本需 ≥1.0.0；Partner Center 身份/提交未做 | 先完成四条非 MSIX 渠道 |
 
 ## 2. 渠道与产物（实际）
 
@@ -29,7 +29,7 @@
 | user EXE | `ClipBridge-<ver>-win-x64-user.exe`（内含 per-user MSI） | `%LOCALAPPDATA%\Programs\ClipBridge` | 同上 | **删除**；`RemoveUserData=0` 保留 | 待 SignPath |
 | 便携 ZIP | `ClipBridge-<ver>-win-x64-portable.zip` | 用户选择 | `<exeDir>\data`（不可写回退 `%LOCALAPPDATA%`） | 删目录即全删；保留 `data\` 即保留 | 无 |
 | winget | `dist/winget/*.yaml`（三件套） | 由底层安装器决定 | 同底层 | **删除**（winget 无法传 keep） | hash |
-| MSIX | `build-windows-msix.ps1`（unsigned/自签名） | Store 管理 | `LocalState` + 首启导入（已实现） | 系统删除 LocalState | Store 代签 |
+| MSIX | `build-windows-msix.ps1`（Sideload/StoreUpload） | Store 管理 | `LocalState` + 首启导入（已实现） | 系统删除 LocalState | Store 代签 |
 
 GUID：
 
@@ -49,6 +49,7 @@ pwsh scripts/build-windows-user-exe.ps1     -WixInstallPath C:\tools\wix314
 pwsh scripts/build-windows-portable-zip.ps1
 pwsh scripts/build-windows-winget.ps1       # 需 dist 已有 machine MSI + user EXE
 pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 [-SelfSign]  # MSIX 需 >=1.0.0
+pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 -StoreUpload  # .msixupload
 ```
 
 流程：`dotnet publish`（Release、win-x64、self-contained、R2R、裁剪）→ stage（去 pdb/xml）→ heat `-ag` 一次 → machine MSI；user MSI 复用 heat（SkipPublish/SkipHeat）→ Burn bundle；portable ZIP；断言。
@@ -103,6 +104,7 @@ CI：`.github/workflows/ci.yml` 的 `windows-installer` job（windows-latest、.
 | MSIX 构建（1.0.0） | 109.4 MB → 89.9 MB；AI/ML 23 文件/42.5 MB、pdb 0、语言仅 en-us/zh-CN/zh-TW；manifest/PRI/自签名断言通过 |
 | MSIX 开发者模式安装/启动/卸载 | `Add-AppxPackage -Register` exit 0；进程存活、窗口出现；LocalState 生成 core.db/tls/logs/Strings；卸载后包与 `%LOCALAPPDATA%\Packages\<PFN>` 删除 |
 | MSIX 数据导入 | 73/73；源 core items=2/history=2、logs=804，目标同；tls 三文件 sha256 一致；设置含 Core_DeviceId；源目录导入前后只读不变；卸载删 LocalState，重装再次导入 |
+| MSIX StoreUpload | exit 0；91.2 MB `.msixupload`，内部单 `.msix` 398 文件；裁剪 -19.5 MB；upload/内部包可 unpack；版本/身份/无 AI-ML-pdb/e_sqlite3/resources 断言通过；与 Sideload payload 逐文件一致（除 BlockMap） |
 | MSIX 签名包安装 | **未完成**：非管理员无法把自签名根加入 `LocalMachine\TrustedPeople`，`Add-AppxPackage` 报 0x800B0109；管理员导入证书后应可安装 |
 | 构建断言 | `REMOVEUSERDATA=1`、ALLUSERS、WordCount bit3、无 pdb、bundle 版本等全部通过 |
 
@@ -110,13 +112,13 @@ CI：`.github/workflows/ci.yml` 的 `windows-installer` job（windows-latest、.
 
 ## 7. MSIX 剩余待办（P2）
 
-已实现：`scripts/build-windows-msix.ps1`（版本守卫、manifest 注入、AI/ML/pdb/语言裁剪、自签名、断言）；`Package.appxmanifest` 的 `uap5:StartupTask`、Desktop-only、DisplayName=ClipBridge；开发者模式安装/启动/卸载验收；旧数据导入（VACUUM INTO 快照 + tls/settings + sentinel/回滚 + 一次性提示）。
+已实现：`scripts/build-windows-msix.ps1`（版本守卫、manifest 注入、AI/ML/pdb/语言裁剪、Sideload + StoreUpload、自签名、断言）；`Package.appxmanifest` 的 `uap5:StartupTask`、Desktop-only、DisplayName=ClipBridge；开发者模式安装/启动/卸载验收；旧数据导入（VACUUM INTO 快照 + tls/settings + sentinel/回滚 + 一次性提示）。
 
 剩余：
 
 1. **Store 身份**：Partner Center 的 Identity Name / Publisher CN / PublisherDisplayName；`-IdentityName`/`-Publisher`/`-PublisherDisplayName` 参数已就绪。
 2. **StoreUpload**：当前脚本出 `.msix`（SideloadOnly）；提交 Store 需 `UapAppxPackageBuildMode=StoreUpload` 生成 `.msixupload`。
-3. **StoreUpload**：当前脚本出 `.msix`（SideloadOnly）；补 `-StoreUpload` 生成 `.msixupload` 并校验裁剪/身份。
+3. **Partner Center 提交**：用 `-StoreUpload` 产物（未签名，Store 重签），注入 Partner Center 的 Identity Name/Publisher CN/PublisherDisplayName，提交年龄分级/截图/隐私政策并过 WACK。
 4. **签名包真机安装**：需管理员把自签名证书导入 `LocalMachine\TrustedPeople` 后 `Add-AppxPackage`；Store 由 Store 重签，不走自签名。
 5. **V1–V10/V13**：虚拟化落点、导入、托盘、StartupTask、Toast、mDNS、Strings/PRI、单实例、签名、Store 草稿。
 6. 本地调试：开发者模式 + `Add-AppxPackage -Register`；不做自签名侧载分发。
@@ -129,4 +131,4 @@ CI：`.github/workflows/ci.yml` 的 `windows-installer` job（windows-latest、.
 - 便携自启留 HKCU Run 指针；删除目录后需手动清理。
 - 便携在移动盘/网络盘的 WAL 风险未实现 DriveType 拒绝（待 P2 或后续）。
 - x64 only；arm64 后续。
-- MSIX 构建与数据导入已实现，但 Store 身份/StoreUpload 未完成；签名包本地安装需管理员把自签名证书导入 `LocalMachine\TrustedPeople`。
+- MSIX 构建/导入/StoreUpload 已实现，但 Partner Center 身份与真实提交未完成；签名包本地安装需管理员把自签名证书导入 `LocalMachine\TrustedPeople`。
