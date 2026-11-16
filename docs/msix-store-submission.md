@@ -83,7 +83,7 @@ pwsh scripts/build-windows-msix.ps1 `
 
 ## 3. 预提交验证
 
-> 本地已验证：用真实身份构建的 `.msixupload`，开发者模式安装后 PFN 与 Store 显示的 PFN 一致（`Ryan416.ClipBridge_x7bq0vy4t3gtr`）；版本 `1.0.0.0`。真实身份值只存在本地 `store/identity.local.json`，未提交。
+> 本地已验证：用真实身份构建的 `.msixupload`，开发者模式安装后 PFN 与 Store 显示的 PFN 一致（`<Store 显示的 PFN>`）；版本 `1.0.0.0`。真实身份值只存在本地 `store/identity.local.json`，未提交。
 
 ### 3.1 包结构
 
