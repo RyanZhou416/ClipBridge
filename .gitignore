@@ -164,3 +164,13 @@ dist/
 # Store 身份（本地；不要提交）
 store/identity.local.json
 store/*.local.json
+
+# 本地 Store 身份 / 凭据（额外兜底，防止 future 误提交）
+store/identity.json
+.env
+.env.local
+.env.*.local
+*.p12
+*.snk
+*.pem
+*.key
