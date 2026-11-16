@@ -88,6 +88,9 @@
          移除后 -35.1ms，9/9 对同向）。它提供的 Show/Hide/BringToFront/最小尺寸/提示对话框
          已在 Helpers/WindowExtensions.cs 里按原实现逐字重建。 -->
     <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
+    <!-- MSIX 首启从旧 MSI/EXE 数据导入：用只读连接 + VACUUM INTO 做一致性快照，
+         不直接复制活动数据库。原生 e_sqlite3.dll 需随包一起发布（构建脚本有断言）。 -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.15" />
   </ItemGroup>
 
   <ItemGroup>

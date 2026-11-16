@@ -447,6 +447,13 @@ try {
     foreach ($rel in $requiredLayoutFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $layout $rel))) { throw "裁剪后布局缺少: $rel" }
     }
+    # Microsoft.Data.Sqlite 的原生依赖：MSIX 首启导入旧数据时实际调用 VACUUM INTO，
+    # 必须确认 AI/ML/pdb 裁剪没有把它误删（包内断言在 Assert-MsixPackage 里还有一次）。
+    $sqliteNative = @(Get-ChildItem -LiteralPath $layout -Recurse -File -Filter 'e_sqlite3.dll' -ErrorAction SilentlyContinue)
+    if ($sqliteNative.Count -eq 0) {
+        throw "裁剪后布局缺少 e_sqlite3.dll（Microsoft.Data.Sqlite 原生依赖；检查 AI/ML 裁剪规则）"
+    }
+    Write-Log ("[sqlite] e_sqlite3.dll: {0}" -f (($sqliteNative | ForEach-Object { $_.FullName.Substring($layout.Length + 1) }) -join ', '))
     foreach ($culture in @('zh-CN', 'zh-TW', 'en-us')) {
         if (-not (Test-Path -LiteralPath (Join-Path $layout $culture))) { throw "裁剪后布局缺少语言目录: $culture" }
     }
@@ -571,6 +578,11 @@ try {
         $pdb = @($names | Where-Object { $_ -match '\.pdb$' })
         if ($pdb.Count -gt 0) { $errors.Add("包内仍有 pdb: $($pdb -join ', ')") }
 
+        # MSIX 首启导入旧数据依赖 Microsoft.Data.Sqlite（VACUUM INTO），原生 e_sqlite3.dll 必须入包。
+        $sqliteNative = @($names | Where-Object { ($_ -split '/')[-1] -eq 'e_sqlite3.dll' })
+        if ($sqliteNative.Count -eq 0) { $errors.Add("包内缺少 e_sqlite3.dll（Microsoft.Data.Sqlite 原生依赖）") }
+        if ($names -notcontains 'Microsoft.Data.Sqlite.dll') { $errors.Add("包内缺少 Microsoft.Data.Sqlite.dll") }
+
         $ai = @($names | Where-Object {
             $leaf = ($_ -split '/')[-1]
             ($aiLeafPatterns | Where-Object { $leaf -like $_ }).Count -gt 0
@@ -676,8 +688,17 @@ try {
         if (-not $sig.SignerCertificate) { throw "签名后没有 SignerCertificate：$finalMsix" }
 
         # 只报告验证结果，不因自签名根不受信而让构建失败（本机验收说明见 docs/windows-build.md）。
-        & $sdk.SignTool verify /pa /v $finalMsix *> (Join-Path $logsDir 'signtool-verify.log')
-        $verifyExit = $LASTEXITCODE
+        # 注意：用户的 PowerShell profile 可能把 $PSNativeCommandUseErrorActionPreference 设为
+        # true；那样 verify 的“预期 exit 1”会变成 NativeCommandExitException，直接跳过下面的
+        # 显式 exit code 检查。这里只在本段临时关闭该偏好，退出后原样恢复。
+        $nativeExitPreference = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+        try {
+            & $sdk.SignTool verify /pa /v $finalMsix *> (Join-Path $logsDir 'signtool-verify.log')
+            $verifyExit = $LASTEXITCODE
+        } finally {
+            $PSNativeCommandUseErrorActionPreference = $nativeExitPreference
+        }
         Write-Log ("[sign] signtool verify exit={0}（1=自签名根不在 LocalMachine 信任链，属预期；详见 signtool-verify.log）" -f $verifyExit)
     } else {
         Copy-Item -LiteralPath $unsignedMsix -Destination $finalMsix -Force

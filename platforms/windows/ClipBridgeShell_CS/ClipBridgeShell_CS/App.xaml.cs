@@ -99,6 +99,12 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// MSIX 首启旧数据导入结果（供窗口/托盘就绪后的一次性提示使用）。
+    /// 只在 OnLaunched 里赋值一次，之后只读，无并发写入。
+    /// </summary>
+    private static MsixLegacyImportResult? _legacyImportResult;
+
+    /// <summary>
     /// 等待本地化器就绪；若本地化器根本没启动（例如单实例重定向后提前 Exit），立即返回。
     /// 用方法而不是直接 await 字段，避免 null 任务带来的空引用。
     /// </summary>
@@ -354,6 +360,13 @@ public partial class App : Application
         }
         StartupTrace.Mark("single-instance-done");
 
+        // ⓪.5 MSIX 首启数据导入：把真实 %LOCALAPPDATA%\ClipBridge 的旧 MSI/EXE 数据
+        // 快照进 LocalState。必须放在 core 初始化（ActivationService → CoreHostService）
+        // 之前：core 一旦先在空 LocalState 上建库，目标 core.db 就会让导入永远跳过。
+        // 未打包进程直接返回 NotPackaged，不做任何 IO。导入失败不影响启动。
+        _legacyImportResult = await RunLegacyImportAsync();
+        StartupTrace.Mark($"legacy-import-finished status={_legacyImportResult.Status}");
+
         // ① 初始化 Localizer（打包应用版）
         // 默认为“后台构建、不等待”（LEVER 1）：本地化器构建（实测约 56ms）不再挡住窗口创建与激活。
         // 安全前提：
@@ -484,6 +497,128 @@ public partial class App : Application
 
         // 便携模式回退提示：必须在窗口/托盘就绪之后提示（解析器结果已缓存，这里不重复探测）。
         NotifyPortableDataRootFallback();
+
+        // MSIX 首启导入提示：同样在窗口/托盘就绪之后，一次性告知导入结果与“不再导入”入口。
+        NotifyLegacyImportResult();
+    }
+
+    /// <summary>
+    /// 执行 MSIX 首启旧数据导入。服务本身不抛异常；这里仍兜一层，保证导入永远不会阻断启动。
+    /// </summary>
+    private static async Task<MsixLegacyImportResult> RunLegacyImportAsync()
+    {
+        try
+        {
+            return await Task.Run(() => MsixLegacyImportService.Run());
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Legacy data import failed: {ex}");
+            return new MsixLegacyImportResult
+            {
+                Status = MsixLegacyImportStatus.Failed,
+                SkipReason = MsixLegacyImportSkipReason.None,
+                Error = $"{ex.GetType().Name}: {ex.Message}",
+            };
+        }
+    }
+
+    /// <summary>
+    /// 一次性提示“已从旧版本导入”，并提供“不再导入”开关（写入 MSIX LocalSettings）。
+    /// 对话框与登录提醒/便携回退提示可能撞车；失败时退化为托盘气泡，绝不影响启动。
+    /// 只有真正 Imported 才提示：Skipped/Failed/NotPackaged 不打扰用户。
+    /// </summary>
+    private static void NotifyLegacyImportResult()
+    {
+        var result = _legacyImportResult;
+        if (result is not { Status: MsixLegacyImportStatus.Imported })
+        {
+            return;
+        }
+
+        var window = MainWindow;
+        if (window == null)
+        {
+            return;
+        }
+
+        window.DispatcherQueue.TryEnqueue(async () =>
+        {
+            // 让启动期的其它提示（如未登录提醒）先走，避免同时打开两个 ContentDialog。
+            await Task.Delay(2000);
+            try
+            {
+                await WaitLocalizerReadyAsync();
+                var isChinese = IsChineseUi();
+
+                var title = isChinese ? "已从旧版本导入" : "Imported from an older version";
+                var content = isChinese
+                    ? $"已从旧版本导入剪贴板历史与设置。\n\n来源：{result.SourceRoot}\n目标：{result.TargetRoot}\n\n历史图片/文件缓存未导入（默认跳过缓存），旧记录中的图片或文件可能无法打开。\n\n如果不想以后再自动导入旧数据，请点击“不再导入”。卸载重装后 LocalState 会被清空，本提示会再次出现。"
+                    : $"Clipboard history and settings were imported from an older version.\n\nSource: {result.SourceRoot}\nTarget: {result.TargetRoot}\n\nHistorical image/file cache was not imported (cache is skipped by default), so images or files in old entries may not open.\n\nTo stop future automatic imports, choose \"Don't import again\". This prompt reappears after uninstall/reinstall because LocalState is cleared.";
+
+                var panel = new StackPanel { Spacing = 12 };
+                panel.Children.Add(new TextBlock { Text = content, TextWrapping = TextWrapping.Wrap });
+
+                var dialog = new ContentDialog
+                {
+                    Title = title,
+                    Content = panel,
+                    PrimaryButtonText = isChinese ? "不再导入" : "Don't import again",
+                    CloseButtonText = "OK",
+                    DefaultButton = ContentDialogButton.Close,
+                    XamlRoot = window.Content.XamlRoot,
+                };
+
+                var dialogResult = await dialog.ShowAsync();
+                if (dialogResult == ContentDialogResult.Primary)
+                {
+                    // LocalSettingsService 的 MSIX 分支会把 true 序列化成 JSON 字符串，
+                    // 导入服务读取同一个键后即跳过后续导入。
+                    await App.GetService<ILocalSettingsService>()
+                        .SaveSettingAsync(MsixLegacyImportService.LegacyImportOptOutKey, true);
+                    ShowLegacyImportBalloon(
+                        title,
+                        isChinese ? "已关闭旧数据自动导入。" : "Automatic legacy data import is disabled.");
+                }
+            }
+            catch (Exception ex)
+            {
+                // 对话框失败（例如另一个 ContentDialog 还开着）时退化为托盘气泡。
+                System.Diagnostics.Debug.WriteLine($"[App] Legacy import dialog failed: {ex.Message}");
+                var isChinese = IsChineseUi();
+                ShowLegacyImportBalloon(
+                    isChinese ? "已从旧版本导入" : "Imported from an older version",
+                    isChinese
+                        ? "剪贴板历史与设置已导入；历史图片/文件缓存未导入。"
+                        : "Clipboard history and settings were imported; historical image/file cache was not.");
+            }
+        });
+    }
+
+    private static void ShowLegacyImportBalloon(string title, string text)
+    {
+        try
+        {
+            App.GetService<TrayService>().ShowBalloonTip(title, text);
+        }
+        catch
+        {
+            // 托盘不可用时提示失败不能影响启动。
+        }
+    }
+
+    private static bool IsChineseUi()
+    {
+        try
+        {
+            return Localizer.Get().GetCurrentLanguage()
+                .StartsWith("zh", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return CultureInfo.CurrentUICulture.Name
+                .StartsWith("zh", StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     /// <summary>
