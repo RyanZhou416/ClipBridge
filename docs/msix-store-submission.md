@@ -8,7 +8,7 @@
 
 | 项 | 当前值 | Store 要求 |
 |---|---|---|
-| `Version.props` | `0.1.0` | **≥1.0.0**，4 段、Revision=0；首发建议 `1.0.0.0` |
+| `Version.props` | `0.1.0`（3 段真值） | **≥1.0.0**；MSIX 构建时自动补成 `1.0.0.0`（第 4 段固定 0） |
 | Manifest `Identity Name` | `40a26821-a97d-4eb8-ae89-804c2cccf4a0`（模板 GUID） | Partner Center 分配的 **`<PublisherId>.<AppName>`** |
 | Manifest `Publisher` | `CN=Ryan416` | Partner Center 的 **`CN=<GUID>`**，必须与 Store 重签证书主体一致 |
 | `PublisherDisplayName` | `Ryan416` | 与 Partner Center 账户/发布者名称一致 |
@@ -17,6 +17,21 @@
 | 最低系统 | Windows 10 1809（17763） | 与 Store 支持范围一致 |
 
 当前 `Package.appxmanifest` 的 `Version` 是 `0.0.0.0` 占位，构建脚本会注入；**不要手工改**。
+### 0.1 版本映射（3 段真值 → 各渠道）
+
+**不要**为了"统一"把 MSI/Bundle 也写成 4 段：格式本身不允许，而且第 4 段不参与升级判断。
+
+| 渠道 | 字段格式 | 发布值 | 限制 |
+|---|---|---|---|
+| `Version.props`（真值） | `Major.Minor.Patch` | `1.0.0` | 唯一来源；语义化版本 |
+| machine/user MSI | `Major.Minor.Build` | `1.0.0` | 只能 3 段；Major/Minor ≤ 255，Build ≤ 65535 |
+| Burn Bundle | `Major.Minor.Build` | `1.0.0` | 只能 3 段 |
+| MSIX | `Major.Minor.Build.Revision` | `1.0.0.0` | 必须 4 段；每段 0–65535；**Major ≠ 0；Revision 必须为 0**（Store 保留，提交后 Store 可能改写） |
+| 文件名 / 展示版本 | 3 段 | `1.0.0` | 只是展示/命名 |
+
+- `scripts/version.ps1` 已经做这个映射：`MsiVersion = 1.0.0`、`BundleVersion = 1.0.0`、`AppxVersion = 1.0.0.0`。
+- Store 每次提交的 MSIX 版本必须**严格递增**；热修只能加 Patch（`1.0.1.0`），不能靠 Revision。
+- CI build 号、commit hash、日期等**不要**塞进版本字段（Store 要求 Revision=0，MSI 不认第 4 段）；放文件名、Release notes 或遥测。
 
 ## 1. 准备 Partner Center
 
@@ -40,7 +55,7 @@ notepad store\identity.local.json
 
 # 2) 构建（先把 Version.props 抬到 >=1.0.0）
 pwsh scripts/build-windows-msix.ps1 `
-  -Version 1.0.0.0 `
+  -Version 1.0.0 `
   -StoreUpload `
   -IdentityFile store/identity.local.json
 ```
@@ -96,7 +111,9 @@ Get-ChildItem $tmp -Filter *.msix | Select-Object Name,Length
 # 内部包再 unpack 检查 AppxManifest.xml
 ```
 
-### 3.2 WACK（Windows App Certification Kit）
+### 3.2 WACK（发布候选阶段再做）
+
+> **现在不做**：WACK 结果只对当次构建有效；版本、签名、商店资料未定稿前跑没有意义。等发布候选（RC）时再执行本节。
 
 WACK 已标记为弃用但仍是本地预检工具；**需要管理员权限**：
 
@@ -105,7 +122,7 @@ $appcert = "${env:ProgramFiles(x86)}\Windows Kits\10\App Certification Kit\appce
 
 # 先构建同 payload 的签名 Sideload 包用于本地安装/测试；
 # StoreUpload 包本身未签名，不能直接 Add-AppxPackage。
-pwsh scripts/build-windows-msix.ps1 -Version 1.0.0.0 -SelfSign -KeepLayout
+pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 -SelfSign -KeepLayout
 Import-Certificate -FilePath dist\msix\certs\ClipBridge-CN_Ryan416.cer `
   -CertStoreLocation Cert:\LocalMachine\TrustedPeople
 Add-AppxPackage -Path dist\msix\ClipBridge-1.0.0-win-x64.msix
@@ -211,15 +228,25 @@ ClipBridge 需要账号与可达的同步服务；Store 认证人员没有你的
 - [ ] Partner Center 账号完成验证
 - [ ] 产品名 `ClipBridge` 已保留
 - [ ] 取得 Identity Name / Publisher CN / PublisherDisplayName
-- [ ] `Version.props` 升至 `1.0.0` 且用 4 段构建
+- [ ] `Version.props` 升至 `1.0.0`（3 段真值；MSIX 自动补 `.0`，不要手写 4 段到 MSI）
 - [ ] 用真实身份重新执行 `-StoreUpload` 构建（非模板 GUID/CN=Ryan416）
 - [ ] 隐私政策 URL 可公开访问
 - [ ] 至少 1 张合格截图 + 300×300 Store logo
 - [ ] 测试账号 + 可达服务端 + 认证步骤
-- [ ] WACK 通过（或已知项有解释）
+- [ ] WACK 通过（**发布候选阶段**再跑；或已知项有解释）
 - [ ] 干净 VM 安装/登录/同步/卸载冒烟
 - [ ] 签名包本地安装验收（可选，管理员信任自签名证书）
 - [ ] `msixupload` 上传成功且版本严格递增
+
+### 6.1 发布时执行顺序（RC 清单）
+
+1. `Version.props` → `1.0.0`（3 段真值），用 release-please 或人工提交；
+2. 重建四渠道：`pwsh scripts/build-windows-all.ps1 -WixInstallPath <wix>`；
+3. 用真实身份构建 StoreUpload：`pwsh scripts/build-windows-msix.ps1 -StoreUpload -IdentityFile store/identity.local.json`；
+4. 干净 VM 安装/登录/同步/卸载冒烟（见 3.3）；
+5. 构建同 payload 的 `-SelfSign` Sideload 包，信任自签名证书，安装后跑 WACK（见 3.2）；
+6. 上传 `.msixupload` 到 Partner Center，填写 4.x 材料，提交认证；
+7. 发布后用 Store 安装做一次冒烟，并记录版本/Store ID。
 
 ## 7. 命令速查
 
@@ -230,7 +257,7 @@ pwsh scripts/build-windows-msix.ps1 -Version 1.0.0.0 -StoreUpload `
   -PublisherDisplayName '<PublisherDisplayName>' -DisplayName 'ClipBridge'
 
 # Sideload + 自签名（仅本地 WACK/冒烟）
-pwsh scripts/build-windows-msix.ps1 -Version 1.0.0.0 -SelfSign -KeepLayout
+pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 -SelfSign -KeepLayout
 
 # 信任自签名证书（管理员）
 Import-Certificate -FilePath dist\msix\certs\ClipBridge-CN_Ryan416.cer `
@@ -248,6 +275,7 @@ pwsh scripts/build-windows-msix.ps1
 
 - [Create an app submission for MSIX apps](https://learn.microsoft.com/windows/apps/publish/publish-your-app/msix/create-app-submission)
 - [MSIX package identity / version rules](https://learn.microsoft.com/windows/msix/package/identity)
+- [Package version numbering（Store 4 段/Revision=0 规则）](https://learn.microsoft.com/windows/apps/publish/publish-your-app/package-version-numbering)
 - [runFullTrust capability](https://learn.microsoft.com/windows/msix/package/capabilities)
 - [StartupTask API](https://learn.microsoft.com/uwp/api/windows.applicationmodel.startuptask)
 - [appcert.exe（WACK）命令行](https://learn.microsoft.com/windows/win32/appxpkg/appcert-exe)
