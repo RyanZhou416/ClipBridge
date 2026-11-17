@@ -140,6 +140,7 @@ require_cmd curl
 require_cmd chmod
 require_cmd sed
 require_cmd grep
+require_cmd env
 
 [[ -f "$GRADLEW" ]] || die "Gradle wrapper missing: $GRADLEW"
 # The checked-in wrapper is mode 100644; a clean Linux checkout has no execute
@@ -295,24 +296,39 @@ NDK_TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin"
 export ANDROID_NDK_ROOT="$NDK_DIR"
 export ANDROID_NDK_HOME="$NDK_DIR"
 
-for abi in "${ABI_LIST[@]}"; do
-	triple="${ABI_TRIPLE[$abi]}"
-	upper_triple="$(printf '%s' "${triple//-/_}" | tr '[:lower:]' '[:upper:]')"
-	export "CC_${triple//-/_}=$NDK_TOOLCHAIN/${triple}${ANDROID_API_LEVEL}-clang"
-	export "AR_${triple//-/_}=$NDK_TOOLCHAIN/llvm-ar"
-	export "RANLIB_${triple//-/_}=$NDK_TOOLCHAIN/llvm-ranlib"
-	# cc-rs also probes hyphenated target names (ring/rusqlite C code).
-	export "CC_${triple}=$NDK_TOOLCHAIN/${triple}${ANDROID_API_LEVEL}-clang"
-	export "AR_${triple}=$NDK_TOOLCHAIN/llvm-ar"
-	export "CARGO_TARGET_${upper_triple}_LINKER=$NDK_TOOLCHAIN/${triple}${ANDROID_API_LEVEL}-clang"
-done
+# cc-rs (used by ring and any bundled C code) probes `<VAR>_<target>` first and
+# `<VAR>_<target_with_underscores>` second; rustc selects the linker through
+# `CARGO_TARGET_<TARGET>_LINKER`. The underscore spellings are valid identifiers
+# and are exported. The hyphenated spellings matter for cc-rs/ring too, but bash
+# cannot export a name containing '-' ("not a valid identifier", hosted run
+# 44115863192 failed on exactly that), so they are passed per cargo invocation
+# through env(1), which forwards them to the child environment verbatim.
+# Sets CC_TARGET_ENV for that purpose.
+cargo_env_for_abi() {
+	local triple="$1"
+	local underscore_triple="${triple//-/_}"
+	local upper_triple cc_bin
+	upper_triple="$(printf '%s' "$underscore_triple" | tr '[:lower:]' '[:upper:]')"
+	cc_bin="$NDK_TOOLCHAIN/${triple}${ANDROID_API_LEVEL}-clang"
+	export "CC_${underscore_triple}=$cc_bin"
+	export "AR_${underscore_triple}=$NDK_TOOLCHAIN/llvm-ar"
+	export "RANLIB_${underscore_triple}=$NDK_TOOLCHAIN/llvm-ranlib"
+	export "CARGO_TARGET_${upper_triple}_LINKER=$cc_bin"
+	CC_TARGET_ENV=(
+		"CC_${triple}=$cc_bin"
+		"AR_${triple}=$NDK_TOOLCHAIN/llvm-ar"
+		"RANLIB_${triple}=$NDK_TOOLCHAIN/llvm-ranlib"
+	)
+}
 
 for abi in "${ABI_LIST[@]}"; do
 	triple="${ABI_TRIPLE[$abi]}"
 	so_path="$ROOT_DIR/target/$triple/release/libcore_ffi_android.so"
 	rm -f "$so_path"
+	cargo_env_for_abi "$triple"
 	log "cargo build -p core-ffi-android --release --locked --target $triple"
-	cargo build -p core-ffi-android --release --locked --target "$triple"
+	env "${CC_TARGET_ENV[@]}" \
+		cargo build -p core-ffi-android --release --locked --target "$triple"
 	[[ -f "$so_path" ]] || die "cargo produced no library at $so_path"
 	log "  -> $so_path ($(sha256sum "$so_path" | cut -d' ' -f1))"
 done

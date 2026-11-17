@@ -502,10 +502,10 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 
 ### 10.1 保留的阻断与配置前置
 
-- **Android 构建供应链**：未新增忽略项或放宽门禁。拟修复的内部依赖约束仅在临时副本调研，没有应用到仓库；需要进一步验证 AGP/Gradle、JNI、APK/AAB 和签名工具兼容性。构建工具图的漏洞不等于应用 APK 图有同样漏洞，但仍在既定检查范围内。
-- **托管 runner**：首轮已取得 Windows、macOS 和 Windows 包构建通过的证据，但 Linux Rust、Android 和 CI 配置检查仍失败，完整结果见 §10.2；不能以 Windows 本地通过代替其他平台。
+- **Android 构建供应链**：原始构建工具图的高危/严重发现通过 buildscript 依赖约束修复，不新增忽略项或放宽门禁；本地真实构建与扫描证据见 §10.3，托管 Linux 仍须复验。应用依赖锁保持不变。约束 AGP 内部依赖不是官方支持组合，后续 AGP/Gradle 更新必须重新验证并优先移除不再必要的约束。
+- **托管 runner**：第二轮已取得 Linux Rust、Windows、macOS 和 Windows 包构建通过的证据，Android 与 CI 配置仍有后续实现失败，见 §10.3；不能以部分平台通过替代完整同一提交验收。
 - **发布前置**：未配置生产签名或 `windows-release-stable` 环境。正式发布必须拒绝缺失配置。预检为读取草稿使用了 contents: write，但 API context 强制 GET-only；能否收窄 token 权限仍需托管验证。
-- **版本 PR 权限**：只读查询到仓库尚未允许 Actions 创建/批准 PR，且无发布环境；本轮未修改这些设置。release-please 的 XML 更新已用真实 updater 做本地验证，但仍有可忽略的缺省 version.txt 警告，未新增第二版本源。
+- **版本 PR 权限**：前两轮因仓库禁止 Actions 创建 PR 而失败。后经用户明确同意开启 create/approve PR 开关，并回读确认默认 token 权限仍为 read；工作流不自动批准、合并或发布。生产签名/发布环境未配置。release-please 的 XML 更新已用真实 updater 做本地验证，缺省 version.txt 警告未通过新增第二版本源来消除。
 - **已有工具告警**：stable rustfmt 对 nightly-only 配置发出警告；WiX 有既有 ICE/双用途 MSI 告警。它们不被描述为零告警构建，也不作为安装/升级行为的证明。
 - **格式改动范围**：恢复格式门禁使约 90 个 C# 文件产生 BOM/行尾/using/style 调整；核心业务修改集中于数据根注入、原生加载验证及对应测试，需与格式变更分开审阅。
 
@@ -540,7 +540,39 @@ pwsh -NoProfile -File scripts/ci/rust.ps1 -OutDir dist/ci-review/rust
 
 本地 actionlint 若未安装 ShellCheck，会少一层检查；再次本地复现时须把 ShellCheck 放到 PATH（本轮使用官方 SHA256 校验的 0.11.0 便携版），不能将 `-shellcheck=` 的结果称为完整托管检查。
 
-随 push 触发的 [release-please 44107130209](https://github.com/RyanZhou416/ClipBridge/actions/runs/44107130209) 已更新其版本准备分支，但创建 PR 被仓库权限拒绝：`GitHub Actions is not permitted to create or approve pull requests`。本轮不修改仓库权限，不触发手动 Windows 发布。
+随 push 触发的 [release-please 44107130209](https://github.com/RyanZhou416/ClipBridge/actions/runs/44107130209) 已更新其版本准备分支，但创建 PR 被仓库权限拒绝：`GitHub Actions is not permitted to create or approve pull requests`。首轮未修改仓库权限、未触发手动 Windows 发布；后续授权变化见 §10.1。
+
+### 10.3 第二轮托管结果与后续修复
+
+[`38b8872`](https://github.com/RyanZhou416/ClipBridge/commit/38b8872bd32d101c7d10b9454c71a4734bc30c7a) 的 [运行 44115863192](https://github.com/RyanZhou416/ClipBridge/actions/runs/44115863192) 仍为 **failure**，但上轮三个直接修复已生效：Rust 全入口通过，ShellCheck 通过，Android SDK 安装通过；Windows、macOS、三种 Windows 包继续通过。
+
+继续执行后暴露的实现问题及修复：
+
+- **Android 交叉编译环境**：Bash 不接受 `export CC_aarch64-linux-android=...` 这类带连字符的标识符。保留合法下划线变量与 Cargo linker 变量，带连字符的 cc-rs 变量经 `env` 传给 cargo；新增真实 shell 子进程回归，覆盖两种 ABI，而非仅做 `bash -n`。
+- **Linux 测试临时目录**：发布夹具依赖 Windows 的 TEMP 环境变量，且一项路径越界负例使用 Windows 分隔符。改用已有跨平台临时目录辅助函数与 Path.Combine，补充临时环境变量全部缺失的子进程回归。父审查复跑 model 125、API 29、candidate 8、workflow 16 项及打包 47 项通过；生产发布策略未因此修改。
+- 这些失败体现的是实现与验收覆盖不足，不是允许跳过平台检查的理由。第二轮 Android 在首次 cargo 之前退出，尚不能用它声称 Android 构建或依赖门禁已通过。
+
+Android 构建工具依赖另外采用以下受控安全修复，保持 AGP 8.13.2 / Gradle 8.13 / JDK 21 与 SDK pins：
+
+| buildscript 依赖 | 固定修复版本 |
+|---|---|
+| Guava（JRE） | 33.7.2-jre |
+| Netty 已解析模块统一版本 | 4.1.137.Final |
+| BouncyCastle bcprov / bcpkix / bcutil | 1.85 |
+| jdom2 | 2.0.6.1 |
+| jose4j | 0.9.6 |
+
+使用 Gradle dependency constraints，而非 force 或漏洞忽略。checker-qual 保持基线 3.43.0，避免新依赖图将其降级；Guava 伴随依赖按真实解析结果锁定。仅调整 [构建脚本](<../platforms/android/ClipBridgeShellAndroid/build.gradle.kts>) 和 [buildscript 锁文件](<../platforms/android/ClipBridgeShellAndroid/buildscript-gradle.lockfile>)；[应用锁文件](<../platforms/android/ClipBridgeShellAndroid/app/gradle.lockfile>) 字节不变。
+
+本地证据：
+
+- OSV-Scanner 2.7.1 实际扫描覆盖 128/128 个构建包，父审查用当前策略与锁文件独立重算：**0 high / critical / unknown，剩余 2 条 medium（commons-compress 1.21）**；这不是“零漏洞”，也不是下调严重度门槛。
+- buildscript 锁 SHA256：`3243fc09203b83a6d34c7e00be1d8b69dddbbeca48d2685b6f643e038e6707c1`；应用锁仍为 `1a56ebf52f95a50e279ad861df9e1506501fb807e0bf2ff0593f809c29af4ee4`。
+- Windows 主机上真实执行 help/tasks/buildEnvironment/signingReport、debug/release APK、release AAB、testDebugUnitTest、assembleDebugAndroidTest 均 exit 0；双 ABI Rust SO、AIDL 与 CMake/JNI 构建通过。任务 exit 0 不替代测试数量或真机运行证明。
+- debug APK 的 apksigner 与 zipalign 检查通过；release APK 未签名是预期，不作为生产发行。父审查独立核对 debug APK 两种 ELF 架构及包内 Rust SO hash 与本次构建完全一致。
+- 这些构建使用本机 warm cache，不代表 Linux 冷构建或设备运行已验证。BouncyCastle 跨多个次版本且 AGP 内部图覆盖不获 Google 支持，保留实际签名工具验证；后续依赖更新必须再次验收。
+
+后续以新提交的 GitHub 全量结果继续验收，不用以上本地证据覆盖失败任务，不自动发布。
 
 ## 11. 参考与适用范围
 

@@ -87,6 +87,17 @@ else
 	fail "OSV policy + APK verifier fixtures"
 fi
 
+# Regression for hosted run 44115863192 (Android job 134153885061): the entry
+# used `export "CC_<hyphenated triple>=..."`, which bash rejects at runtime with
+# "not a valid identifier", so cargo never received the cc-rs/ring compiler
+# mapping for either ABI. The dedicated test imports the real env-setup function
+# and runs it with errexit active.
+if bash scripts/ci/android/tests/test_cargo_env.sh; then
+	pass "cargo compiler/linker env mapping for both Android ABIs"
+else
+	fail "cargo compiler/linker env mapping for both Android ABIs"
+fi
+
 # Regression for the generated-path deletion guard: import the real function
 # text from android.sh (no copy) with a non-exiting die stub.
 GUARD_DIR="$(mktemp -d)"

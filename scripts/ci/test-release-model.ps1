@@ -615,10 +615,49 @@ Test-Case 'safe relative paths' {
     Assert-True (-not (Test-SafeRelativePath 'a\\b'))
 }
 Test-Case 'Assert-PathUnderRoot accepts child and rejects escape' {
-    $root = Join-Path $env:TEMP 'cb-model-root'
-    $child = Join-Path $root 'a/b.txt'
-    $null = Assert-PathUnderRoot -Path $child -Root $root
-    Assert-Throws { Assert-PathUnderRoot -Path (Join-Path $root '..\evil.txt') -Root $root } 'escapes'
+    $root = New-ReleaseTempDirectory -Prefix 'cb-model-root'
+    try {
+        $child = [System.IO.Path]::Combine($root, 'a', 'b.txt')
+        $null = Assert-PathUnderRoot -Path $child -Root $root
+        $absolute = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), 'cb-model-absolute.txt'))
+        Assert-Throws { Assert-PathUnderRoot -Path $absolute -Root $root } 'escapes'
+        Assert-Throws { Assert-PathUnderRoot -Path ([System.IO.Path]::Combine($root, '..', 'evil.txt')) -Root $root } 'escapes'
+    }
+    finally {
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+Test-Case 'temp paths work when TEMP/TMP are unset' {
+    # Hosted Linux runners have no TEMP/TMP. Fixtures must use the portable
+    # runtime temp helper; a direct env lookup yields $null and breaks Join-Path.
+    foreach ($fixture in @('test-release-model.ps1', 'test-release-github-api.ps1', 'test-release-candidate.ps1', 'test-release-workflow.ps1')) {
+        $text = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot $fixture)
+        Assert-True (-not ($text -match '\$env:(TEMP|TMP|RUNNER_TEMP)\b')) "$fixture must use New-ReleaseTempDirectory instead of a Windows-only temp environment variable"
+    }
+    $probe = @'
+$ErrorActionPreference = 'Stop'
+Remove-Item Env:TEMP, Env:TMP, Env:RUNNER_TEMP -ErrorAction SilentlyContinue
+Import-Module '__MODEL__' -Force
+Import-Module '__RUNTIME__' -Force
+$root = New-ReleaseTempDirectory -Prefix 'cb-temp-probe'
+try {
+    if (-not [System.IO.Path]::IsPathRooted($root)) { throw "temp root is not an absolute path: $root" }
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "temp root was not created: $root" }
+    $null = Assert-PathUnderRoot -Path ([System.IO.Path]::Combine($root, 'child', 'b.txt')) -Root $root
+    $escaped = $false
+    try { $null = Assert-PathUnderRoot -Path ([System.IO.Path]::Combine($root, '..', 'evil.txt')) -Root $root }
+    catch { $escaped = $true }
+    if (-not $escaped) { throw 'parent traversal did not escape the allowed root' }
+}
+finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+Write-Output 'temp-probe-ok'
+'@
+    $probe = $probe.Replace('__MODEL__', (Join-Path $repo 'scripts/release/ReleaseModel.psm1').Replace("'", "''"))
+    $probe = $probe.Replace('__RUNTIME__', (Join-Path $repo 'scripts/release/ReleaseRuntime.psm1').Replace("'", "''"))
+    $output = & pwsh -NoProfile -Command $probe 2>&1
+    $exit = $LASTEXITCODE
+    Assert-Equal 0 $exit ("temp probe failed with exit code ${exit}: " + ($output -join ' | '))
+    Assert-True (($output -join "`n") -match 'temp-probe-ok') 'temp probe did not complete'
 }
 Test-Case 'latest decision' {
     Assert-Equal 'true' (Get-PublishLatestMode -CurrentStableLatestVersion $null -NewVersion '0.1.0')

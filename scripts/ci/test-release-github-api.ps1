@@ -8,6 +8,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Import-Module (Join-Path $repo 'scripts/release/GitHubReleaseApi.psm1') -Force
+Import-Module (Join-Path $repo 'scripts/release/ReleaseRuntime.psm1') -Force
+$script:FixtureTemp = New-ReleaseTempDirectory -Prefix 'cb-api-test'
 
 $script:Total = 0
 $script:Failed = 0
@@ -106,7 +108,7 @@ Test-Case 'artifact record is fetched by exact id' {
 Test-Case 'artifact zip download writes bytes' {
     $bytes = [byte[]](1, 2, 3, 4)
     $m = New-MockState { param($r) [pscustomobject]@{ StatusCode = 200; Bytes = $bytes } }
-    $out = Join-Path $env:TEMP ('cb-api-' + [guid]::NewGuid().ToString('N') + '.zip')
+    $out = Join-Path $script:FixtureTemp ('cb-api-' + [guid]::NewGuid().ToString('N') + '.zip')
     try {
         $null = Save-GitHubArtifactZip -Context $m.Context -ArtifactId 9 -OutFile $out
         Assert-True (Test-Path $out)
@@ -177,7 +179,7 @@ Test-Case 'release update rejects invalid make_latest' {
     Assert-Throws { Update-GitHubRelease -Context $m.Context -ReleaseId 7 -Update ([ordered]@{ make_latest = 'yes' }) } 'make_latest'
 }
 Test-Case 'asset upload uses exact name query and InFile' {
-    $tmp = Join-Path $env:TEMP ('cb-asset-' + [guid]::NewGuid().ToString('N'))
+    $tmp = Join-Path $script:FixtureTemp ('cb-asset-' + [guid]::NewGuid().ToString('N'))
     Set-Content -Path $tmp -Value 'payload' -NoNewline
     try {
         $m = New-MockState { param($r) New-JsonResponse @{ id = 11; name = 'ClipBridge-0.1.0-win-x64-machine.msi'; size = 7; digest = ('sha256:' + ('a' * 64)) } }
@@ -192,13 +194,13 @@ Test-Case 'asset upload uses exact name query and InFile' {
 }
 Test-Case 'asset upload rejects unsafe names and missing files' {
     $m = New-MockState { param($r) New-JsonResponse @{ id = 11 } }
-    Assert-Throws { Publish-GitHubReleaseAsset -Context $m.Context -ReleaseId 7 -Name '..\evil.exe' -InFile (Join-Path $env:TEMP 'nope') } 'invalid'
-    Assert-Throws { Publish-GitHubReleaseAsset -Context $m.Context -ReleaseId 7 -Name 'ok.msi' -InFile (Join-Path $env:TEMP 'nope') } 'does not exist'
+    Assert-Throws { Publish-GitHubReleaseAsset -Context $m.Context -ReleaseId 7 -Name '..\evil.exe' -InFile (Join-Path $script:FixtureTemp 'nope') } 'invalid'
+    Assert-Throws { Publish-GitHubReleaseAsset -Context $m.Context -ReleaseId 7 -Name 'ok.msi' -InFile (Join-Path $script:FixtureTemp 'nope') } 'does not exist'
 }
 Test-Case 'release asset download writes bytes' {
     $bytes = [byte[]](9, 8, 7)
     $m = New-MockState { param($r) [pscustomobject]@{ StatusCode = 200; Bytes = $bytes } }
-    $out = Join-Path $env:TEMP ('cb-download-' + [guid]::NewGuid().ToString('N'))
+    $out = Join-Path $script:FixtureTemp ('cb-download-' + [guid]::NewGuid().ToString('N'))
     try {
         $null = Save-GitHubReleaseAsset -Context $m.Context -AssetId 11 -OutFile $out
         Assert-Equal 3 (Get-Item $out).Length
@@ -259,6 +261,7 @@ Test-Case 'ReadOnly context refuses upload and draft creation helpers' {
     Assert-Throws { Update-GitHubRelease -Context $ctx -ReleaseId 1 -Update @{ draft = $false } } 'ReadOnly'
     Assert-Equal 0 $state.Calls
 }
+if (Test-Path -LiteralPath $script:FixtureTemp) { Remove-Item -LiteralPath $script:FixtureTemp -Recurse -Force -ErrorAction SilentlyContinue }
 Write-Host ''
 Write-Host "$($script:Total - $script:Failed)/$($script:Total) GitHub API mock tests passed."
 if ($script:Failed -gt 0) {

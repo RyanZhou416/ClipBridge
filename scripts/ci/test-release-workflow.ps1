@@ -7,6 +7,8 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+Import-Module (Join-Path $repo 'scripts/release/ReleaseRuntime.psm1') -Force
+$script:FixtureTemp = New-ReleaseTempDirectory -Prefix 'cb-workflow-test'
 $releaseWorkflow = Join-Path $repo '.github/workflows/release-windows.yml'
 $releasePleaseWorkflow = Join-Path $repo '.github/workflows/release-please.yml'
 $releasePleaseConfig = Join-Path $repo 'release-please-config.json'
@@ -46,7 +48,7 @@ if True in d:
 d['on'] = on
 print(json.dumps(d, ensure_ascii=False))
 '@
-    $py = Join-Path $env:TEMP ('cb-yaml-' + [guid]::NewGuid().ToString('N') + '.py')
+    $py = Join-Path $script:FixtureTemp ('cb-yaml-' + [guid]::NewGuid().ToString('N') + '.py')
     try {
         Set-Content -Path $py -Value $script -Encoding utf8
         $json = & python $py $Path 2>$null
@@ -261,6 +263,7 @@ Test-Case 'release workflow does not interpolate dispatch inputs into shell sour
     Assert-True (-not ($releaseText -match '\$\{\{\s*inputs\.'))
     Assert-True (-not ($releaseText -match '\$\{\{\s*github\.event\.inputs'))
 }
+if (Test-Path -LiteralPath $script:FixtureTemp) { Remove-Item -LiteralPath $script:FixtureTemp -Recurse -Force -ErrorAction SilentlyContinue }
 
 Write-Host ''
 if ($null -eq $releaseDoc) { Write-Host 'note: PyYAML not available; structural YAML checks used text invariants only.' }
