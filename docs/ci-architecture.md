@@ -1,6 +1,6 @@
 # ClipBridge 持续集成架构与验收规范
 
-- 状态：主体实现已提交，首轮 GitHub 全量验证已执行但未通过，正在修复实跑暴露的问题。实际证据与剩余阻断见 §10；部分平台通过不等于全量验收完成。
+- 状态：日常 CI 已在提交 `96aa612` 完成 GitHub 全量验证，8 个 job 全部成功，release-please 同次提交也成功；证据见 §10.4。此结论不等于生产签名、正式发布、真实安装或移动端运行已经验收。
 - 更新日期：2026-11-17。
 - 适用范围：Rust 核心、共享 C ABI、Windows、Android、macOS 的日常验证，以及机器级 MSI、用户级 EXE、便携 ZIP 的 GitHub 打包验证。
 - 现状核对基线：提交 `bbfeb45`。
@@ -502,8 +502,8 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 
 ### 10.1 保留的阻断与配置前置
 
-- **Android 构建供应链**：原始构建工具图的高危/严重发现通过 buildscript 依赖约束修复，不新增忽略项或放宽门禁；本地真实构建与扫描证据见 §10.3，托管 Linux 仍须复验。应用依赖锁保持不变。约束 AGP 内部依赖不是官方支持组合，后续 AGP/Gradle 更新必须重新验证并优先移除不再必要的约束。
-- **托管 runner**：第二轮已取得 Linux Rust、Windows、macOS 和 Windows 包构建通过的证据，Android 与 CI 配置仍有后续实现失败，见 §10.3；不能以部分平台通过替代完整同一提交验收。
+- **Android 构建供应链**：原始构建工具图的高危/严重发现通过 buildscript 依赖约束修复，不新增忽略项或放宽门禁；本地证据见 §10.3，托管 Linux 构建及扫描也已在 §10.4 通过。应用依赖锁保持不变。仍有 2 条中危发现；约束 AGP 内部依赖不是官方支持组合，后续 AGP/Gradle 更新必须重新验证并优先移除不再必要的约束。
+- **托管 runner**：第三轮同一提交全量通过，见 §10.4。fork PR、取消/重跑等其他事件场景和故障注入清单应按实际证据分别验收，不从一次 main push 成功推断所有场景已覆盖。
 - **发布前置**：未配置生产签名或 `windows-release-stable` 环境。正式发布必须拒绝缺失配置。预检为读取草稿使用了 contents: write，但 API context 强制 GET-only；能否收窄 token 权限仍需托管验证。
 - **版本 PR 权限**：前两轮因仓库禁止 Actions 创建 PR 而失败。后经用户明确同意开启 create/approve PR 开关，并回读确认默认 token 权限仍为 read；工作流不自动批准、合并或发布。生产签名/发布环境未配置。release-please 的 XML 更新已用真实 updater 做本地验证，缺省 version.txt 警告未通过新增第二版本源来消除。
 - **已有工具告警**：stable rustfmt 对 nightly-only 配置发出警告；WiX 有既有 ICE/双用途 MSI 告警。它们不被描述为零告警构建，也不作为安装/升级行为的证明。
@@ -573,6 +573,27 @@ Android 构建工具依赖另外采用以下受控安全修复，保持 AGP 8.13
 - 这些构建使用本机 warm cache，不代表 Linux 冷构建或设备运行已验证。BouncyCastle 跨多个次版本且 AGP 内部图覆盖不获 Google 支持，保留实际签名工具验证；后续依赖更新必须再次验收。
 
 后续以新提交的 GitHub 全量结果继续验收，不用以上本地证据覆盖失败任务，不自动发布。
+
+### 10.4 第三轮同一提交全量通过
+
+- 验证提交：[`96aa612eef3fafa2f83d446670ae08946c31190c`](https://github.com/RyanZhou416/ClipBridge/commit/96aa612eef3fafa2f83d446670ae08946c31190c)。
+- [CI 44121503303](https://github.com/RyanZhou416/ClipBridge/actions/runs/44121503303)：push 触发，全量范围，**8/8 job success，没有通过跳过必跑任务取得绿灯**。
+- [release-please 44121503043](https://github.com/RyanZhou416/ClipBridge/actions/runs/44121503043)：success；已创建 [版本 PR #1](https://github.com/RyanZhou416/ClipBridge/pull/1)，未由代理批准或合并，未触发正式发布。
+
+父审查已下载并核对本次托管报告：
+
+| 任务 | 实际结果与范围 |
+|---|---|
+| changes / ci-config / ci-result | 分类、工作流与契约检查、最终汇总全部成功 |
+| rust | fmt、Clippy、FFI surface、cargo-deny 全部 exit 0；Linux 210 项执行通过，18 项既有测试 ignored，0 failed / filtered；ignored 不计作通过 |
+| windows | 84 项发现并执行，84 passed、0 failed / skipped / inconclusive；必需套件全部执行，格式及 NuGet 门禁通过 |
+| android | 双 ABI Rust + JNI + debug APK 构建及包内 hash/ELF 验证通过；应用依赖 66/66 扫描、无发现；构建依赖 128/128 扫描、0 blocking、2 medium，无缺失扫描包 |
+| macos | 真实 arm64 Xcode 应用构建、嵌入和 dlopen 通过，FFI=1.0；应用测试产物已上传 |
+| windows-packages | 三种所选格式全部生成并上传；内部 user MSI 保持内部角色；None/unsigned/trusted=false/timestamped=false，不能当作正式签名发行 |
+
+普通 CI 打包在独立 job 中重新构建原生库，因此报告 `sourceReusedVerified=false`；这不是复用已测试 DLL 的发布证明。手动发布仍须执行自己的 Windows 验证、精确 DLL 复用、候选绑定、生产签名及审批契约，本轮没有触发该工作流。
+
+Android 通知栏手动发送尚未实现/真机验收，应用运行、真实安装/升级/卸载、正式发行与厂商渠道的既有边界不因 CI 全绿而改变。后续纯文档提交若只运行 affected 检查，应继续引用本节固定 SHA 的全量证据，不宣称文档运行重做了全平台构建。
 
 ## 11. 参考与适用范围
 
