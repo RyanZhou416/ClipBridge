@@ -1,6 +1,6 @@
 # ClipBridge 持续集成架构与验收规范
 
-- 状态：日常 CI 已在提交 `96aa612` 完成 GitHub 全量验证，8 个 job 全部成功，release-please 同次提交也成功；证据见 §10.4。此结论不等于生产签名、正式发布、真实安装或移动端运行已经验收。
+- 状态：日常 CI 已在提交 `96aa612` 完成 GitHub 全量验证，8 个 job 全部成功，证据见 §10.4。历史版本机器人已按最新决定移除，CI 不创建分支/PR，见 §10.6。CI 成功不等于生产签名、正式发布、真实安装或移动端运行已经验收。
 - 更新日期：2026-11-17。
 - 适用范围：Rust 核心、共享 C ABI、Windows、Android、macOS 的日常验证，以及机器级 MSI、用户级 EXE、便携 ZIP 的 GitHub 打包验证。
 - 现状核对基线：提交 `bbfeb45`。
@@ -70,7 +70,7 @@
 | Android | 两种 ABI 的 Rust SO、APK 构建和包内容检查 | 触发规则漏掉部分公共构建输入；没有实际设备运行保证 |
 | macOS | SwiftPM 编译检查、真实 Xcode 工程和原生构建脚本均存在 | CI 仅构建 SwiftPM 桩；[Xcode 嵌入阶段](<../platforms/macos/ClipBridgeShell_macOS/ClipBridge/ClipBridge.xcodeproj/project.pbxproj#L235-L252>) 在缺少 dylib 时可返回成功 |
 | Windows 打包 | 各渠道本地脚本已实现；现有 job 还调用 winget 清单生成/校验 | 目标 GitHub 范围收窄为 MSI/EXE/ZIP：需移除 winget 步骤，不接入 MSIX；修正打包输入过滤，并补齐 [CI 制品上传](<../.github/workflows/ci.yml>) 缺失的便携 ZIP |
-| 发布 | 基线已有 [版本自动化](<../.github/workflows/release-please.yml>) 与旧全 tag 发布入口 | 旧入口使用过期 SDK、构建方式和 tag 前缀；本次由 [手动发布工作流](<../.github/workflows/release-windows.yml>) 替代，仍须验收 |
+| 发布 | 基线已有 [旧版本自动化](https://github.com/RyanZhou416/ClipBridge/blob/bbfeb4519aa7b98c31accb8cf7c56d5fb4b72115/.github/workflows/release-please.yml) 与旧全 tag 发布入口 | 旧入口已移除；本次由 [手动发布工作流](<../.github/workflows/release-windows.yml>) 承担发行，版本改为人工直推，仍须真实发布验收 |
 
 目标实施时保留有效检查，并解决这些缺口；不以删除检查、接受降级或长期设置 `continue-on-error` 换取成功状态。
 
@@ -391,19 +391,20 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 - macOS 首期外部共享依赖由 Rust 检查覆盖，Apple SDK 由工具链更新政策管理；未来引入 SwiftPM/CocoaPods 外部库时必须在同一变更中补锁定与扫描责任，不能宣称未配置的生态已被覆盖。
 - 首期 Rust 之外尚不承诺完整的自动许可证合规审计；漏洞扫描和来源固定也不等同于完整软件供应链审计。
 
-## 8. 版本自动化与手动发布边界
+## 8. 版本管理与手动发布边界
 
-### 8.1 版本自动化
+### 8.1 main 直推与人工版本管理
 
-保留版本建议与变更日志职责，但公开发行只由人工手动入口授权，实施时需同步收敛 [release-please 配置](<../release-please-config.json>) 与 [版本工作流](<../.github/workflows/release-please.yml>)：
+版本和变更日志由维护者明确修改后直接提交 main，公开发行仍只由独立手动入口授权：
 
-- 日常开发直接提交并推送 main，不要求 PR；普通 push 只触发 CI，不自动创建版本 PR，也不自动改版本。release-please 仅由维护者在 main 上手动触发（workflow_dispatch），用于可选的版本/变更日志建议；不自动批准、合并，维护者也可以直接提交版本修改。
-- 版本源必须真正被更新，不能只修改一个不存在的默认版本文件；任何版本提升都须明确决定，不因清理分支而隐式合入自动版本建议。
-- 版本自动化仅准备版本/变更日志变更，不自动创建 Release/tag 或触发打包发布。若保留 release-please，显式使用 `skip-github-release: true` 停止 release 及关联 tag 创建，不另行补打 Windows tag。`clipbridge-windows-*` 的自动创建权只属于手动发布入口，验收必须验证合并版本变更不会生成这些 tag。
+- 日常开发直接提交并推送 main，不要求 PR；普通 push 只触发只读 CI，不创建版本分支或 PR，也不自动改版本。
+- release-please 工作流、配置与生成清单全部移除，不保留手动入口。当前只保留日常 CI 与手动 Windows 发布两条工作流；不能在其中另装机器人恢复分支/PR 创建。
+- 版本源必须真正更新：Windows 使用现有 [Version.props](<../platforms/windows/ClipBridgeShell_CS/Version.props>)，Rust 使用对应 Cargo package version；变更时保持相关锁定信息一致。不新增生成版本清单，不因清理旧分支而隐式采纳 0.2.0 建议。
+- `clipbridge-windows-*` tag 的自动创建权只属于手动发布入口。该入口可以按授权创建发布 tag/Release，但不能创建任何 heads 分支或 PR；普通 push/版本修改不生成发布 tag。
 - 手动发布核对所选提交、版本源与 `clipbridge-windows-<version>` tag 一致，不在构建中偷偷修改版本文件。
 - 不依赖 `GITHUB_TOKEN` 创建 tag/release 再触发另一流水线；采用一个 `workflow_dispatch` 入口完成所需动作，不为递归触发预先要求长期 PAT。
-- 机器人 PR 创建权限和分支保护独立确认，不因设计文档自动改变。
-- 旧全 tag 发布入口已在本次工作区重构中移除，由单一 [手动 Windows 发布工作流](<../.github/workflows/release-windows.yml>) 替代；实现存在不代表已部署或完成真实发布验收。
+- Actions 默认 token 权限保持 read，普通 CI 不申请写权限；已撤回为旧版本机器人开启的 create/approve PR 开关。手动发布的最小写权限只用于其发布任务，不作为分支自动化入口。
+- 旧全 tag 发布和 release-please 入口均已移除，由单一 [手动 Windows 发布工作流](<../.github/workflows/release-windows.yml>) 承担发行；日常 CI 成功不代表真实发布验收完成。
 
 ### 8.2 人工选择、自动构建与发布
 
@@ -506,7 +507,7 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 - **Android 构建供应链**：原始构建工具图的高危/严重发现通过 buildscript 依赖约束修复，不新增忽略项或放宽门禁；本地证据见 §10.3，托管 Linux 构建及扫描也已在 §10.4 通过。应用依赖锁保持不变。仍有 2 条中危发现；约束 AGP 内部依赖不是官方支持组合，后续 AGP/Gradle 更新必须重新验证并优先移除不再必要的约束。
 - **托管 runner**：第三轮同一提交全量通过，见 §10.4。fork PR、取消/重跑等其他事件场景和故障注入清单应按实际证据分别验收，不从一次 main push 成功推断所有场景已覆盖。
 - **发布前置**：未配置生产签名或 `windows-release-stable` 环境。正式发布必须拒绝缺失配置。预检为读取草稿使用了 contents: write，但 API context 强制 GET-only；能否收窄 token 权限仍需托管验证。
-- **版本 PR 权限**：前两轮因仓库禁止 Actions 创建 PR 而失败。后经用户明确同意开启 create/approve PR 开关，并回读确认默认 token 权限仍为 read；工作流不自动批准、合并或发布。生产签名/发布环境未配置。release-please 的 XML 更新已用真实 updater 做本地验证，缺省 version.txt 警告未通过新增第二版本源来消除。
+- **版本 PR 权限（历史与当前）**：前两轮曾因仓库禁止 Actions 创建 PR 而失败，经用户授权短暂开启用于验证。最新决定移除版本机器人，因此该 create/approve PR 开关已撤回；默认 token 权限仍为 read。当前不再保留 release-please 的 XML updater 或生成清单，Windows 仍以 Version.props 为唯一版本源；生产签名/发布环境未配置。
 - **已有工具告警**：stable rustfmt 对 nightly-only 配置发出警告；WiX 有既有 ICE/双用途 MSI 告警。它们不被描述为零告警构建，也不作为安装/升级行为的证明。
 - **格式改动范围**：恢复格式门禁使约 90 个 C# 文件产生 BOM/行尾/using/style 调整；核心业务修改集中于数据根注入、原生加载验证及对应测试，需与格式变更分开审阅。
 
@@ -598,12 +599,24 @@ Android 通知栏手动发送尚未实现/真机验收，应用运行、真实�
 
 ### 10.5 main 直推与旧分支处置（2026-11-17）
 
-- 日常代码直接推送 main，CI 负责提交后的验证，不新增必须经过 PR 的要求。release-please 从 push 改为仅在 main 手动触发；普通提交不再自动创建版本 PR，不用“自动合并 PR”来模拟直推。
-- 自动版本分支 `release-please--branches--main` 只准备三个组件 0.1.0 → 0.2.0 与变更日志，不是待合入的功能代码。维护者明确选择保持 0.1.0、关闭 PR #1，不合入版本建议；分支不在本次删除。
+- 首次处置时将 release-please 从 push 改为仅在 main 手动触发（提交 `fa1a752`），其 [CI 44144903981](https://github.com/RyanZhou416/ClipBridge/actions/runs/44144903981) 已全量通过，且该 push 未启动版本辅助。此为过渡状态；最新决定是连手动入口一并移除，见 §10.6。
+- 自动版本分支 `release-please--branches--main` 只准备三个组件 0.1.0 → 0.2.0 与变更日志，不是待合入的功能代码。维护者明确选择保持 0.1.0、关闭 PR #1，不合入版本建议；当时暂留分支，后续按明确授权删除，见 §10.6。
 - 旧开发分支 `ClipBridgeShell_CS` 的 tip 为 `77b99a0`，共同基点 `6e8aaeb`；本次核对时 main 领先 229 个提交，旧分支仅 1 个独有提交。其标题虽为目录树更新，实际改动 13 个路径，包含早期语言切换原型。
 - 该分支引用未提交的 ILocalizationService/LocalizationService，SettingsViewModel 的主题命令也未完成初始化。main 的语言热切换已由 [`5955b89`](https://github.com/RyanZhou416/ClipBridge/commit/5955b898c835a8439dce355453a6ba01a126a290) 等后续提交实现；现有 [SettingsViewModel](<../platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/ViewModels/SettingsViewModel.cs#L379-L416>) 使用 WinUI3Localizer 并保存语言选择，不需要旧分支的刷新页面接口。
-- merge-tree 只读评估显示 11 处冲突；旧接口自动合并还会引入当前实现未实现的成员。目录树文件已被 main 删除，其他非功能格式/注释改动不值得恢复。因此未执行无意义的冲突合并，也不以 ours-only 合并伪称吸收了功能；保留旧分支供历史查阅，后续删除须另行授权。
+- merge-tree 只读评估显示 11 处冲突；旧接口自动合并还会引入当前实现未实现的成员。目录树文件已被 main 删除，其他非功能格式/注释改动不值得恢复。因此未执行无意义的冲突合并，也不以 ours-only 合并伪称吸收了功能；首次暂留分支，随后按维护者明确指令删除，见 §10.6。
 - 分支处置不修改版本、Cargo.lock、发布标签或 Release；正式发布仍只由独立手动入口授权。
+
+### 10.6 移除分支创建自动化并清理旧分支（2026-11-17）
+
+维护者进一步明确：CI 不得创建分支，release-please 的手动辅助也不保留。执行结果：
+
+- GitHub 上的旧 release-please 注册工作流先禁用；仓库中的工作流、配置、生成版本清单全部删除。默认 token 仍只读，Actions create/approve PR 开关撤回。
+- 当前工作流清单只允许日常 CI 和手动 Windows 发布。契约测试验证没有版本机器人、PR 写权限或创建分支/PR 的命令；保留手动发布 tag/Release 的既有权限边界，不误删发行能力。
+- 删除前再次核对：版本分支 tip 仍为 `57500742bc6240841871c1e54c4bb9d84ca84bc4`，无额外新提交；旧 Windows 分支仍为 `77b99a03a416590cabf081e8a543f9d956c6ccf8`。以精确 tip 的 lease 保护远端删除，避免覆盖并发新增工作。
+- 两个远端分支 `release-please--branches--main`、`ClipBridgeShell_CS` 已删除；本地旧 Windows 分支及相应 remote-tracking refs 也已清除。当前只剩 main（origin/HEAD 是 main 的符号引用，不是额外开发分支）。
+- PR #1 保持 closed/unmerged，版本仍为 0.1.0，未改 package version/锁文件、未合入过期代码、未创建 tag/Release。删除的是分支引用，没有重写 main 历史。
+
+今后版本和变更日志由维护者直接提交 main；新功能开发也直接推 main，不用 CI 创建临时分支或通过自动合并 PR 绕行。
 
 ## 11. 参考与适用范围
 
@@ -615,7 +628,6 @@ Android 通知栏手动发送尚未实现/真机验收，应用运行、真实�
 - [GitHub：复用工作流配置](https://docs.github.com/en/actions/concepts/workflows-and-actions/avoiding-duplication)：步骤复用与 job 复用的不同边界。
 - [GitHub：required checks 与跳过行为](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/collaborating-on-repositories-with-code-quality-features/troubleshooting-required-status-checks)：整个 workflow 跳过、条件 job 跳过和上游失败的不同结果。
 - [GitHub：安全使用 Actions](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions)：最小权限、秘密管理、不可信代码和第三方 Actions 的风险。
-- [release-please outputs 与资产上传](https://github.com/googleapis/release-please-action#outputs)：同一次运行可以基于组件 outputs 继续处理，无需假设 tag 自动触发另一流水线。
 - [Microsoft：WinUI 持续集成](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/ci-for-winui3)：MSIX/StoreUpload 构建与提交商店是不同操作。
 - [GitHub 托管镜像及架构标签](https://github.com/actions/runner-images)、[macOS 15 arm64 工具清单](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md)：支持矩阵的 runner/Xcode 选择依据；镜像仍需在实际运行中预检。
 - [OSV-Scanner 支持的锁文件](https://google.github.io/osv-scanner/supported-languages-and-lockfiles/)：Gradle 扫描依赖已解析的锁定输入，不能用版本目录代替完整依赖图。

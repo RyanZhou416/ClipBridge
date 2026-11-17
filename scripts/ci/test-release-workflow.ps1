@@ -1,17 +1,32 @@
 <#
 .SYNOPSIS
-    Static contract tests for the manual release workflow, release-please config
-    and the removed old tag-triggered publish workflow. The YAML structure is
-    parsed when PyYAML is available; text invariants run regardless.
+    Static contract tests for the manual-only release workflow and the
+    two-workflow CI surface. The YAML structure is parsed when PyYAML is
+    available; text invariants run regardless.
+
+.DESCRIPTION
+    Regression contract for the removal of release-please/version-PR
+    automation:
+      - exactly two workflows: ci.yml and release-windows.yml
+      - no release-please workflow, config, manifest or action reference
+      - no workflow may request pull-requests: write or run commands that
+        create branches/PRs or bypass the release entry with direct git mutations
+      - normal CI stays contents: read and cannot publish
+      - only the manual workflow may publish, and only via workflow_dispatch
+      - the Windows version remains the single Version.props XML truth
+    The manual release approval/nonce/hash/pinning safety contracts are kept.
 #>
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Import-Module (Join-Path $repo 'scripts/release/ReleaseRuntime.psm1') -Force
 $script:FixtureTemp = New-ReleaseTempDirectory -Prefix 'cb-workflow-test'
-$releaseWorkflow = Join-Path $repo '.github/workflows/release-windows.yml'
-$releasePleaseWorkflow = Join-Path $repo '.github/workflows/release-please.yml'
+$workflowDir = Join-Path $repo '.github/workflows'
+$ciWorkflow = Join-Path $workflowDir 'ci.yml'
+$releaseWorkflow = Join-Path $workflowDir 'release-windows.yml'
+$releasePleaseWorkflow = Join-Path $workflowDir 'release-please.yml'
 $releasePleaseConfig = Join-Path $repo 'release-please-config.json'
+$releasePleaseManifest = Join-Path $repo 'release-please-manifest.json'
 
 $script:Total = 0
 $script:Failed = 0
@@ -58,12 +73,90 @@ print(json.dumps(d, ensure_ascii=False))
     finally { if (Test-Path $py) { Remove-Item $py -Force } }
 }
 
-$releaseDoc = Get-YamlDocument -Path $releaseWorkflow
-$releasePleaseDoc = Get-YamlDocument -Path $releasePleaseWorkflow
-$releaseText = Get-Content -Raw $releaseWorkflow
-$releasePleaseText = Get-Content -Raw $releasePleaseWorkflow
-$config = Get-Content -Raw $releasePleaseConfig | ConvertFrom-Json
+$workflowFiles = @(
+    Get-ChildItem -LiteralPath $workflowDir -File |
+        Where-Object { $_.Extension -in @('.yml', '.yaml') } |
+        Sort-Object Name
+)
+$workflowTexts = @{}
+foreach ($file in $workflowFiles) { $workflowTexts[$file.Name] = Get-Content -Raw -LiteralPath $file.FullName }
 
+$releaseDoc = Get-YamlDocument -Path $releaseWorkflow
+$ciDoc = Get-YamlDocument -Path $ciWorkflow
+$releaseText = Get-Content -Raw $releaseWorkflow
+$ciText = Get-Content -Raw $ciWorkflow
+
+Test-Case 'workflow inventory is exactly ci.yml and release-windows.yml' {
+    $names = @($workflowFiles | ForEach-Object { $_.Name })
+    Assert-Equal 'ci.yml,release-windows.yml' ($names -join ',')
+    foreach ($legacy in @('publish.yml', 'publish.yaml', 'release-please.yml', 'release-please.yaml', 'release.yml')) {
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $workflowDir $legacy))) "obsolete workflow still present: $legacy"
+    }
+}
+Test-Case 'release-please automation and configuration are removed' {
+    foreach ($artifact in @($releasePleaseWorkflow, $releasePleaseConfig, $releasePleaseManifest)) {
+        Assert-True (-not (Test-Path -LiteralPath $artifact)) "release-please artifact must be removed: $artifact"
+    }
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $repo -File -Filter 'release-please*').Count 'root release-please files must be removed'
+    foreach ($entry in $workflowTexts.GetEnumerator()) {
+        Assert-True ($entry.Value -notmatch '(?i)release-please-(?:action|config|manifest)') "$($entry.Key) still references release-please automation"
+    }
+    Assert-True ($releaseText -notmatch '(?i)googleapis/release-please-action') 'release workflow must not invoke release-please'
+}
+Test-Case 'no workflow can request PR writes or create branches/PRs' {
+    $forbidden = [ordered]@{
+        'pull-requests: write'       = '(?im)^\s*pull-requests\s*:\s*write\s*$'
+        'pull_request_target'        = '(?i)pull_request_target'
+        'gh pr command'              = '(?i)\bgh\s+pr\b'
+        'create-pull-request action' = '(?i)create-pull-request'
+        'release-please action'      = '(?i)release-please-action'
+        'softprops action-gh-release' = '(?i)softprops/action-gh-release|action-gh-release'
+        'git branch/tag/push command' = '(?i)\bgit\s+(?:push|tag|branch|commit|update-ref|checkout\s+-b|switch\s+(?:-c|--create))\b'
+        'GitHub CreateRef'           = '(?i)\bCreateRef\b'
+        'git refs API'               = '(?i)git/refs\b'
+        'pulls API'                  = '(?i)(?:/pulls\b|"pulls"|merge_pull_request)'
+        'write-all permissions'      = '(?i)\bwrite-all\b'
+    }
+    foreach ($entry in $workflowTexts.GetEnumerator()) {
+        foreach ($rule in $forbidden.GetEnumerator()) {
+            Assert-True ($entry.Value -notmatch $rule.Value) "$($entry.Key) contains forbidden $($rule.Key)"
+        }
+    }
+}
+Test-Case 'normal CI is read-only and cannot publish' {
+    Assert-True ($null -ne $ciDoc)
+    Assert-Equal 'read' $ciDoc.permissions.contents 'ci.yml workflow permissions'
+    Assert-True (-not ($ciDoc.permissions.PSObject.Properties.Name -contains 'pull-requests')) 'ci.yml must not request pull-requests permission'
+    foreach ($job in $ciDoc.jobs.PSObject.Properties) {
+        $permissionsProperty = $job.Value.PSObject.Properties['permissions']
+        if ($null -eq $permissionsProperty) { continue }
+        foreach ($permission in $permissionsProperty.Value.PSObject.Properties) {
+            Assert-Equal 'read' $permission.Value "ci.yml job $($job.Name) permission $($permission.Name) must stay read-only"
+        }
+    }
+    $ciTriggers = @($ciDoc.on.PSObject.Properties.Name | Sort-Object)
+    Assert-Equal 'pull_request,push,workflow_dispatch' ($ciTriggers -join ',') 'ci.yml trigger set'
+    Assert-Equal 'main' (@($ciDoc.on.push.branches) -join ',') 'ci.yml push must only target main'
+    Assert-True (-not ($ciText -match '(?im)^\s*contents\s*:\s*write')) 'ci.yml must not request contents: write'
+    Assert-True (-not ($ciText -match '(?i)secrets\.')) 'normal CI must not consume release secrets'
+}
+Test-Case 'manual dispatch is the only publishing path' {
+    Assert-True ($null -ne $releaseDoc)
+    Assert-Equal 'workflow_dispatch' (@($releaseDoc.on.PSObject.Properties.Name) -join ',') 'release trigger must stay manual-only'
+    $writeWorkflows = @($workflowFiles | Where-Object { $workflowTexts[$_.Name] -match '(?im)^\s*contents\s*:\s*write' } | ForEach-Object { $_.Name })
+    Assert-Equal 'release-windows.yml' ($writeWorkflows -join ',') 'only the manual release workflow may write contents'
+    foreach ($entry in $workflowTexts.GetEnumerator()) {
+        $doc = Get-YamlDocument -Path (Join-Path $workflowDir $entry.Key)
+        if ($null -eq $doc) { continue }
+        $triggers = @($doc.on.PSObject.Properties.Name)
+        foreach ($prohibited in @('release', 'workflow_run', 'schedule')) {
+            Assert-True ($triggers -cnotcontains $prohibited) "$($entry.Key) must not trigger on $prohibited"
+        }
+        if ($triggers -ccontains 'push' -and $null -ne $doc.on.push) {
+            Assert-True (-not ($doc.on.push.PSObject.Properties.Name -contains 'tags')) "$($entry.Key) must not trigger on tags"
+        }
+    }
+}
 Test-Case 'release workflow is workflow_dispatch only' {
     if ($null -ne $releaseDoc) {
         $on = $releaseDoc.on
@@ -180,57 +273,24 @@ Test-Case 'all uses are pinned to full commit SHAs' {
     Assert-Equal 'GITHUB_TOKEN' (($tokenRefs) -join ',')
 }
 Test-Case 'old automatic tag publish entry is removed' {
-    Assert-True (-not (Test-Path (Join-Path $repo '.github/workflows/publish.yml')))
-    Assert-True (-not (Test-Path (Join-Path $repo '.github/workflows/publish.yml')))
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workflowDir 'publish.yml')))
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $workflowDir 'publish.yaml')))
 }
-Test-Case 'release-please is optional manual preparation on main, not a push-triggered PR' {
-    if ($null -ne $releasePleaseDoc) {
-        $keys = @($releasePleaseDoc.on.PSObject.Properties.Name)
-        Assert-Equal 'workflow_dispatch' ($keys -join ',')
-        Assert-Equal "github.ref == 'refs/heads/main'" $releasePleaseDoc.jobs.'release-please'.if
-    }
-    else {
-        Assert-True ($releasePleaseText -match '(?m)^on:\s*\r?\n\s+workflow_dispatch:')
-        Assert-True ($releasePleaseText -match "(?m)^\s+if:\s*github\.ref == 'refs/heads/main'\s*$")
-    }
-    Assert-True ($releasePleaseText -notmatch '(?m)^  (push|pull_request|pull_request_target|schedule|release|workflow_run|workflow_call):') 'normal pushes must not create version PRs'
-}
-Test-Case 'release-please cannot create releases or tags' {
-    Assert-True ($config.'skip-github-release' -eq $true)
-    if ($null -ne $releasePleaseDoc) {
-        $step = $releasePleaseDoc.jobs.'release-please'.steps[0]
-        Assert-True ($step.uses -match '@[0-9a-f]{40}$')
-        Assert-Equal 'true' ([string]$step.with.'skip-github-release').ToLowerInvariant()
-        Assert-Equal 'release-please-config.json' $step.with.'config-file'
-        Assert-Equal 'release-please-manifest.json' $step.with.'manifest-file'
-    }
-    else {
-        Assert-True ($releasePleaseText -match 'skip-github-release:\s*true')
-        Assert-True ($releasePleaseText -match 'release-please-config\.json')
-        Assert-True ($releasePleaseText -notmatch 'token:\s*\$\{\{\s*secrets\.')
-    }
-    Assert-True ($releasePleaseText -notmatch 'tag_name|createRelease|softprops|action-gh-release')
-}
-Test-Case 'release-please Windows XML extra-file path is package-relative and preserves one version truth' {
-    $package = $config.packages.'platforms/windows/ClipBridgeShell_CS'
-    Assert-True ($null -ne $package)
-    Assert-Equal 'simple' $package.'release-type'
-    Assert-Equal 'Version.props' $package.'extra-files'[0].path
-    Assert-Equal 'xml' $package.'extra-files'[0].type
-    Assert-True (-not ($package.PSObject.Properties.Name -contains 'version-file'))
-    Assert-True (-not (Test-Path (Join-Path $repo 'platforms/windows/ClipBridgeShell_CS/version.txt')))
-    Assert-True (-not (Test-Path (Join-Path $repo 'version.txt')))
-    $manifest = Get-Content -Raw (Join-Path $repo 'release-please-manifest.json') | ConvertFrom-Json
-    Assert-True ($null -ne $manifest.'platforms/windows/ClipBridgeShell_CS')
-}
-Test-Case 'release-please XML xpath targets the single Version.props truth' {
+Test-Case 'Windows Version.props is the single XML version truth' {
     $versionProps = Join-Path $repo 'platforms/windows/ClipBridgeShell_CS/Version.props'
-    Assert-True (Test-Path $versionProps)
-    [xml]$xml = Get-Content -Raw $versionProps
+    Assert-True (Test-Path -LiteralPath $versionProps)
+    [xml]$xml = Get-Content -Raw -LiteralPath $versionProps
     $nodes = @($xml.SelectNodes('//Project/PropertyGroup/Version'))
-    Assert-Equal 1 $nodes.Count
-    Assert-True ($nodes[0].InnerText -match '^\d+\.\d+\.\d+$')
-    Assert-True (-not (Test-Path (Join-Path $repo 'platforms/windows/ClipBridgeShell_CS/version.txt')))
+    Assert-Equal 1 $nodes.Count 'Version.props must define exactly one PropertyGroup Version'
+    Assert-True ($nodes[0].InnerText -match '^\d+\.\d+\.\d+$') 'Version.props Version must be three-part'
+    Assert-Equal 1 @($xml.SelectNodes('//Version')).Count 'Version.props must not define competing Version elements'
+    $directoryProps = Join-Path $repo 'platforms/windows/ClipBridgeShell_CS/Directory.Build.props'
+    Assert-True (Test-Path -LiteralPath $directoryProps)
+    $directoryPropsText = Get-Content -Raw -LiteralPath $directoryProps
+    Assert-True ($directoryPropsText -match 'Version\.props') 'Directory.Build.props must import Version.props'
+    Assert-True (-not ($directoryPropsText -match '<Version>')) 'Directory.Build.props must not duplicate the version'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $repo 'platforms/windows/ClipBridgeShell_CS/version.txt')))
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $repo 'version.txt')))
 }
 Test-Case 'nonce gate is wired from stage through approve-stable to publish' {
     Assert-True ($null -ne $releaseDoc)

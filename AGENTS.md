@@ -77,6 +77,7 @@ The refactored CI uses a single change plan, platform entry scripts, and an alwa
 - Shared Rust/ABI inputs propagate to Windows, Android, and macOS; a skipped required task is not success.
 - Windows runs strict native integration and MSTest. macOS targets the real Xcode app, not the SwiftPM stub.
 - GitHub packaging/release is restricted to MSI, user EXE, and portable ZIP. MSIX/StoreUpload and winget remain local-only; do not add them to CI.
+- Develop by committing/pushing directly to main; CI must not create branches or PRs. release-please and its metadata were removed by explicit decision; do not reintroduce them, even as a manual helper. Version/changelog edits are maintainer-authored commits.
 - Public Windows releases require the explicit manual workflow. Never dispatch a release or change signing/environment settings merely to test CI.
 - Preserve security gates when they reveal existing dependency vulnerabilities; do not turn them into continue-on-error to claim a green run.
 

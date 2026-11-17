@@ -1,5 +1,7 @@
 # ADR-004：Windows 分发渠道与安装形态（v4.1，定稿）
 
+> **CI/版本流程更新（2026-11-17）**：本文中的 release-please/PAT 方案是历史设计，现已移除，不能据此恢复分支或 PR 自动化。版本人工修改后直接推 main，发行仅由手动入口授权；当前规则见 [CI 规范](<../ci-architecture.md>) 与 [Windows 发布规范](<../windows-release.md>)。
+
 > **实现状态（2026-11-15）**：本 ADR 是 v4.1 设计稿；P0/P1 已落地，实际行为与差异以
 > [ADR-005](005-windows-distribution-implementation.md) 为准（显式 RegRoot、RegistrySearch、卸载默认删数据、
 > 便携 DPAPI/settings、winget schema 修正、MSIX 构建已实现/Store 未提交）。与 005 冲突处以 005 为准。

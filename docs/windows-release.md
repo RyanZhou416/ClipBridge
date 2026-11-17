@@ -67,7 +67,9 @@ GitHub 表单用独立布尔输入选择格式，不需要自建前端。点击�
 5. GitHub 的 `prerelease` 标记不改变安装器数字版本，也不使 Windows Installer 支持 SemVer 后缀。同版本的不同二进制不能靠“从预发布改正式”解决升级排序；二进制变化需要新版本。
 6. 0.x 的 MSI/EXE/ZIP 可以按既有版本规则构建；本流程不施加 Store 版本限制，也不为了本地 MSIX 抬高产品版本。
 
-日常开发与版本变更都允许直接提交并推送到 main，不以 PR 为前置；普通 push 不自动创建版本 PR。`release-please` 仅保留为 main 上的可选手动辅助（`workflow_dispatch`），主动运行时才准备版本/变更日志 PR，不自动批准或合并。维护者也可以直接提交明确决定的版本变更，不必运行该辅助。显式设置 `skip-github-release: true`，停止它的 GitHub Release 及关联 tag 创建，不另用脚本补打同名前缀 tag。`clipbridge-windows-*` 的自动创建权只属于本手动工作流；已有 tag 仅按上述 SHA 校验规则复用。验收须证明合并版本变更本身不会生成 tag/Release。本工作流是 Windows 二进制公开发行的唯一自动化入口；旧全 tag 发布工作流已在本次工作区重构中移除，由 [手动工作流](<../.github/workflows/release-windows.yml>) 替代，尚未执行远程发布验收。
+日常开发、版本及变更日志都由维护者直接提交并推送到 main，不以 PR 为前置。release-please 工作流、配置与生成清单已移除，不保留手动入口；CI 不创建版本分支或 PR，也不自动 bump 版本。版本源仍是现有 [Version.props](<../platforms/windows/ClipBridgeShell_CS/Version.props>)，不另造版本数据库。
+
+`clipbridge-windows-*` tag 的自动创建权只属于本手动发布工作流；已有 tag 仅按上述 SHA 校验规则复用。发布流程不创建任何 `refs/heads/*` 分支或 PR，普通 push/版本修改本身不生成 tag/Release。本工作流是 Windows 二进制公开发行的唯一自动化入口；旧全 tag 发布与 release-please 入口均已移除，由 [手动工作流](<../.github/workflows/release-windows.yml>) 负责发布，尚未执行真实发布验收。
 
 ## 4. 工作流结构与权限
 
@@ -264,7 +266,7 @@ release-manifest.json
 
 以下是最终验收清单；本地实现和 Mock/夹具测试不能代替真实托管运行、签名、审批或公开发布。未勾选项仍需相应证据。本轮未配置生产凭据、未修改仓库权限，也未创建或公开任何 Release/tag。
 
-- [ ] 只有手动入口；普通 push、tag、release-please 不自动启动二进制公开发行。release-please 显式关闭 release/tag 创建，版本合并后不生成同名 tag。
+- [ ] 只有手动发布入口；普通 push、tag 或版本修改不自动启动二进制公开发行。release-please 及其配置/生成清单不存在，普通 CI 和手动发布均不创建分支或 PR。
 - [ ] 表单只提供 MSI/EXE/ZIP；至少选一项，任意单项或组合可用；仅 ZIP 不要求 WiX。
 - [ ] `source_ref` 固定为 main 历史中的 SHA；版本不一致、tag 指向不一致、未知格式在编译前失败。
 - [ ] 共享构建入口支持格式集合，多个格式复用 publish/stage/heat；不将未选格式上传。

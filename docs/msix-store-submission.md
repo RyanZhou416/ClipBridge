@@ -240,7 +240,7 @@ ClipBridge 需要账号与可达的同步服务；Store 认证人员没有你的
 
 ### 6.1 发布时执行顺序（RC 清单）
 
-1. `Version.props` → `1.0.0`（3 段真值），用 release-please 或人工提交；
+1. 人工将 [Version.props](<../platforms/windows/ClipBridgeShell_CS/Version.props>) 改为确认的 Store 候选版本（首次至少 `1.0.0`，3 段真值），直接提交 main；不使用 CI/机器人生成版本分支或 PR；
 2. 重建四渠道：`pwsh scripts/build-windows-all.ps1 -WixInstallPath <wix>`；
 3. 用真实身份构建 StoreUpload：`pwsh scripts/build-windows-msix.ps1 -StoreUpload -IdentityFile store/identity.local.json`；
 4. 干净 VM 安装/登录/同步/卸载冒烟（见 3.3）；

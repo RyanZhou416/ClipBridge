@@ -1,5 +1,7 @@
 # ADR-005：Windows 分发渠道实现记录（v4.2）
 
+> **CI/版本流程更新（2026-11-17）**：本文的 release-please tag 描述保留为历史记录，当前不再使用该机器人。版本人工修改后直接推 main，发布 tag 只由独立手动发行入口创建，CI 不创建分支或 PR；以 [CI 规范](<../ci-architecture.md>) 与 [Windows 发布规范](<../windows-release.md>) 为准。
+
 - 状态：**P0/P1 已实现并验收；MSIX 构建、旧数据导入、StoreUpload 已实现并本地验收；Partner Center 提交待做**
 - 日期：2026-11-15
 - 关系：本文是 [ADR-004](004-windows-distribution-channels.md)（v4.1 设计稿）的实现记录与差异说明。004 的争议答案、评审历史继续有效；**具体行为以本文为准**，004 中与本文冲突处（HKMU、ProductSearch、默认保留数据、MSIX 状态等）按本文执行。

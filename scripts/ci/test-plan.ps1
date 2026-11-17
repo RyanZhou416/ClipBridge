@@ -175,7 +175,8 @@ try {
         @{ Name = 'repository asset'; Paths = @('Assets/Picture/img.png'); Tasks = @('ci-config', 'rust', 'windows', 'android', 'macos', 'windows-packages'); Packages = @('machine-msi', 'user-exe', 'portable-zip'); Scope = 'full' }
         @{ Name = 'tools script'; Paths = @('tools/cargo-build.cmd'); Tasks = @('ci-config', 'rust', 'windows', 'android', 'macos', 'windows-packages'); Packages = @('machine-msi', 'user-exe', 'portable-zip'); Scope = 'full' }
         @{ Name = 'license'; Paths = @('LICENSE'); Tasks = @('ci-config', 'rust', 'windows', 'android', 'macos', 'windows-packages'); Packages = @('machine-msi', 'user-exe', 'portable-zip'); Scope = 'full' }
-        @{ Name = 'release please config'; Paths = @('release-please-config.json'); Tasks = @('ci-config', 'rust', 'windows', 'android', 'macos', 'windows-packages'); Packages = @('machine-msi', 'user-exe', 'portable-zip'); Scope = 'full' }
+        # 任意未识别的根配置不是已知文档/构建输入，必须 fail closed 全量验证。
+        @{ Name = 'unrecognized config'; Paths = @('unrecognized-config.json'); Tasks = @('ci-config', 'rust', 'windows', 'android', 'macos', 'windows-packages'); Packages = @('machine-msi', 'user-exe', 'portable-zip'); Scope = 'full' }
         # 嵌套 manifest 触发依赖解析与打包。
         @{ Name = 'nested cb_core Cargo.toml'; Paths = @('cb_core/Cargo.toml'); Tasks = @('ci-config', 'rust', 'windows', 'android', 'macos', 'windows-packages'); Packages = @('machine-msi', 'user-exe', 'portable-zip'); Scope = 'affected' }
         @{ Name = 'nested crate Cargo.toml'; Paths = @('crates/cb_core_ffi/Cargo.toml'); Tasks = @('ci-config', 'rust', 'windows', 'android', 'macos', 'windows-packages'); Packages = @('machine-msi', 'user-exe', 'portable-zip'); Scope = 'affected' }
