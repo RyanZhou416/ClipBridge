@@ -432,7 +432,16 @@ fn file_id(path: &Path, _meta: &fs::Metadata) -> Option<FileId> {
 	))
 }
 
+// Unix 的 `(dev, ino)` 恒可得，函数只返回 `Some`；但 `file_id` 是三个平台共享的
+// 私有接口，Windows 取身份需要系统调用、可能失败，调用方统一按 `Option` 处理。
+// 改为直接返回 `FileId` 会让每个调用点按平台分叉（`dir_size` 去重、
+// `remove_download_views_with_id` 的 inode 匹配，以及 `remove_blob` 的
+// “身份未知即拒绝驱逐”），因此保留统一签名，只在此处说明可选返回的原因。
 #[cfg(unix)]
+#[expect(
+	clippy::unnecessary_wraps,
+	reason = "unix file identity is infallible, but the shared cross-platform interface is Option for the fallible Windows path and non-Unix targets"
+)]
 fn file_id(_path: &Path, meta: &fs::Metadata) -> Option<FileId> {
 	use std::os::unix::fs::MetadataExt;
 	Some((meta.dev(), meta.ino()))
@@ -1755,10 +1764,13 @@ mod tests {
 		assert!(!disk_space_allows(Some(100), 1));
 		assert!(disk_space_allows(Some(100), 0));
 
-		// 真实 Windows 卷上应能查到合理值（非 Windows 为 None）。
+		// 真实卷上应能查到合理值：Windows 走 `GetDiskFreeSpaceExW`；其他平台
+		// 没有实现，`free_space_bytes` 固定返回 None（未知即放行）。
 		let dir = tempfile::tempdir().unwrap();
 		let cas = Cas::new(dir.path()).unwrap();
 		#[cfg(windows)]
 		assert!(cas.free_space_bytes().is_some());
+		#[cfg(not(windows))]
+		assert!(cas.free_space_bytes().is_none());
 	}
 }

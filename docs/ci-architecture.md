@@ -1,6 +1,6 @@
 # ClipBridge 持续集成架构与验收规范
 
-- 状态：实现与本地审查进行中，托管 runner 验收尚未完成。以下规范不等于所有检查已通过；实际证据及阻断项需单独记录。
+- 状态：主体实现已提交，首轮 GitHub 全量验证已执行但未通过，正在修复实跑暴露的问题。实际证据与剩余阻断见 §10；部分平台通过不等于全量验收完成。
 - 更新日期：2026-11-17。
 - 适用范围：Rust 核心、共享 C ABI、Windows、Android、macOS 的日常验证，以及机器级 MSI、用户级 EXE、便携 ZIP 的 GitHub 打包验证。
 - 现状核对基线：提交 `bbfeb45`。
@@ -488,7 +488,7 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 
 ## 10. 实施与本地审查记录（2026-11-17）
 
-本轮工作区已写入扁平 CI、平台入口、格式集合打包和手动发布实现；尚未提交、推送或执行新的 GitHub 托管流水线。下表区分本地实际执行与尚未验证，不将 Mock 当作真实发布证据。
+下表保留首次提交前的本地审查证据与当时的未验证范围，不将 Mock 当作真实发布证据。实现随后以 `76b42a0` 提交并推送，首次托管全量验证结果见 §10.2；旧的本地通过记录不能覆盖托管失败。
 
 | 检查 | 本地证据 | 尚未证明 |
 |---|---|---|
@@ -503,7 +503,7 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 ### 10.1 保留的阻断与配置前置
 
 - **Android 构建供应链**：未新增忽略项或放宽门禁。拟修复的内部依赖约束仅在临时副本调研，没有应用到仓库；需要进一步验证 AGP/Gradle、JNI、APK/AAB 和签名工具兼容性。构建工具图的漏洞不等于应用 APK 图有同样漏洞，但仍在既定检查范围内。
-- **托管 runner**：Linux/macOS 构建与全量 GitHub 执行还没有证据，不能用 Windows 夹具测试代替。当前代码保持在工作区，未触发远程运行。
+- **托管 runner**：首轮已取得 Windows、macOS 和 Windows 包构建通过的证据，但 Linux Rust、Android 和 CI 配置检查仍失败，完整结果见 §10.2；不能以 Windows 本地通过代替其他平台。
 - **发布前置**：未配置生产签名或 `windows-release-stable` 环境。正式发布必须拒绝缺失配置。预检为读取草稿使用了 contents: write，但 API context 强制 GET-only；能否收窄 token 权限仍需托管验证。
 - **版本 PR 权限**：只读查询到仓库尚未允许 Actions 创建/批准 PR，且无发布环境；本轮未修改这些设置。release-please 的 XML 更新已用真实 updater 做本地验证，但仍有可忽略的缺省 version.txt 警告，未新增第二版本源。
 - **已有工具告警**：stable rustfmt 对 nightly-only 配置发出警告；WiX 有既有 ICE/双用途 MSI 告警。它们不被描述为零告警构建，也不作为安装/升级行为的证明。
@@ -519,6 +519,28 @@ pwsh -NoProfile -File scripts/ci/test-packaging.ps1
 pwsh -NoProfile -File scripts/ci/windows.ps1 -OutDir dist/ci-review/windows
 pwsh -NoProfile -File scripts/ci/rust.ps1 -OutDir dist/ci-review/rust
 ```
+
+### 10.2 首轮 GitHub 全量验证
+
+- 提交：[`76b42a0`](https://github.com/RyanZhou416/ClipBridge/commit/76b42a05fc7561d7ee0743aa5a3dd657e816679a)。
+- CI：[运行 44107130372](https://github.com/RyanZhou416/ClipBridge/actions/runs/44107130372)，push 触发，计划 scope=full；2026-11-17 完成，总结论 **failure**。
+
+| 任务 | 托管结果 | 证据 / 直接失败原因 |
+|---|---|---|
+| changes | 通过 | 六项检查均 required=true，三个允许格式均被选中 |
+| windows | 通过 | 84/84 MSTest、零跳过；三个项目格式通过；NuGet 扫描 80 个唯一包，无漏洞发现 |
+| windows-packages | 通过 | machine MSI、user EXE、portable ZIP 及内部 user MSI 生成；全部未签名，仅 CI 产物，不是公开发行 |
+| macos | 通过 | macOS arm64 / Xcode 26.0.1 真实应用构建、dylib 嵌入及 dlopen 探测，FFI 版本 1.0；不含 UI 实测、Developer ID 或公证 |
+| ci-config | 失败 | actionlint 调用 runner 上的 ShellCheck，连续写 GITHUB_OUTPUT 触发 SC2129；后续契约套件未执行 |
+| rust | 失败 | Linux Clippy 命中 Unix file_id 的 unnecessary_wraps 及 Windows 专用测试变量在 Unix 上未使用；测试与 cargo-deny 尚未执行 |
+| android | 失败 | setup-android 默认尝试安装已不可用的 tools 包；尚未进入项目构建或 OSV 检查，不能将这次失败归因于已知漏洞 |
+| ci-result | 正确判失败 | 明确列出上述三项必跑失败，不把平台部分通过当作全量成功 |
+
+修复原则：修正 shell 写法与 Android setup 输入，保持失败即阻断；保留跨平台文件标识的正确语义，修正 Unix 编译与测试；不关闭 ShellCheck/Clippy，也不新增漏洞豁免。Android setup 显式使用 `packages: ''`，避免其旧默认值请求已移除的 tools，固定 SDK/NDK/CMake 安装步骤保留。Unix file_id 为与 Windows 可失败实现共享 Option 接口，仅对该函数使用附理由的 `expect(clippy::unnecessary_wraps)`，不改变身份未知时拒绝驱逐的行为；磁盘守卫测试补上非 Windows 返回 None 的断言。重新验收必须以修复后的提交和新运行记录为准。
+
+本地 actionlint 若未安装 ShellCheck，会少一层检查；再次本地复现时须把 ShellCheck 放到 PATH（本轮使用官方 SHA256 校验的 0.11.0 便携版），不能将 `-shellcheck=` 的结果称为完整托管检查。
+
+随 push 触发的 [release-please 44107130209](https://github.com/RyanZhou416/ClipBridge/actions/runs/44107130209) 已更新其版本准备分支，但创建 PR 被仓库权限拒绝：`GitHub Actions is not permitted to create or approve pull requests`。本轮不修改仓库权限，不触发手动 Windows 发布。
 
 ## 11. 参考与适用范围
 

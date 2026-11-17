@@ -597,6 +597,8 @@ try {
         @{ Name = 'secrets reference'; Old = '      shell: pwsh'; New = "      shell: pwsh`n      env:`n        TOKEN: `${{ secrets.TOKEN }}"; Pattern = 'secrets' }
         @{ Name = 'winget command'; Old = 'run: ./scripts/ci/test-plan.ps1'; New = 'run: winget validate dist/winget'; Pattern = 'forbidden local-channel command' }
         @{ Name = 'missing Android SDK install'; Old = '          sdkmanager --install \'; New = '          echo skipped-sdk-install'; Pattern = 'Android job must install' }
+        @{ Name = 'setup-android implicit legacy default'; Old = "        with:`n          packages: ''"; New = '        # packages omitted'; Pattern = 'setup-android must explicitly use packages' }
+        @{ Name = 'setup-android removed tools package'; Old = "          packages: ''"; New = "          packages: 'tools platform-tools'"; Pattern = 'setup-android must explicitly use packages' }
         @{ Name = 'missing windows report suite'; Old = 'run: ./scripts/ci/test-windows-report.ps1'; New = 'run: ./scripts/ci/test-windows-report-missing.ps1'; Pattern = 'windows report contract tests' }
         @{ Name = 'missing fixed release suite'; Old = "'test-release-candidate.ps1'"; New = "'test-release-candidate-missing.ps1'"; Pattern = "fixed release contract suite 'test-release-candidate\.ps1'" }
         @{ Name = 'missing release fail-closed guard'; Old = 'missing required contract suite'; New = 'missing suite'; Pattern = 'fail when a required suite is missing' }

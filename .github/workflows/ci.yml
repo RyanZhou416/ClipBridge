@@ -65,9 +65,11 @@ jobs:
           else
             base=""
           fi
-          echo "diff-base=$base" >> "$GITHUB_OUTPUT"
-          echo "diff-head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-          echo "diff-ok=$ok" >> "$GITHUB_OUTPUT"
+          {
+            echo "diff-base=$base"
+            echo "diff-head=$HEAD_SHA"
+            echo "diff-ok=$ok"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Compute structured plan
         id: plan
@@ -273,8 +275,12 @@ jobs:
           java-version: '21'
           cache: gradle
 
+      # v3.2.2 默认安装 tools platform-tools；Google 已移除 tools 包。
+      # 此 action 仅提供 sdkmanager/接受 licenses，项目固定包由下一步显式安装。
       - name: Set up Android SDK
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: ''
 
       # 平台入口自行严格校验版本，不自动安装 SDK；工作流在入口前显式安装项目固定的
       # platform/build-tools/NDK/CMake。licenses 处理有界（timeout），真正的门禁是随后的

@@ -917,6 +917,11 @@ function Test-CiWorkflowContract {
     if ($Content -notmatch 'test -f scripts/ci/android/tests/run-tests\.sh' -or $Content -notmatch 'test -f scripts/ci/macos/tests/run-tests\.sh') {
         $errors.Add("platform lightweight test scripts must be mandatory, not conditionally skipped")
     }
+    # v3.2.2 的隐式 packages 默认值包含 Google 已移除的 tools 包。
+    # action 只负责 sdkmanager/licenses；依赖仍由下面的固定 SDK 安装步骤提供。
+    if ($code -notmatch '(?m)^\s*(?:-\s+)?uses:\s*android-actions/setup-android@[^\r\n]+\r?\n\s+with:\s*\r?\n\s+packages:\s*(?:''''|"")[ \t]*$') {
+        $errors.Add("setup-android must explicitly use packages: '' to avoid the removed tools package; install pinned SDK dependencies in the following step")
+    }
     foreach ($androidPin in @('platforms;android-36', 'build-tools;36.0.0', 'ndk;26.3.11579264', 'cmake;3.22.1')) {
         if ($code -notmatch [regex]::Escape($androidPin)) { $errors.Add("Android SDK package pin is missing from the setup step: $androidPin") }
     }
