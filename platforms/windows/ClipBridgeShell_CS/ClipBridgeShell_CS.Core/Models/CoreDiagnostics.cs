@@ -8,18 +8,48 @@ namespace ClipBridgeShell_CS.Core.Models;
 
 public sealed class CoreDiagnostics
 {
-    public string? DllPath { get; set; }
-    public string? DllLoadError { get; set; }          // DllNotFound / BadImageFormat / EntryPointNotFound / etc.
-    public uint? FfiAbiMajor { get; set; }
-    public uint? FfiAbiMinor { get; set; }
+    public string? DllPath
+    {
+        get; set;
+    }
+    public string? DllLoadError
+    {
+        get; set;
+    }          // DllNotFound / BadImageFormat / EntryPointNotFound / etc.
+    public uint? FfiAbiMajor
+    {
+        get; set;
+    }
+    public uint? FfiAbiMinor
+    {
+        get; set;
+    }
 
-    public string? LastInitSummary { get; set; }       // “Init failed: ...”
-    public string? LastInitEnvelopeJson { get; set; }  // 原样保留，便于发 issue
+    public string? LastInitSummary
+    {
+        get; set;
+    }       // “Init failed: ...”
+    public string? LastInitEnvelopeJson
+    {
+        get; set;
+    }  // 原样保留，便于发 issue
 
-    public string? AppDataDir { get; set; }
-    public string? CoreDataDir { get; set; }
-    public string? CacheDir { get; set; }
-    public string? LogDir { get; set; }
+    public string? AppDataDir
+    {
+        get; set;
+    }
+    public string? CoreDataDir
+    {
+        get; set;
+    }
+    public string? CacheDir
+    {
+        get; set;
+    }
+    public string? LogDir
+    {
+        get; set;
+    }
 
     public string ToClipboardText()
     {

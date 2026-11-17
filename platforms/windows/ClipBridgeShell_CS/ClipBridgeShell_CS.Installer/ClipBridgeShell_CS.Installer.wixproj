@@ -76,8 +76,9 @@
 
     <!-- 1) publish（只跑一次；后续变体用 -p:SkipPublish=true） -->
     <Message Text="[Setup] publish → $(StageDir)" Importance="high" Condition="'$(SkipPublish)' != 'true'" />
+    <!-- MSI/EXE/ZIP 发布载荷：显式关闭 MSIX 自动出包/签名/符号包目标。 -->
     <Exec Condition="'$(SkipPublish)' != 'true'"
-          Command="dotnet publish &quot;$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS\ClipBridgeShell_CS.csproj&quot; -c $(PublishConfiguration) -p:Platform=$(Platform) -p:PublishProfile=win10-$(Platform) -p:SkipRustBuild=true -o &quot;$(StageDir)&quot;" />
+          Command="dotnet publish &quot;$(MSBuildProjectDirectory)\..\ClipBridgeShell_CS\ClipBridgeShell_CS.csproj&quot; -c $(PublishConfiguration) -p:Platform=$(Platform) -p:PublishProfile=win10-$(Platform) -p:SkipRustBuild=true -p:GenerateAppxPackageOnBuild=false -p:GenerateAppxPackageOnPublish=false -p:AppxPackageSigningEnabled=false -p:AppxSymbolPackageEnabled=false -p:AppxBundle=Never -o &quot;$(StageDir)&quot;" />
     <ItemGroup Condition="'$(SkipPublish)' != 'true'">
       <_StagePdbs Include="$(StageDir)\**\*.pdb" />
       <_StageXml Include="$(StageDir)\**\*.xml" />

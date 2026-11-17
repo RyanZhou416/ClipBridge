@@ -1,9 +1,9 @@
 using System.Collections.ObjectModel;
-using Microsoft.UI.Xaml.Data;
+using System.Runtime.InteropServices.WindowsRuntime;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
 using ClipBridgeShell_CS.Core.Models.Events;
-using System.Runtime.InteropServices.WindowsRuntime;
+using Microsoft.UI.Xaml.Data;
 
 namespace ClipBridgeShell_CS.Collections;
 
@@ -19,7 +19,10 @@ public class HistoryIncrementalCollection : ObservableCollection<ItemMetaPayload
     // 增量插入时的上限，避免长时间运行后集合无限增长
     private const int MaxIncrementalItems = 2000;
 
-    public string? PinnedItemId { get; set; }
+    public string? PinnedItemId
+    {
+        get; set;
+    }
 
     public bool HasMoreItems => _hasMoreItems;
 
@@ -81,12 +84,14 @@ public class HistoryIncrementalCollection : ObservableCollection<ItemMetaPayload
 
                 // Count 反映实际添加到集合中的条目数（跳过锁定项）
                 return new LoadMoreItemsResult { Count = (uint)added };
-            } catch (Exception ex)
+            }
+            catch (Exception ex)
             {
                 // 实际生产中可能需要通知 UI 显示错误条
                 System.Diagnostics.Debug.WriteLine($"Error loading history: {ex}");
                 return new LoadMoreItemsResult { Count = 0 };
-            } finally
+            }
+            finally
             {
                 _isLoading = false;
             }

@@ -1,0 +1,17 @@
+{
+  "project" : {
+    "configurations" : [
+      "Debug",
+      "Release"
+    ],
+    "name" : "ClipBridge",
+    "schemes" : [
+      "ClipBridge"
+    ],
+    "targets" : [
+      "ClipBridge",
+      "ClipBridgeTests",
+      "ClipBridgeUITests"
+    ]
+  }
+}

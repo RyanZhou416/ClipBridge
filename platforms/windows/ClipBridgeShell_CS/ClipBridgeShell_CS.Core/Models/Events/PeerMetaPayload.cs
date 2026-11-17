@@ -45,7 +45,10 @@ public class PeerMetaPayload
     public string ConnectionState { get; set; } = "Offline";  // 连接状态（Online/Offline/Backoff等）
 
     [JsonIgnore]
-    public string? LocalAlias { get; set; }  // 本地别名（仅用于 UI 显示，存储在 LocalSettingsService）
+    public string? LocalAlias
+    {
+        get; set;
+    }  // 本地别名（仅用于 UI 显示，存储在 LocalSettingsService）
 
     /// <summary>
     /// 获取显示名称（优先使用本地别名）

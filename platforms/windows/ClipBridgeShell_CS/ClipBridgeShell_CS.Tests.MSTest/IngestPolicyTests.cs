@@ -1,9 +1,9 @@
-using Microsoft.VisualStudio.TestTools.UnitTesting;
-using ClipBridgeShell_CS.Services;
-using ClipBridgeShell_CS.Core.Models;
-using ClipBridgeShell_CS.Contracts.Services;
 using System;
 using System.Threading.Tasks;
+using ClipBridgeShell_CS.Contracts.Services;
+using ClipBridgeShell_CS.Core.Models;
+using ClipBridgeShell_CS.Services;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace ClipBridgeShell_CS.Tests.MSTest.Services;
 
@@ -31,8 +31,12 @@ public class IngestPolicyTests
         public Task<string?> GetTextAsync() => Task.FromResult<string?>(null);
         public Task SetImageFromPathAsync(string path) => Task.CompletedTask;
         public Task SetFilesFromPathsAsync(IReadOnlyList<string> paths) => Task.CompletedTask;
-        public void LockClipboard(string text, string itemId) { }
-        public void UnlockClipboard() { }
+        public void LockClipboard(string text, string itemId)
+        {
+        }
+        public void UnlockClipboard()
+        {
+        }
     }
 
     private FakeClipboardService _fakeService = null!;

@@ -17,10 +17,16 @@ namespace ClipBridgeShell_CS.ViewModels;
 public partial class ShellViewModel : ObservableRecipient
 {
     [ObservableProperty]
-    public partial bool IsBackEnabled { get; set; }
+    public partial bool IsBackEnabled
+    {
+        get; set;
+    }
 
     [ObservableProperty]
-    public partial object? Selected { get; set; }
+    public partial object? Selected
+    {
+        get; set;
+    }
 
     public INavigationService NavigationService
     {
@@ -36,10 +42,16 @@ public partial class ShellViewModel : ObservableRecipient
     private readonly IClipboardService _clipboard;
 
     [ObservableProperty]
-    public partial bool IsCoreDegraded { get; set; }
+    public partial bool IsCoreDegraded
+    {
+        get; set;
+    }
 
     [ObservableProperty]
-    public partial string? CoreDegradedMessage { get; set; }
+    public partial string? CoreDegradedMessage
+    {
+        get; set;
+    }
 
     public IAsyncRelayCommand RetryCoreInitCommand
     {

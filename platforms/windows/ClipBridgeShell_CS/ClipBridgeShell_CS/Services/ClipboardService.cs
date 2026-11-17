@@ -12,12 +12,18 @@ public sealed class ClipboardService : IClipboardService
 {
     public event EventHandler<ClipboardSnapshot>? ContentChanged;
     public event EventHandler<bool>? ClipboardLockChanged;
-    public string? LastWriteFingerprint { get; private set; }
+    public string? LastWriteFingerprint
+    {
+        get; private set;
+    }
 
     private string? _lockedText;
     private bool _isRestoringLock;
     public bool IsClipboardLocked => _lockedText != null;
-    public string? LockedItemId { get; private set; }
+    public string? LockedItemId
+    {
+        get; private set;
+    }
 
     public ClipboardService()
     {
@@ -75,7 +81,8 @@ public sealed class ClipboardService : IClipboardService
                     }
                 }
             }
-        } catch (Exception ex)
+        }
+        catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[Watcher] Process clipboard change failed: {ex.Message}");
         }
@@ -89,7 +96,7 @@ public sealed class ClipboardService : IClipboardService
         // 每次等待 100ms
         const int DelayMs = 100;
 
-        for (int i = 0; i < MaxRetries; i++)
+        for (var i = 0; i < MaxRetries; i++)
         {
             try
             {
@@ -101,7 +108,8 @@ public sealed class ClipboardService : IClipboardService
                 Clipboard.SetContent(dp);
                 Clipboard.Flush();
                 return true; // 成功则退出
-            } catch (System.Runtime.InteropServices.COMException ex)
+            }
+            catch (System.Runtime.InteropServices.COMException ex)
             {
                 // 0x800401D0 (CLIPBRD_E_CANT_OPEN) 是剪贴板被占用
                 // 检查是否是最后一次重试
@@ -118,7 +126,8 @@ public sealed class ClipboardService : IClipboardService
                     System.Diagnostics.Debug.WriteLine($"[Clipboard] Locked (0x800401D0), retried to max:{MaxRetries}...");
                 }
                 await Task.Delay(DelayMs);
-            } catch (Exception ex)
+            }
+            catch (Exception ex)
             {
                 // 其他异常直接抛出
                 System.Diagnostics.Debug.WriteLine($"[Clipboard] EXCEPTION: {ex}");
@@ -169,7 +178,8 @@ public sealed class ClipboardService : IClipboardService
             // TODO (M5.X): 处理 Bitmap 和 StorageItems (Files)
 
             return null;
-        } catch (Exception ex)
+        }
+        catch (Exception ex)
         {
             // 剪贴板访问极易因其他程序占用而抛出异常，此时返回 null 即可，不要崩溃
             System.Diagnostics.Debug.WriteLine($"Clipboard GetSnapshot failed: {ex.Message}");

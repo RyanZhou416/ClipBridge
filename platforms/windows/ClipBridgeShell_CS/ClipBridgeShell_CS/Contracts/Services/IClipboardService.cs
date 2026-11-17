@@ -16,7 +16,10 @@ public interface IClipboardService
     /// 这也让订阅者不必再次读取系统剪贴板（省掉一次 GetContent + 全文哈希）。
     /// </summary>
     event EventHandler<ClipboardSnapshot> ContentChanged;
-    string? LastWriteFingerprint { get; }
+    string? LastWriteFingerprint
+    {
+        get;
+    }
 
     Task<bool> SetTextAsync(string text);
     Task<string?> GetTextAsync();
@@ -24,8 +27,14 @@ public interface IClipboardService
     Task SetImageFromPathAsync(string path);
     Task SetFilesFromPathsAsync(IReadOnlyList<string> paths);
 
-    bool IsClipboardLocked { get; }
-    string? LockedItemId { get; }
+    bool IsClipboardLocked
+    {
+        get;
+    }
+    string? LockedItemId
+    {
+        get;
+    }
     void LockClipboard(string text, string itemId);
     void UnlockClipboard();
     event EventHandler<bool>? ClipboardLockChanged;

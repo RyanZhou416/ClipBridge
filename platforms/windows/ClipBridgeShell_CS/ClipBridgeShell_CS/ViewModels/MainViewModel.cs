@@ -138,7 +138,7 @@ public partial class MainViewModel : ObservableRecipient
     {
         if (string.IsNullOrEmpty(deviceId))
             return "Unknown";
-        
+
         var peer = _peerStore.Peers.FirstOrDefault(p => p.DeviceId == deviceId);
         return peer?.Name ?? deviceId; // 如果找不到，返回 deviceId 作为后备
     }
@@ -303,16 +303,40 @@ public partial class MainViewModel : ObservableRecipient
     public ObservableCollection<ActivityStatsPoint> ActivitySeries { get; } = new();
 
     // [测试用] 手动模拟 Core 发事件的命令
-    public IRelayCommand TestAddEventCommand { get; }
+    public IRelayCommand TestAddEventCommand
+    {
+        get;
+    }
 
     // 命令
-    public IRelayCommand ClearCacheCommand { get; }
-    public IRelayCommand ToggleCaptureCommand { get; }
-    public IRelayCommand ToggleSharingCommand { get; }
-    public IRelayCommand NavigateToHistoryCommand { get; }
-    public IRelayCommand<ItemMetaPayload> SelectItemCommand { get; }
-    public IAsyncRelayCommand<ItemMetaPayload> DeleteRecentItemCommand { get; }
-    public IAsyncRelayCommand<ItemMetaPayload> GlobalDeleteItemCommand { get; }
+    public IRelayCommand ClearCacheCommand
+    {
+        get;
+    }
+    public IRelayCommand ToggleCaptureCommand
+    {
+        get;
+    }
+    public IRelayCommand ToggleSharingCommand
+    {
+        get;
+    }
+    public IRelayCommand NavigateToHistoryCommand
+    {
+        get;
+    }
+    public IRelayCommand<ItemMetaPayload> SelectItemCommand
+    {
+        get;
+    }
+    public IAsyncRelayCommand<ItemMetaPayload> DeleteRecentItemCommand
+    {
+        get;
+    }
+    public IAsyncRelayCommand<ItemMetaPayload> GlobalDeleteItemCommand
+    {
+        get;
+    }
 
     public MainViewModel(
         HistoryStore historyStore,
@@ -461,7 +485,7 @@ public partial class MainViewModel : ObservableRecipient
             };
 
             var page = await _coreHost.ListHistoryAsync(query);
-            
+
             App.MainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
                 _recentItems.Clear();
@@ -732,12 +756,12 @@ public partial class MainViewModel : ObservableRecipient
         {
             var peers = _peerStore.Peers;
             var transfers = _transferStore.Transfers;
-            
+
             // 只遍历一次集合来计算统计
             var outboundCount = 0;
             var inboundCount = 0;
             var activeTransfers = 0;
-            
+
             foreach (var peer in peers)
             {
                 if (peer.IsOnline && peer.IsAllowed)
@@ -746,7 +770,7 @@ public partial class MainViewModel : ObservableRecipient
                     inboundCount++;
                 }
             }
-            
+
             foreach (var transfer in transfers)
             {
                 if (transfer.State == "downloading" || transfer.State == "uploading")
@@ -754,7 +778,7 @@ public partial class MainViewModel : ObservableRecipient
                     activeTransfers++;
                 }
             }
-            
+
             OutboundPeerCount = outboundCount;
             InboundPeerCount = inboundCount;
             ActiveTransfersCount = activeTransfers;

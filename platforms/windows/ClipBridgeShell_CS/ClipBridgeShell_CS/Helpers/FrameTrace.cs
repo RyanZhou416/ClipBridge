@@ -7,12 +7,10 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
-
+using ClipBridgeShell_CS.Core.Services;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
-
-using ClipBridgeShell_CS.Core.Services;
 
 namespace ClipBridgeShell_CS.Helpers;
 
@@ -2270,11 +2268,20 @@ internal static class FrameTrace
             Phase = phase;
         }
 
-        public long WallUs { get; }
+        public long WallUs
+        {
+            get;
+        }
 
-        public double DeltaUs { get; }
+        public double DeltaUs
+        {
+            get;
+        }
 
-        public int Phase { get; }
+        public int Phase
+        {
+            get;
+        }
     }
 
     private readonly struct StallSample
@@ -2287,13 +2294,25 @@ internal static class FrameTrace
             Depth = depth;
         }
 
-        public long WallUs { get; }
+        public long WallUs
+        {
+            get;
+        }
 
-        public double LatencyUs { get; }
+        public double LatencyUs
+        {
+            get;
+        }
 
-        public int Phase { get; }
+        public int Phase
+        {
+            get;
+        }
 
-        public int Depth { get; }
+        public int Depth
+        {
+            get;
+        }
     }
 
     private readonly struct OpSample
@@ -2306,13 +2325,25 @@ internal static class FrameTrace
             Phase = phase;
         }
 
-        public long WallUs { get; }
+        public long WallUs
+        {
+            get;
+        }
 
-        public double DurationUs { get; }
+        public double DurationUs
+        {
+            get;
+        }
 
-        public string Label { get; }
+        public string Label
+        {
+            get;
+        }
 
-        public int Phase { get; }
+        public int Phase
+        {
+            get;
+        }
     }
 
     /// <summary>一个成本采样区间（默认 1 秒）的增量数据。</summary>
@@ -2342,30 +2373,60 @@ internal static class FrameTrace
             ProcCycleMsDelta = procCycleMsDelta;
         }
 
-        public long WallUs { get; }
+        public long WallUs
+        {
+            get;
+        }
 
-        public int Phase { get; }
+        public int Phase
+        {
+            get;
+        }
 
-        public double WallDeltaS { get; }
+        public double WallDeltaS
+        {
+            get;
+        }
 
         /// <summary>UI 线程本区间 CPU 毫秒（GetThreadTimes；受 ~15.6ms 记账节拍限制）；-1 表示没采到。</summary>
-        public double UiCpuMsDelta { get; }
+        public double UiCpuMsDelta
+        {
+            get;
+        }
 
         /// <summary>整进程本区间 CPU 毫秒（GetProcessTimes；同样受记账节拍限制）；-1 表示没采到。</summary>
-        public double ProcCpuMsDelta { get; }
+        public double ProcCpuMsDelta
+        {
+            get;
+        }
 
-        public int FramesDelta { get; }
+        public int FramesDelta
+        {
+            get;
+        }
 
-        public GpuReading Gpu { get; }
+        public GpuReading Gpu
+        {
+            get;
+        }
 
         /// <summary>本区间 DWM（桌面合成器）的 GPU 读数；不可用时 EngineAvailable=false。</summary>
-        public GpuReading DwmGpu { get; }
+        public GpuReading DwmGpu
+        {
+            get;
+        }
 
         /// <summary>UI 线程本区间 CPU 毫秒（QueryThreadCycleTime 标定换算，细粒度）；-1 表示没采到。</summary>
-        public double UiCycleMsDelta { get; }
+        public double UiCycleMsDelta
+        {
+            get;
+        }
 
         /// <summary>整进程本区间 CPU 毫秒（QueryProcessCycleTime 标定换算，细粒度）；-1 表示没采到。</summary>
-        public double ProcCycleMsDelta { get; }
+        public double ProcCycleMsDelta
+        {
+            get;
+        }
     }
 
     /// <summary>一次 PDH GPU 采样结果（只统计本进程实例）。不可用时 EngineAvailable=false。</summary>
@@ -2395,20 +2456,38 @@ internal static class FrameTrace
         }
 
         /// <summary>GPU Engine 计数器可用且本次 collect 成功。</summary>
-        public bool EngineAvailable { get; }
+        public bool EngineAvailable
+        {
+            get;
+        }
 
         /// <summary>本进程所有引擎实例利用率之和（%）。</summary>
-        public double SumPct { get; }
+        public double SumPct
+        {
+            get;
+        }
 
         /// <summary>本进程单个引擎实例利用率的峰值（%）。</summary>
-        public double MaxPct { get; }
+        public double MaxPct
+        {
+            get;
+        }
 
         /// <summary>按引擎类型聚合的峰值（engtype_3d / engtype_copy / ...）。</summary>
-        public Dictionary<string, double> EnginePct { get; }
+        public Dictionary<string, double> EnginePct
+        {
+            get;
+        }
 
-        public long DedicatedBytes { get; }
+        public long DedicatedBytes
+        {
+            get;
+        }
 
-        public long CommittedBytes { get; }
+        public long CommittedBytes
+        {
+            get;
+        }
     }
 
     /// <summary>一个场景的成本汇总；<see cref="FormatLine"/> 生成 summary/stdout 里的 [cost] 行。</summary>
@@ -2416,17 +2495,35 @@ internal static class FrameTrace
     {
         public string PhaseName { get; set; } = string.Empty;
 
-        public double RequestedSeconds { get; set; }
+        public double RequestedSeconds
+        {
+            get; set;
+        }
 
-        public double WallS { get; set; }
+        public double WallS
+        {
+            get; set;
+        }
 
-        public int Frames { get; set; }
+        public int Frames
+        {
+            get; set;
+        }
 
-        public int Samples { get; set; }
+        public int Samples
+        {
+            get; set;
+        }
 
-        public double UiCpuMs { get; set; }
+        public double UiCpuMs
+        {
+            get; set;
+        }
 
-        public double ProcCpuMs { get; set; }
+        public double ProcCpuMs
+        {
+            get; set;
+        }
 
         /// <summary>细粒度 UI 线程 CPU（cycle 标定换算）；GetThreadTimes 口径见 <see cref="UiCpuMs"/>。</summary>
         public double UiCycleCpuMs { get; set; } = double.NaN;
@@ -2434,7 +2531,10 @@ internal static class FrameTrace
         /// <summary>细粒度整进程 CPU（cycle 标定换算）。</summary>
         public double ProcCycleCpuMs { get; set; } = double.NaN;
 
-        public int GpuSampleCount { get; set; }
+        public int GpuSampleCount
+        {
+            get; set;
+        }
 
         public double GpuSumMeanPct { get; set; } = double.NaN;
 
@@ -2447,7 +2547,10 @@ internal static class FrameTrace
         public long GpuCommittedBytes { get; set; } = -1;
 
         /// <summary>DWM（桌面合成器）GPU 引擎采样次数。</summary>
-        public int DwmGpuSampleCount { get; set; }
+        public int DwmGpuSampleCount
+        {
+            get; set;
+        }
 
         public double DwmGpuSumMeanPct { get; set; } = double.NaN;
 
@@ -2455,7 +2558,10 @@ internal static class FrameTrace
 
         public Dictionary<string, double> DwmGpuEngineMaxPct { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
-        public int DisplayRefreshHz { get; set; }
+        public int DisplayRefreshHz
+        {
+            get; set;
+        }
 
         /// <summary>本轮 CB_FRAME_TRACE_ACRYLIC 的原始值（unset/0/1）。</summary>
         public string AcrylicRequested { get; set; } = "unset";
@@ -2479,7 +2585,10 @@ internal static class FrameTrace
         public string DragStatus { get; set; } = "not-run";
 
         /// <summary>drag 场景实际成功的 SetWindowPos 次数。</summary>
-        public int DragMoves { get; set; }
+        public int DragMoves
+        {
+            get; set;
+        }
 
         /// <summary>drag 场景实测移动频率（Hz），moves / 场景持续时长。</summary>
         public double DragActualHz { get; set; } = double.NaN;
@@ -2487,9 +2596,15 @@ internal static class FrameTrace
         /// <summary>单次 SetWindowPos 的平均耗时（毫秒）；用于从 UI CPU 里分离“移动窗口”本身的开销。</summary>
         public double DragMoveAvgMs { get; set; } = double.NaN;
 
-        public int DragAmplitudeX { get; set; }
+        public int DragAmplitudeX
+        {
+            get; set;
+        }
 
-        public int DragAmplitudeY { get; set; }
+        public int DragAmplitudeY
+        {
+            get; set;
+        }
 
         public string DragRectStart { get; set; } = "(none)";
 

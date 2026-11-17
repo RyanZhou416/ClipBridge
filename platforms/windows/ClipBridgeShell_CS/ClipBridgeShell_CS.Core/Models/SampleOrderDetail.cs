@@ -1,4 +1,4 @@
-﻿namespace ClipBridgeShell_CS.Core.Models;
+namespace ClipBridgeShell_CS.Core.Models;
 
 // Model for the SampleDataService. Replace with your own model.
 public class SampleOrderDetail

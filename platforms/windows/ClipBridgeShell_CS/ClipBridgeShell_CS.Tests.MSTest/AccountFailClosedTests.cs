@@ -15,7 +15,13 @@ public class AccountFailClosedTests
     private static CoreHostService CreateCoreHost(IAccountService? accountService)
     {
         var eventPump = new EventPumpService(new HistoryStore(), new PeerStore(), new TransferStore(), new ContentFetchAwaiter());
-        return new CoreHostService(eventPump, new InMemoryLocalSettingsService(), null, accountService);
+        // 哨兵 provider：凭据 fail-closed 之前绝不允许解析/写入任何用户数据根。
+        return new CoreHostService(
+            eventPump,
+            new InMemoryLocalSettingsService(),
+            null,
+            accountService,
+            new ThrowingDataRootProvider());
     }
 
     [TestMethod]

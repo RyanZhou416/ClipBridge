@@ -1,4 +1,4 @@
-﻿namespace ClipBridgeShell_CS.Contracts.Services;
+namespace ClipBridgeShell_CS.Contracts.Services;
 
 public interface IActivationService
 {

@@ -1,4 +1,4 @@
-﻿namespace ClipBridgeShell_CS.Core.Contracts.Services;
+namespace ClipBridgeShell_CS.Core.Contracts.Services;
 
 public interface IFileService
 {

@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 
 using ClipBridgeShell_CS.Core.Contracts.Services;
 

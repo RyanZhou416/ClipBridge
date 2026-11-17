@@ -140,15 +140,15 @@ public sealed partial class ShellPage : Page
             if (account.HasValue)
             {
                 var deviceName = System.Environment.MachineName;
-                
+
                 // 创建内容面板
                 var contentPanel = new StackPanel
                 {
                     Spacing = 12
                 };
-                
+
                 var loc = Localizer.Get();
-                
+
                 // 账号信息
                 var accountInfo = new TextBlock
                 {
@@ -157,7 +157,7 @@ public sealed partial class ShellPage : Page
                     Margin = new Thickness(0, 0, 0, 8)
                 };
                 contentPanel.Children.Add(accountInfo);
-                
+
                 // 设备信息
                 var deviceInfo = new TextBlock
                 {
@@ -165,7 +165,7 @@ public sealed partial class ShellPage : Page
                     FontSize = 14
                 };
                 contentPanel.Children.Add(deviceInfo);
-                
+
                 var dialog = new ContentDialog
                 {
                     Title = loc.GetLocalizedString("AccountInfo_Title"),
@@ -174,23 +174,23 @@ public sealed partial class ShellPage : Page
                     CloseButtonText = loc.GetLocalizedString("AccountInfo_Close"),
                     XamlRoot = this.XamlRoot
                 };
-                
+
                 var result = await dialog.ShowAsync();
-                
+
                 // 如果点击了"更换账号"
                 if (result == ContentDialogResult.Primary)
                 {
                     // 清除当前账号
                     await accountService.ClearAccountAsync();
-                    
+
                     // 关闭核心（如果正在运行）
                     var coreHost = App.GetService<ICoreHostService>();
-                    if (coreHost.State == CoreState.Ready || 
+                    if (coreHost.State == CoreState.Ready ||
                         coreHost.State == CoreState.Loading)
                     {
                         await coreHost.ShutdownAsync();
                     }
-                    
+
                     // 显示登录对话框
                     var loginDialog = new LoginDialog(accountService);
                     loginDialog.XamlRoot = this.XamlRoot;

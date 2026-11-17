@@ -1,8 +1,11 @@
 # Windows 打包渠道（按产物拆分）
 
 > 设计与实现差异见 [ADR-005](adr/005-windows-distribution-implementation.md)；各渠道卸载/数据保留行为以该文为准。
+>
+> **GitHub 自动化范围（实现中，待远程验收）**：只纳入机器级 MSI、用户级 EXE、便携 ZIP。[手动发布工作流](<../.github/workflows/release-windows.yml>) 与 [CI 工作流](<../.github/workflows/ci.yml>) 已写入工作区，尚未触发真实发布；目标行为与门禁见 [Windows 发布规范](<windows-release.md>) 和 [CI 架构](<ci-architecture.md>)。
+> **MSIX/StoreUpload 与 winget 继续使用下文的本地脚本和人工渠道流程，不进入 GitHub CI/发布，也不上传其包或清单。** 下文历史本机验证不表示 GitHub 已覆盖这些渠道；本次重构已移除 GitHub 工作流里的 winget 步骤。
 
-主入口是 `scripts/build-windows-installers.ps1`，用 `-Only` 选择渠道；每个渠道另有一个薄封装脚本，
+主入口是 [build-windows-installers.ps1](<../scripts/build-windows-installers.ps1>)，用 `-Formats` 选择一个或多个 MSI/EXE/ZIP 格式，或用兼容的 `-Only` 选择单渠道；两参数不可同时指定。每个渠道另有一个薄封装脚本，
 便于 CI / 本地只构建需要的产物。版本唯一真值仍是
 `platforms/windows/ClipBridgeShell_CS/Version.props`，经 `scripts/version.ps1` 派生
 （本文实测时是 `0.1.0`，架构 `x64`）。
@@ -16,17 +19,20 @@ MSIX 是**独立脚本** `scripts/build-windows-msix.ps1`（不进 `build-window
 |---|---|---|---|---|
 | 全部（All，默认） | `pwsh scripts/build-windows-all.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-machine.msi`、`-user.exe`、`-user.msi`（内部）、`-portable.zip` | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 已实测 exit 0（2026-11-14，66.1s），4 类产物齐全、断言通过；未做真机安装 |
 | per-machine MSI | `pwsh scripts/build-windows-machine-msi.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-machine.msi` | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 已实测 exit 0（32.2s），结构断言通过；**2026-11-15 已用管理员权限实测安装/卸载成功**（程序目录/HKLM/快捷方式/ARP/数据目录全部清除） |
-| per-user EXE（Burn） | `pwsh scripts/build-windows-user-exe.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-user.exe`（+ 内部 `-user.msi`） | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 已实测 exit 0（34.3s），结构断言通过；**真机安装验证本次未做** |
+| per-user EXE（Burn） | `pwsh scripts/build-windows-user-exe.ps1 -WixInstallPath C:\tools\wix314` | `ClipBridge-<ver>-win-<arch>-user.exe`（+ 内部 `-user.msi`） | WiX 3.14 + VS 2022 MSBuild + .NET 10 SDK + Rust 目标 | 脚本拆分时实测 exit 0（34.3s）、结构断言通过；后续已有 **2026-11-15 本机安装/卸载记录**（见文末），不代表每次重建产物都已重新安装验收 |
 | 便携 ZIP | `pwsh scripts/build-windows-portable-zip.ps1` | `ClipBridge-<ver>-win-<arch>-portable.zip` | .NET 10 SDK + Rust 目标（**不经过 WiX**） | 已实测 exit 0（10.3s），ZIP 结构断言通过；**已解压实测便携/无 marker/不可写回退三种模式** |
 | winget 清单 | `pwsh scripts/build-windows-winget.ps1` | `dist/winget/` 下三件套 YAML | `dist/` 已有 machine MSI 与 user EXE；winget CLI（可选，缺失时跳过 validate） | 已实测 exit 0（约 1s），`winget validate` 通过；**真实安装需先发布 Release** |
 | MSIX（Store） | `pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 [-SelfSign -KeepLayout]`；Partner Center 提交用 `-StoreUpload` | `dist/msix/ClipBridge-<ver>-win-x64.msix`（默认）；`dist/msix/ClipBridge-<ver>-win-x64.msixupload`（`-StoreUpload`）；+ `unsigned/`、可选 `layout/` | .NET 10 SDK + Rust target + Windows SDK（makeappx/signtool/makepri）；不需要 WiX | 已实测 exit 0（1.0.0，30s 量级）：109.4→89.9 MB，AI/ML/pdb/资源断言通过，自签名成功；**真机 `Add-AppxPackage` 被自签名根信任阻止（0x800B0109）**，已用开发者模式 `-Register` 完成安装/启动/卸载验收；**StoreUpload 已实测 exit 0（31.4s），91.2 MB `.msixupload`，内部包 398 文件、身份/裁剪/未签名断言通过**（未提交 Partner Center） |
 
 ## 参数
 
-- 所有构建 wrapper：`-Platform x64|arm64`、`-OutDir dist`、`-SkipRust`、`-KeepStage`。
+- MSI/EXE/ZIP 构建 wrapper：`-Platform x64`、`-OutDir dist`、`-SkipRust`、`-KeepStage`。当前仅 x64 已实现；传 arm64 会在构建前明确拒绝，不根据参数列表宣称支持。
 - `machine` / `user` / `all` 额外支持 `-WixInstallPath <WiX 3.14 目录>`；不传时探测标准安装位置。
 - 便携 ZIP 不需要 WiX：为与其他渠道脚本保持同一套参数而保留 `-WixInstallPath`，传入会被忽略。
-- 主脚本：`-Only All|MachineMsi|UserExe|PortableZip`（默认 `All`，行为与旧版一致）。
+- 主脚本：`-Formats @('machine-msi','user-exe','portable-zip')` 支持任意非空子集；或兼容 `-Only All|MachineMsi|UserExe|PortableZip`。不指定时仍构建三种格式，不能同时显式传两参数。
+- 主脚本签名：`-SigningMode None|Certificate`（默认 None）。Certificate 要求已有证书的 `-CertificateThumbprint`、RFC3161 `-TimestampUrl` 和可用 signtool；不自动创建或导入证书，不配置签名服务。签名接口尚无生产证书实测，不等于签名发布已可用。
+- 新增输出 `package-summary.json` 记录本次格式集合、版本、架构、签名状态及各文件大小/hash；internal user MSI 明确标为内部载荷，正式上传白名单将它排除。
+- 发布流程可用 `-SkipRust -ExpectedCoreDllSha256 <64位SHA256>` 复用刚经 Windows 测试的 DLL；输入 hash 不符会在 publish 前失败，stage 预签名 hash 也必须一致。对应 `nativeEvidence.sourceReusedVerified` 仅在该校验成功时为 true；普通独立构建不传该参数则仍显式 cargo 构建。
 - winget wrapper：`-Version`、`-ReleaseUrlBase`、`-ReleaseTag`、`-OutDir`；清单固定按 `x64` 产物生成。
 - MSIX（独立脚本）：`-Version`、`-AllowPreviewVersion`、`-IdentityName`、`-Publisher`、
   `-PublisherDisplayName`、`-DisplayName`、`-SelfSign`、`-StoreUpload`、`-OutDir`（默认 `dist/msix`）、
@@ -36,8 +42,14 @@ MSIX 是**独立脚本** `scripts/build-windows-msix.ps1`（不进 `build-window
 
 ## 共享的 publish / heat 与断言
 
-- `All`：machine MSI 构建时做一次 `dotnet publish` + `heat`，user MSI 用
-  `-p:SkipPublish=true -p:SkipHeat=true` 复用同一份 stage/heat；再构建 bundle 与 ZIP。
+- `All` 或多格式集合：只做一次 `dotnet publish` 并建立 stage；需要 MSI 时 heat 一次，machine/user MSI 复用该 stage/heat，再按选择构建 bundle/ZIP。若启用签名，则先签项目自有载荷，再签 MSI，最后构建并签 Burn，ZIP 使用最终 stage。
+- 从 PowerShell 传格式数组时直接调用脚本，避免跨 `pwsh -File` 进程把数组误传成单字符串：
+
+  ```powershell
+  & ./scripts/build-windows-installers.ps1 `
+    -Formats @('machine-msi', 'portable-zip') `
+    -WixInstallPath "$env:TEMP/wix314"
+  ```
 - `MachineMsi`：只做 publish + heat + machine MSI，并只断言 machine 的属性。
 - `UserExe`：publish + heat + per-user MSI + bundle，并只断言 user MSI 与 bundle。
 - `PortableZip`：直接执行与 wixproj `BeforeBuild` 相同的 `dotnet publish` 参数并去掉
@@ -269,9 +281,9 @@ pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 -StoreUpload
 
 ## 验证状态与已知限制
 
-- 本轮 MSI/Bundle/ZIP 验证只覆盖"构建 + 包结构断言"：所有命令 exit 0、产物存在、MSI/Bundle/ZIP 属性符合预期。
-- **machine MSI 需要管理员权限在真实机器上安装验证**（写 `Program Files` / `HKLM`、走 UAC），本次未做。
-- per-user EXE 的真机安装/卸载、便携 ZIP 的解压启动，本次也未做。
+- 脚本拆分时的验证范围是“构建 + 包结构断言”；后续系统级验收单独记录，不能将两个阶段的状态混为一谈。
+- machine MSI 的管理员安装/卸载、user EXE 的本机安装/卸载已有 2026-11-15 记录，便携 ZIP 也有解压启动/数据根记录，见文末。
+- 这些是指定历史候选的本机证据，不代表 GitHub 已自动覆盖安装验收，也不替代未来新候选按 SHA/hash 重新验收。
 - **winget 需要先发布 GitHub Release 并上传 machine MSI 与 user EXE**；清单里的 `InstallerUrl`
   指向 Release 资产，未发布前真实 `winget install` 会 404。`winget validate` 只校验清单结构，
   不校验远端 URL。
@@ -281,9 +293,7 @@ pwsh scripts/build-windows-msix.ps1 -Version 1.0.0 -StoreUpload
   签名包 `Add-AppxPackage` 受自签名根信任限制（本机非管理员，`0x800B0109`），已用开发者模式
   `-Register` 完成安装/启动/卸载验收。**StoreUpload（`.msixupload`）已实现并实测 exit 0**，
   内部包已裁剪、未签名、身份正确；Store 正式提交仍待 Partner Center 身份与重签。
-- **MSIX 未做 MSI→MSIX 数据导入**（ADR-005 P2 待办）：打包后应用数据根是 `LocalState` /
-  `LocalCache`，不会自动导入 `%LOCALAPPDATA%\ClipBridge`；本机因 PasswordVault 账号可复用，
-  core 能正常初始化，但旧 core.db/tls 不会迁移。
+- **MSIX 旧数据导入已有实现与本地验收记录**：首次启动按条件快照导入旧数据库、TLS 和设置；缓存默认跳过，失败恢复与限制见 [ADR-005](<adr/005-windows-distribution-implementation.md#L104-L108>)。这是本地渠道能力，不因此将 MSIX 打包/注册/提交加入 GitHub CI。
 - 当前产物未签名，首次运行仍会被 SmartScreen 拦截。
 
 ## 常用命令

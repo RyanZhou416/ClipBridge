@@ -1,4 +1,4 @@
-﻿using System.Diagnostics.CodeAnalysis;
+using System.Diagnostics.CodeAnalysis;
 
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Helpers;

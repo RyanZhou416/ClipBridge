@@ -1,4 +1,4 @@
-﻿using ClipBridgeShell_CS.Core.Helpers;
+using ClipBridgeShell_CS.Core.Helpers;
 
 using Windows.Storage;
 using Windows.Storage.Streams;

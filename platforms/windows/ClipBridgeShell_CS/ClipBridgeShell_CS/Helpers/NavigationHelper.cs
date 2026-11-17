@@ -1,4 +1,4 @@
-﻿using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
 namespace ClipBridgeShell_CS.Helpers;

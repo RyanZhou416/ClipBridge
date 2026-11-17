@@ -20,13 +20,13 @@ public sealed class CoreLogDispatcher : IDisposable
     private readonly Task _backgroundTask;
     private const int BatchSize = 5; // 减小批量大小，加快响应速度
     private const int QueueCapacity = 1000;
-    
+
     /// <summary>
     /// 写入完成回调：当一批日志写入完成时触发
     /// 参数：写入的日志条目列表
     /// </summary>
     public event Action<List<LogEntry>>? BatchWritten;
-    
+
     /// <summary>
     /// 单条日志写入完成回调：当一条日志写入完成时立即触发（用于实时显示）
     /// </summary>
@@ -107,7 +107,7 @@ public sealed class CoreLogDispatcher : IDisposable
             {
                 batch.Add(entry);
             }
-            
+
             // 如果队列为空但批次中有日志，立即处理（不等待达到 BatchSize）
             // 这样可以加快响应速度，特别是对于少量日志
             if (batch.Count > 0 && batch.Count < BatchSize && _queue.Count == 0)
@@ -186,7 +186,10 @@ public sealed class CoreLogDispatcher : IDisposable
             {
                 type = "LOG_WRITTEN",
                 ts_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                payload = new { batch_count = batch.Count }
+                payload = new
+                {
+                    batch_count = batch.Count
+                }
             });
             _eventPump.Enqueue(eventJson);
         }

@@ -1,0 +1,7 @@
+# ClipBridge CI 与本地构建的 Rust 工具链唯一真值。
+# 1.99.1 是实施时本机 rustup 中已验证存在的版本；工作流通过 rustup 读取本文件，
+# 不静默回退到 stable/latest。修改本文件会触发全量 CI。
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

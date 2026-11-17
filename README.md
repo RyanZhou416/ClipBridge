@@ -12,6 +12,8 @@
 
 ### Android
 
+> 剪贴板交互决策见 [ADR-006：通知栏手动发送](<docs/adr/006-android-notification-clipboard-send.md>)：默认采用通知按钮触发短暂透明 Activity，获焦后读取并关闭，再后台发送；无需进入首页或手工粘贴，不要求 Shizuku/Root。**这是已确定但尚未实现、未真机验收的目标；不承诺通知栏始终展开或零焦点切换，现有代码仍依赖 Shizuku。**
+
 - 使用 `platforms/android/ClipBridgeShellAndroid/gradlew`，JDK 21。Gradle 8.13 无法解析 JDK 25 的版本号，`JAVA_HOME` 指向 JDK 25 时构建会在配置阶段直接失败。
 - NDK 版本由 `app/build.gradle.kts` 固定为 `26.3.11579264`。
 - 先安装 Rust Android 目标并交叉编译 `libcore_ffi_android.so`：

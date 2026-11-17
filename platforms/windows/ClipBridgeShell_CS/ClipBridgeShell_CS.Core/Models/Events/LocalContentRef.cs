@@ -19,14 +19,23 @@ public class LocalContentRef
     public string Mime { get; set; } = string.Empty;
 
     [JsonPropertyName("text_utf8")]
-    public string? TextUtf8 { get; set; }
+    public string? TextUtf8
+    {
+        get; set;
+    }
 
     [JsonPropertyName("local_path")]
-    public string? LocalPath { get; set; }
+    public string? LocalPath
+    {
+        get; set;
+    }
 
     [JsonPropertyName("sha256")]
     public string Sha256 { get; set; } = string.Empty;
 
     [JsonPropertyName("total_bytes")]
-    public long TotalBytes { get; set; }
+    public long TotalBytes
+    {
+        get; set;
+    }
 }

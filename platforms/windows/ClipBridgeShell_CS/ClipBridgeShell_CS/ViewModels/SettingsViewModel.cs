@@ -35,22 +35,40 @@ public partial class SettingsViewModel : ObservableRecipient
     private bool _suppressSettingWrites;
 
     [ObservableProperty]
-    public partial ElementTheme ElementTheme { get; set; }
+    public partial ElementTheme ElementTheme
+    {
+        get; set;
+    }
 
     [ObservableProperty]
-    public partial string VersionDescription { get; set; }
+    public partial string VersionDescription
+    {
+        get; set;
+    }
 
     [ObservableProperty]
-    public partial IReadOnlyList<ComboOption<ElementTheme>> ThemeOptions { get; set; }
+    public partial IReadOnlyList<ComboOption<ElementTheme>> ThemeOptions
+    {
+        get; set;
+    }
 
     [ObservableProperty]
-    public partial IReadOnlyList<ComboOption<string>> LanguageOptions { get; set; }
+    public partial IReadOnlyList<ComboOption<string>> LanguageOptions
+    {
+        get; set;
+    }
 
     [ObservableProperty]
-    public partial IReadOnlyList<ComboOption<string>> CloseBehaviorOptions { get; set; }
+    public partial IReadOnlyList<ComboOption<string>> CloseBehaviorOptions
+    {
+        get; set;
+    }
 
     [ObservableProperty]
-    public partial IReadOnlyList<ComboOption<string>> StartupMethodOptions { get; set; }
+    public partial IReadOnlyList<ComboOption<string>> StartupMethodOptions
+    {
+        get; set;
+    }
 
     private bool _isClipboardCaptureEnabled;
     private string _currentLanguage = "en-US";
@@ -471,7 +489,7 @@ public partial class SettingsViewModel : ObservableRecipient
             Windows.Storage.ApplicationData.Current.LocalSettings.Values.Clear();
         }
 
-        string defaultLang = NormalizeLanguageTag(CultureInfo.CurrentUICulture.Name);
+        var defaultLang = NormalizeLanguageTag(CultureInfo.CurrentUICulture.Name);
         CurrentLanguage = defaultLang;
 
         IsClipboardCaptureEnabled = true;

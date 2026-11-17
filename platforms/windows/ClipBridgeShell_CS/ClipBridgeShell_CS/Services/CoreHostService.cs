@@ -31,6 +31,9 @@ public sealed class CoreHostService : ICoreHostService
     private const string CredentialsUnavailableMessage = "无法读取账户凭据，请重新登录/重新设置密码";
 
     private readonly CoreConfigBuilder _cfgBuilder = new();
+    private readonly IDataRootProvider _dataRootProvider;
+    private readonly ICoreLibraryLocator _coreLibraryLocator;
+    private readonly uint _expectedFfiAbiMajor;
     private CoreInterop.CbOnEventFn? _onEventThunk;
     private GCHandle _selfHandle;
     private IntPtr _coreHandle = IntPtr.Zero;
@@ -69,11 +72,43 @@ public sealed class CoreHostService : ICoreHostService
         get; private set;
     }
 
-    public CoreHostService(EventPumpService eventPump, ILocalSettingsService localSettingsService, ILoggerFactory? loggerFactory = null, IAccountService? accountService = null)
+    public CoreHostService(
+        EventPumpService eventPump,
+        ILocalSettingsService localSettingsService,
+        ILoggerFactory? loggerFactory = null,
+        IAccountService? accountService = null,
+        IDataRootProvider? dataRootProvider = null)
+        : this(
+            eventPump,
+            localSettingsService,
+            loggerFactory,
+            accountService,
+            dataRootProvider ?? new DefaultDataRootProvider(),
+            new DefaultCoreLibraryLocator(),
+            ExpectedFfiAbiMajor)
+    {
+    }
+
+    /// <summary>
+    /// 测试/宿主专用构造：显式注入数据根、原生库定位器与期望 ABI 主版本。
+    /// 生产公开构造固定使用 <see cref="DefaultDataRootProvider"/>、真实 DLL 搜索和
+    /// <see cref="ExpectedFfiAbiMajor"/>，行为与历史实现一致。
+    /// </summary>
+    internal CoreHostService(
+        EventPumpService eventPump,
+        ILocalSettingsService localSettingsService,
+        ILoggerFactory? loggerFactory,
+        IAccountService? accountService,
+        IDataRootProvider dataRootProvider,
+        ICoreLibraryLocator coreLibraryLocator,
+        uint expectedFfiAbiMajor)
     {
         _eventPump = eventPump;
         _localSettingsService = localSettingsService;
         _accountService = accountService;
+        _dataRootProvider = dataRootProvider ?? throw new ArgumentNullException(nameof(dataRootProvider));
+        _coreLibraryLocator = coreLibraryLocator ?? throw new ArgumentNullException(nameof(coreLibraryLocator));
+        _expectedFfiAbiMajor = expectedFfiAbiMajor;
         _logger = loggerFactory?.CreateLogger<CoreHostService>();
         _jsonOpts = new JsonSerializerOptions
         {
@@ -128,9 +163,9 @@ public sealed class CoreHostService : ICoreHostService
 
         var deviceId = await GetOrCreateDeviceIdAsync();
 
-        // 1. 路径构建（唯一解析入口：便携 / LocalAppData 由 CoreConfigBuilder 决定）
-        var dataRoot = CoreConfigBuilder.ResolveDataRootInfo("ClipBridge");
-        var paths = _cfgBuilder.BuildPaths("ClipBridge");
+        // 1. 路径构建（唯一解析入口：生产为 CoreConfigBuilder，测试注入临时根）
+        var dataRoot = _dataRootProvider.Current;
+        var paths = _cfgBuilder.BuildPaths(dataRoot);
         Diagnostics.AppDataDir = paths.AppDataDir;
         Diagnostics.CoreDataDir = paths.CoreDataDir;
         Diagnostics.CacheDir = paths.CacheDir;
@@ -210,7 +245,7 @@ public sealed class CoreHostService : ICoreHostService
         var configJson = JsonSerializer.Serialize(config, _jsonOpts);
 
         // 2. 查找 DLL
-        var dllFullPath = FindCoreDll("core_ffi_windows.dll");
+        var dllFullPath = _coreLibraryLocator.FindCoreLibrary();
         Diagnostics.DllPath = dllFullPath;
 
         if (string.IsNullOrWhiteSpace(dllFullPath) || !File.Exists(dllFullPath))
@@ -226,26 +261,37 @@ public sealed class CoreHostService : ICoreHostService
 
         try
         {
-            // 3. 配置 Resolver（CoreInterop 内部线程安全且幂等）
-            if (!CoreInterop.ConfigureDllPath(dllFullPath))
-            {
-                _logger?.LogWarning("CoreInterop already configured with a different DLL path; keeping the first configuration");
-            }
-
-            // 4. 检查 ABI
-            CoreInterop.cb_get_ffi_version(out var major, out var minor);
+            // 3. 检查 ABI：显式加载目标 DLL 读取版本，错误能在 ConfigureDllPath 之前
+            //    被归类为 DllNotFound / BadImageFormat / EntryPointNotFound，不会被
+            //    进程内已解析的另一个模块句柄掩盖（测试负路径依赖这个顺序）。
+            var (major, minor) = CoreNativeLibrary.ProbeFfiVersion(dllFullPath);
             Diagnostics.FfiAbiMajor = major;
             Diagnostics.FfiAbiMinor = minor;
 
             // ABI 主版本不匹配是硬失败：继续初始化会在不兼容的 ABI 上调用 FFI，只会静默错乱。
             // 与 init 失败保持一致的对外表现：State=Degraded、LastError、LastInitSummary 都会被设置。
-            if (major != ExpectedFfiAbiMajor)
+            if (major != _expectedFfiAbiMajor)
             {
                 _logger?.LogError(
                     "FFI ABI mismatch: core reports {CoreMajor}.{CoreMinor}, shell requires major {ExpectedMajor}",
-                    major, minor, ExpectedFfiAbiMajor);
-                LastError = $"FFI ABI 不兼容：core 返回 {major}.{minor}，壳侧要求 major {ExpectedFfiAbiMajor}。";
-                Diagnostics.LastInitSummary = $"Core degraded: FFI ABI mismatch (core {major}.{minor}, shell {ExpectedFfiAbiMajor}.x).";
+                    major, minor, _expectedFfiAbiMajor);
+                LastError = $"FFI ABI 不兼容：core 返回 {major}.{minor}，壳侧要求 major {_expectedFfiAbiMajor}。";
+                Diagnostics.LastInitSummary = $"Core degraded: FFI ABI mismatch (core {major}.{minor}, shell {_expectedFfiAbiMajor}.x).";
+                SetState(CoreState.Degraded);
+                return;
+            }
+
+            // 4. 配置 Resolver（CoreInterop 内部线程安全且幂等）。如果进程已经指向另一个 DLL，
+            //    继续初始化会让 ABI 探测（B）与实际 FFI 调用（A）使用不同库；必须 fail-closed，
+            //    不能让“验证 B 实际用 A”。
+            if (!CoreInterop.ConfigureDllPath(dllFullPath))
+            {
+                _logger?.LogError(
+                    "Refusing to initialize core: FFI resolver already points to a different DLL than {RequestedPath}",
+                    dllFullPath);
+                Diagnostics.DllLoadError = "ResolverConflict: FFI resolver is already bound to a different core DLL in this process.";
+                Diagnostics.LastInitSummary = "Core degraded: conflicting core DLL path already configured.";
+                LastError = "FFI 解析器已绑定到另一个 core DLL，拒绝在同一进程内混用不同实现。";
                 SetState(CoreState.Degraded);
                 return;
             }
@@ -330,6 +376,14 @@ public sealed class CoreHostService : ICoreHostService
             LastError = ex.Message;
             SetState(CoreState.Degraded);
         }
+        catch (EntryPointNotFoundException ex)
+        {
+            _logger?.LogError(ex, "Core initialization failed");
+            Diagnostics.DllLoadError = $"EntryPointNotFound: {ex.Message}";
+            Diagnostics.LastInitSummary = "Core degraded: incompatible core library (missing FFI export).";
+            LastError = ex.Message;
+            SetState(CoreState.Degraded);
+        }
         catch (Exception ex)
         {
             Diagnostics.LastInitSummary = $"Init failed: {ex.GetType().Name}: {ex.Message}";
@@ -391,8 +445,9 @@ public sealed class CoreHostService : ICoreHostService
             }
             else
             {
-                // 与 CoreConfigBuilder.BuildPaths 用同一个解析器：便携模式下证书也在 <exeDir>\data。
-                localFolder = CoreConfigBuilder.ResolveDataRoot("ClipBridge");
+                // 与 CoreHostService.InitializeAsync 使用同一个注入根：便携/默认/测试
+                // 三个来源下证书都留在本次运行真正使用的数据根内。
+                localFolder = _dataRootProvider.Current.Root;
             }
 
             var tlsDir = System.IO.Path.Combine(localFolder, "tls");
@@ -731,22 +786,6 @@ public sealed class CoreHostService : ICoreHostService
         {
             get; set;
         }
-    }
-
-    // [FIX] 确保 FindCoreDll 被 InitializeAsync 调用
-    private static string? FindCoreDll(string dllName)
-    {
-        var current = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        const int maxLevels = 5;
-        for (var level = 0; level <= maxLevels && !string.IsNullOrEmpty(current); level++)
-        {
-            var direct = Path.Combine(current, dllName);
-            if (File.Exists(direct)) return direct;
-            var winx64 = Path.Combine(current, "win-x64", dllName);
-            if (File.Exists(winx64)) return winx64;
-            current = Directory.GetParent(current)?.FullName;
-        }
-        return null;
     }
 
     public string GetDiagnosticsText()

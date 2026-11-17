@@ -13,13 +13,22 @@ public class ClipboardFileEntry
     public string RelName { get; set; } = string.Empty;
 
     [JsonPropertyName("abs_path")]
-    public string? AbsPath { get; set; }
+    public string? AbsPath
+    {
+        get; set;
+    }
 
     [JsonPropertyName("size_bytes")]
-    public long SizeBytes { get; set; }
+    public long SizeBytes
+    {
+        get; set;
+    }
 
     [JsonPropertyName("sha256")]
-    public string? Sha256 { get; set; }
+    public string? Sha256
+    {
+        get; set;
+    }
 }
 
 /// <summary>
@@ -75,19 +84,31 @@ public class ClipboardSnapshot
     /// 快照类型，取 Rust <c>SnapshotKind</c> 的 snake_case 拼写：text / image / file_list。
     /// 为空时按 ImageBytes / Files 自动推断，默认 text（现有文本采集路径无需改动）。
     /// </summary>
-    public string? Kind { get; set; }
+    public string? Kind
+    {
+        get; set;
+    }
 
     /// <summary>
     /// 可选共享模式，取 Rust <c>ShareMode</c> 的 snake_case 拼写：default / local_only / force。
     /// 为 null 时不发送该字段，由 Core 取默认值 default。
     /// </summary>
-    public string? ShareMode { get; set; }
+    public string? ShareMode
+    {
+        get; set;
+    }
 
     /// <summary>图片原始字节；kind=image 时必填，序列化时转 base64 写入 image.bytes_b64。</summary>
-    public byte[]? ImageBytes { get; set; }
+    public byte[]? ImageBytes
+    {
+        get; set;
+    }
 
     /// <summary>文件列表；kind=file_list 时必填，序列化为 files[]。</summary>
-    public List<ClipboardFileEntry>? Files { get; set; }
+    public List<ClipboardFileEntry>? Files
+    {
+        get; set;
+    }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -182,22 +203,37 @@ public class ClipboardSnapshot
         public string Type => "ClipboardSnapshot";
 
         [JsonPropertyName("ts_ms")]
-        public long TsMs { get; set; }
+        public long TsMs
+        {
+            get; set;
+        }
 
         [JsonPropertyName("kind")]
         public string Kind { get; set; } = KindText;
 
         [JsonPropertyName("share_mode")]
-        public string? ShareMode { get; set; }
+        public string? ShareMode
+        {
+            get; set;
+        }
 
         [JsonPropertyName("text")]
-        public TextDto? Text { get; set; }
+        public TextDto? Text
+        {
+            get; set;
+        }
 
         [JsonPropertyName("image")]
-        public ImageDto? Image { get; set; }
+        public ImageDto? Image
+        {
+            get; set;
+        }
 
         [JsonPropertyName("files")]
-        public List<ClipboardFileEntry>? Files { get; set; }
+        public List<ClipboardFileEntry>? Files
+        {
+            get; set;
+        }
     }
 
     private sealed class TextDto

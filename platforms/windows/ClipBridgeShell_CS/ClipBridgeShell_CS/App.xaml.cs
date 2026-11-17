@@ -222,7 +222,9 @@ public partial class App : Application
         services.AddSingleton<EventPumpService>();
 
         // Logging - 先注册日志系统，避免循环依赖
-        services.AddSingleton<Services.Logging.StashLogManager>();
+        // 暂存日志与 core 共用同一个数据根（默认实现仍由 CoreConfigBuilder 解析）。
+        services.AddSingleton<Services.Logging.StashLogManager>(
+            sp => new Services.Logging.StashLogManager(sp.GetRequiredService<IDataRootProvider>()));
 
         // 先创建 CoreHostService（不使用 ILoggerFactory，避免循环依赖）
         services.AddSingleton<CoreHostService>(sp =>
@@ -230,8 +232,9 @@ public partial class App : Application
             var eventPump = sp.GetRequiredService<EventPumpService>();
             var localSettings = sp.GetRequiredService<ILocalSettingsService>();
             var accountService = sp.GetRequiredService<IAccountService>();
+            var dataRootProvider = sp.GetRequiredService<IDataRootProvider>();
             // 暂时不传入 loggerFactory，避免循环依赖
-            return new CoreHostService(eventPump, localSettings, null, accountService);
+            return new CoreHostService(eventPump, localSettings, null, accountService, dataRootProvider);
         });
         services.AddSingleton<ICoreHostService>(sp => sp.GetRequiredService<CoreHostService>());
 

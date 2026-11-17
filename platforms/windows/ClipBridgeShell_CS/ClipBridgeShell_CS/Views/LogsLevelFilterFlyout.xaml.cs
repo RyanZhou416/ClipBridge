@@ -1,33 +1,36 @@
-using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml;
-using ClipBridgeShell_CS.ViewModels;
 using System.Collections.Generic;
+using ClipBridgeShell_CS.ViewModels;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace ClipBridgeShell_CS.Views;
 
 public sealed partial class LogsLevelFilterFlyout : UserControl
 {
-    public LogsViewModel? ViewModel { get; set; }
-    
+    public LogsViewModel? ViewModel
+    {
+        get; set;
+    }
+
     private bool _isRestoringState = false;
-    
+
     public LogsLevelFilterFlyout()
     {
         InitializeComponent();
         Loaded += (s, e) => { RestoreFilterState(); AttachLevelEvents(); };
     }
-    
+
     private void RestoreFilterState()
     {
         if (ViewModel == null) return;
-        
+
         var currentFilter = ViewModel.FilterLevels;
         // 如果过滤条件为空或包含所有级别，表示全部选中
-        bool allSelected = currentFilter.Count == 0 || currentFilter.Count == 6;
-        
+        var allSelected = currentFilter.Count == 0 || currentFilter.Count == 6;
+
         // 暂时禁用事件，避免恢复状态时触发过滤
         _isRestoringState = true;
-        
+
         if (allSelected)
         {
             LevelTraceCheckBox.IsChecked = true;
@@ -46,10 +49,10 @@ public sealed partial class LogsLevelFilterFlyout : UserControl
             LevelErrorCheckBox.IsChecked = currentFilter.Contains(4);
             LevelCriticalCheckBox.IsChecked = currentFilter.Contains(5);
         }
-        
+
         _isRestoringState = false;
     }
-    
+
     private void AttachLevelEvents()
     {
         LevelTraceCheckBox.Checked += OnLevelChecked;
@@ -65,7 +68,7 @@ public sealed partial class LogsLevelFilterFlyout : UserControl
         LevelCriticalCheckBox.Checked += OnLevelChecked;
         LevelCriticalCheckBox.Unchecked += OnLevelUnchecked;
     }
-    
+
     private void OnLevelChecked(object sender, RoutedEventArgs e)
     {
         if (!_isRestoringState)
@@ -73,7 +76,7 @@ public sealed partial class LogsLevelFilterFlyout : UserControl
             ApplyFilter();
         }
     }
-    
+
     private void OnLevelUnchecked(object sender, RoutedEventArgs e)
     {
         if (!_isRestoringState)
@@ -81,11 +84,11 @@ public sealed partial class LogsLevelFilterFlyout : UserControl
             ApplyFilter();
         }
     }
-    
+
     private void ApplyFilter()
     {
         if (ViewModel == null) return;
-        
+
         var selectedLevels = new HashSet<int>();
         if (LevelTraceCheckBox.IsChecked == true) selectedLevels.Add(0);
         if (LevelDebugCheckBox.IsChecked == true) selectedLevels.Add(1);
@@ -93,10 +96,10 @@ public sealed partial class LogsLevelFilterFlyout : UserControl
         if (LevelWarnCheckBox.IsChecked == true) selectedLevels.Add(3);
         if (LevelErrorCheckBox.IsChecked == true) selectedLevels.Add(4);
         if (LevelCriticalCheckBox.IsChecked == true) selectedLevels.Add(5);
-        
+
         ViewModel.FilterLevels = selectedLevels;
     }
-    
+
     private void OnResetClick(object sender, RoutedEventArgs e)
     {
         LevelTraceCheckBox.IsChecked = true;

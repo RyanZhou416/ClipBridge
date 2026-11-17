@@ -15,6 +15,13 @@
 	<UseWinUI>true</UseWinUI>
     <EnableMsixTooling>true</EnableMsixTooling>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!--
+      CI 严格原生集成：置 true 时 cargo 构建失败或 DLL 缺失会直接 Error（脚本已先
+      执行锁定模式的 cargo 构建并用 -p:SkipRustBuild=true 复用产物）。默认 false 时保持
+      开发机的 Warning 行为；产品运行时仍由 CoreHostService 捕获加载失败并进入 Degraded，
+      两者互不替代。
+    -->
+    <RequireCoreFfi Condition="'$(RequireCoreFfi)' == ''">false</RequireCoreFfi>
 
     <!-- 发布时默认做 ReadyToRun 预编译（Release）。实测收益：交替 A/B 9 对，
          配对差值中位数 -37.5ms，8/9 对同向（无 R2R 369.9ms → 有 R2R 326.2ms）。
@@ -150,15 +157,17 @@
   </PropertyGroup>
 
   <Target Name="BuildCoreFfi" BeforeTargets="BeforeBuild" Condition="'$(SkipRustBuild)' != 'true'">
-    <Message Importance="high" Text="[core-ffi] cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc" />
-    <Exec Command="cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc"
+    <Message Importance="high" Text="[core-ffi] cargo build -p core-ffi-windows --release --locked --target x86_64-pc-windows-msvc" />
+    <Exec Command="cargo build -p core-ffi-windows --release --locked --target x86_64-pc-windows-msvc"
           WorkingDirectory="$(CliBridgeRepoRoot)"
           IgnoreExitCode="true"
           StandardOutputImportance="low"
           StandardErrorImportance="normal">
       <Output TaskParameter="ExitCode" PropertyName="RustBuildExitCode" />
     </Exec>
-    <Warning Condition="'$(RustBuildExitCode)' != '0'"
+    <Error Condition="'$(RustBuildExitCode)' != '0' and '$(RequireCoreFfi)' == 'true'"
+           Text="[core-ffi] cargo build failed (exit $(RustBuildExitCode)) while RequireCoreFfi=true. Native CI must fail instead of loading a stale/missing core_ffi_windows.dll." />
+    <Warning Condition="'$(RustBuildExitCode)' != '0' and '$(RequireCoreFfi)' != 'true'"
              Text="[core-ffi] cargo build failed (exit $(RustBuildExitCode)); the app will load $(RustTargetDir)\core_ffi_windows.dll which may be STALE. Install the Rust toolchain or pass -p:SkipRustBuild=true." />
   </Target>
 
@@ -169,7 +178,9 @@
       Release 构建缺少 core_ffi_windows.dll 时不再静默通过（运行期会 DllNotFoundException，
       CoreHostService 只会报告 Degraded）。用 -p:SkipCoreFfiCheck=true 可显式关掉该检查。
     -->
-    <Warning Condition="'$(Configuration)' == 'Release' and '$(SkipCoreFfiCheck)' != 'true' and !Exists('$(RustTargetDir)\core_ffi_windows.dll')"
+    <Error Condition="'$(RequireCoreFfi)' == 'true' and !Exists('$(RustTargetDir)\core_ffi_windows.dll')"
+           Text="core_ffi_windows.dll was not found in '$(RustTargetDir)' while RequireCoreFfi=true. Native CI must fail; build the Rust core-ffi crate with --locked and pass -p:RustTargetDir=&lt;dir&gt;." />
+    <Warning Condition="'$(RequireCoreFfi)' != 'true' and '$(Configuration)' == 'Release' and '$(SkipCoreFfiCheck)' != 'true' and !Exists('$(RustTargetDir)\core_ffi_windows.dll')"
              Text="core_ffi_windows.dll was not found in '$(RustTargetDir)'. The resulting app will fail at runtime with DllNotFoundException (CoreHostService reports 'Degraded'). Build the Rust core-ffi crate (cargo build -p core_ffi_windows --release --target x86_64-pc-windows-msvc) or pass -p:RustTargetDir=&lt;dir&gt;. Set -p:SkipCoreFfiCheck=true to suppress this warning." />
     <Copy SourceFiles="$(RustTargetDir)\core_ffi_windows.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('$(RustTargetDir)\core_ffi_windows.dll')" />
   </Target>

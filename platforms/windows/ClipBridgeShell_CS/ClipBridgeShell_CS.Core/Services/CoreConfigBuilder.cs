@@ -193,7 +193,17 @@ public sealed class CoreConfigBuilder
     }
 
     public Paths BuildPaths(string appName = "ClipBridge")
+        => BuildPaths(ResolveDataRootInfo(appName));
+
+    /// <summary>
+    /// 用调用方已解析的数据根构建路径。生产默认实现委托给
+    /// <see cref="ResolveDataRootInfo(string)"/>；测试/宿主可通过
+    /// <c>IDataRootProvider</c> 注入临时根，避免任何真实用户目录读写。
+    /// </summary>
+    public Paths BuildPaths(DataRootResolution dataRoot)
     {
+        ArgumentNullException.ThrowIfNull(dataRoot);
+
         // 真实布局（与 CoreHostService.InitializeAsync 传给 cb_init 的字段一致）：
         //   <dataRoot>\            ← data_dir：core.db / logs.db / tls/ / startup.log
         //   <dataRoot>\Cache\      ← cache_dir：blobs/ + tmp/
@@ -207,7 +217,7 @@ public sealed class CoreConfigBuilder
         // 但运行中的 core 从来没用过它们（data_dir 一直是根目录），结果是每次启动都
         // 留下几个空目录，误导用户和排障。现在只创建真正会用到的两个目录，并对旧布局
         // 的空目录做一次性清理（见 CoreHostService.TryRemoveEmptyLegacyDirs）。
-        var root = ResolveDataRoot(appName);
+        var root = dataRoot.Root;
         var cacheDir = Path.Combine(root, "Cache");
 
         Directory.CreateDirectory(root);

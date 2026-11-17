@@ -1,28 +1,31 @@
-using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml;
 using ClipBridgeShell_CS.ViewModels;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace ClipBridgeShell_CS.Views;
 
 public sealed partial class LogsTimestampFilterFlyout : UserControl
 {
-    public LogsViewModel? ViewModel { get; set; }
-    
+    public LogsViewModel? ViewModel
+    {
+        get; set;
+    }
+
     private bool _isRestoringState = false;
-    
+
     public LogsTimestampFilterFlyout()
     {
         InitializeComponent();
         Loaded += (s, e) => { RestoreFilterState(); AttachEvents(); };
     }
-    
+
     private void RestoreFilterState()
     {
         if (ViewModel == null) return;
-        
+
         // 暂时禁用事件，避免恢复状态时触发过滤
         _isRestoringState = true;
-        
+
         // 恢复开始时间过滤
         if (ViewModel.FilterStartTime.HasValue)
         {
@@ -34,7 +37,7 @@ public sealed partial class LogsTimestampFilterFlyout : UserControl
         {
             StartTimeUnlimitedCheckBox.IsChecked = true;
         }
-        
+
         // 恢复结束时间过滤
         if (ViewModel.FilterEndTime.HasValue)
         {
@@ -46,10 +49,10 @@ public sealed partial class LogsTimestampFilterFlyout : UserControl
         {
             EndTimeNowCheckBox.IsChecked = true;
         }
-        
+
         _isRestoringState = false;
     }
-    
+
     private void AttachEvents()
     {
         StartTimeUnlimitedCheckBox.Checked += OnTimeFilterChanged;
@@ -61,7 +64,7 @@ public sealed partial class LogsTimestampFilterFlyout : UserControl
         EndDatePicker.DateChanged += (s, e) => ApplyTimeFilter();
         EndTimePicker.TimeChanged += (s, e) => ApplyTimeFilter();
     }
-    
+
     private void OnTimeFilterChanged(object sender, RoutedEventArgs e)
     {
         if (!_isRestoringState)
@@ -69,11 +72,11 @@ public sealed partial class LogsTimestampFilterFlyout : UserControl
             ApplyTimeFilter();
         }
     }
-    
+
     private void ApplyTimeFilter()
     {
         if (ViewModel == null || _isRestoringState) return;
-        
+
         DateTimeOffset? startTime = null;
         if (StartTimeUnlimitedCheckBox.IsChecked == false)
         {
@@ -83,7 +86,7 @@ public sealed partial class LogsTimestampFilterFlyout : UserControl
                 startTime = new DateTimeOffset(startDate.Value.DateTime + StartTimePicker.Time);
             }
         }
-        
+
         DateTimeOffset? endTime = null;
         if (EndTimeNowCheckBox.IsChecked == false)
         {
@@ -93,11 +96,11 @@ public sealed partial class LogsTimestampFilterFlyout : UserControl
                 endTime = new DateTimeOffset(endDate.Value.DateTime + EndTimePicker.Time);
             }
         }
-        
+
         ViewModel.FilterStartTime = startTime;
         ViewModel.FilterEndTime = endTime;
     }
-    
+
     private void OnResetClick(object sender, RoutedEventArgs e)
     {
         StartTimeUnlimitedCheckBox.IsChecked = true;

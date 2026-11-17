@@ -1,4 +1,5 @@
 {
+  "skip-github-release": true,
   "include-component-in-tag": true,
   "include-v-in-tag": false,
   "changelog-sections": [
@@ -25,9 +26,8 @@
       "component": "clipbridge-windows",
       "release-type": "simple",
       "extra-files": [
-        { "type": "xml", "path": "platforms/windows/ClipBridgeShell_CS/Version.props", "xpath": "//Project/PropertyGroup/Version" }
+        { "type": "xml", "path": "Version.props", "xpath": "//Project/PropertyGroup/Version" }
       ]
     }
   }
 }
-

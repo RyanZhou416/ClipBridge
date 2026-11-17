@@ -1,4 +1,4 @@
-﻿using Microsoft.Windows.ApplicationModel.Resources;
+using Microsoft.Windows.ApplicationModel.Resources;
 
 namespace ClipBridgeShell_CS.Helpers;
 

@@ -48,9 +48,9 @@ For dependency and policy checks when relevant:
 - `cargo deny check advisories bans licenses sources`
 
 For Windows C# shell changes:
-- `dotnet restore platforms/windows/ClipBridgeShell_CS`
-- `dotnet format platforms/windows/ClipBridgeShell_CS --verify-no-changes`
-- `dotnet build platforms/windows/ClipBridgeShell_CS -c Release --no-restore`
+- `pwsh -NoProfile -File scripts/ci/windows.ps1 -OutDir dist/ci/windows`
+- This entry builds the current Rust DLL, then restores/formats/builds/tests the concrete C# projects with consistent Release/x64/win-x64/R2R settings and isolated test data.
+- Do not restore/build the whole Windows solution as a C# check: it also contains WiX projects. Do not run native smoke tests against the real user data root or accept Degraded as a positive result.
 
 For Android shell changes, use the Gradle wrapper from `platforms/android/ClipBridgeShellAndroid` and keep Rust/NDK integration changes isolated.
 
@@ -73,9 +73,12 @@ For Android shell changes, use the Gradle wrapper from `platforms/android/ClipBr
 - Be careful with changes that affect JNI/FFI boundaries or NDK setup.
 
 ## CI Notes
-CI currently gates:
-- Rust formatting, clippy, tests, and `cargo-deny` on Rust-related paths.
-- `dotnet restore`, `dotnet format`, and `dotnet build` on Windows C# paths.
+The refactored CI uses a single change plan, platform entry scripts, and an always-run result check. Implementation and unverified/blocked items are recorded in [CI architecture](<docs/ci-architecture.md>).
+- Shared Rust/ABI inputs propagate to Windows, Android, and macOS; a skipped required task is not success.
+- Windows runs strict native integration and MSTest. macOS targets the real Xcode app, not the SwiftPM stub.
+- GitHub packaging/release is restricted to MSI, user EXE, and portable ZIP. MSIX/StoreUpload and winget remain local-only; do not add them to CI.
+- Public Windows releases require the explicit manual workflow. Never dispatch a release or change signing/environment settings merely to test CI.
+- Preserve security gates when they reveal existing dependency vulnerabilities; do not turn them into continue-on-error to claim a green run.
 
 When possible, run the validations that match the files you changed before finishing.
 

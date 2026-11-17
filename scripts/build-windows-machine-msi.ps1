@@ -13,7 +13,7 @@
     或用 -WixInstallPath 指定解压目录。
 
 .PARAMETER Platform
-    x64（默认）或 arm64。
+    x64（当前唯一支持）。arm64 参数只为兼容旧调用而保留，会在构建前明确失败。
 
 .PARAMETER OutDir
     产物输出目录，默认 dist（相对仓库根目录）。
@@ -31,7 +31,7 @@
     pwsh scripts/build-windows-machine-msi.ps1 -WixInstallPath $env:TEMP\wix314
 
 .EXAMPLE
-    pwsh scripts/build-windows-machine-msi.ps1 -Platform arm64 -SkipRust
+    pwsh scripts/build-windows-machine-msi.ps1 -SkipRust
 #>
 [CmdletBinding()]
 param(

@@ -1,4 +1,4 @@
-﻿namespace ClipBridgeShell_CS.Activation;
+namespace ClipBridgeShell_CS.Activation;
 
 public interface IActivationHandler
 {

@@ -1,4 +1,4 @@
-﻿using ClipBridgeShell_CS.Core.Models;
+using ClipBridgeShell_CS.Core.Models;
 
 namespace ClipBridgeShell_CS.Core.Contracts.Services;
 

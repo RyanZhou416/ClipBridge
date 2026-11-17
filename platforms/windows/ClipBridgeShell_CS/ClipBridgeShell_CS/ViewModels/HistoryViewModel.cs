@@ -20,9 +20,18 @@ public partial class HistoryViewModel : ObservableRecipient, IDisposable
     private readonly MainViewModel _mainViewModel;
     private bool _disposed;
 
-    public IAsyncRelayCommand<ItemMetaPayload> CopyCommand { get; }
-    public IAsyncRelayCommand<ItemMetaPayload> DeleteItemCommand { get; }
-    public IAsyncRelayCommand<ItemMetaPayload> GlobalDeleteItemCommand { get; }
+    public IAsyncRelayCommand<ItemMetaPayload> CopyCommand
+    {
+        get;
+    }
+    public IAsyncRelayCommand<ItemMetaPayload> DeleteItemCommand
+    {
+        get;
+    }
+    public IAsyncRelayCommand<ItemMetaPayload> GlobalDeleteItemCommand
+    {
+        get;
+    }
 
     /// <summary>当前锁定的项 Id，用于历史项锁定图标与首页同步。</summary>
     public string? LockedItemId => _clipboardService.LockedItemId;
@@ -76,10 +85,16 @@ public partial class HistoryViewModel : ObservableRecipient, IDisposable
     }
 
     [ObservableProperty]
-    public partial string FilterText { get; set; }
+    public partial string FilterText
+    {
+        get; set;
+    }
 
     [ObservableProperty]
-    public partial string? SelectedKind { get; set; }
+    public partial string? SelectedKind
+    {
+        get; set;
+    }
 
     public HistoryViewModel(ICoreHostService coreService, ClipboardApplyService clipboardApply, HistoryStore historyStore, IClipboardService clipboardService, MainViewModel mainViewModel)
     {

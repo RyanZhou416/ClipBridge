@@ -76,12 +76,21 @@ internal static class DragSnapshot
     private static byte[]? _pixels;
 
     /// <summary>覆盖层当前是否可见。</summary>
-    public static bool IsShowing { get; private set; }
+    public static bool IsShowing
+    {
+        get; private set;
+    }
 
     /// <summary>最近一次成功抓取的客户区宽/高（物理像素）；0 表示尚未抓取。</summary>
-    public static int CapturedWidth { get; private set; }
+    public static int CapturedWidth
+    {
+        get; private set;
+    }
 
-    public static int CapturedHeight { get; private set; }
+    public static int CapturedHeight
+    {
+        get; private set;
+    }
 
     /// <summary>
     /// 显示代数。每次显示/隐藏都自增；<see cref="ScheduleHide"/> 的延迟回调只对“自己那一代”
@@ -126,10 +135,10 @@ internal static class DragSnapshot
         }
 
         var started = Stopwatch.GetTimestamp();
-        IntPtr screenDc = IntPtr.Zero;
-        IntPtr memDc = IntPtr.Zero;
-        IntPtr dib = IntPtr.Zero;
-        IntPtr previousObject = IntPtr.Zero;
+        var screenDc = IntPtr.Zero;
+        var memDc = IntPtr.Zero;
+        var dib = IntPtr.Zero;
+        var previousObject = IntPtr.Zero;
 
         try
         {

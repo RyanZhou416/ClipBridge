@@ -109,19 +109,41 @@ internal sealed class StubDataRootProvider : IDataRootProvider
 }
 
 /// <summary>
+/// 数据根哨兵：fail-closed 路径必须在解析任何用户目录之前返回。若代码回归到
+/// “先解析路径再检查凭据”，测试会立刻失败，而不是悄悄写入真实 LocalAppData。
+/// </summary>
+internal sealed class ThrowingDataRootProvider : IDataRootProvider
+{
+    public DataRootResolution Current => throw new InvalidOperationException(
+        "data root must not be resolved before credential fail-closed");
+}
+
+/// <summary>
 /// 测试用 <see cref="ICredentialStore"/>：记录调用、可注入读取结果/写入失败。
 /// </summary>
 internal sealed class StubCredentialStore : ICredentialStore
 {
     public CredentialReadResult Result { get; set; } = CredentialReadResult.NotFound;
 
-    public (string Username, string Password)? SavedCredential { get; private set; }
+    public (string Username, string Password)? SavedCredential
+    {
+        get; private set;
+    }
 
-    public int ClearCount { get; private set; }
+    public int ClearCount
+    {
+        get; private set;
+    }
 
-    public bool ThrowOnSave { get; set; }
+    public bool ThrowOnSave
+    {
+        get; set;
+    }
 
-    public bool ThrowOnClear { get; set; }
+    public bool ThrowOnClear
+    {
+        get; set;
+    }
 
     public string Kind => "stub";
 

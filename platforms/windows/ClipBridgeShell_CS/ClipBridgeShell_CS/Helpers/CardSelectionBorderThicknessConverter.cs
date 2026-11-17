@@ -1,7 +1,7 @@
-using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Data;
 using ClipBridgeShell_CS.Core.Models.Events;
 using ClipBridgeShell_CS.ViewModels;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Data;
 
 namespace ClipBridgeShell_CS.Helpers;
 

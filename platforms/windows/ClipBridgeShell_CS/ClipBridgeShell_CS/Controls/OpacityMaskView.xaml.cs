@@ -1,12 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+using System.Numerics;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
-using System.Numerics;
 
 namespace ClipBridgeShell_CS.Controls;
 

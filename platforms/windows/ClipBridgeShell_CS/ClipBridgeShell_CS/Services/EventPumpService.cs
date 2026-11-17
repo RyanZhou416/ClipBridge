@@ -1,5 +1,5 @@
-using System.Threading.Channels;
 using System.Text.Json;
+using System.Threading.Channels;
 using ClipBridgeShell_CS.Core.Models.Events;
 using ClipBridgeShell_CS.Stores;
 
@@ -191,7 +191,7 @@ public class EventPumpService
                     if (string.IsNullOrWhiteSpace(transferId))
                         return;
 
-                    string? itemId = payload.TryGetProperty("item_id", out var iidEl) ? iidEl.GetString() : null;
+                    var itemId = payload.TryGetProperty("item_id", out var iidEl) ? iidEl.GetString() : null;
 
                     // 缓存成功即传输成功终态：即使 awaiter 已被 Resolve，也要把 TransferStore 的
                     // 对应行落到 completed（终态不回退），否则 ActiveTransfersCount 永不下降、

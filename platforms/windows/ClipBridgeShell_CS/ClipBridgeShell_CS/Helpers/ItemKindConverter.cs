@@ -19,7 +19,7 @@ public class ItemKindConverter : IValueConverter
             // 获取本地化字符串
             var localizer = Localizer.Get();
             string localizedKind;
-            
+
             switch (kind.ToLowerInvariant())
             {
                 case "text":
@@ -36,7 +36,7 @@ public class ItemKindConverter : IValueConverter
                     localizedKind = kind; // 未知类型，返回原值
                     break;
             }
-            
+
             // 返回格式化的字符串："类型：{localizedKind}"
             var typeLabel = localizer.GetLocalizedString("ItemKind_TypeLabel");
             return $"{typeLabel}{localizedKind}";

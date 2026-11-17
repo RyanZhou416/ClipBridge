@@ -1,0 +1,406 @@
+name: Release Windows
+
+# Manual-only publishing entry. There is intentionally no push/tag/release
+# trigger here: a normal merge, a tag or release-please must never start a
+# public binary release. The workflow definition itself only runs from main;
+# the selected source_ref is the code being built, not a privileged workflow ref.
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Source: main, a full 40-hex main-history commit SHA, or clipbridge-windows-<version> tag'
+        required: true
+        default: main
+        type: string
+      expected_version:
+        description: 'Expected three-part version; must equal Version.props at the source commit'
+        required: true
+        type: string
+      machine_msi:
+        description: 'Build/publish the machine-level MSI'
+        required: true
+        default: true
+        type: boolean
+      user_exe:
+        description: 'Build/publish the per-user Burn EXE (includes the internal user MSI)'
+        required: true
+        default: true
+        type: boolean
+      portable_zip:
+        description: 'Build/publish the portable ZIP (no WiX required)'
+        required: true
+        default: true
+        type: boolean
+      release_kind:
+        description: 'draft = private candidate only; prerelease = publish prerelease; stable = approval-gated public release'
+        required: true
+        default: draft
+        type: choice
+        options:
+          - draft
+          - prerelease
+          - stable
+      allow_unsigned_prerelease:
+        description: 'Explicitly allow an unsigned PUBLIC prerelease (never affects stable)'
+        required: true
+        default: false
+        type: boolean
+
+# One release at a time; never cancel an in-flight release.
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+permissions:
+  contents: read
+
+jobs:
+  # GET-only inspection: fix the source SHA, validate version/tag/formats/signing
+  # policy, inspect the existing release/assets, and emit the plan for later jobs.
+  preflight:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    # GitHub returns draft releases only to tokens with push access. contents: write
+    # is retained solely for draft visibility; the API context is ReadOnly, so any
+    # POST/PATCH is rejected before network/transport. This is the minimum viable
+    # permission set pending hosted-runner verification. Build/verify stay read-only;
+    # stage/publish own all writes.
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      plan_json: ${{ steps.preflight.outputs.plan_json }}
+      mode: ${{ steps.preflight.outputs.mode }}
+      stage_required: ${{ steps.preflight.outputs.stage_required }}
+      publish_required: ${{ steps.preflight.outputs.publish_required }}
+      stable: ${{ steps.preflight.outputs.stable }}
+      source_sha: ${{ steps.preflight.outputs.source_sha }}
+      version: ${{ steps.preflight.outputs.version }}
+      tag: ${{ steps.preflight.outputs.tag }}
+      formats: ${{ steps.preflight.outputs.formats }}
+      release_kind: ${{ steps.preflight.outputs.release_kind }}
+      release_id: ${{ steps.preflight.outputs.release_id }}
+      candidate_digest: ${{ steps.preflight.outputs.candidate_digest }}
+      environment: ${{ steps.preflight.outputs.environment }}
+    steps:
+      - name: Checkout trusted main with full history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Preflight (read-only)
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_PATH: ${{ github.event_path }}
+          RELEASE_SIGNING_MODE: ${{ vars.WINDOWS_RELEASE_SIGNING_MODE }}
+          RELEASE_SIGNING_CERT_THUMBPRINT: ${{ vars.WINDOWS_RELEASE_CERT_THUMBPRINT }}
+          RELEASE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_RELEASE_TIMESTAMP_URL }}
+        run: |
+          pwsh -NoProfile -File scripts/release/Invoke-Preflight.ps1 -Mode Live -EventPath $env:EVENT_PATH
+          if ($LASTEXITCODE -ne 0) { throw "preflight failed (exit $LASTEXITCODE)" }
+
+  # Shared core checks on the fixed source SHA. Runs for build-new and reuse.
+  verify:
+    needs: preflight
+    if: needs.preflight.result == 'success' && needs.preflight.outputs.stage_required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout fixed source commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Assert source checkout is the fixed SHA
+        env:
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: |
+          $head = (git -C source rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($head -ne $env:SOURCE_SHA) { throw "checkout HEAD $head does not match fixed source $env:SOURCE_SHA" }
+
+      - name: Rust quality checks and evidence
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'verify-rust'
+          pwsh -NoProfile -File (Join-Path $env:GITHUB_WORKSPACE 'source/scripts/ci/rust.ps1') -OutDir $out
+          if ($LASTEXITCODE -ne 0) { throw "Rust quality checks failed (exit $LASTEXITCODE)" }
+
+      - name: Upload rust evidence for the build job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verify-rust/rust-summary.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # New candidate only: Windows native/C# checks and the selected packages.
+  build:
+    needs: [preflight, verify]
+    if: needs.preflight.result == 'success' && needs.preflight.outputs.mode == 'build-new'
+    runs-on: windows-2022
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      candidate_digest: ${{ steps.candidate.outputs.candidate_digest }}
+    steps:
+      - name: Checkout trusted workflow scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout fixed source commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Assert source checkout is the fixed SHA
+        env:
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: |
+          $head = (git -C source rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($head -ne $env:SOURCE_SHA) { throw "checkout HEAD $head does not match fixed source $env:SOURCE_SHA" }
+
+      - name: Resolve exact .NET SDK (source global.json, then trusted global.json)
+        id: dotnet-sdk
+        run: |
+          $sdk = $null
+          foreach ($candidate in @((Join-Path $env:GITHUB_WORKSPACE 'source/global.json'), (Join-Path $env:GITHUB_WORKSPACE 'global.json'))) {
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+            $sdk = (Get-Content -Raw -LiteralPath $candidate | ConvertFrom-Json).sdk.version
+            if ($sdk) { Write-Host "using exact SDK $sdk from $candidate"; break }
+          }
+          if (-not $sdk) { throw 'No pinned sdk.version found in source/global.json or the trusted global.json; refusing a floating SDK.' }
+          "dotnet-version=$sdk" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Setup pinned .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: ${{ steps.dotnet-sdk.outputs.dotnet-version }}
+
+      - name: Assert Rust toolchain is available
+        run: |
+          rustc --version --verbose
+          cargo --version
+
+      - name: Setup WiX 3.14.1 (only when an MSI is selected)
+        if: contains(needs.preflight.outputs.formats, 'machine-msi') || contains(needs.preflight.outputs.formats, 'user-exe')
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $wix = Join-Path $env:RUNNER_TEMP 'wix314'
+          pwsh -NoProfile -File (Join-Path $env:GITHUB_WORKSPACE 'source/scripts/ci/setup-wix.ps1') -DestDir $wix
+          if ($LASTEXITCODE -ne 0) { throw "WiX setup failed (exit $LASTEXITCODE)" }
+
+      - name: Download Rust evidence from verify
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verify-rust
+
+      - name: Windows checks and evidence
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'windows'
+          pwsh -NoProfile -File (Join-Path $env:GITHUB_WORKSPACE 'source/scripts/ci/windows.ps1') -OutDir $out
+          if ($LASTEXITCODE -ne 0) { throw "Windows checks failed (exit $LASTEXITCODE)" }
+
+      - name: Build selected packages
+        env:
+          RELEASE_FORMATS: ${{ needs.preflight.outputs.formats }}
+          RELEASE_SIGNING_MODE: ${{ vars.WINDOWS_RELEASE_SIGNING_MODE }}
+          RELEASE_SIGNING_CERT_THUMBPRINT: ${{ vars.WINDOWS_RELEASE_CERT_THUMBPRINT }}
+          RELEASE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_RELEASE_TIMESTAMP_URL }}
+          RELEASE_SIGNING_SIGNTOOL_PATH: ${{ vars.WINDOWS_RELEASE_SIGNTOOL_PATH }}
+        run: |
+          $formats = @($env:RELEASE_FORMATS -split ',' | Where-Object { $_ -ne '' })
+          if ($formats.Count -eq 0) { throw 'preflight did not provide a format selection' }
+          $out = Join-Path $env:RUNNER_TEMP 'packages'
+          $windowsSummaryPath = Join-Path $env:RUNNER_TEMP 'windows/windows-summary.json'
+          if (-not (Test-Path -LiteralPath $windowsSummaryPath -PathType Leaf)) { throw 'windows-summary.json is missing before packaging' }
+          $windowsSummary = Get-Content -Raw -LiteralPath $windowsSummaryPath | ConvertFrom-Json
+          if ([string]$windowsSummary.status -cne 'passed') { throw 'windows checks did not pass before packaging' }
+          $expectedDll = [string]$windowsSummary.nativeEvidence.dllSha256
+          if ($expectedDll -notmatch '^[0-9a-fA-F]{64}$') { throw "windows-summary nativeEvidence.dllSha256 is missing/invalid: '$expectedDll'" }
+          $expectedDll = $expectedDll.ToLowerInvariant()
+          $needWix = (($formats -contains 'machine-msi') -or ($formats -contains 'user-exe'))
+          $params = @{
+            Formats              = $formats
+            OutDir               = $out
+            SigningMode          = $(if ($env:RELEASE_SIGNING_MODE) { $env:RELEASE_SIGNING_MODE } else { 'None' })
+            SkipRust             = $true
+            ExpectedCoreDllSha256 = $expectedDll
+          }
+          if ($needWix) { $params.WixInstallPath = (Join-Path $env:RUNNER_TEMP 'wix314') }
+          if ($params.SigningMode -eq 'Certificate') {
+            if (-not $env:RELEASE_SIGNING_CERT_THUMBPRINT) { throw 'Certificate signing requests a certificate thumbprint' }
+            if (-not $env:RELEASE_SIGNING_TIMESTAMP_URL) { throw 'Certificate signing requests a timestamp URL' }
+            $params.CertificateThumbprint = $env:RELEASE_SIGNING_CERT_THUMBPRINT
+            $params.TimestampUrl = $env:RELEASE_SIGNING_TIMESTAMP_URL
+            if ($env:RELEASE_SIGNING_SIGNTOOL_PATH) { $params.SigntoolPath = $env:RELEASE_SIGNING_SIGNTOOL_PATH }
+          }
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'source/scripts/build-windows-installers.ps1') @params
+          if (-not $?) { throw 'build-windows-installers.ps1 failed' }
+
+      - name: Assemble immutable candidate manifest
+        id: candidate
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          RELEASE_FORMATS: ${{ needs.preflight.outputs.formats }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $formats = @($env:RELEASE_FORMATS -split ',' | Where-Object { $_ -ne '' })
+          $artifactName = "windows-release-candidate-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $out = Join-Path $env:RUNNER_TEMP 'candidate'
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/release/New-ReleaseCandidate.ps1') `
+            -OutDir $out `
+            -Version $env:RELEASE_VERSION `
+            -SourceCommit $env:RELEASE_SOURCE_SHA `
+            -Formats $formats `
+            -SourceRunId $env:GITHUB_RUN_ID `
+            -SourceRunAttempt $env:GITHUB_RUN_ATTEMPT `
+            -ArtifactName $artifactName `
+            -PackageSummaryPath (Join-Path $env:RUNNER_TEMP 'packages/package-summary.json') `
+            -RustSummaryPath (Join-Path $env:RUNNER_TEMP 'verify-rust/rust-summary.json') `
+            -WindowsSummaryPath (Join-Path $env:RUNNER_TEMP 'windows/windows-summary.json')
+          if (-not $?) { throw 'candidate assembly failed' }
+
+      - name: Upload candidate (30-day recovery window)
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: error
+          retention-days: 30
+
+  # Reuse: verify runs; build is intentionally skipped. build-new: both must
+  # succeed. stage validates the actual job results again (never a blanket skip).
+  stage:
+    needs: [preflight, verify, build]
+    if: >-
+      always() &&
+      needs.preflight.result == 'success' &&
+      needs.preflight.outputs.stage_required == 'true' &&
+      (
+        (needs.preflight.outputs.mode == 'build-new' && needs.verify.result == 'success' && needs.build.result == 'success') ||
+        (needs.preflight.outputs.mode == 'reuse-candidate' && needs.verify.result == 'success' && needs.build.result == 'skipped')
+      )
+    runs-on: windows-2022
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      stage_json: ${{ steps.stage.outputs.stage_json }}
+      release_id: ${{ steps.stage.outputs.release_id }}
+      release_url: ${{ steps.stage.outputs.release_url }}
+      candidate_digest: ${{ steps.stage.outputs.candidate_digest }}
+      approval_nonce: ${{ steps.stage.outputs.approval_nonce }}
+      stage_completed_at: ${{ steps.stage.outputs.stage_completed_at }}
+      signed: ${{ steps.stage.outputs.signed }}
+    steps:
+      - name: Checkout trusted workflow scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Stage candidate and emit immutable summary
+        id: stage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLAN_JSON: ${{ needs.preflight.outputs.plan_json }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          BUILD_ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          BUILD_ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+        run: |
+          pwsh -NoProfile -File scripts/release/Invoke-Stage.ps1 -Mode Live
+          if ($LASTEXITCODE -ne 0) { throw "stage failed (exit $LASTEXITCODE)" }
+
+  # The approval gate only runs for stable, after stage produced the complete
+  # candidate. Approval is per-run and is re-read and validated by publish.
+  approve-stable:
+    needs: [preflight, stage]
+    if: needs.preflight.result == 'success' && needs.stage.result == 'success' && needs.preflight.outputs.stable == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    environment: windows-release-stable
+    outputs:
+      approval_nonce: ${{ steps.gate.outputs.approval_nonce }}
+      run_attempt: ${{ steps.gate.outputs.run_attempt }}
+    steps:
+      - name: Record current stage nonce after environment approval
+        id: gate
+        env:
+          STAGE_NONCE: ${{ needs.stage.outputs.approval_nonce }}
+        run: |
+          if (-not $env:STAGE_NONCE) { throw 'stage did not provide an approval nonce' }
+          if ($env:STAGE_NONCE -notmatch '^[0-9a-f]{64}$') { throw 'stage approval nonce is not 256-bit hex' }
+          "approval_nonce=$env:STAGE_NONCE" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "run_attempt=$env:GITHUB_RUN_ATTEMPT" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          echo "Candidate: ${{ needs.stage.outputs.candidate_digest }}"
+          echo "Approval nonce: $env:STAGE_NONCE"
+          echo "Run attempt: $env:GITHUB_RUN_ATTEMPT"
+          echo "Staged at: ${{ needs.stage.outputs.stage_completed_at }}"
+          echo "Release: ${{ needs.stage.outputs.release_url }}"
+          echo "The reviewer must include nonce/candidate/run_id/run_attempt/result=pass/record in the approval comment. The public API does not expose approval time; none is claimed."
+
+  # Status-only publication. The actual release/tag/assets were fixed by stage;
+  # this job re-verifies them and never moves a tag or replaces an asset.
+  publish:
+    needs: [preflight, stage, approve-stable]
+    if: >-
+      always() &&
+      needs.preflight.result == 'success' &&
+      needs.stage.result == 'success' &&
+      needs.preflight.outputs.publish_required == 'true' &&
+      (needs.preflight.outputs.stable != 'true' || needs.approve-stable.result == 'success')
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout trusted workflow scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Publish or promote candidate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLAN_JSON: ${{ needs.preflight.outputs.plan_json }}
+          STAGE_JSON: ${{ needs.stage.outputs.stage_json }}
+          STAGE_APPROVAL_NONCE: ${{ needs.stage.outputs.approval_nonce }}
+          GATE_APPROVAL_NONCE: ${{ needs.approve-stable.outputs.approval_nonce }}
+          GATE_RUN_ATTEMPT: ${{ needs.approve-stable.outputs.run_attempt }}
+        run: |
+          pwsh -NoProfile -File scripts/release/Invoke-Publish.ps1 -Mode Live
+          if ($LASTEXITCODE -ne 0) { throw "publish failed (exit $LASTEXITCODE)" }

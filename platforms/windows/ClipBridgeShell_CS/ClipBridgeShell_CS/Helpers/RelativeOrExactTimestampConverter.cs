@@ -40,7 +40,7 @@ public sealed class RelativeOrExactTimestampConverter : IValueConverter
             var diff = (long)(now - created).TotalSeconds;
             if (diff < 0) diff = 0;
 
-            bool isZh = IsCurrentLanguageZh();
+            var isZh = IsCurrentLanguageZh();
 
             if (diff < SecondsPerMinute)
                 return isZh ? $"{diff}秒前" : $"{diff}s ago";

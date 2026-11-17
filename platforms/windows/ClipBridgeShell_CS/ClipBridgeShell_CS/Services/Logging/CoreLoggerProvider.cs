@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
-using Microsoft.Extensions.Logging;
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
+using Microsoft.Extensions.Logging;
 
 namespace ClipBridgeShell_CS.Services.Logging;
 
@@ -26,7 +26,7 @@ public sealed class CoreLoggerProvider : ILoggerProvider
 
         // 监听核心状态变化
         _coreHost.StateChanged += OnCoreStateChanged;
-        
+
         // 监听日志写入完成回调
         _dispatcher.BatchWritten += OnBatchWritten;
     }
@@ -48,7 +48,7 @@ public sealed class CoreLoggerProvider : ILoggerProvider
         }
 
         var stashedLogs = _stashManager.ReadAllLogs();
-        
+
         if (stashedLogs.Count == 0)
         {
             return;
@@ -64,7 +64,7 @@ public sealed class CoreLoggerProvider : ILoggerProvider
                 _pendingStashedLogIds.Add(entry.Id);
             }
         }
-        
+
         foreach (var entry in stashedLogs)
         {
             if (!_dispatcher.Enqueue(entry))
@@ -76,7 +76,7 @@ public sealed class CoreLoggerProvider : ILoggerProvider
                 }
             }
         }
-        
+
         // 注意：不再使用固定延迟，而是通过 OnBatchWritten 回调来检查所有暂存日志是否已写入
         // 如果所有暂存日志都已写入，OnBatchWritten 会自动清空暂存文件
     }
@@ -103,13 +103,13 @@ public sealed class CoreLoggerProvider : ILoggerProvider
                 // 没有待写入的暂存日志，无需处理
                 return;
             }
-            
+
             // 从待写入列表中移除已写入的日志
             foreach (var entry in writtenEntries)
             {
                 _pendingStashedLogIds.Remove(entry.Id);
             }
-            
+
             // 如果所有暂存日志都已写入，清空暂存文件
             if (_pendingStashedLogIds.Count == 0)
             {

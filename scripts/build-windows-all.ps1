@@ -5,15 +5,14 @@
 .DESCRIPTION
     build-windows-installers.ps1 -Only All 的薄封装：
       - machine MSI（PerMachine，需要管理员实机安装验证）
-      - per-user MSI + Burn EXE（免 UAC，ARP 隐藏）
+      - per-user MSI（内部 bundle 载荷，不单独发布）+ Burn EXE（免 UAC，ARP 隐藏）
       - 便携 ZIP（ClipBridge.portable）
-      - 全部结构断言
-    不自动生成 winget 清单：清单里固化产物 SHA256，签名前生成会在后续重构建/签名后失效。
-    发布 Release（上传产物）之后，再单独运行：
-      pwsh scripts/build-windows-winget.ps1
+      - 全部产物表断言 + package-summary.json
+    只产出 machine MSI / user EXE / 便携 ZIP 三个公开发布格式；内部 user MSI 只作为
+    EXE 的依赖并在 summary 中标记 internal。MSIX/winget 不在本入口内，不自动生成清单。
 
 .PARAMETER Platform
-    x64（默认）或 arm64。
+    x64（当前唯一支持）。arm64 参数只为兼容旧调用而保留，会在构建前明确失败。
 
 .PARAMETER OutDir
     产物输出目录，默认 dist（相对仓库根目录）。
@@ -83,19 +82,23 @@ if ($exitCode -eq 0) {
         $artifact = Join-Path $outRoot $name
         if (Test-Path -LiteralPath $artifact) {
             $f = Get-Item -LiteralPath $artifact
-            Write-Host ("  {0}" -f $f.FullName)
+            $tag = if ($name -match '-user\.msi$') { '  [internal]' } else { '' }
+            Write-Host ("  {0}{1}" -f $f.FullName, $tag)
             Write-Host ("  {0:N1} MB" -f ($f.Length / 1MB))
         } else {
             Write-Warning "未找到预期产物：$artifact"
         }
     }
+    $summaryPath = Join-Path $outRoot 'package-summary.json'
+    if (Test-Path -LiteralPath $summaryPath) {
+        Write-Host ("  {0}  （机器可读签名/大小/SHA256，供 CI/release 复用）" -f $summaryPath)
+    }
 
     Write-Host ''
     Write-Host '下一步：'
-    Write-Host '  1. 签名（若已配置证书）。'
-    Write-Host '  2. 发布 GitHub Release 并上传上面 4 个产物。'
-    Write-Host '  3. 生成 winget 清单：pwsh scripts/build-windows-winget.ps1'
-    Write-Host '说明：本脚本不自动生成 winget 清单，避免签名前固化产物 SHA256。'
+    Write-Host '  1. 生产发布请用主脚本 -SigningMode Certificate（本 All 入口默认不签名）。'
+    Write-Host '  2. 公开发布资产只取 machine MSI / user EXE / portable ZIP；内部 user MSI 不公开。'
+    Write-Host '  3. winget 清单仍是本地人工渠道流程，不在 GitHub 发布自动化内。'
 }
 
 $sw.Stop()

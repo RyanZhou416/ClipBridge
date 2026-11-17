@@ -1,4 +1,4 @@
-﻿using ClipBridgeShell_CS.Core.Contracts.Services;
+using ClipBridgeShell_CS.Core.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
 
 namespace ClipBridgeShell_CS.Core.Services;
@@ -29,7 +29,7 @@ public class SampleDataService : ISampleDataService
     {
         return new List<SampleCompany>()
         {
-            new SampleCompany()
+            new()
             {
                 CompanyID = "ALFKI",
                 CompanyName = "Company A",
@@ -43,7 +43,7 @@ public class SampleDataService : ISampleDataService
                 Fax = "030-0076545",
                 Orders = new List<SampleOrder>()
                 {
-                    new SampleOrder()
+                    new()
                     {
                         OrderID = 10643, // Symbol Globe
                         OrderDate = new DateTime(1997, 8, 25),
@@ -60,7 +60,7 @@ public class SampleDataService : ISampleDataService
                         SymbolName = "Globe",
                         Details = new List<SampleOrderDetail>()
                         {
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 28,
                                 ProductName = "Rössle Sauerkraut",
@@ -72,7 +72,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Dried fruit and bean curd",
                                 Total = 513.00
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 39,
                                 ProductName = "Chartreuse verte",
@@ -84,7 +84,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Soft drinks, coffees, teas, beers, and ales",
                                 Total = 283.50
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 46,
                                 ProductName = "Spegesild",
@@ -98,7 +98,7 @@ public class SampleDataService : ISampleDataService
                             }
                         }
                     },
-                    new SampleOrder()
+                    new()
                     {
                         OrderID = 10835, // Symbol Music
                         OrderDate = new DateTime(1998, 1, 15),
@@ -115,7 +115,7 @@ public class SampleDataService : ISampleDataService
                         SymbolName = "Audio",
                         Details = new List<SampleOrderDetail>()
                         {
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 59,
                                 ProductName = "Raclette Courdavault",
@@ -127,7 +127,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Cheeses",
                                 Total = 825.00
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 77,
                                 ProductName = "Original Frankfurter grüne Soße",
@@ -141,7 +141,7 @@ public class SampleDataService : ISampleDataService
                             }
                         }
                     },
-                    new SampleOrder()
+                    new()
                     {
                         OrderID = 10952, // Symbol Calendar
                         OrderDate = new DateTime(1998, 3, 16),
@@ -158,7 +158,7 @@ public class SampleDataService : ISampleDataService
                         SymbolName = "Calendar",
                         Details = new List<SampleOrderDetail>()
                         {
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 6,
                                 ProductName = "Grandma's Boysenberry Spread",
@@ -170,7 +170,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Sweet and savory sauces, relishes, spreads, and seasonings",
                                 Total = 380.00
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 28,
                                 ProductName = "Rössle Sauerkraut",
@@ -186,7 +186,7 @@ public class SampleDataService : ISampleDataService
                     }
                 }
             },
-            new SampleCompany()
+            new()
             {
                 CompanyID = "ANATR",
                 CompanyName = "Company F",
@@ -200,7 +200,7 @@ public class SampleDataService : ISampleDataService
                 Fax = "(5) 555-3745",
                 Orders = new List<SampleOrder>()
                 {
-                    new SampleOrder()
+                    new()
                     {
                         OrderID = 10625, // Symbol Camera
                         OrderDate = new DateTime(1997, 8, 8),
@@ -217,7 +217,7 @@ public class SampleDataService : ISampleDataService
                         SymbolName = "Camera",
                         Details = new List<SampleOrderDetail>()
                         {
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 14,
                                 ProductName = "Tofu",
@@ -229,7 +229,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Dried fruit and bean curd",
                                 Total = 69.75
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 42,
                                 ProductName = "Singaporean Hokkien Fried Mee",
@@ -241,7 +241,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Breads, crackers, pasta, and cereal",
                                 Total = 70.00
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 60,
                                 ProductName = "Camembert Pierrot",
@@ -255,7 +255,7 @@ public class SampleDataService : ISampleDataService
                             }
                         }
                     },
-                    new SampleOrder()
+                    new()
                     {
                         OrderID = 10926, // Symbol Clock
                         OrderDate = new DateTime(1998, 3, 4),
@@ -272,7 +272,7 @@ public class SampleDataService : ISampleDataService
                         SymbolName = "Clock",
                         Details = new List<SampleOrderDetail>()
                         {
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 11,
                                 ProductName = "Queso Cabrales",
@@ -284,7 +284,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Cheeses",
                                 Total = 42.00
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 13,
                                 ProductName = "Konbu",
@@ -296,7 +296,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Seaweed and fish",
                                 Total = 60.00
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 19,
                                 ProductName = "Teatime Chocolate Biscuits",
@@ -308,7 +308,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Desserts, candies, and sweet breads",
                                 Total = 64.40
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 72,
                                 ProductName = "Mozzarella di Giovanni",
@@ -324,7 +324,7 @@ public class SampleDataService : ISampleDataService
                     }
                 }
             },
-            new SampleCompany()
+            new()
             {
                 CompanyID = "ANTON",
                 CompanyName = "Company Z",
@@ -338,7 +338,7 @@ public class SampleDataService : ISampleDataService
                 Fax = string.Empty,
                 Orders = new List<SampleOrder>()
                 {
-                    new SampleOrder()
+                    new()
                     {
                         OrderID = 10507, // Symbol Contact
                         OrderDate = new DateTime(1997, 4, 15),
@@ -355,7 +355,7 @@ public class SampleDataService : ISampleDataService
                         SymbolName = "Contact",
                         Details = new List<SampleOrderDetail>()
                         {
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 43,
                                 ProductName = "Ipoh Coffee",
@@ -367,7 +367,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Soft drinks, coffees, teas, beers, and ales",
                                 Total = 816.00
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 48,
                                 ProductName = "Chocolade",
@@ -381,7 +381,7 @@ public class SampleDataService : ISampleDataService
                             }
                         }
                     },
-                    new SampleOrder()
+                    new()
                     {
                         OrderID = 10573, // Symbol Star
                         OrderDate = new DateTime(1997, 6, 19),
@@ -398,7 +398,7 @@ public class SampleDataService : ISampleDataService
                         SymbolName = "Favorite",
                         Details = new List<SampleOrderDetail>()
                         {
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 17,
                                 ProductName = "Alice Mutton",
@@ -410,7 +410,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Prepared meats",
                                 Total = 702.00
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 34,
                                 ProductName = "Sasquatch Ale",
@@ -422,7 +422,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Soft drinks, coffees, teas, beers, and ales",
                                 Total = 560.00
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 53,
                                 ProductName = "Perth Pasties",
@@ -436,7 +436,7 @@ public class SampleDataService : ISampleDataService
                             }
                         }
                     },
-                    new SampleOrder()
+                    new()
                     {
                         OrderID = 10682, // Symbol Home
                         OrderDate = new DateTime(1997, 9, 25),
@@ -453,7 +453,7 @@ public class SampleDataService : ISampleDataService
                         SymbolName = "Home",
                         Details = new List<SampleOrderDetail>()
                         {
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 33,
                                 ProductName = "Geitost",
@@ -465,7 +465,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Cheeses",
                                 Total = 75.00
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 66,
                                 ProductName = "Louisiana Hot Spiced Okra",
@@ -477,7 +477,7 @@ public class SampleDataService : ISampleDataService
                                 CategoryDescription = "Sweet and savory sauces, relishes, spreads, and seasonings",
                                 Total = 68.00
                             },
-                            new SampleOrderDetail()
+                            new()
                             {
                                 ProductID = 75,
                                 ProductName = "Rhönbräu Klosterbier",

@@ -10,5 +10,8 @@ namespace ClipBridgeShell_CS.Core.Models.Events;
 public class ItemPreviewPayload
 {
     [JsonPropertyName("text")]
-    public string? Text { get; set; }
+    public string? Text
+    {
+        get; set;
+    }
 }

@@ -1,8 +1,8 @@
 using ClipBridgeShell_CS.Contracts.Services;
 using ClipBridgeShell_CS.Core.Models;
-using Microsoft.UI.Xaml.Controls;   
-using Microsoft.UI.Xaml;
 using Microsoft.Extensions.Logging;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace ClipBridgeShell_CS.Services;
 
@@ -109,7 +109,8 @@ public class ClipboardWatcher
         try
         {
             await Task.Delay(DebounceMs, token);
-        } catch (TaskCanceledException)
+        }
+        catch (TaskCanceledException)
         {
             return; // 新的事件来了，取消当前的
         }
@@ -170,7 +171,8 @@ public class ClipboardWatcher
             {
                 _logger?.LogWarning("Clipboard ingest denied by policy: {Reason}", decision.Reason);
             }
-        } catch (Exception ex)
+        }
+        catch (Exception ex)
         {
             _logger?.LogError(ex, "Failed to process clipboard change");
         }
@@ -207,7 +209,8 @@ public class ClipboardWatcher
                     XamlRoot = App.MainWindow?.Content?.XamlRoot
                 };
                 await dialog.ShowAsync();
-            } catch
+            }
+            catch
             {
                 // 如果已有弹窗打开，可能会抛异常，忽略即可
             }

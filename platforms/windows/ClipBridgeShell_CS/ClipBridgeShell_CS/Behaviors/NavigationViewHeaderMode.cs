@@ -1,4 +1,4 @@
-﻿namespace ClipBridgeShell_CS.Behaviors;
+namespace ClipBridgeShell_CS.Behaviors;
 
 public enum NavigationViewHeaderMode
 {

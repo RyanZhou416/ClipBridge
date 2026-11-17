@@ -65,9 +65,6 @@ public class ActivationService : IActivationService
 
         var mainWindow = App.MainWindow!;
 
-        // 主题是否允许推迟到首帧之后套用（只有“推迟不会造成可见闪烁”时才为 true）。
-        var themeApplyDeferred = false;
-
         // 视觉正确性规则（不可妥协）：
         // 窗口首帧一定用“当前系统主题”绘制。若保存的主题与它不同，把套用推迟到首帧之后
         // 就会先看到系统主题、再跳成保存主题——一次可见的闪烁。
@@ -86,7 +83,8 @@ public class ActivationService : IActivationService
         }
         StartupTrace.Mark("theme-init-done");
 
-        themeApplyDeferred = CanApplyThemeAfterFirstFrame();
+        // 主题是否允许推迟到首帧之后套用（只有“推迟不会造成可见闪烁”时才为 true）。
+        var themeApplyDeferred = CanApplyThemeAfterFirstFrame();
         StartupTrace.Mark(themeApplyDeferred ? "theme-apply-deferred" : "theme-sync-fallback");
 
         // 关键改动：先让窗口可见，Shell 排到首帧之后构建。

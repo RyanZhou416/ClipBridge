@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using ClipBridgeShell_CS.Core.Services;
+using ClipBridgeShell_CS.Services;
 using Windows.Storage;
 
 namespace ClipBridgeShell_CS.Services.Logging;
@@ -18,7 +19,18 @@ public sealed class StashLogManager
     private readonly List<LogEntry> _inMemoryLogs = new();
 
     public StashLogManager()
+        : this(new DefaultDataRootProvider())
     {
+    }
+
+    /// <summary>
+    /// 用注入的数据根创建暂存日志。生产 DI 传入 <see cref="IDataRootProvider"/>；
+    /// 测试宿主可传临时根，保证核心未就绪时的日志同样不写真实用户目录。
+    /// </summary>
+    public StashLogManager(IDataRootProvider dataRootProvider)
+    {
+        ArgumentNullException.ThrowIfNull(dataRootProvider);
+
         string localFolder;
         if (ClipBridgeShell_CS.Helpers.RuntimeHelper.IsMSIX)
         {
@@ -26,10 +38,10 @@ public sealed class StashLogManager
         }
         else
         {
-            // 统一走 Core 的解析器：便携模式下日志也要落在 <exeDir>\data，不能继续写 LocalAppData。
-            localFolder = CoreConfigBuilder.ResolveDataRoot("ClipBridge");
+            // 与 core 使用同一个注入根：便携模式/测试临时根下日志也落在该根内的 logs/。
+            localFolder = dataRootProvider.Current.Root;
         }
-        
+
         var logsDir = Path.Combine(localFolder, "logs");
         if (!Directory.Exists(logsDir)) Directory.CreateDirectory(logsDir);
         _stashFilePath = Path.Combine(logsDir, "stash.log");
@@ -150,35 +162,56 @@ public sealed class StashLogManager
 /// </summary>
 public sealed class LogEntry
 {
-    public long Id { get; set; }
-    public long TsUtc { get; set; }
-    public int Level { get; set; }
+    public long Id
+    {
+        get; set;
+    }
+    public long TsUtc
+    {
+        get; set;
+    }
+    public int Level
+    {
+        get; set;
+    }
     public string Component { get; set; } = "";
     public string Category { get; set; } = "";
-    
+
     /// <summary>
     /// 消息（向后兼容，如果 MessageEn 和 MessageZhCn 为空则使用此字段）
     /// </summary>
     public string Message { get; set; } = "";
-    
+
     /// <summary>
     /// 英文消息
     /// </summary>
-    public string? MessageEn { get; set; }
-    
+    public string? MessageEn
+    {
+        get; set;
+    }
+
     /// <summary>
     /// 中文消息
     /// </summary>
-    public string? MessageZhCn { get; set; }
-    
-    public string? Exception { get; set; }
-    public string? PropsJson { get; set; }
-    
+    public string? MessageZhCn
+    {
+        get; set;
+    }
+
+    public string? Exception
+    {
+        get; set;
+    }
+    public string? PropsJson
+    {
+        get; set;
+    }
+
     /// <summary>
     /// 获取英文消息（优先使用 MessageEn，否则使用 Message）
     /// </summary>
     public string GetMessageEn() => !string.IsNullOrEmpty(MessageEn) ? MessageEn : Message;
-    
+
     /// <summary>
     /// 获取中文消息
     /// </summary>

@@ -1,200 +1,291 @@
 name: ci
 
+# ClipBridge 扁平多任务 CI（契约见 docs/ci-architecture.md）。
+# 分类只由 scripts/ci/plan.psm1 + get-plan.ps1 产生一个结构化 plan；
+# 每个 job 的 if 读取 plan.required，ci-result 用同一 plan 与 needs 实际结果核对。
+# 本地渠道（MSIX / Store 上传 / winget）不进入本工作流，也不上传其产物。
+
 on:
   pull_request:
   push:
     branches: [ main ]
+  workflow_dispatch:
 
+# fork PR 只读：普通 CI 不使用 secrets、不申请写权限、不发布 Release。
 permissions:
   contents: read
 
-# 同一分支/PR 的新推送取消仍在跑的旧运行：Android 要交叉编译两份 Rust .so 再跑
-# Gradle/CMake，macOS 要跑 Swift 编译器，都是分钟级任务；不取消就会让已经被取代的
-# 运行继续烧分钟数。
+# PR 新提交取消同 PR 的过时验证；main push 与手动全量不取消正在执行的验证。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      csharp: ${{ steps.filter.outputs.csharp }}
-      android: ${{ steps.filter.outputs.android }}
-      macos: ${{ steps.filter.outputs.macos }}
-      installer: ${{ steps.filter.outputs.installer }}
+      plan: ${{ steps.plan.outputs.plan }}
+      diff-base: ${{ steps.range.outputs.diff-base }}
+      diff-head: ${{ steps.range.outputs.diff-head }}
+      diff-ok: ${{ steps.range.outputs.diff-ok }}
     steps:
-      - uses: actions/checkout@v4
-      # 过滤器的职责是“只有相关文件变了才启动对应 job”：
-      # - rust 只覆盖 Rust 核心/共享 FFI/各平台 core-ffi。旧过滤器把
-      #   platforms/android/ClipBridgeShellAndroid/** 和 platforms/macos/** 也算进
-      #   rust job，但 rust job 从不编译这两个外壳 —— 等于把 Android/macOS 变更
-      #   路由进了一个永远发现不了问题的 job。现在它们各自有真正的编译 job。
-      # - android：整个 platforms/android（外壳 + Android FFI），以及它交叉编译所依赖
-      #   的 Rust 源码（cb_core、crates、Cargo.lock）；核心改动同样可能让 .so 编不过。
-      # - macos：只覆盖 SwiftPM 外壳目录；纯 Rust 改动不会启动 macOS runner。
-      # - 门禁脚本自身变化时也重跑 android，避免“改了检查却没人跑”。
-      - uses: dorny/paths-filter@v3
-        id: filter
+      - name: Checkout (full history for merge-base diff)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          filters: |
-            rust:
-              - 'cb_core/**'
-              - 'crates/**'
-              - 'platforms/**/core-ffi/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'deny.toml'
-              - 'rustfmt.toml'
-            csharp:
-              - 'platforms/windows/ClipBridgeShell_CS/**'
-              - '**/*.sln'
-              - '**/*.csproj'
-              - '**/*.props'
-              - '**/*.targets'
-              - '.editorconfig'
-            android:
-              - 'platforms/android/**'
-              - 'cb_core/**'
-              - 'crates/**'
-              - 'Cargo.lock'
-              - 'scripts/check-android-shell-contracts.sh'
-            macos:
-              - 'platforms/macos/ClipBridgeShell_macOS/**'
-            installer:
-              - 'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Installer/**'
-              - 'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Bundle/**'
-              - 'platforms/windows/ClipBridgeShell_CS/Version.props'
-              - 'platforms/windows/ClipBridgeShell_CS/Directory.Build.props'
-              - 'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/ClipBridgeShell_CS.csproj'
-              - 'scripts/build-windows-installers.ps1'
-              - 'scripts/build-winget-manifest.ps1'
-              - 'scripts/version.ps1'
-              - '.github/workflows/ci.yml'
+          fetch-depth: 0
+
+      # PR 使用与目标分支的合并基点；main push 覆盖整个 push 范围。
+      # 所有事件值通过 env 传入，不拼进可执行 shell 源码。
+      - name: Resolve diff range
+        id: range
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          base=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if [ -n "$BASE_REF" ]; then
+              if git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"; then
+                base="$(git merge-base "origin/${BASE_REF}" "$HEAD_SHA" || true)"
+              fi
+            fi
+          elif [ "$EVENT_NAME" = "push" ]; then
+            if [ -n "$BEFORE_SHA" ] && ! [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+              base="$BEFORE_SHA"
+            fi
+          fi
+          ok=false
+          if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            ok=true
+          else
+            base=""
+          fi
+          echo "diff-base=$base" >> "$GITHUB_OUTPUT"
+          echo "diff-head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "diff-ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Compute structured plan
+        id: plan
+        shell: pwsh
+        env:
+          HEAD_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          DIFF_OK: ${{ steps.range.outputs.diff-ok }}
+          DIFF_BASE: ${{ steps.range.outputs.diff-base }}
+          DIFF_HEAD: ${{ steps.range.outputs.diff-head }}
+        run: |
+          $arguments = @{
+            Commit     = $env:HEAD_SHA
+            OutFile    = (Join-Path $env:RUNNER_TEMP 'ci-plan.json')
+            VerifyHead = $true
+          }
+          if ($env:DIFF_OK -eq 'true') {
+            $arguments.DiffBase = $env:DIFF_BASE
+            $arguments.DiffHead = $env:DIFF_HEAD
+          } else {
+            $arguments.Scope = 'full'
+            $arguments.FullReason = if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+              'manual full validation requested'
+            } else {
+              'diff unavailable or empty base; conservative full validation'
+            }
+          }
+          ./scripts/ci/get-plan.ps1 @arguments
+          if ($LASTEXITCODE -ne 0) { throw "get-plan.ps1 failed (exit $LASTEXITCODE)" }
+          $planPath = Join-Path $env:RUNNER_TEMP 'ci-plan.json'
+          if (-not (Test-Path -LiteralPath $planPath -PathType Leaf)) {
+            throw "get-plan.ps1 did not write a plan: $planPath"
+          }
+          $json = [System.IO.File]::ReadAllText($planPath)
+          $delimiter = 'CLIPBRIDGE_PLAN_' + [guid]::NewGuid().ToString('N')
+          "plan<<$delimiter" | Add-Content -Path $env:GITHUB_OUTPUT
+          $json | Add-Content -Path $env:GITHUB_OUTPUT
+          $delimiter | Add-Content -Path $env:GITHUB_OUTPUT
+
+  ci-config:
+    needs: changes
+    if: needs.changes.result == 'success' && fromJSON(needs.changes.outputs.plan).required['ci-config'] == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history for changed-doc links)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # 固定版本 + 官方发布 SHA256；不执行被检查的业务命令。
+      - name: Download actionlint 1.7.12 (pinned + SHA256)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-tools/actionlint"
+          curl -fsSL --retry 2 --retry-delay 2 \
+            -o "$RUNNER_TEMP/actionlint.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP/ci-tools/actionlint"
+          "$RUNNER_TEMP/ci-tools/actionlint/actionlint" -version
+
+      # actionlint + PowerShell AST + bash -n + 修改文档的本地链接 + workflow 结构契约。
+      - name: Lightweight CI configuration checks
+        shell: pwsh
+        env:
+          CI_PLAN: ${{ needs.changes.outputs.plan }}
+          DIFF_OK: ${{ needs.changes.outputs.diff-ok }}
+          DIFF_BASE: ${{ needs.changes.outputs.diff-base }}
+          DIFF_HEAD: ${{ needs.changes.outputs.diff-head }}
+          ACTIONLINT: ${{ runner.temp }}/ci-tools/actionlint/actionlint
+        run: |
+          ./scripts/ci/check-config.ps1 `
+            -PlanJson $env:CI_PLAN `
+            -BaseSha $env:DIFF_BASE `
+            -HeadSha $env:DIFF_HEAD `
+            -DiffOk $env:DIFF_OK `
+            -ActionlintPath $env:ACTIONLINT
+
+      # 分类/汇总与平台轻量契约测试每次运行。
+      - name: Plan and aggregation contract tests
+        shell: pwsh
+        run: ./scripts/ci/test-plan.ps1
+
+      - name: Rust report contract tests
+        shell: pwsh
+        run: ./scripts/ci/test-rust-report.ps1
+
+      - name: Windows report contract tests
+        shell: pwsh
+        run: ./scripts/ci/test-windows-report.ps1
+
+      - name: Packaging and release contract tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pwsh -NoProfile -File ./scripts/ci/test-packaging.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'packaging contract tests failed' }
+          foreach ($name in @('test-release-model.ps1', 'test-release-github-api.ps1', 'test-release-candidate.ps1', 'test-release-workflow.ps1')) {
+            $path = Join-Path ./scripts/ci $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "missing required contract suite: $name" }
+            pwsh -NoProfile -File $path
+            if ($LASTEXITCODE -ne 0) { throw "release contract test failed: $name" }
+          }
+
+      - name: Android and macOS lightweight contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/ci/android/tests/run-tests.sh
+          test -f scripts/ci/macos/tests/run-tests.sh
+          bash scripts/ci/android/tests/run-tests.sh
+          bash scripts/ci/macos/tests/run-tests.sh
 
   rust:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    if: needs.changes.result == 'success' && fromJSON(needs.changes.outputs.plan).required['rust'] == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      # 依赖缓存用 Swatinem/rust-cache，而不是 actions/cache 直接存 target/：
-      # - 冷 cargo 缓存下实测全量 debug 工作区构建 21 s（188 个单元；tokio 7.3 s、
-      #   syn 两代共 7.2 s、cb_core 5.7 s）。它只回填“第三方依赖”的 target 产物和
-      #   ~/.cargo（registry + bin），工作区 crate 每次照常重编（实测增量
-      #   check 1.2 s / build 2.8 s），所以省下的是依赖那 ~15 s，并非把 21 s 全清零。
-      # - 缓存 key 由 rustc 版本 + 仓库内 Cargo.lock/Cargo.toml/.cargo/config.toml
-      #   的哈希自动组成：Cargo.lock 或工具链一变 key 就变，旧缓存不会被错误复用；
-      #   需要手动整体失效时再改 prefix-key。
-      # - shared-key 每个 job 一个，Linux/Windows/Android 各占独立缓存条目，避免
-      #   互相驱逐（GitHub 缓存按条目 LRU 淘汰，体积大的 target 缓存最容易挤掉别人）。
-      # - 不用 actions/cache：它会把增量产物、已删依赖和未知 rustc 时代的产物一起存下来，
-      #   命中后可能拿到与当前依赖图不一致的产物；rust-cache 保存前会剔除这些。
       - name: Cache cargo (rust-cache)
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: linux-rust
 
-      - name: Format (rustfmt)
-        run: cargo fmt --all -- --check
-
-      - name: Lint (clippy)
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --workspace
-
-      # 三平台的 C ABI 表面必须一致：唯一导出定义在 crates/cb_core_ffi/src/exports.rs，
-      # 三份 include/clipbridge_core.h 是它的投影。历史上 Android 曾悄无声息地少掉 21 个导出、
-      # 头文件也缺 cb_get_ffi_version —— 这个门禁就是为了让那种漂移不可能再合入。
-      # 另外断言源文件不再重复定义导出（防止有人把实现又抄回平台 crate）。
-      - name: FFI surface consistency (exports vs headers, 3 platforms)
+      # 单一入口：格式化、clippy、测试、FFI surface、固定版本 cargo-deny、报告核验。
+      - name: Rust validation and reports
         shell: pwsh
-        run: ./scripts/verify-ffi-surface.ps1
+        run: ./scripts/ci/rust.ps1 -OutDir "$env:RUNNER_TEMP/ci-logs/rust"
 
-      # Pinned on purpose: an unpinned `cargo install cargo-deny --locked` lets a new upstream
-      # release break (or silently change) the supply-chain gate without a reviewable diff.
-      # 缓存交互：上面的 rust-cache 缓存 ~/.cargo（registry + bin），所以同一工具链/锁文件下
-      # 第二次起 cargo 会发现 0.20.2 已安装而直接跳过（<1 s 空操作）；首次仍需真实编译
-      # （本仓库未实测安装耗时）。cache-all-crates 保持默认 false，因为 `cargo install`
-      # 默认在临时 target 目录里编译（见 cargo help install），不写工作区 target/；打开它
-      # 只会把依赖图之外的 crate 产物也塞进缓存，对安装没有加速作用，只增加缓存体积。
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --version 0.20.2 --locked
-
-      - name: Supply-chain checks (cargo-deny)
-        run: cargo deny check advisories bans licenses sources
-
-  # ubuntu-latest only ever compiles the Linux target, so the Windows cdylib shipped by
-  # platforms/windows/core-ffi was never built by CI. This job checks it on a Windows runner.
-  rust-windows:
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      # 与 Linux rust job 同样的冷缓存成本：实测全量 debug 工作区构建 21 s（188 个
-      # 单元；tokio 7.3 s、syn 两代共 7.2 s、cb_core 5.7 s）。Windows runner 的依赖
-      # 编译只会更慢，缓存价值同样。rust-cache 只回填依赖的 target 产物 + ~/.cargo，
-      # 工作区 crate 仍重编（实测增量 check 1.2 s / build 2.8 s）；本 job 跑
-      # cargo check，因此每次约省依赖那 ~15 s。
-      # 缓存 key 含 rustc 版本与 Cargo.lock/Cargo.toml 哈希：工具链或锁文件变化时
-      # key 自动改变；shared-key: windows-rust 让它与 linux-rust/windows-csharp 隔离。
-      # 不用 actions/cache 直接存 target/，理由同 rust job（增量产物/过期依赖会被
-      # 一起存下，命中后可能与当前依赖图不一致）。
-      - name: Cache cargo (rust-cache, Windows)
-        uses: Swatinem/rust-cache@v2
+      - name: Upload Rust logs and reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          shared-key: windows-rust
+          name: ci-logs-rust-x64-${{ github.sha }}
+          # 白名单：不把 OutDir/tools 下的 cargo-deny 等工具二进制塞进 artifact。
+          path: |
+            ${{ runner.temp }}/ci-logs/rust/**/*.log
+            ${{ runner.temp }}/ci-logs/rust/**/*summary*.json
+            ${{ runner.temp }}/ci-logs/rust/**/*-report*.json
+            ${{ runner.temp }}/ci-logs/rust/**/*.trx
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Check workspace (Windows targets)
-        run: cargo check --workspace --all-targets
+  windows:
+    needs: changes
+    if: needs.changes.result == 'success' && fromJSON(needs.changes.outputs.plan).required['windows'] == true
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-  # Android 外壳在旧 CI 里从未被编译过：platforms/android/** 只被路由到 Rust job，
-  # 而 Rust job 只跑 cargo fmt/clippy/test，从不碰 Android 侧代码。四个已合入的阻塞级
-  # 缺陷（init 缺必填字段、AIDL 事务码错位、null watcher、ensure_content_cached 参数
-  # 形状）都是在“CI 全绿”的情况下漏进去的。这个 job 保证：Android 侧代码真的能编译、
-  # Rust .so 真能进 jniLibs、APK 真能产出并包含两份 ABI 的 .so；其中 init/AIDL/
-  # ensure_content_cached 三项另由下面的静态契约脚本兜住。null watcher 属于运行时对象
-  # 生命周期问题，编译器和静态检查都看不见（见报告中的补测建议），需要仪器测试。
+      - name: Setup .NET (from global.json)
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          global-json-file: global.json
+
+      # WinUI shell 的 BeforeBuild 会构建 core-ffi-windows；缓存 Rust 依赖产物，
+      # 但工作区 crate 仍按当前源码重编（缓存命中不等于源码构建通过）。
+      - name: Cache cargo (rust-cache, Windows native)
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows-native
+
+      # 单一入口：Rust DLL、Release/x64/win-x64/R2R 的 restore/format/build/test、TRX 与 summary。
+      - name: Windows native integration and MSTest
+        shell: pwsh
+        run: ./scripts/ci/windows.ps1 -OutDir "$env:RUNNER_TEMP/ci-logs/windows"
+
+      - name: Upload Windows logs, TRX and summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-logs-windows-x64-${{ github.sha }}
+          # 只上传报告/日志；排除临时 tools 等构建树内容。
+          path: |
+            ${{ runner.temp }}/ci-logs/windows/**/*.log
+            ${{ runner.temp }}/ci-logs/windows/**/*summary*.json
+            ${{ runner.temp }}/ci-logs/windows/**/*-report*.json
+            ${{ runner.temp }}/ci-logs/windows/**/*.trx
+            ${{ runner.temp }}/ci-logs/windows/**/*.txt
+          if-no-files-found: warn
+          retention-days: 14
+
   android:
     needs: changes
-    if: needs.changes.outputs.android == 'true'
-    runs-on: ubuntu-latest
+    if: needs.changes.result == 'success' && fromJSON(needs.changes.outputs.plan).required['android'] == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # 固定 JDK 21：Gradle 8.13（wrapper 版本）拒绝在 JDK 25 上运行（本地已实测），
-      # 浮动 java-version 会在 runner 镜像换 JDK 时无声地把门禁弄红/弄绿。
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: '21'
           cache: gradle
 
-      # setup-android@v3 负责提供 sdkmanager 并接受 license；它要求 JDK 17+，所以必须
-      # 放在 setup-java 之后。
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
 
-      # 版本全部从项目里抄来，避免“CI 装的和项目要的不一样”：
-      # - NDK 26.3.11579264 = app/build.gradle.kts 的 ndkVersion
-      # - platform 36 / build-tools 36.0.0 = compileSdk/targetSdk 36
-      # - CMake 3.22.1 = app/src/main/cpp/CMakeLists.txt 的 cmake_minimum_required
-      - name: Install Android SDK packages (platform 36, build-tools, NDK, CMake)
+      # 平台入口自行严格校验版本，不自动安装 SDK；工作流在入口前显式安装项目固定的
+      # platform/build-tools/NDK/CMake。licenses 处理有界（timeout），真正的门禁是随后的
+      # sdkmanager --install：license 缺失会在这里 fail closed。
+      - name: Install pinned Android SDK packages
+        shell: bash
         run: |
           set -euo pipefail
-          ( yes | sdkmanager --licenses > /dev/null ) || true
+          if ! timeout 120 bash -c 'yes | sdkmanager --licenses >/dev/null 2>&1'; then
+            echo "sdkmanager --licenses did not complete cleanly; continuing to the install gate" >&2
+          fi
           sdkmanager --install \
             "platforms;android-36" \
             "build-tools;36.0.0" \
@@ -202,256 +293,235 @@ jobs:
             "cmake;3.22.1"
 
       - name: Add Rust Android targets
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,x86_64-linux-android
-
-      # Android 交叉编译的依赖同样来自冷 cargo 缓存：这里每个 ABI 各编一次 release
-      # .so，对应实测 release FFI 构建 45 s（thin LTO + codegen-units=1）里的依赖
-      # 打底部分；rust-cache 回填后每个 ABI 只剩工作区 crate 要重编（实测增量
-      # build 2.8 s），两份合计每次省下数十秒。
-      # 目录：仓库没有设置 CARGO_TARGET_DIR（.cargo/config.toml 只有 CMAKE 相关 env），
-      # 这里又用 plain cargo（见下方说明），产物落在默认的
-      # target/aarch64-linux-android/release 与 target/x86_64-linux-android/release，
-      # 都在 rust-cache 默认缓存的 target/ 之内，因此 workspaces 保持默认 ". -> target"，
-      # 不需要额外 target-dir（rust-cache v2 也没有 target-dir 输入，要换目录得写
-      # workspaces: "<path> -> <target>"）。
-      # key：rust-cache 自动把 rustc 版本与 Cargo.lock/Cargo.toml 哈希算进 key，所以
-      # Cargo.lock 或工具链一变缓存自动失效；下面的 --locked 构建保证锁文件与缓存一致。
-      # shared-key: android-rust 与 linux-rust/windows-rust 分开，避免互相驱逐。
-      # cache-workspace-crates 保持默认 false（工作区 crate 每次都变，缓存它们没有收益），
-      # 缓存的是两个 triple 下的第三方依赖产物。
-      - name: Cache cargo (rust-cache, Android cross)
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: android-rust
-
-      # 静态契约门禁：编译器只能证明 Java/AIDL 自洽，证明不了与平台/Rust 的契约。
-      # 这里钉死 API 36 的 IClipboard 事务码顺序、检查 init JSON 覆盖 InitConfigDto
-      # 必填字段、检查 ensure_content_cached 的请求键与 transfer_id 解析。
-      - name: Android shell contracts (AIDL order, init keys, FFI request shape)
-        run: bash scripts/check-android-shell-contracts.sh
-
-      # 用 plain cargo 而不是 cargo ndk，理由有两个：
-      # 1) build.gradle.kts 在配置阶段检查 target/<triple>/release/libcore_ffi_android.so
-      #    是否存在来决定 abiFilters；cargo ndk -o <jniLibs> 不会写这两个路径，结果
-      #    availableAbis 为空、只剩 arm64-v8a，x86_64 会被静默跳过。
-      # 2) cargo ndk 是额外 cargo 子命令，版本不受 Cargo.lock 约束；plain cargo + NDK
-      #    clang 只依赖仓库已声明的工具链，repeatability 更好。
-      # API level 用 26，与 app/build.gradle.kts 的 minSdk 一致；.so 同时写进
-      # target/<triple>/release（Gradle 的 copyRustSo 读这里）和 app/src/main/jniLibs
-      # （CMake 的 target_link_directories 读这里），保证链接与打包都有输入。
-      - name: Build Android FFI (.so for arm64-v8a and x86_64)
+        shell: bash
         run: |
           set -euo pipefail
-          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          NDK="$SDK/ndk/26.3.11579264"
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          API=26
-          export ANDROID_NDK_ROOT="$NDK"
-          export ANDROID_NDK_HOME="$NDK"
-          export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android${API}-clang"
-          export CC_x86_64_linux_android="$TOOLCHAIN/x86_64-linux-android${API}-clang"
-          export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
-          export AR_x86_64_linux_android="$TOOLCHAIN/llvm-ar"
-          export RANLIB_aarch64_linux_android="$TOOLCHAIN/llvm-ranlib"
-          export RANLIB_x86_64_linux_android="$TOOLCHAIN/llvm-ranlib"
-          # cc-rs 也会按带连字符的目标三元组查环境变量（给 ring/rusqlite 的 C 代码用）
-          export "CC_aarch64-linux-android=$CC_aarch64_linux_android"
-          export "CC_x86_64-linux-android=$CC_x86_64_linux_android"
-          export "AR_aarch64-linux-android=$AR_aarch64_linux_android"
-          export "AR_x86_64-linux-android=$AR_x86_64_linux_android"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android${API}-clang"
-          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$TOOLCHAIN/x86_64-linux-android${API}-clang"
-          cargo build -p core-ffi-android --release --locked --target aarch64-linux-android
-          cargo build -p core-ffi-android --release --locked --target x86_64-linux-android
-          for pair in arm64-v8a:aarch64-linux-android x86_64:x86_64-linux-android; do
-            abi="${pair%%:*}"
-            triple="${pair##*:}"
-            src="target/${triple}/release/libcore_ffi_android.so"
-            test -f "$src" || { echo "未产出 $src" >&2; exit 1; }
-            dest="platforms/android/ClipBridgeShellAndroid/app/src/main/jniLibs/${abi}"
-            mkdir -p "$dest"
-            cp "$src" "$dest/libcore_ffi_android.so"
-          done
+          rustup target add aarch64-linux-android x86_64-linux-android
 
-      # gradlew 在仓库里是 100644（Windows 本地不受影响），Ubuntu checkout 后没有执行位。
-      - name: Make Gradle wrapper executable
-        working-directory: platforms/android/ClipBridgeShellAndroid
-        run: chmod +x gradlew
+      # 单一入口：SDK/NDK/CMake 版本核对、双 ABI SO、Gradle debug APK、包内容与签名范围检查。
+      - name: Android build and package contract
+        shell: bash
+        run: bash scripts/ci/android.sh "$RUNNER_TEMP/ci-logs/android"
 
-      # assembleDebug 同时做：AIDL 编译、Java 编译、CMake 编译 cb_jni 并链接
-      # core_ffi_android、打包 APK。注意 app/build.gradle.kts 里 “No Rust .so files
-      # found” 只是 println 警告，不会让构建失败；所以下面再用 APK 内容断言兜底。
-      - name: Build debug APK
-        working-directory: platforms/android/ClipBridgeShellAndroid
-        run: ./gradlew :app:assembleDebug --stacktrace --console=plain
-
-      # 真正验证 .so 进了包：只看 "BUILD SUCCESSFUL" 不够，历史 warning 正说明
-      # .so 缺失时 Gradle 仍然会成功。
-      - name: Verify APK contains Rust .so for both ABIs
-        working-directory: platforms/android/ClipBridgeShellAndroid
-        run: |
-          set -euo pipefail
-          APK=app/build/outputs/apk/debug/app-debug.apk
-          test -f "$APK" || { echo "未产出 $APK" >&2; exit 1; }
-          entries="$(unzip -l "$APK")"
-          for abi in arm64-v8a x86_64; do
-            if ! grep -q "lib/${abi}/libcore_ffi_android.so" <<< "$entries"; then
-              echo "APK 缺少 lib/${abi}/libcore_ffi_android.so（Rust .so 没有进 jniLibs）" >&2
-              exit 1
-            fi
-          done
-          echo "OK: APK 同时包含 arm64-v8a 与 x86_64 的 Rust .so"
-
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+      - name: Upload Android debug APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: android-debug-apk
-          path: platforms/android/ClipBridgeShellAndroid/app/build/outputs/apk/debug/app-debug.apk
+          name: android-debug-apk-arm64_x86_64-${{ github.sha }}
+          path: ${{ runner.temp }}/ci-logs/android/android-debug.apk
           if-no-files-found: error
           retention-days: 7
 
-  # macOS 外壳同样从未被 CI 编译过（platforms/macos/** 以前只进 Rust job）。
-  # SwiftPM 包目前是桩实现（CoreBridge 直接 throw notImplemented），但 swift build
-  # 仍能挡住语法/类型/并发隔离层面的腐烂，避免“看起来还在、其实编不过”。
-  # TODO: 真正的 app 产物由 platforms/macos/ClipBridgeShell_macOS/ClipBridge/ClipBridge.xcodeproj
-  # 构建；CI 还没有跑 xcodebuild，也没有把 Rust dylib 嵌进 bundle。等 FFI 绑定落地后补。
-  # Package.swift 的 swift-tools-version 是 6.2，因此要求 macos-latest 带 Xcode 26+。
-  # 注意：Swift 6.2 默认启用 SE-0444（成员导入可见性）。若这里报 ObservableObject/
-  # @Published 未定义，说明 CoreHostService.swift 只 import Foundation 却用了 Combine
-  # 的成员，需要在 Swift 源码补 `import Combine`（属于 shell 修复，不是放宽本门禁）。
+      - name: Upload Android logs and reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-logs-android-x64-${{ github.sha }}
+          # 只上传日志/报告/文本证据；APK、SO、tools 扫描器不在 logs artifact 中。
+          path: |
+            ${{ runner.temp }}/ci-logs/android/**/*.log
+            ${{ runner.temp }}/ci-logs/android/**/*summary*.json
+            ${{ runner.temp }}/ci-logs/android/**/*check*.json
+            ${{ runner.temp }}/ci-logs/android/**/*.txt
+          if-no-files-found: warn
+          retention-days: 14
+
   macos:
     needs: changes
-    if: needs.changes.outputs.macos == 'true'
-    runs-on: macos-latest
+    if: needs.changes.result == 'success' && fromJSON(needs.changes.outputs.plan).required['macos'] == true
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.0.1.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Show Swift version
-        run: swift --version
-
-      - name: Build SwiftPM shell
-        working-directory: platforms/macos/ClipBridgeShell_macOS
-        run: swift build
-
-  csharp:
-    needs: changes
-    if: needs.changes.outputs.csharp == 'true'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # The shell targets net10.0-windows10.0.26100.0, so a 9.0.x SDK can never build it.
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-
-      # 本 job 的 dotnet build 会在 ClipBridgeShell_CS.csproj 的 BeforeBuild 里执行
-      # `cargo build -p core-ffi-windows --release --target x86_64-pc-windows-msvc`。
-      # windows-latest 镜像自带 Rust stable（现有 job 就是靠它），所以这里不额外加
-      # rust-toolchain 步骤，但 rust-cache 需要 cargo/rustc 在 PATH 上。
-      # - 实测冷缓存 release FFI 构建 45 s（thin LTO + codegen-units=1）：缓存命中后
-      #   这部分依赖产物直接回填，每次省掉 45 s 里依赖编译的大头；工作区 crate 仍重编
-      #   （实测增量 build 2.8 s）。
-      # - 该构建带 --target，产物落在 target/x86_64-pc-windows-msvc/release；rust-cache
-      #   默认 cache-targets: true 缓存整个 target/，已覆盖这个三元组目录，仓库也没有
-      #   设置非默认 target 目录，所以无需 CARGO_TARGET_DIR/target-dir 覆盖。
-      # - key 含 rustc 版本 + Cargo.lock/Cargo.toml 哈希：锁文件或工具链变化时 key 自动
-      #   改变，旧 release 产物不会被错误复用；shared-key 与 Windows Rust job 分开。
-      - name: Cache cargo (rust-cache, C# job)
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: windows-csharp
-          # 显式写出：这里必须连 target/ 一起缓存（release 产物在 target/<triple>/release），
-          # 只缓存 ~/.cargo 的话依赖仍要全量重编。
-          cache-targets: true
-
-      # Build the concrete project files instead of the
-      # platforms/windows/ClipBridgeShell_CS folder: that folder also contains the WiX installer
-      # project, and restoring/building it hard-fails where the WiX toolset is missing.
-      - name: Restore (shell)
-        run: dotnet restore platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/ClipBridgeShell_CS.csproj -p:Platform=x64
-
-      - name: Restore (tests)
-        run: dotnet restore platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Tests.MSTest/ClipBridgeShell_CS.Tests.MSTest.csproj -p:Platform=x64
-
-      # TODO: demoted from a blocking gate because `dotnet format --verify-no-changes` currently
-      # reports pre-existing whitespace/IDE-analyzer diffs on this tree (exit code 2 at HEAD).
-      # Drop `continue-on-error` once the tree is clean.
-      - name: Format (dotnet format, shell)
-        continue-on-error: true
-        run: dotnet format platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/ClipBridgeShell_CS.csproj --verify-no-changes --no-restore
-
-      - name: Format (dotnet format, tests)
-        continue-on-error: true
-        run: dotnet format platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Tests.MSTest/ClipBridgeShell_CS.Tests.MSTest.csproj --verify-no-changes --no-restore
-
-      - name: Build (shell)
-        run: dotnet build platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/ClipBridgeShell_CS.csproj -c Release -p:Platform=x64 --no-restore
-
-      # The MSTest suite had no CI step at all before this.
-      # `-p:Platform=x64` selects the win-x64 asset target that the restore above produced; the
-      # test project itself emits its own runtimeconfig.json, which VSTest requires.
-      - name: Test (MSTest)
-        run: dotnet test platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Tests.MSTest/ClipBridgeShell_CS.Tests.MSTest.csproj -c Release -p:Platform=x64 --no-restore
-
-  # Windows 安装器（machine MSI + per-user EXE）。独立 job，不塞进 csharp：
-  # csharp 有意只做 restore/format/build/test，不碰 wixproj（目录 restore 会硬失败）。
-  windows-installer:
-    needs: changes
-    if: needs.changes.outputs.installer == 'true'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: windows-installer
-
-      # 固定 WiX 3.14 二进制（不 winget install：runner 可复现、可校验）。
-      - name: Download WiX 3.14
-        shell: pwsh
+      - name: Verify pinned Xcode 26.0.1
+        shell: bash
         run: |
-          $zip = Join-Path $env:RUNNER_TEMP 'wix314-binaries.zip'
-          $dir = Join-Path $env:RUNNER_TEMP 'wix314'
-          Invoke-WebRequest -Uri 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip' -OutFile $zip
-          $h = (Get-FileHash -Algorithm SHA256 $zip).Hash
-          if ($h -ne '6AC824E1642D6F7277D0ED7EA09411A508F6116BA6FAE0AA5F2C7DAA2FF43D31') {
-            throw "WiX zip hash mismatch: $h"
-          }
-          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          set -euo pipefail
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            echo "missing pinned Xcode toolchain: $DEVELOPER_DIR" >&2
+            exit 1
+          fi
+          xcodebuild -version
 
-      - name: Build installers
-        shell: pwsh
-        run: pwsh scripts/build-windows-installers.ps1 -WixInstallPath (Join-Path $env:RUNNER_TEMP 'wix314')
+      # 单一入口：当前源码 dylib、真实 Xcode target/scheme、嵌入与动态加载/ABI 探测。
+      - name: macOS Xcode build and probe
+        shell: bash
+        run: bash scripts/ci/macos.sh "$RUNNER_TEMP/ci-logs/macos"
 
-      # 从 dist/ 的真实产物生成多文件三件套（version / installer / defaultLocale），
-      # SHA256 直接取自刚构建的文件；结构自检在脚本内部完成。
-      - name: Generate winget manifests
-        shell: pwsh
-        run: pwsh scripts/build-winget-manifest.ps1
-
-      # 三件套完整时 validate 应通过；对单个 yaml 运行会报 multi-file incomplete（预期）。
-      - name: Validate winget manifests
-        shell: pwsh
-        run: winget validate --manifest dist/winget --disable-interactivity
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload macOS app bundle (test artifact)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: windows-installers
+          name: macos-app-release-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/ci-logs/macos/ClipBridge-app-release-arm64.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload macOS logs and reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-logs-macos-arm64-${{ github.sha }}
+          # 只上传日志/报告/文本证据；DerivedData、.app、dylib 和 app zip 不在这里。
           path: |
-            dist/*.msi
-            dist/*.exe
-            dist/winget/**
+            ${{ runner.temp }}/ci-logs/macos/**/*.log
+            ${{ runner.temp }}/ci-logs/macos/**/*summary*.json
+            ${{ runner.temp }}/ci-logs/macos/**/*check*.json
+            ${{ runner.temp }}/ci-logs/macos/**/*.txt
+            ${{ runner.temp }}/ci-logs/macos/xcodebuild-list.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows-packages:
+    needs: [ changes, windows ]
+    if: needs.changes.result == 'success' && fromJSON(needs.changes.outputs.plan).required['windows-packages'] == true
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup .NET (from global.json)
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          global-json-file: global.json
+
+      # 包构建同样从当前源码构建 Rust DLL；缓存依赖产物，不把缓存命中当源码成功。
+      - name: Cache cargo (rust-cache, Windows packages)
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows-packages
+
+      - name: Download and verify WiX 3.14.1
+        id: wix
+        shell: pwsh
+        run: ./scripts/ci/setup-wix.ps1 -DestDir "$env:RUNNER_TEMP/wix314"
+
+      # 只构建 plan.packages 指定格式；package-summary.json 的 role=release 才是上传白名单，
+      # role=internal（user MSI 载荷）只作为诊断 artifact。
+      - name: Build selected Windows packages
+        id: packages
+        shell: pwsh
+        env:
+          CI_PLAN: ${{ needs.changes.outputs.plan }}
+          WIX_PATH: ${{ steps.wix.outputs.wix-path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $plan = $env:CI_PLAN | ConvertFrom-Json -Depth 16
+          $formats = @($plan.packages)
+          if ($formats.Count -eq 0) { throw 'windows-packages was scheduled but plan.packages is empty' }
+          foreach ($format in $formats) {
+            if ($format -notin @('machine-msi', 'user-exe', 'portable-zip')) {
+              throw "unsupported package format from plan: $format"
+            }
+          }
+          Write-Host "formats: $($formats -join ', ')"
+          & ./scripts/build-windows-installers.ps1 -Formats $formats -OutDir dist -WixInstallPath $env:WIX_PATH
+          if (-not $?) { throw 'build-windows-installers.ps1 failed' }
+
+          $summaryPath = Join-Path 'dist' 'package-summary.json'
+          if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+            throw "missing package summary: $summaryPath"
+          }
+          $summary = [System.IO.File]::ReadAllText($summaryPath) | ConvertFrom-Json -Depth 16
+          if ([int]$summary.schemaVersion -ne 1) { throw "unsupported package summary schemaVersion: $($summary.schemaVersion)" }
+          if ([string]$summary.product -ne 'ClipBridge') { throw "unexpected package summary product: $($summary.product)" }
+          if ([string]$summary.platform -ne 'x64') { throw "unexpected package summary platform: $($summary.platform)" }
+
+          $summaryFormats = @($summary.formats | ForEach-Object { [string]$_ })
+          if ((($summaryFormats | Sort-Object) -join ',') -ne (($formats | Sort-Object) -join ',')) {
+            throw "package summary formats do not match plan.packages: [$($summaryFormats -join ',')] vs [$($formats -join ',')]"
+          }
+
+          $artifacts = @($summary.artifacts)
+          $release = @($artifacts | Where-Object { [string]$_.role -eq 'release' })
+          $internal = @($artifacts | Where-Object { [string]$_.role -eq 'internal' })
+          foreach ($artifact in $artifacts) {
+            $role = [string]$artifact.role
+            if ($role -notin @('release', 'internal')) { throw "unknown artifact role: $role" }
+            $name = [string]$artifact.name
+            if ([string]::IsNullOrWhiteSpace($name) -or $name -match '[\\/]' -or $name -match '\.\.') {
+              throw "invalid artifact name in package summary: $name"
+            }
+            $isInternal = [bool]$artifact.internal
+            if (($role -eq 'internal') -ne $isInternal) { throw "artifact '$name' role/internal flag disagree" }
+            $path = Join-Path 'dist' $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "declared artifact is missing: $path" }
+            $item = Get-Item -LiteralPath $path
+            if ([int64]$artifact.size -ne $item.Length) { throw "artifact size mismatch for $name" }
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash
+            if ($hash -ine [string]$artifact.sha256) { throw "artifact sha256 mismatch for $name" }
+          }
+          if ($release.Count -ne $formats.Count) {
+            throw "expected exactly one release artifact per planned format; got $($release.Count) release and $($formats.Count) formats"
+          }
+          foreach ($format in $formats) {
+            $matches = @($release | Where-Object { [string]$_.format -eq $format })
+            if ($matches.Count -ne 1) { throw "expected exactly one release artifact for format $format" }
+          }
+
+          $releasePaths = @($release | ForEach-Object { Join-Path 'dist' ([string]$_.name) })
+          $internalPaths = @($internal | ForEach-Object { Join-Path 'dist' ([string]$_.name) })
+          $releaseDelimiter = 'RELEASE_PATHS_' + [guid]::NewGuid().ToString('N')
+          $internalDelimiter = 'INTERNAL_PATHS_' + [guid]::NewGuid().ToString('N')
+          "release-paths<<$releaseDelimiter" | Add-Content -Path $env:GITHUB_OUTPUT
+          $releasePaths | Add-Content -Path $env:GITHUB_OUTPUT
+          $releaseDelimiter | Add-Content -Path $env:GITHUB_OUTPUT
+          "internal-paths<<$internalDelimiter" | Add-Content -Path $env:GITHUB_OUTPUT
+          $internalPaths | Add-Content -Path $env:GITHUB_OUTPUT
+          $internalDelimiter | Add-Content -Path $env:GITHUB_OUTPUT
+
+          $logDir = Join-Path $env:RUNNER_TEMP 'ci-logs/windows-packages'
+          New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+          Copy-Item -LiteralPath $summaryPath -Destination (Join-Path $logDir 'package-summary.json') -Force
+
+      - name: Upload selected installers (release artifacts only)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-packages-x64-${{ github.sha }}
+          path: ${{ steps.packages.outputs.release-paths }}
           if-no-files-found: error
           compression-level: 0
+          retention-days: 7
+
+      - name: Upload internal user MSI (diagnostic only)
+        if: steps.packages.outputs.internal-paths != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-packages-diagnostic-x64-${{ github.sha }}
+          path: ${{ steps.packages.outputs.internal-paths }}
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Windows packaging logs and summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-logs-windows-packages-x64-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/ci-logs/windows-packages/**/*summary*.json
+            ${{ runner.temp }}/ci-logs/windows-packages/**/*.log
+            ${{ runner.temp }}/ci-logs/windows-packages/**/*.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+  ci-result:
+    needs: [ changes, ci-config, rust, windows, android, macos, windows-packages ]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Verify results and write GITHUB_STEP_SUMMARY
+        if: always()
+        shell: pwsh
+        env:
+          CI_PLAN: ${{ needs.changes.outputs.plan }}
+          CI_NEEDS: ${{ toJSON(needs) }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: ./scripts/ci/assert-result.ps1

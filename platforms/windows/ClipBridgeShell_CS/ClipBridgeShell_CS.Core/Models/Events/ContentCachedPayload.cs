@@ -16,7 +16,10 @@ public class ContentCachedPayload
     public string ItemId { get; set; } = string.Empty;
 
     [JsonPropertyName("file_id")]
-    public string? FileId { get; set; }
+    public string? FileId
+    {
+        get; set;
+    }
 
     [JsonPropertyName("local_ref")]
     public LocalContentRef LocalRef { get; set; } = new();

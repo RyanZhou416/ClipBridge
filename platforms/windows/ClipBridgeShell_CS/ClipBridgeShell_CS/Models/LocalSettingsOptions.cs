@@ -1,4 +1,4 @@
-﻿namespace ClipBridgeShell_CS.Models;
+namespace ClipBridgeShell_CS.Models;
 
 public class LocalSettingsOptions
 {

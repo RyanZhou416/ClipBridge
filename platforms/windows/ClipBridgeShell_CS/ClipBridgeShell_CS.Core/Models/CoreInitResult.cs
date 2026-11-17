@@ -8,8 +8,20 @@ namespace ClipBridgeShell_CS.Core.Models;
 
 public sealed class CoreInitResult
 {
-    public bool Ok { get; init; }
-    public string? ErrorCode { get; init; }     // 统一映射后的“逻辑码”（Shell 用）
-    public string? Message { get; init; }
-    public string? EnvelopeJson { get; init; }
+    public bool Ok
+    {
+        get; init;
+    }
+    public string? ErrorCode
+    {
+        get; init;
+    }     // 统一映射后的“逻辑码”（Shell 用）
+    public string? Message
+    {
+        get; init;
+    }
+    public string? EnvelopeJson
+    {
+        get; init;
+    }
 }

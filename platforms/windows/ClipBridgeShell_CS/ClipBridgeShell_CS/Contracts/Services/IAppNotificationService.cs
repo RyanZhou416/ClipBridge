@@ -1,4 +1,4 @@
-﻿using System.Collections.Specialized;
+using System.Collections.Specialized;
 
 namespace ClipBridgeShell_CS.Contracts.Services;
 

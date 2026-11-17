@@ -1,8 +1,8 @@
-using Microsoft.UI.Xaml.Data;
-using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml;
 using ClipBridgeShell_CS.Core.Models.Events;
 using ClipBridgeShell_CS.ViewModels;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Media;
 
 namespace ClipBridgeShell_CS.Helpers;
 
@@ -40,10 +40,10 @@ public sealed class CardSelectionBorderBrushConverter : IValueConverter
                         if (themeDictionaries != null)
                         {
                             var currentTheme = _pageReference.ActualTheme == ElementTheme.Light ? "Light" : "Dark";
-                            if (themeDictionaries.TryGetValue(currentTheme, out var themeDict) && 
+                            if (themeDictionaries.TryGetValue(currentTheme, out var themeDict) &&
                                 themeDict is ResourceDictionary themeResourceDict)
                             {
-                                if (themeResourceDict.TryGetValue("CardSelectedBorderBrush", out var resource) && 
+                                if (themeResourceDict.TryGetValue("CardSelectedBorderBrush", out var resource) &&
                                     resource is SolidColorBrush themeBrush)
                                 {
                                     return themeBrush;
@@ -51,7 +51,7 @@ public sealed class CardSelectionBorderBrushConverter : IValueConverter
                             }
                         }
                     }
-                    
+
                     // 如果无法从 Page 获取，尝试从 Application 资源获取
                     if (Application.Current.Resources.TryGetValue("CardSelectedBorderBrush", out var appResource) &&
                         appResource is SolidColorBrush appBrush)
@@ -65,14 +65,14 @@ public sealed class CardSelectionBorderBrushConverter : IValueConverter
                 // 如果获取失败，返回默认值
             }
         }
-        
+
         // 未选中时使用默认边框颜色
         if (Application.Current.Resources.TryGetValue("CardStrokeColorDefaultBrush", out var defaultResource) &&
             defaultResource is Brush defaultBrush)
         {
             return defaultBrush;
         }
-        
+
         // 最后的后备方案
         return new SolidColorBrush(Microsoft.UI.Colors.Gray);
     }

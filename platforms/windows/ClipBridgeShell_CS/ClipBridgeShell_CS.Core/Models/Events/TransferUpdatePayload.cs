@@ -16,23 +16,38 @@ public class TransferUpdatePayload
     public string TransferId { get; set; } = string.Empty; // 传输任务的唯一ID
 
     [JsonPropertyName("item_id")]
-    public string? ItemId { get; set; }      // 关联的历史记录ID
+    public string? ItemId
+    {
+        get; set;
+    }      // 关联的历史记录ID
 
     [JsonPropertyName("state")]
     public string State { get; set; } = string.Empty;
     // 例如: "pending", "running", "completed", "failed", "cancelled"
 
     [JsonPropertyName("received")]
-    public long? Received { get; set; }
+    public long? Received
+    {
+        get; set;
+    }
 
     [JsonPropertyName("total")]
-    public long? Total { get; set; }
+    public long? Total
+    {
+        get; set;
+    }
 
     [JsonPropertyName("bytes_done")]
-    public long? BytesDone { get; set; }
+    public long? BytesDone
+    {
+        get; set;
+    }
 
     [JsonPropertyName("bytes_total")]
-    public long? BytesTotal { get; set; }
+    public long? BytesTotal
+    {
+        get; set;
+    }
 
     [JsonIgnore]
     public long ProcessedBytes => Received ?? BytesDone ?? 0; // 已传输字节数
@@ -41,10 +56,16 @@ public class TransferUpdatePayload
     public long TotalBytes => Total ?? BytesTotal ?? 0;    // 总字节数
 
     [JsonPropertyName("code")]
-    public string? Code { get; set; }
+    public string? Code
+    {
+        get; set;
+    }
 
     [JsonPropertyName("message")]
-    public string? Message { get; set; }
+    public string? Message
+    {
+        get; set;
+    }
 
     [JsonPropertyName("error_msg")]
     public string? ErrorMessage

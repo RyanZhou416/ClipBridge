@@ -22,17 +22,23 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
     private readonly ILocalSettingsService _localSettings;
     private readonly EventPumpService _eventPump;
     private DispatcherTimer? _refreshTimer;
-    private DispatcherTimer? _eventDebounceTimer;
+    private readonly DispatcherTimer? _eventDebounceTimer;
     private bool _isEventPumpSubscribed;
     private PeerMetaPayload? _selectedDevice;
 
     public ObservableCollection<PeerMetaPayload> Devices { get; } = new();
 
     [ObservableProperty]
-    public partial int OutboundAllowedCount { get; set; }
+    public partial int OutboundAllowedCount
+    {
+        get; set;
+    }
 
     [ObservableProperty]
-    public partial int InboundAllowedCount { get; set; }
+    public partial int InboundAllowedCount
+    {
+        get; set;
+    }
 
     public PeerMetaPayload? SelectedDevice
     {
@@ -161,7 +167,7 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
                 var aliasKey = $"DeviceAlias_{peer.DeviceId}";
                 peer.LocalAlias = await _localSettings.ReadSettingAsync<string>(aliasKey);
             }).ToArray();
-            
+
             await Task.WhenAll(aliasTasks);
 
             // 更新 UI 线程上的集合
@@ -232,7 +238,7 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
         {
             // 调用 API 更新策略（使用用户期望的新值，而不是取反）
             _coreHost.SetPeerPolicy(device.DeviceId, null, newValue);
-            
+
             // 注意：不手动更新 device.AcceptFromPeer，让 peer_changed 事件触发 RefreshDevicesAsync 来更新状态
             // 这样可以确保状态与核心保持一致
         }
@@ -298,7 +304,7 @@ public partial class DevicesViewModel : ObservableRecipient, INavigationAware
         {
             var aliasKey = $"DeviceAlias_{device.DeviceId}";
             var newAlias = textBox.Text?.Trim();
-            
+
             if (string.IsNullOrEmpty(newAlias))
             {
                 // 删除别名

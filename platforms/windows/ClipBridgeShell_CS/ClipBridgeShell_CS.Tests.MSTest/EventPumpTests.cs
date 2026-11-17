@@ -1,9 +1,9 @@
 using System.Diagnostics;
+using System.Threading.Tasks;
 using ClipBridgeShell_CS.Core.Models.Events;
 using ClipBridgeShell_CS.Services;
 using ClipBridgeShell_CS.Stores;
 using Microsoft.VisualStudio.TestTools.UnitTesting; // 确保引用 MSTest
-using System.Threading.Tasks;
 
 namespace ClipBridgeShell_CS.Tests.MSTest;
 

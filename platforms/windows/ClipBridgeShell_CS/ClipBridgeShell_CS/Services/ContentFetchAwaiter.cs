@@ -4,11 +4,26 @@ namespace ClipBridgeShell_CS.Services;
 
 public sealed class LocalContentRef
 {
-    public required string TransferId { get; init; }
-    public string? ItemId { get; init; }
-    public string? TextUtf8 { get; init; }
-    public string? LocalPath { get; init; }
-    public string? Mime { get; init; }
+    public required string TransferId
+    {
+        get; init;
+    }
+    public string? ItemId
+    {
+        get; init;
+    }
+    public string? TextUtf8
+    {
+        get; init;
+    }
+    public string? LocalPath
+    {
+        get; init;
+    }
+    public string? Mime
+    {
+        get; init;
+    }
 }
 
 public sealed class ContentFetchAwaiter

@@ -13,7 +13,10 @@ namespace ClipBridgeShell_CS.Views;
 
 public sealed partial class HistoryPage : Page
 {
-    public HistoryViewModel ViewModel { get; }
+    public HistoryViewModel ViewModel
+    {
+        get;
+    }
 
     private ItemMetaPayload? _contextMenuItem;
     private MenuFlyout? _historyItemContextMenu;
@@ -180,8 +183,7 @@ public sealed partial class HistoryPage : Page
     private async void CopyButton_Click(object sender, RoutedEventArgs e)
     {
         var fe = sender as FrameworkElement;
-        var meta = fe?.DataContext as ItemMetaPayload;
-        if (meta == null) return;
+        if (fe?.DataContext is not ItemMetaPayload meta) return;
 
         await ViewModel.CopyCommand.ExecuteAsync(meta);
     }

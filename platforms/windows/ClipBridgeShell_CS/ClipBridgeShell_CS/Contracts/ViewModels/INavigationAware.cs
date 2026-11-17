@@ -1,4 +1,4 @@
-﻿namespace ClipBridgeShell_CS.Contracts.ViewModels;
+namespace ClipBridgeShell_CS.Contracts.ViewModels;
 
 public interface INavigationAware
 {
