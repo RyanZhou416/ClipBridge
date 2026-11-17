@@ -2,6 +2,12 @@
 
 跨平台剪贴板同步项目；当前实现状态见 [`STATUS.md`](STATUS.md)。
 
+## 开发与版本流程
+
+- 日常开发直接提交并推送到 `main`，由 [CI](<.github/workflows/ci.yml>) 验证；不要求先创建 PR，也不会因普通 push 自动创建版本 PR。
+- 版本由维护者明确决定；可以将版本变更直接提交到 `main`。只有主动运行 [release-please 手动辅助工作流](<.github/workflows/release-please.yml>) 才会生成版本/变更日志 PR，且不自动合并。
+- Windows 二进制发布使用独立的 [手动发布工作流](<.github/workflows/release-windows.yml>)；普通 push、版本变更或合并均不代表发布授权。
+
 ## 本地构建前置
 
 ### Windows

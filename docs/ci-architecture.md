@@ -397,7 +397,8 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 
 保留版本建议与变更日志职责，但公开发行只由人工手动入口授权，实施时需同步收敛 [release-please 配置](<../release-please-config.json>) 与 [版本工作流](<../.github/workflows/release-please.yml>)：
 
-- 版本源必须真正被更新，不能只修改一个不存在的默认版本文件；普通 push 不自动把版本提高到 1.0.0。
+- 日常开发直接提交并推送 main，不要求 PR；普通 push 只触发 CI，不自动创建版本 PR，也不自动改版本。release-please 仅由维护者在 main 上手动触发（workflow_dispatch），用于可选的版本/变更日志建议；不自动批准、合并，维护者也可以直接提交版本修改。
+- 版本源必须真正被更新，不能只修改一个不存在的默认版本文件；任何版本提升都须明确决定，不因清理分支而隐式合入自动版本建议。
 - 版本自动化仅准备版本/变更日志变更，不自动创建 Release/tag 或触发打包发布。若保留 release-please，显式使用 `skip-github-release: true` 停止 release 及关联 tag 创建，不另行补打 Windows tag。`clipbridge-windows-*` 的自动创建权只属于手动发布入口，验收必须验证合并版本变更不会生成这些 tag。
 - 手动发布核对所选提交、版本源与 `clipbridge-windows-<version>` tag 一致，不在构建中偷偷修改版本文件。
 - 不依赖 `GITHUB_TOKEN` 创建 tag/release 再触发另一流水线；采用一个 `workflow_dispatch` 入口完成所需动作，不为递归触发预先要求长期 PAT。
@@ -578,7 +579,7 @@ Android 构建工具依赖另外采用以下受控安全修复，保持 AGP 8.13
 
 - 验证提交：[`96aa612eef3fafa2f83d446670ae08946c31190c`](https://github.com/RyanZhou416/ClipBridge/commit/96aa612eef3fafa2f83d446670ae08946c31190c)。
 - [CI 44121503303](https://github.com/RyanZhou416/ClipBridge/actions/runs/44121503303)：push 触发，全量范围，**8/8 job success，没有通过跳过必跑任务取得绿灯**。
-- [release-please 44121503043](https://github.com/RyanZhou416/ClipBridge/actions/runs/44121503043)：success；已创建 [版本 PR #1](https://github.com/RyanZhou416/ClipBridge/pull/1)，未由代理批准或合并，未触发正式发布。
+- [release-please 44121503043](https://github.com/RyanZhou416/ClipBridge/actions/runs/44121503043)：success；当时由 push 创建 [版本 PR #1](https://github.com/RyanZhou416/ClipBridge/pull/1)，未由代理批准或合并，未触发正式发布。后续决定停止普通 push 自动建版本 PR，见 §10.5；本条保留为当时的运行证据。
 
 父审查已下载并核对本次托管报告：
 
@@ -594,6 +595,15 @@ Android 构建工具依赖另外采用以下受控安全修复，保持 AGP 8.13
 普通 CI 打包在独立 job 中重新构建原生库，因此报告 `sourceReusedVerified=false`；这不是复用已测试 DLL 的发布证明。手动发布仍须执行自己的 Windows 验证、精确 DLL 复用、候选绑定、生产签名及审批契约，本轮没有触发该工作流。
 
 Android 通知栏手动发送尚未实现/真机验收，应用运行、真实安装/升级/卸载、正式发行与厂商渠道的既有边界不因 CI 全绿而改变。后续纯文档提交若只运行 affected 检查，应继续引用本节固定 SHA 的全量证据，不宣称文档运行重做了全平台构建。
+
+### 10.5 main 直推与旧分支处置（2026-11-17）
+
+- 日常代码直接推送 main，CI 负责提交后的验证，不新增必须经过 PR 的要求。release-please 从 push 改为仅在 main 手动触发；普通提交不再自动创建版本 PR，不用“自动合并 PR”来模拟直推。
+- 自动版本分支 `release-please--branches--main` 只准备三个组件 0.1.0 → 0.2.0 与变更日志，不是待合入的功能代码。维护者明确选择保持 0.1.0、关闭 PR #1，不合入版本建议；分支不在本次删除。
+- 旧开发分支 `ClipBridgeShell_CS` 的 tip 为 `77b99a0`，共同基点 `6e8aaeb`；本次核对时 main 领先 229 个提交，旧分支仅 1 个独有提交。其标题虽为目录树更新，实际改动 13 个路径，包含早期语言切换原型。
+- 该分支引用未提交的 ILocalizationService/LocalizationService，SettingsViewModel 的主题命令也未完成初始化。main 的语言热切换已由 [`5955b89`](https://github.com/RyanZhou416/ClipBridge/commit/5955b898c835a8439dce355453a6ba01a126a290) 等后续提交实现；现有 [SettingsViewModel](<../platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/ViewModels/SettingsViewModel.cs#L379-L416>) 使用 WinUI3Localizer 并保存语言选择，不需要旧分支的刷新页面接口。
+- merge-tree 只读评估显示 11 处冲突；旧接口自动合并还会引入当前实现未实现的成员。目录树文件已被 main 删除，其他非功能格式/注释改动不值得恢复。因此未执行无意义的冲突合并，也不以 ours-only 合并伪称吸收了功能；保留旧分支供历史查阅，后续删除须另行授权。
+- 分支处置不修改版本、Cargo.lock、发布标签或 Release；正式发布仍只由独立手动入口授权。
 
 ## 11. 参考与适用范围
 

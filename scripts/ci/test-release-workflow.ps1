@@ -183,6 +183,18 @@ Test-Case 'old automatic tag publish entry is removed' {
     Assert-True (-not (Test-Path (Join-Path $repo '.github/workflows/publish.yml')))
     Assert-True (-not (Test-Path (Join-Path $repo '.github/workflows/publish.yml')))
 }
+Test-Case 'release-please is optional manual preparation on main, not a push-triggered PR' {
+    if ($null -ne $releasePleaseDoc) {
+        $keys = @($releasePleaseDoc.on.PSObject.Properties.Name)
+        Assert-Equal 'workflow_dispatch' ($keys -join ',')
+        Assert-Equal "github.ref == 'refs/heads/main'" $releasePleaseDoc.jobs.'release-please'.if
+    }
+    else {
+        Assert-True ($releasePleaseText -match '(?m)^on:\s*\r?\n\s+workflow_dispatch:')
+        Assert-True ($releasePleaseText -match "(?m)^\s+if:\s*github\.ref == 'refs/heads/main'\s*$")
+    }
+    Assert-True ($releasePleaseText -notmatch '(?m)^  (push|pull_request|pull_request_target|schedule|release|workflow_run|workflow_call):') 'normal pushes must not create version PRs'
+}
 Test-Case 'release-please cannot create releases or tags' {
     Assert-True ($config.'skip-github-release' -eq $true)
     if ($null -ne $releasePleaseDoc) {
