@@ -1,5 +1,5 @@
 {
-  "cb_core": "0.1.0",
-  "platforms/windows/core-ffi": "0.1.0",
-  "platforms/windows/ClipBridgeShell_CS": "0.1.0"
+  "cb_core": "0.2.0",
+  "platforms/windows/core-ffi": "0.2.0",
+  "platforms/windows/ClipBridgeShell_CS": "0.2.0"
 }

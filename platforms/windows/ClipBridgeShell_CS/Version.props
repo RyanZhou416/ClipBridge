@@ -5,6 +5,6 @@
     全部由 scripts/version.ps1 从这里派生。不要再在 Product.wxs / appxmanifest 里写死版本。
   -->
   <PropertyGroup>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
   </PropertyGroup>
 </Project>
