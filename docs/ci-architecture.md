@@ -1,10 +1,10 @@
 # ClipBridge 持续集成架构与验收规范
 
-- 状态：日常 CI 已在提交 `96aa612` 完成 GitHub 全量验证，8 个 job 全部成功，证据见 §10.4。历史版本机器人已按最新决定移除，CI 不创建分支/PR，见 §10.6。CI 成功不等于生产签名、正式发布、真实安装或移动端运行已经验收。
-- 更新日期：2026-11-17。
-- 适用范围：Rust 核心、共享 C ABI、Windows、Android、macOS 的日常验证，以及机器级 MSI、用户级 EXE、便携 ZIP 的 GitHub 打包验证。
-- 现状核对基线：提交 `bbfeb45`。
-- 架构决策：脚本驱动的扁平多任务 CI；日常按依赖关系验证代码，打包输入变化时检查对应包；Windows 发布仅由人工触发，自动构建并交付所选 MSI/EXE/ZIP。
+- 状态：2026-11-18 起，日常 CI 契约为 `schemaVersion=2` 的 7 个 job / 5 个固定任务，普通 push/PR **不构建任何 Windows 安装器**；新契约的 hosted 验收尚未执行，本文不引用未来 run ID 或预写成功结论（见 §10.7）。提交 `96aa612` 的 8/8 全量运行、此前 MSI/EXE/ZIP 打包记录及 `2d7129a` 基线只作为历史证据，见 §10.4、§10.7。历史版本机器人已按最新决定移除，CI 不创建分支/PR，见 §10.6。CI 成功不等于生产签名、正式发布、真实安装或移动端运行已经验收。
+- 更新日期：2026-11-18。
+- 适用范围：Rust 核心、共享 C ABI、Windows、Android、macOS 的日常构建与测试；Windows 机器级 MSI、用户级 EXE、便携 ZIP 只在人工触发的 Windows 发布中构建和验收（见 [Windows 发布规范](<windows-release.md>)）。
+- 现状核对基线：`2d7129a`（引入 `schemaVersion=2` 前的设计基线；此提交上的旧契约运行不代表新契约已验收）。
+- 架构决策：脚本驱动的扁平多任务 CI；日常只做受影响平台的构建与测试及轻量配置检查；安装器打包从日常 CI 移出，仅由手动发布入口按选择构建。
 - 渠道边界：MSIX、StoreUpload、winget 不进入 GitHub CI 或发布工作流；保留本地脚本和人工渠道流程。这是项目范围决策，不是对 GitHub Actions 技术能力的判断。
 - 发布设计：[Windows 手动触发自动发布规范](<windows-release.md>)。工作流与脚本正在据此重构；本地契约测试不代替托管 runner、签名或真实发布验收。
 
@@ -24,10 +24,11 @@
 6. 普通 CI 不依赖生产秘密、不使用真实 Store 身份、不发布 Release、不提交商店。
 7. 汇总结果说明应运行、实际运行、成功和跳过的任务，能够区分合理跳过与漏检。
 8. 保留 main 直推的开发方式，同时支持 Pull Request（PR）检查；不以改换分支工作方式作为重构前提。
+9. 日常 CI 只编译/测试应用与原生库，不构建、不签名、不上传 Windows 安装器；MSI/EXE/ZIP 的真实构建、签名与验收只属于人工触发的 Windows 发布入口。普通 push 仍必须编译应用，不能用“没有安装器”描述为“没有构建”。
 
 ### 1.2 本次架构不包含的工作
 
-- 在普通 push/PR 后自动公开版本、自动提升产品版本或隐式配置签名凭据。人工触发后的 MSI/EXE/ZIP 自动发布由独立发布规范定义。
+- 在普通 push/PR 后自动公开版本、自动提升产品版本或隐式配置签名凭据。普通 CI 不构建安装器；人工触发后的 MSI/EXE/ZIP 自动发布由独立发布规范定义。
 - 在 GitHub Actions 中构建、验证或上传 MSIX/StoreUpload，生成或提交 winget 清单，调用 Partner Center/winget 提交服务。相关本地脚本不删除。
 - 每次提交运行 Windows App Certification Kit（WACK）、完整图形界面自动化、跨设备网络测试或性能基准。
 - 新建自托管 runner 集群、远程构建缓存服务、自研任务调度框架或跨运行产物晋级系统。
@@ -42,14 +43,15 @@
 |---|---|---|---|---|
 | `changes`、`ci-config`、`ci-result` | `ubuntu-24.04` / x64 | 分类、语法、规则测试、汇总 | 调度契约和轻量检查可执行 | 不代表应用运行通过 |
 | `rust` | `ubuntu-24.04` / x64 | `x86_64-unknown-linux-gnu`；工作区 fmt/clippy/test，测试使用默认 test profile | host 测试、ABI 静态检查、依赖政策通过 | 不代表存在 Linux GUI 发行物 |
-| `windows` | `windows-2022` / x64 | Rust `x86_64-pc-windows-msvc` Release；C# Release / x64 / `win-x64` | 真实 DLL 链接、加载、初始化/关闭，MSTest 与格式检查 | Windows 10 最低版本、全部 GUI/网络行为尚未实测 |
-| `windows-packages` | `windows-2022` / x64 | 与 Windows job 一致；仅按计划生成 machine MSI、user Burn EXE、便携 ZIP | 各选定格式及必要载荷的结构断言通过 | 不验证 MSIX/winget；不等于系统安装、升级、卸载 |
+| `windows` | `windows-2022` / x64 | Rust `x86_64-pc-windows-msvc` Release；C# Release / x64 / `win-x64` | 真实 DLL 链接、加载、初始化/关闭，MSTest 与格式检查；不构建安装器 | Windows 10 最低版本、全部 GUI/网络行为尚未实测 |
 | `android` | `ubuntu-24.04` / x64 host | Rust `aarch64-linux-android`、`x86_64-linux-android` Release；Gradle `:app:assembleDebug` | APK 包含 `arm64-v8a` 与 `x86_64` 的本次 SO；JNI/Java 构建与静态契约通过 | 无设备/emulator 运行、正式签名 APK/AAB 验收 |
 | `macos` | `macos-15` / arm64 | Rust `aarch64-apple-darwin` Release；Xcode target/scheme `ClipBridge`、Release、`ARCHS=arm64` | 真实应用构建、dylib 嵌入、动态加载与 ABI 探测 | Intel/universal、完整 UI、Developer ID、公证和 DMG 分发 |
 
+Android 的 debug APK 与 macOS 的 Xcode `.app` 是各平台集成测试的输出，不属于 Windows 发布安装器；它们的存在不表示日常 CI 仍在打包 MSI/EXE/ZIP，移除日常打包也不表示移除了这些平台构建检查。
+
 工具链边界：
 
-- Windows 使用 .NET 10 SDK、Windows SDK `10.0.26100.0`、VS 2022 MSBuild 与 WiX `3.14.1`。C# restore/build/test 的 R2R 属性保持一致，不改为 Debug 来绕过 Release 依赖。
+- Windows 日常使用 .NET 10 SDK、Windows SDK `10.0.26100.0` 与 VS 2022 MSBuild；WiX `3.14.1` 只由人工发布/本地打包入口使用，日常 CI 不安装 WiX、不构建 MSI/EXE/ZIP。C# restore/build/test 的 R2R 属性保持一致，不改为 Debug 来绕过 Release 依赖。
 - Android 使用 JDK 21、[Gradle wrapper](<../platforms/android/ClipBridgeShellAndroid/gradle/wrapper/gradle-wrapper.properties>) 的 8.13、[版本目录](<../platforms/android/ClipBridgeShellAndroid/gradle/libs.versions.toml>) 的 AGP 8.13.2，以及 [应用配置](<../platforms/android/ClipBridgeShellAndroid/app/build.gradle.kts>) 对应的 SDK 36、build-tools 36.0.0、NDK 26.3.11579264、CMake 3.22.1；原生 Android API level 为 26。
 - macOS 初始选择 Xcode `26.0.1` 及其 macOS SDK 26.0，不使用镜像默认 Xcode；保持 [Xcode 工程](<../platforms/macos/ClipBridgeShell_macOS/ClipBridge/ClipBridge.xcodeproj/project.pbxproj#L440-L470>) 声明的 deployment target 15.7。实施时提交共享 scheme `ClipBridge`，不能依赖个人 Xcode 用户配置。
 - Rust 及 .NET 10 的具体补丁版本在实施提交中通过原生工具链配置固定，并由三平台验证记录确认；这里不凭空宣称某个尚未验证的补丁版本可用。GitHub 镜像可用工具以预检为准，缺失时明确安装指定版本或失败，不静默切换目标/工具链。
@@ -59,7 +61,7 @@
 
 ## 2. 当前基础与已知缺口
 
-以下是基线提交的事实，不是目标架构已经完成的声明。
+以下是基线提交的事实，不是目标架构已经完成的声明。表格保留首次重构前的缺口；其中“日常打包”相关缺口已按 2026-11-18 的决定改为移出日常 CI 并只保留轻量契约检查（见 §10.7），不再以补齐每日包验证为目标。
 
 | 范围 | 已有基础 | 需要修正的缺口 |
 |---|---|---|
@@ -69,7 +71,7 @@
 | Windows 正向冒烟 | [CoreHostSmokeTests](<../platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Tests.MSTest/CoreHostSmokeTests.cs>) 执行初始化与关闭 | 断言接受 `Degraded`；临时路径只用于设置，核心仍通过 [CoreHostService](<../platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/Services/CoreHostService.cs>) 取得默认数据根 |
 | Android | 两种 ABI 的 Rust SO、APK 构建和包内容检查 | 触发规则漏掉部分公共构建输入；没有实际设备运行保证 |
 | macOS | SwiftPM 编译检查、真实 Xcode 工程和原生构建脚本均存在 | CI 仅构建 SwiftPM 桩；[Xcode 嵌入阶段](<../platforms/macos/ClipBridgeShell_macOS/ClipBridge/ClipBridge.xcodeproj/project.pbxproj#L235-L252>) 在缺少 dylib 时可返回成功 |
-| Windows 打包 | 各渠道本地脚本已实现；现有 job 还调用 winget 清单生成/校验 | 目标 GitHub 范围收窄为 MSI/EXE/ZIP：需移除 winget 步骤，不接入 MSIX；修正打包输入过滤，并补齐 [CI 制品上传](<../.github/workflows/ci.yml>) 缺失的便携 ZIP |
+| Windows 打包 | 各渠道本地脚本已实现；旧版日常 CI 曾包含 `windows-packages` job，并调用 winget 清单生成/校验 | 已按新决定移除日常打包 job：普通 push/PR 不构建 MSI/EXE/ZIP，打包/发布输入只触发 `ci-config` 轻量检查；winget 不在 GitHub 范围；真实包只在手动发布中构建 |
 | 发布 | 基线已有 [旧版本自动化](https://github.com/RyanZhou416/ClipBridge/blob/bbfeb4519aa7b98c31accb8cf7c56d5fb4b72115/.github/workflows/release-please.yml) 与旧全 tag 发布入口 | 旧入口已移除；本次由 [手动发布工作流](<../.github/workflows/release-windows.yml>) 承担发行，版本改为人工直推，仍须真实发布验收 |
 
 目标实施时保留有效检查，并解决这些缺口；不以删除检查、接受降级或长期设置 `continue-on-error` 换取成功状态。
@@ -78,7 +80,7 @@
 
 ### 3.1 单入口、扁平多任务
 
-[CI 工作流](<../.github/workflows/ci.yml>) 作为统一入口，任务关系直接可见。下列名称是目标任务标识，不表示这些 job 已存在。
+[CI 工作流](<../.github/workflows/ci.yml>) 作为统一入口，任务关系直接可见。下列为 schemaVersion=2 的实际任务结构；托管验收状态另见 §10.7。
 
 ```text
 PR / main push / 手动全量验证
@@ -88,8 +90,6 @@ PR / main push / 手动全量验证
      ┌───────────┼───────────┬───────────┬───────────┐
      │           │           │           │           │
  ci-config      rust       windows     android     macos
-                             │
-                       windows-packages
      │           │           │           │           │
      └───────────┴───────────┴───────────┴───────────┘
                              │
@@ -97,12 +97,13 @@ PR / main push / 手动全量验证
 ```
 
 - `changes`：计算变更范围和必跑任务集合，输出触发原因；不是通用构建系统。
-- `ci-config`：执行 §3.4 限定的语法与规则检查；本地文档链接只检查本次新增/修改文档，不启动平台应用，不扩展为全仓库治理。
-- `rust`、`windows`、`android`、`macos`：各自拥有该平台的构建与验证责任，能够并行运行。
-- `windows-packages`：Windows 验证通过后，构建并检查选定包格式；只要需要打包，就同时要求 `windows` 运行，避免依赖 job 被分类为无需运行。
+- `ci-config`：执行 §3.4 限定的语法与规则检查；本地文档链接只检查本次新增/修改文档，不启动平台应用，不扩展为全仓库治理。打包/发布输入变化也只在这里做轻量契约检查。
+- `rust`、`windows`、`android`、`macos`：各自拥有该平台的构建与验证责任，能够并行运行；Windows 只构建应用/原生库和测试，不构建安装器。
 - `ci-result`：依赖上述全部任务，使用 `always()` 汇总结果；上游失败、取消或意外跳过不能被掩盖。
 
-平台间不为复用一个小文件而建立跨 runner 的复杂依赖。Windows 校验与打包 job 可分别构建原生库，依赖缓存用于减少开销；优先保证来源清楚，不将缓存命中当作本次源码构建成功。
+固定 job 集合为 `changes` + 五个验证任务（含 `ci-config`）+ `ci-result`，共 7 个；不存在 `windows-packages` 或其它打包/签名 job。安装器只由独立的 [手动 Windows 发布工作流](<../.github/workflows/release-windows.yml>) 构建、签名和验收。
+
+平台间不为复用一个小文件而建立跨 runner 的复杂依赖。日常平台 job 各自构建所需原生库；发布入口另行构建或复用经 Windows 测试的精确 DLL hash，不把日常缓存命中当作发布候选证明。
 
 ### 3.2 构建规则归属
 
@@ -113,7 +114,7 @@ PR / main push / 手动全量验证
 | 工作流 | 触发、runner、工具链准备、任务依赖、权限、缓存、日志与制品上传 | 大段内联打包业务逻辑、另一套本地无法复现的构建规则 |
 | 发布入口 | 指定提交和版本、受保护的签名/上传步骤、审批、发布记录 | 从未经信任的 PR 自动取得待签名产物 |
 
-复用现有 [Windows 打包主入口](<../scripts/build-windows-installers.ps1>)、[MSI/EXE/ZIP 全量入口](<../scripts/build-windows-all.ps1>) 和 [FFI 一致性脚本](<../scripts/verify-ffi-surface.ps1>)。需要迁出 YAML 的复杂步骤使用普通 PowerShell/Bash 脚本；单条标准构建命令无需再包一层。MSIX/winget 的独立本地脚本不被 GitHub 工作流调用。
+日常 CI 复用平台入口 [Windows](<../scripts/ci/windows.ps1>)、[Android](<../scripts/ci/android.sh>)、[macOS](<../scripts/ci/macos.sh>)、[Rust](<../scripts/ci/rust.ps1>) 和 [FFI 一致性脚本](<../scripts/verify-ffi-surface.ps1>)。[Windows 打包主入口](<../scripts/build-windows-installers.ps1>)与 [MSI/EXE/ZIP 全量入口](<../scripts/build-windows-all.ps1>) 只由人工发布或维护者显式本地调用，日常 CI 不调用。需要迁出 YAML 的复杂步骤使用普通 PowerShell/Bash 脚本；单条标准构建命令无需再包一层。MSIX/winget 的独立本地脚本不被任何 GitHub 工作流调用。
 
 本阶段不引入 composite action 或 reusable workflow。只有同一组环境准备或完整 job 在多个有效入口中真实重复时，才提取对应层级；不得仅为目录对称而抽象。保留脚本边界，使将来的提取不改变构建语义。
 
@@ -124,16 +125,17 @@ PR / main push / 手动全量验证
 | 单入口、扁平 job | 调度图直接可读；检查名称稳定；故障定位少跨文件 | 入口文件会随平台任务增长 |
 | 构建逻辑放脚本 | 本地与 CI 共用；可以独立验证退出码和负路径 | 需要维护少量脚本帮助与参数契约 |
 | 以依赖并集过滤 | 降低无关构建成本，同时覆盖核心到平台的影响 | 规则新增或调整必须有回归用例 |
-| push/PR 按影响验证，打包输入变化才打包 | 普通业务代码修改不重复构建所有安装格式，降低 runner 占用 | 仅在 publish/裁剪后出现的问题可能到手动全量或发布验收才发现 |
+| push/PR 按影响验证，安装器移出日常 CI | 普通业务代码修改不构建任何安装格式，显著降低 runner 占用与打包输入误触发 | 安装器问题只能在手动发布或维护者显式本地打包时发现；发布入口必须对所选格式自行构建/校验 |
 | 独立发布候选构建 | 不依赖普通 CI 制品保留期；发布流程较简单 | 需在发布候选上重新执行验证 |
 
 ### 3.4 轻量检查的范围
 
 `ci-config` 每次运行，但检查集合保持有限：
 
-- 使用固定版本的 actionlint 检查工作流语法和表达式，不执行 workflow 内的业务命令。
+- 使用固定版本的 actionlint 同时检查 `ci.yml` 与 `release-windows.yml` 的语法和表达式，不执行 workflow 内的业务命令。
 - 对本次变更的 PowerShell/Bash CI 或构建脚本进行 AST/`bash -n` 等语法检查；只解析，不运行脚本。`scope=full` 时遍历已声明的 CI/构建脚本集合，不包含任意历史辅助脚本。
-- 每次执行分类与汇总函数的表驱动测试，覆盖固定任务集合、依赖闭包、失败状态和未知路径处理。
+- 每次执行分类与汇总函数的表驱动测试，覆盖 `schemaVersion=2`、固定 5 个任务、依赖闭包、失败状态和未知路径处理。
+- 发布工作流、发布/打包脚本与安装器工程输入（WiX 工程、Burn bundle、打包脚本等）只运行既有的纯契约/夹具、AST、XML 语法及合成表夹具、YAML 结构检查，不构建、不签名、不上传任何安装器；这类变更不启动 `windows` job。
 - 检查本次新增/修改文档引用的本地文件、明确的章节或行号目标；不扫描整个文档库，不检查外部网站在线状态，不将历史文档整治混入 CI 重构。
 - diff 不可靠时仍对工作流和分类规则做完整检查；文档链接范围无法确定则在摘要标明未检查，不因此启动全仓库文档巡检。平台构建仍按 §4.2 保守全跑。
 
@@ -143,78 +145,87 @@ PR / main push / 手动全量验证
 
 | 事件 | 必须执行的检查 | 发布行为 |
 |---|---|---|
-| PR | 轻量检查；受影响平台编译/测试；打包输入变化时执行对应包验证 | 无 |
-| push 到 main | 与 PR 相同：受影响平台编译/测试必跑；仅打包输入变化时检查对应 MSI/EXE/ZIP，普通业务代码或测试修改不触发全量打包 | 无 |
-| 手动全量验证 | 不使用路径过滤；执行当前 GitHub 支持范围内的全部任务，Windows 包格式仅 MSI/EXE/ZIP | 无 |
+| PR | 轻量检查；受影响平台编译/测试；发布/打包输入变化只做 `ci-config` 轻量契约检查，不构建安装器 | 无 |
+| push 到 main | 与 PR 相同：受影响平台编译/测试必跑；普通业务代码或测试修改不触发安装器构建，打包脚本/发布输入的修改也只运行轻量检查 | 无 |
+| 手动全量验证 | 不使用路径过滤；执行 `ci-config` 与 rust/windows/android/macos 的构建、测试（5 个固定任务），不构建安装器 | 无 |
 | 手动发布 Windows | 固定提交和版本；新候选重新检查并构建所选 MSI/EXE/ZIP；已有候选按发布规范核对原证据、现有资产和当前政策，不重打包 | 按选择生成 GitHub 草稿、预发布或正式 Release；见 [发布规范](<windows-release.md>) |
 
-顶层 CI 不通过 `on.paths` 跳过整个 workflow。纯文档修改也产生轻量检查和最终结果，但不占用 Windows/macOS 重型构建资源。当前不创建定时任务。
+顶层 CI 不通过 `on.paths` 跳过整个 workflow。纯文档修改也产生轻量检查和最终结果，但不占用 Windows/macOS 重型构建资源。当前不创建定时任务。日常 CI 不产出任何安装器；Android debug APK 与 macOS `.app` 只是平台集成测试的制品，不能与 Windows 发布安装器混为一谈。
 
 PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge queue，再配套增加对应事件；本阶段不预设需要合并队列。
 
 ### 4.2 分类原则
 
-- 规则表达的是任务的全部构建输入，而不是文件归属部门；命中多个规则取并集。生产项目/依赖模式应显式排除测试专用目录，不能用 `**/*.csproj` 等宽泛匹配使“仅改测试不打包”失效；公共 props/targets 或共享生产依赖仍触发打包。
+- 规则表达的是任务的全部构建输入，而不是文件归属部门；每条路径按 specific-first 只命中首个规则，多个变更路径的影响取并集。规则顺序必须先匹配发布/打包/夹具等特殊路径，再匹配平台目录与共享构建输入，最后才回退未知路径；一条宽泛的 `platforms/**` 或 `scripts/ci/**` 规则不得吞掉更精确的轻量路由。
+- 区分平台产品测试与 CI 夹具：修改 Windows 的 MSTest 或其项目依赖仍运行 `windows`；仅修改 `scripts/ci/` 下的报告/发布/平台夹具才只运行恒跑的 `ci-config`。所有路径都不能触发日常安装器构建；具体规则见 §4.3。
+- 发布工作流、发布脚本与安装器工程输入只路由到 `ci-config` 轻量检查，不得因位于 Windows 平台目录或 `.github/` 下而重新触发 `windows` 或全量平台构建。
 - PR 使用与目标分支的合并基点计算变更；main push 覆盖整个 push 范围，不只最后一个提交。
 - 支持新增、删除、重命名。重命名按旧路径和新路径共同计算影响。
+- 平台入口/工具链变化只路由到该平台（如 Windows 的 .NET SDK pin 只触发 `windows`）；所有 Rust 消费平台共享的 `rust-toolchain.toml` 路由到 rust/windows/android/macos，不把整个 workflow 标为 full。
+- 共享分类/聚合实现或 `ci.yml` 变化触发全量验证，避免修改检查本身却没有运行它。
 - diff 无法取得、基点无效或存在未分类路径时，保守执行全部检查，并在摘要说明原因。
 - 仅明确列入文档清单且不被构建消费的路径才可免重型检查；应用图标、资源、许可证、安装器素材不能因位于 assets 或文档目录就被排除。
-- 工作流、分类逻辑和公共工具链配置变化触发全量验证，避免修改检查本身却没有运行它。
 - 手动全量验证与发布候选不依赖 diff 结果。
 
 ### 4.3 输入到任务的传播矩阵
 
 下表中的路径表达式是实施时的分类契约，不是现有过滤器的描述。
 
-| 变更输入 | 编译/测试范围 | PR 包验证 | main 包验证 |
-|---|---|---|---|
-| `cb_core/**`、`crates/**` | Rust + Windows + Android + macOS | 改及 ABI/依赖/打包输入时执行 MSI/EXE/ZIP 包验证；一般核心逻辑改动只验证集成 | 同左 |
-| `Cargo.toml`、`Cargo.lock`、`.cargo/**`、Rust 工具链配置 | Rust + 三个平台 | 完整 Windows 包验证（仅 MSI/EXE/ZIP） | 同左 |
-| 任一平台导出头文件或共享 ABI 声明 | Rust ABI 检查 + 三个平台消费者 | 完整 Windows 包验证（仅 MSI/EXE/ZIP） | 同左 |
-| 单平台 `core-ffi` 实现 | Rust + 对应平台；共享 ABI 改动按上一行处理 | Windows FFI 变化执行 MSI/EXE/ZIP 包验证 | 同左 |
-| Windows 普通 C#/XAML 代码 | Windows | 无；命中生产依赖、资源、发布裁剪或其他打包输入规则时取并集 | 同左 |
-| 仅 Windows 测试代码或测试专用依赖/配置 | Windows 编译与测试 | 无 | 无；同时改动生产项目或公共构建输入时再取并集 |
-| Windows 公共项目依赖、props/targets、版本、资源与 unpackaged 发布配置 | Windows | 完整 Windows 包验证（仅 MSI/EXE/ZIP） | 同左 |
-| WiX/Burn 工程、MSI/EXE/ZIP 渠道脚本 | Windows + 打包脚本检查 | 受影响的 MSI/EXE/ZIP；公共构建脚本变化执行全部三个 | 同左 |
-| 仅 MSIX manifest、MSIX 专用构建/身份配置文件 | 识别为本地渠道范围，摘要说明；不增加 MSIX job | 无 | 无 |
-| 仅 winget 生成/包装脚本 | 识别为本地渠道范围，摘要说明；不执行生成或 validate | 无 | 无 |
-| Android shell/JNI/Gradle/资源/构建脚本 | Android；头文件变化额外适用 ABI 规则 | debug APK 及两种 ABI 内容检查 | 同左 |
-| macOS Swift/Xcode/资源/构建脚本 | macOS；头文件变化额外适用 ABI 规则 | 真实应用与 dylib 嵌入检查 | 同左 |
-| `.github/workflows/**`、公共 CI 脚本、分类规则 | 全量 | 全部当前支持的包验证 | 同左 |
-| `.editorconfig`、格式/依赖政策 | 所有受规则约束的检查 | 涉及构建输入时按并集执行 | 同左 |
-| 纯说明文档 | 轻量检查和最终汇总 | 无 | 无 |
-| 未分类路径或 diff 不可靠 | 全量 | 全量 | 全量 |
+| 变更输入 | 构建/测试范围 | 轻量检查 / 说明 |
+|---|---|---|
+| `cb_core/**`、`crates/**`、根 `Cargo.toml`/`Cargo.lock`、`.cargo/**`、`rust-toolchain.toml` | rust + windows + android + macos | `ci-config` 恒跑；不构建安装器；全部 Rust 消费平台 |
+| 平台内 Cargo 清单/锁文件（如 `platforms/<p>/**/Cargo.toml`、`Cargo.lock`） | rust + 该平台 | 只扩大该平台的 Rust 构建输入 |
+| `platforms/<p>/include/**` 导出头文件 | rust + 该平台 | 共享 ABI 声明一致性与导出面仍由 rust 检查 |
+| `crates/cb_core_ffi/**` 共享 C ABI | rust + windows + android + macos | 被各平台嵌入 |
+| 单平台 `platforms/<p>/core-ffi/**` | rust + 该平台 | 不扩大到其它平台 |
+| Windows 普通 C#/XAML、props/targets、版本、资源、publish profile | windows | 不构建安装器 |
+| 仅 Windows 测试代码或测试专用依赖/配置 | windows | 不触发安装器 |
+| WiX/Burn 工程、MSI/EXE/ZIP 渠道脚本 | 仅 `ci-config` | AST/XML 表/纯夹具测试；不构建、不签名、不上传包 |
+| `.github/workflows/release-windows.yml`、`scripts/release/**` | 仅 `ci-config` | actionlint（同时检查两个工作流）与 release/workflow 夹具；不发布 |
+| `scripts/version.ps1` | windows | 版本生成是正常构建输入，不只是打包输入 |
+| `.github/workflows/ci.yml`、共享分类/聚合脚本 | 全量 5 个任务 | 修改检查本身必须全跑 |
+| `scripts/verify-ffi-surface.ps1` | rust | 由 rust job 执行的共享导出面检查；不扩大到打包 |
+| `scripts/ci/windows.ps1`、`windows-report.psm1`、`global.json` | windows | 平台专用 CI 入口/工具链只路由对应平台 |
+| `scripts/ci/rust.ps1`、`rust-report.psm1`、`rustfmt.toml`、`deny.toml` | rust | `.editorconfig` 归 `windows` |
+| `scripts/ci/android.sh`、`scripts/ci/android/` 生产工具 | android | 仍构建 debug APK 做集成验证 |
+| `scripts/ci/macos.sh`、`scripts/ci/macos/` 生产工具 | macos | 仍构建真实 Xcode `.app` |
+| `scripts/ci/test-*-report.ps1`、`test-packaging.ps1`、`test-release-*.ps1`、`scripts/ci/android/tests/**`、`scripts/ci/macos/tests/**`、`scripts/README.md` | 仅 `ci-config` | 纯夹具/契约测试或说明文档，不启动平台构建 |
+| Android shell/JNI/Gradle/资源/构建脚本 | android | debug APK 是集成测试输出，不是 Windows 安装器 |
+| macOS Swift/Xcode/资源/构建脚本 | macos | `.app` 是集成测试输出，不是 Windows 安装器 |
+| `.editorconfig` | windows | dotnet format 门禁 |
+| 仅 MSIX manifest、MSIX 专用构建/身份配置、winget 生成/包装脚本 | 无平台任务；只跑 `ci-config` 与汇总 | 摘要说明；不调用 MSIX/winget 脚本 |
+| 纯说明文档 | 仅 `ci-config` | 不占用 Windows/macOS 重型构建资源 |
+| 未分类路径或 diff 不可靠 | 全量 5 个任务 | 保守回退并说明原因 |
 
-“完整 Windows 包验证”在 GitHub 中仅包括 machine MSI、user MSI 内部载荷与 Burn EXE、便携 ZIP。MSIX、StoreUpload、winget 明确不在该集合中，包括手动全量运行和未知路径回退。
+日常 CI 不构建 machine MSI、user Burn EXE、portable ZIP 或任何 Windows 安装器；这些只由手动发布工作流按选择构建和验收。Android debug APK 与 macOS `.app` 仍是平台集成测试输出，不因移除日常打包而取消。
 
-本地渠道文件必须显式分类，不能因为未识别路径而间接触发被排除的渠道。若同时修改共用 C# 代码、项目依赖或通用脚本，仍按其他规则验证受影响的普通 Windows 构建与 MSI/EXE/ZIP。普通单测中不需要包身份/部署的迁移逻辑测试可以保留，但不能因此宣称 MSIX 渠道已经在 GitHub 验收。
+本地渠道文件必须显式分类，不能因为未识别路径而间接触发被排除的渠道。若同时修改共用 C# 代码、项目依赖或通用构建脚本，仍按其他规则验证受影响的普通 Windows 构建（但不构建安装器）。普通单测中不需要包身份/部署的迁移逻辑测试可以保留，但不能因此宣称 MSIX 渠道已经在 GitHub 验收。
 
 ### 4.4 分类输出与调用契约
 
-分类规则只由一个仓库脚本/模块维护，逻辑为“变更路径与事件 → 固定任务/包集合”。YAML 中不再维护第二套路径规则，汇总阶段也不重新猜测影响范围。不生成动态 job 图，不引入任务调度框架。
+分类规则只由一个仓库脚本/模块维护，逻辑为“变更路径与事件 → 固定任务集合”。YAML 中不再维护第二套路径规则，汇总阶段也不重新猜测影响范围。不生成动态 job 图，不引入任务调度框架。
 
 `changes` 只暴露一个结构化输出 `plan`（JSON）；其字段契约如下：
 
 | 字段 | 类型与约束 |
 |---|---|
-| `schemaVersion` | 整数，首版为 `1`；不认识的版本失败 |
+| `schemaVersion` | 整数，当前为 `2`；旧版 `1`（含 `packages`）及不认识的版本失败 |
 | `scope` | `affected` 或 `full`；未知路径/diff 回退及手动全量使用 `full` |
 | `commit` | 本次实际检出的完整提交 SHA；PR 是被测合并结果的 SHA，不拿 head SHA 冒充 |
-| `required` | 固定键的布尔 map：`ci-config`、`rust`、`windows`、`android`、`macos`、`windows-packages`；不允许缺键或额外任务名；`ci-config` 恒为 true |
-| `packages` | 去重数组，只允许 `machine-msi`、`user-exe`、`portable-zip`；出现 MSIX/StoreUpload/winget 等任务名按非法范围失败 |
+| `required` | 固定 5 键的布尔 map：`ci-config`、`rust`、`windows`、`android`、`macos`；不允许缺键或额外任务名；`ci-config` 恒为 true |
 | `reasons` | 与 `required` 同键的 map，每个值是非空说明字符串数组；记录触发或不必运行的原因，不含凭据 |
 
 契约不变量：
 
-1. `packages` 非空当且仅当 `required.windows-packages=true`；需要打包时 `required.windows=true`。
-2. 内部 user MSI 是 `user-exe` 的构建依赖，不单列为发行渠道；不因选择 EXE 而要求发布 machine MSI。
-3. `scope=full` 时所有固定任务必跑，MSI/EXE/ZIP 三种包验证全部列入计划；不能扩大到本地 MSIX/winget 渠道。
+1. 计划只有 5 个固定任务；不得出现 `windows-packages`、`packages` 字段或 MSIX/StoreUpload/winget 任务名。
+2. `schemaVersion=2` 明确移除安装器打包计划；不接受 schemaVersion 1 或带 `packages` 的输入，不做兼容转换。
+3. `scope=full` 时 5 个固定任务全部必跑；不因日常不打包而降低任何平台构建/测试要求，也不把安装器加入日常计划。
 4. 分类脚本在输出前验证类型、字段、闭包和提交；输出缺失、非法 JSON、未知枚举或不变量破坏直接失败，禁止退回“没有任务”。diff 不可靠可以生成合法全量计划，但脚本自身执行错误不能被当作正常回退。
-5. job 的 `if` 从 `plan.required` 取值；打包脚本从同一 `plan.packages` 取范围。`ci-result` 使用同一解析/校验函数与 `needs` 的实际结果对照，不再有第三套规则。
+5. job 的 `if` 从 `plan.required` 取值；`ci-result` 使用同一解析/校验函数与 `needs` 的实际结果对照，不再有第三套规则。安装器格式由手动发布工作流自己的输入选择，不从日常 plan 读取。
 6. 新增 job 必须在同一变更中更新固定集合、job 条件、汇总 `needs` 和契约用例；轻量测试核对这些集合一致，避免漏掉新增任务。
 7. 原始路径名只作为数据传入，展示前转义；不用文件名拼 shell 或 workflow 命令。分类说明不含本地身份或秘密。
 
-例如，只有 Windows 测试文件变更时，`required` 仅 `ci-config`、`windows` 为 true，`packages=[]`；混合修改按并集计算。手动全量不接受调用者提供任意任务图。
+例如，只有 Windows 测试文件变更时，`required` 仅 `ci-config`、`windows` 为 true；只改安装器/Burn 工程或发布/打包脚本时，仅 `ci-config` 为 true；未分类路径则全部 5 个任务为 true。手动全量不接受调用者提供任意任务图。
 
 ### 4.5 最终结果检查
 
@@ -227,16 +238,16 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 | 必跑任务失败、取消、意外跳过 | 失败 |
 | 无需运行的任务被跳过 | 允许，显示跳过原因 |
 | 额外执行的任务失败 | 失败 |
-| 文档修改仅完成轻量检查，其余按计划跳过 | 成功，并说明验证范围 |
+| 仅文档或发布/打包输入变化，完成轻量检查、其余按计划跳过 | 成功，并说明本次没有平台构建或安装器构建 |
 
-不得仅检查“没有 failure”而忽略必跑 job 的 skipped。分类规则必须用表驱动用例覆盖公共核心、头文件、工作流、脚本、删除/重命名、纯文档和未知路径。
+不得仅检查“没有 failure”而忽略必跑 job 的 skipped。分类规则必须用表驱动用例覆盖公共核心、平台头文件、平台入口/工具链、发布/打包/夹具路径、`ci.yml` 与共享分类脚本、删除/重命名、纯文档和未知路径。
 
 未来若配置 required checks，使用一个固定、跨 workflow 不重名的汇总名称。当前 main 直推模式下，汇总是提交后的质量信号；它不能阻止已经发生的 push。分支保护或 ruleset 的变更需要单独授权，不随文档或 YAML 修改隐式启用。
 
 ### 4.6 成功状态的含义
 
 - **本次检查通过**：当前提交的计划任务全部按要求成功；摘要同时显示 `affected/full` 和具体覆盖范围。
-- **全量验证通过**：同一提交以 `scope=full` 完成 §1.3 的全部验证。它仍不包含表中明确排除的设备、最低 OS 或发布认证。
+- **全量验证通过**：同一提交以 `scope=full` 完成 §1.3 的全部平台构建/测试。它仍不构建安装器，也不包含表中明确排除的设备、最低 OS 或发布认证。
 - 上一次 Windows 失败后，下一次文档检查通过不代表 Windows 已修复。必须用修复后的受影响验证或手动全量运行提供新证据，不能用“最近一次绿色图标”覆盖失败事实。
 - 不引入跨提交继承绿色状态的数据库；每次结果绑定自身 SHA。架构重构验收必须执行仓库全量验证；Windows 新候选执行完整共享核心/Windows 发布检查，复用既有候选须有原验证证据并核验当前政策和同一份资产，不冒充三端全量验收，也不以最近一次部分 CI 成功代替。
 - 整个 workflow 被取消、runner 失联或汇总未执行时，结果为取消/未完成，不能声称 `always()` 保证任何情况下都会生成最终结果，更不能推定成功。
@@ -263,15 +274,16 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 - 测试禁用外部发现/网络连接，使用合成账号，不读取真实 PasswordVault；进程和文件清理只针对本次测试拥有的资源。
 - 缺 DLL 或 Rust 构建失败的 CI 严格模式应失败；不因此取消产品运行时面向用户的降级处理。
 
-### 5.3 Windows 包格式验证
+### 5.3 Windows 安装器（不在日常 CI 构建）
 
-- 通过既有 [安装器入口](<../scripts/build-windows-installers.ps1>) 及 MSI/EXE/ZIP 包装脚本构建，不在 YAML 复制参数和裁剪列表。
-- 检查版本、架构、必要原生库、SQLite 依赖、资源、MSI scope、Burn 内部载荷、便携标记与目录布局。
-- 普通 CI 使用版本源的实际版本，不自动提升版本；输出是测试包，不是公开 Release。日常未签名构建与正式发布签名政策分开。
+- 日常 CI 不调用 [安装器入口](<../scripts/build-windows-installers.ps1>) 或 MSI/EXE/ZIP 包装脚本，不构建、签名或上传任何安装器。这些脚本只在手动发布或维护者显式本地调用时执行。
+- 与打包相关的日常门禁仅是 `ci-config` 的纯契约/夹具测试：格式子集与 `-Only` 映射、非法格式/arm64 fail-fast、MSI/Burn 表条件、`package-summary.json` 结构、签名顺序和路径边界。它们不执行真实打包路径，也不产生安装器。
+- 真实构建由手动发布入口通过同一 [安装器入口](<../scripts/build-windows-installers.ps1>) 及包装脚本完成，不在 YAML 复制参数和裁剪列表；检查版本、架构、必要原生库、SQLite 依赖、资源、MSI scope、Burn 内部载荷、便携标记与目录布局。
+- 发布构建使用版本源的实际版本，不自动提升版本；日常未签名构建与正式发布签名政策分开。
 - 普通 C# 构建显式禁用自动生成 MSIX 包；不得因项目启用 MSIX tooling 而附带执行打包、签名、注册或 StoreUpload 目标。
 - GitHub 工作流不调用 MSIX/winget 脚本，不生成、验证或上传其包/清单，也不使用真实或测试 Store 身份。
 - 顺序执行共享中间目录的构建，或明确隔离中间输出；多个包复用同一份可信 stage，而不是复用开发机残留库。
-- 普通 CI 的自动验收范围是构建与结构检查；真实安装/升级/卸载在隔离环境和手动发布候选验收，未经验证不得列为日常保证。MSIX 系统级验证由本地渠道流程负责。
+- 真实安装/升级/卸载在隔离环境和手动发布候选验收，未经验证不得列为日常保证。MSIX 系统级验证由本地渠道流程负责。
 - 发布所选包前必须重新运行检查、验证最终资产并计算 hash，具体流程见 [Windows 发布规范](<windows-release.md>)。
 
 ### 5.4 Android
@@ -298,17 +310,17 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 - Windows 原生生命周期、数据隔离和迁移回归等必需套件必须发现并执行；用套件/测试标识及结果验证，不将总数永久写死为某次的“73 项”。移除必需套件需同步修改契约并说明覆盖替代。
 - Rust 使用工具支持的测试输出，Windows 使用 TRX；其他运行时测试使用对应原生报告或最小探测结果。报告核验是小型脚本职责，不自研统一测试平台。
 - Android 首期仅声明构建/包契约；不得用模板 JUnit 通过宣称设备集成成功。增加业务 JVM/仪器测试时同时增加其发现与执行检查。
-- 打包阶段输出计划中每个格式的检查结果及本次产物路径/hash；任一计划格式未产出、少跑断言或读取上次残留文件均失败，不能仅凭脚本 exit 0 判定全部格式通过。
+- 发布构建阶段输出计划中每个格式的检查结果及本次产物路径/hash；任一计划格式未产出、少跑断言或读取上次残留文件均失败，不能仅凭脚本 exit 0 判定全部格式通过。日常 CI 不执行该阶段。
 
 ### 5.7 数据生命周期与清理风险的检查责任
 
-下列回归属于 Windows 验证与包验证的重点。普通 CI 检查逻辑、失败恢复与包内条件；真正的系统卸载效果仍在隔离环境和 RC 验收，不把静态条件检查等同于系统执行证据。
+下列回归属于 Windows 验证与发布候选验证的重点。`ci-config` 只做逻辑、失败恢复和包内条件的纯夹具检查；真正的系统卸载效果仍在隔离环境和 RC 验收，不把静态条件检查等同于系统执行证据。
 
 | 风险与不变量 | 日常检查的责任任务 | 隔离环境 / RC 的补充验证 |
 |---|---|---|
 | 迁移失败、取消或中断不得覆盖源数据或留下被当成成功的半成品；重试幂等 | `windows`：仅普通 C# 单测中的合成数据库、WAL、TLS、设置迁移逻辑；不注册或构建 MSIX | MSIX 注册启动、重启恢复和再次导入仅在 GitHub 外的本地渠道验证 |
-| 明确保留用户数据时不删除；最终卸载默认删除只作用于授权的数据根 | `windows`：相关清理逻辑测试；`windows-packages`：检查 MSI 属性、UI 选项、Burn 变量传递和实际产物中的执行条件 | MSI/EXE 各执行默认删除与显式保留的卸载场景 |
-| 升级不得触发最终卸载的数据删除或错误清除自启 | `windows-packages`：检查升级排除条件和变量传递；缺守卫必须失败 | 跨版本升级后比较用户数据、设置与自启 |
+| 明确保留用户数据时不删除；最终卸载默认删除只作用于授权的数据根 | `windows`：相关清理逻辑测试；`ci-config`：MSI 属性、UI 选项、Burn 变量传递和产物条件的纯夹具断言（不构建安装器） | 手动发布候选/隔离环境执行 MSI/EXE 默认删除与显式保留的卸载场景 |
+| 升级不得触发最终卸载的数据删除或错误清除自启 | `ci-config`：升级排除条件和变量传递的纯夹具断言；缺守卫必须失败 | 跨版本升级后比较用户数据、设置与自启 |
 | 凭据损坏应失败关闭，不能当首次运行并覆盖数据 | `windows`：DPAPI/Vault 抽象的损坏、缺失、写失败和保留文件回归 | 在测试用户中验证恢复/重登，不读取生产凭据 |
 | 测试清理不得删除其他目录或另一个测试的数据 | `windows` 及各平台测试脚本：独占临时根、边界/符号链接检查、目录外哨兵文件不变 | 所有安装测试仅在可丢弃用户或 VM 上执行 |
 
@@ -336,17 +348,17 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 - PR 新提交可以取消同 PR 的过时验证；取消状态不代表通过。
 - main 默认不主动取消正在执行的验证；若 GitHub 队列或后续策略替换了等待中的运行，必须标为未验证，不能声称每个中间提交都已通过。
 - 发布候选使用独立并发组，不被日常 CI 取消；后续发布必须绑定具体提交，不读取“最近一次绿色”的模糊状态。
-- 所有 job 必须配置超时。可先采用轻量检查 10 分钟、Rust/Windows/Android/macOS 30 分钟、Windows 打包 45 分钟的上限，再依据 hosted runner 的冷缓存、热缓存记录调整。
+- 所有 job 必须配置超时。日常可先采用轻量检查 10 分钟、Rust/Windows/Android/macOS 30 分钟的上限；发布工作流按构建/候选/发布 job 单独设置，再依据 hosted runner 的冷缓存、热缓存记录调整。
 - 这些是初始终止上限，不是耗时承诺；成本分析同时考虑 runner 占用、排队、缓存和制品存储，不用本机测量代替 CI 数据。
 
 ### 6.4 结果与制品
 
-- 成功运行输出提交 SHA、事件、变更分类原因、工具链版本、测试统计和包校验范围。
+- 成功运行输出提交 SHA、事件、变更分类原因、工具链版本、测试统计和实际覆盖范围。
 - 失败仍上传有用的日志与测试报告；必要输出缺失必须失败，而非上传空 artifact。
-- 测试安装包与 APK 默认保留 7 天，日志/测试报告默认保留 14 天；发布候选另行保留，不依赖普通 CI 的短期制品。
+- 日常 CI 的 Android debug APK、macOS `.app` 集成制品默认保留 7 天，日志/测试报告默认保留 14 天；发布候选另行保留，不依赖普通 CI 的短期制品。
 - 制品名称带平台、架构和提交标识，明确标记非发布用途。上传采用白名单，不递归上传整个工作目录。
-- Windows 测试制品包括便携 ZIP；内部 user MSI 可保留在测试 artifact 中供诊断，但不自动成为对外发布资产。
-- 普通 CI 的 MSI/EXE/ZIP 及其 hash 只代表该次构建。后续签名或重打包后必须重新验证并计算最终 hash；普通 artifact 不自动晋级为发布资产。
+- 日常 CI 不上传任何 Windows 安装器、内部 user MSI 或 `package-summary.json`；仅上传 Rust/Windows/Android/macOS 的日志、测试报告与平台集成测试制品。
+- 安装器制品只由手动发布工作流生成并核验。后续签名或重打包后必须重新验证并计算最终 hash；发布候选不自动从日常 artifact 晋级。
 
 ### 6.5 失败分类、重试与临时例外
 
@@ -418,7 +430,7 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
     → 草稿：结束；预发布：按政策公开；正式：候选验收和环境审批后公开/晋级
 ```
 
-- 日常 CI 不发布。手动选择公开发布并运行表达发布意图；正式发布还必须在候选准备完成后经过 `windows-release-stable` 环境审批，审批绑定本次运行的 SHA/hash 与系统验收记录，不增加手工打包上传步骤。
+- 日常 CI 不发布、也不构建安装器。手动选择公开发布并运行表达发布意图；正式发布还必须在候选准备完成后经过 `windows-release-stable` 环境审批，审批绑定本次运行的 SHA/hash 与系统验收记录，不增加手工打包上传步骤。
 - 新候选的发布检查不因路径过滤跳过；复用候选核对原构建/Windows 测试证据并重新执行当前政策校验，不重新生成待发布包。两者均不要求为 Windows 单端发行重新构建 Android/macOS，也不声称因此三端全量通过。
 - 候选复用、草稿恢复、预发布转正式及禁止公开状态倒退的条件以 [发布状态规范](<windows-release.md>) 为准；不能只因版本/hash 相同就把请求的状态转换当作已完成。
 - 签名顺序遵循载荷、MSI、Burn 封装关系，最终签名后计算 hash。公开的已验证资产不静默覆盖，失败仅恢复同一份候选。
@@ -437,7 +449,7 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 1. 按 §1.3 固定目标与工具链，建立单一变更分类输出、job 条件和最终结果契约，加入分类/汇总回归用例。
 2. 修复 Windows 原生失败处理、正向 smoke 成功条件、完整测试数据隔离和 restore/build 参数一致性；补测试发现及报告核验。
 3. 提取必要的平台多步骤脚本，接入真实 macOS 构建；保留 Android 双 ABI 内容验证。
-4. 仅将 MSI/EXE/ZIP 包验证纳入按打包输入触发的频率规则；移除现有 winget CI 步骤，不引入 MSIX 任务；补数据生命周期回归和计划格式完成性检查。
+4. 将安装器打包从日常 CI 移除：删除 `windows-packages` job 与 `packages` 计划字段，打包/发布输入只保留 `ci-config` 轻量契约检查；真实 MSI/EXE/ZIP 只在手动发布中构建。保留 Android 双 ABI APK 与 macOS `.app` 的集成检查，不把它们误删为“打包”。
 5. 恢复格式门禁，接入依赖安全检查、有限重试与例外政策，落实超时、缓存、日志和权限约束。
 6. 修正版本自动化配置，停用旧自动发布入口；按 [Windows 发布规范](<windows-release.md>) 实施单一手动入口。仓库环境/签名权限单独配置，不由文档变更隐式启用。
 7. 执行 §9.3 的故障注入验收，以及同一 SHA 的 hosted runner 全量验证；保留失败与恢复证据，按实际结果更新实现状态。
@@ -445,28 +457,31 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 ### 9.2 验收清单
 
 - [ ] §1.3 的 runner/CPU/target/configuration/scheme 与实际日志一致；工具链缺失明确失败，不静默换目标。
-- [ ] 公共核心、平台 FFI、头文件、锁文件、构建配置和门禁脚本的变化触发正确任务。
-- [ ] `plan` 是分类、job 条件与汇总的单一输入；非法字段、未知枚举、缺失 output 和依赖不闭合均失败。
+- [ ] 公共核心、平台 FFI、平台内头文件/清单、共享锁文件、构建配置和门禁脚本的变化触发正确任务。
+- [ ] `plan` 是 `schemaVersion=2`、固定 5 个任务且无 `packages` 字段；schemaVersion 1、带 `packages`、非法字段、未知枚举、缺失 output 和依赖不闭合均失败。
+- [ ] 普通 push/PR 不构建 MSI/EXE/ZIP；仅修改发布工作流/发布脚本/安装器工程/打包夹具时，`required` 仅 `ci-config=true`，不启动 `windows` 或其它平台构建。
+- [ ] 平台 CI 入口/工具链只路由对应平台；平台内 Cargo 清单与平台头文件只扩大到该平台；共享 `Cargo.lock` 路由全部四个 Rust 消费平台；共享分类/汇总或 `ci.yml` 才 `scope=full`。
+- [ ] specific-first 规则顺序有表驱动用例：宽泛 `platforms/**` 或 `scripts/ci/**` 不得把发布/打包/夹具的轻量路由重新扩大为平台构建。
 - [ ] 删除、重命名、未知路径和 diff 失败均有分类用例；未知情况不会静默跳过。
-- [ ] 纯文档修改只运行限定的轻量检查与最终结果；仅 Windows 测试变化不重打所有包，混合修改正确取并集。
+- [ ] 纯文档或仅打包/发布输入修改只运行限定的轻量检查与最终结果；仅 Windows 测试变化不触发安装器构建，混合修改正确取并集。
 - [ ] 任一必跑任务失败、取消或意外 skipped，都使最终结果失败；分类失败不能生成成功结果。
 - [ ] Windows 真实 DLL 链接和 ABI 探测成功；正向初始化达到 Ready；缺库负路径能可靠失败。
 - [ ] Windows smoke 的核心数据、缓存、设置、TLS 和日志全部在临时目录，不触碰真实用户数据根。
-- [ ] Android APK 同时包含两种目标 ABI 的本次构建库；缺少任一 ABI 会失败。
-- [ ] macOS 真实 Xcode 应用构建并嵌入本次 dylib，架构/加载探测通过；SwiftPM 桩不替代此结果。
+- [ ] Android debug APK 同时包含两种目标 ABI 的本次构建库；缺少任一 ABI 会失败；它是集成测试输出，不是 Windows 安装器。
+- [ ] macOS 真实 Xcode 应用构建并嵌入本次 dylib，架构/加载探测通过；SwiftPM 桩不替代此结果；`.app` 是集成测试输出，不是 Windows 安装器。
 - [ ] Windows 的 restore/build/test 使用一致配置，格式检查恢复阻断。
-- [ ] MSI/EXE/ZIP 包验证通过，版本不污染源码；包内原生依赖、资源、便携标记、scope、版本和最终 hash 断言有实际输出。
+- [ ] 日常 CI 不生成任何安装器；打包契约夹具仍断言版本、架构、原生载荷、scope、便携标记、签名顺序与 `package-summary` 结构。真实包由手动发布按 [Windows 发布规范](<windows-release.md>) 构建并验证最终资产。
 - [ ] 仅 MSIX/winget 本地渠道文件修改被正确识别；任何普通/全量/发布 GitHub 运行均不调用相关脚本，不生成或上传其包、清单、身份配置。
 - [ ] 清空缓存后可以重建；有冷/热缓存 hosted runner 的耗时和工具链记录。
-- [ ] 失败日志与测试报告可获取；制品白名单包含便携 ZIP，排除私钥、身份配置和用户数据。
+- [ ] 失败日志与测试报告可获取；日常制品白名单仅包含日志、报告、Android debug APK 与 macOS `.app`，不包含安装器、内部 user MSI 或便携 ZIP；排除私钥、身份配置和用户数据。
 - [ ] 普通 PR/main 验证不使用生产秘密、不发布、不申请 UAC、不运行 WACK。
 - [ ] 版本自动化更新正确文件且不自动公开 Release；旧全 tag 发布入口停用，MSI/EXE/ZIP 只由手动选择发布。
 - [ ] 测试报告缺失、零发现、零执行、必需套件未执行和全部跳过均能被拦住；不硬编码历史总测试数。
-- [ ] 数据迁移、升级保护、最终卸载默认删除/显式保留、凭据损坏和清理边界都有 §5.7 对应的测试或包条件证据。
+- [ ] 数据迁移、升级保护、最终卸载默认删除/显式保留、凭据损坏和清理边界都有 §5.7 对应的测试、纯夹具或发布候选证据。
 - [ ] Rust/NuGet/Gradle 的依赖扫描输入包含真实解析依赖；严重漏洞、扫描不可用和过期例外按政策失败。
 - [ ] 编译/断言失败不被自动重试掩盖；网络重试次数与原始失败记录可查；日志上传不覆盖原结论。
 - [ ] §9.3 故障注入全部产生预期失败，恢复后在同一待验收 SHA 完成干净的全量验证。
-- [ ] 摘要明确区分本次部分检查与全量验证；文档运行成功不宣称此前平台失败已修复。
+- [ ] 摘要明确区分本次部分检查与全量验证；文档运行成功不宣称此前平台失败已修复，也不把“无安装器”表述成“无构建”。
 - [ ] 实施记录明确区分编译、原生加载、包结构、安装运行、真实渠道发布等验证层级。
 
 ### 9.3 检查有效性的故障注入验收
@@ -479,18 +494,21 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 | 正向初始化返回 `Degraded` | Windows 集成断言 | 测试失败，独立降级测试不改变该判定 |
 | 报告没有生成、测试过滤匹配零项或必需套件全部跳过 | 结果核验器 | 即使测试命令返回 0 仍失败 |
 | `windows` 必跑但实际 skipped，或上游 failure 导致依赖任务 skipped | 汇总器 | 最终失败并列明任务，不把 skipped 普遍视为通过 |
-| `plan` 缺字段、坏 JSON、未知任务或与 packages 不闭合 | 分类/契约校验 | 明确失败，不转换为空任务集 |
-| 删除包副本中的必要原生库/PRI/便携标记，或留下旧版产物冒充本次输出 | 包校验器 | 对应格式失败；计划格式不齐时打包任务失败 |
-| 移除升级数据删除守卫，或错误传递保留开关 | MSI/Burn 条件夹具校验 | 检查失败；不需要在开发机执行破坏性卸载 |
+| `plan` 缺字段、坏 JSON、未知任务、schemaVersion 1 或带 `packages` 字段 | 分类/契约校验 | 明确失败，不转换为空任务集 |
+| 发布工作流/发布脚本/安装器工程改动被错误路由为 `windows` 或全量，或宽泛平台规则吞掉轻量路由 | 分类/契约校验 | 计划仅 `ci-config=true`；错误扩大的规则用例失败 |
+| 删除打包夹具中的必要原生库/PRI/便携标记，或留下旧版产物冒充本次输出 | 打包契约夹具/发布校验器 | 夹具或发布校验失败；日常 CI 不构建安装器，但静态断言仍须拦截 |
+| 移除升级数据删除守卫，或错误传递保留开关 | MSI/Burn 条件夹具校验（`ci-config`） | 检查失败；不需要在开发机执行破坏性卸载 |
 | 导入发布阶段失败/重启，或清理路径越过独占临时根 | 数据生命周期测试 | 源数据/外部哨兵不变，目标无伪成功状态，重试符合约定 |
 | 漏洞报告含 High/Critical、扫描命令失败、例外过期 | 安全报告/例外判定器 | 阻断并记录原因；不依赖访问真实漏洞包来构造用例 |
 | 模拟一次临时下载失败后恢复、持续失败、摘要不匹配 | 网络包装与退出码处理 | 有界重试，超过上限失败；摘要不匹配不重试掩盖 |
 
 这些故障场景作为重构验收证据，相关小型规则/报告判定测试可持续运行；不要求每次提交重新编译一套故意损坏的完整应用。证据应保存用例、预期/实际结论、日志和恢复后的正常验证结果，不计入产品测试的“全部通过”数字。
 
-## 10. 实施与本地审查记录（2026-11-17）
+## 10. 实施与本地审查记录（2026-11-17，历史证据）
 
 下表保留首次提交前的本地审查证据与当时的未验证范围，不将 Mock 当作真实发布证据。实现随后以 `76b42a0` 提交并推送，首次托管全量验证结果见 §10.2；旧的本地通过记录不能覆盖托管失败。
+
+**历史范围说明**：§10.1–§10.4 记录旧 8-job 契约（含 `windows-packages` 日常打包与 `packages` 计划字段）的本地/托管证据，仅用于保留当时事实；它们不描述当前 7-job / 5-task 契约，也不能作为新契约已经 hosted 验收的证明。当前决定与待验收状态见 §10.7。下文历史安装器构建记录同样不构成当前日常 CI 的承诺。
 
 | 检查 | 本地证据 | 尚未证明 |
 |---|---|---|
@@ -500,12 +518,12 @@ PR 验证合并结果；main 验证实际 push 的提交。若未来启用 merge
 | MSI/EXE/ZIP | subagent 实际构建三个单项、All 组合及旧 wrapper；父审查另构建 user EXE + ZIP 子集；最终用 `-SkipRust -ExpectedCoreDllSha256` 复用刚测试的同一 DLL，验证 input/stage hash 一致及内部 MSI 角色；47 项打包契约测试通过，未运行安装器 | 生产证书签名、时间戳信任链、本次真实安装/升级/卸载 |
 | 发布规则 | 父审查最终复跑 model 124、API Mock 29、候选夹具 8、workflow/config 16 项及 actionlint 通过；修复了真实报告字段不兼容、审批重试及已测 DLL 溯源缺口 | GitHub 草稿写入、签名、环境审批、真正公开发行；全部未执行 |
 | Android/macOS | Android 22、macOS 29 项离线脚本/夹具检查；Gradle 实际生成并锁定 app/buildscript 图，显式缺 ABI 能失败 | Android Linux 完整交叉构建/APK 与 macOS Xcode 实机 runner |
-| Android 依赖安全 | 实际 OSV 数据经父审查独立重算：应用 66 个包、0 漏洞；AGP buildscript 127 个包、49 条记录，其中 3 critical + 21 high 阻断 | 构建工具图尚未修复；当前 Android job 按设计会失败，不能称全量 CI 已绿 |
+| Android 依赖安全 | 实际 OSV 数据经父审查独立重算：应用 66 个包、0 漏洞；AGP buildscript 127 个包、49 条记录，其中 3 critical + 21 high 阻断 | 当时构建工具图尚未修复；该问题随后已在 §10.4 修复并通过，本条不代表当前状态 |
 
 ### 10.1 保留的阻断与配置前置
 
 - **Android 构建供应链**：原始构建工具图的高危/严重发现通过 buildscript 依赖约束修复，不新增忽略项或放宽门禁；本地证据见 §10.3，托管 Linux 构建及扫描也已在 §10.4 通过。应用依赖锁保持不变。仍有 2 条中危发现；约束 AGP 内部依赖不是官方支持组合，后续 AGP/Gradle 更新必须重新验证并优先移除不再必要的约束。
-- **托管 runner**：第三轮同一提交全量通过，见 §10.4。fork PR、取消/重跑等其他事件场景和故障注入清单应按实际证据分别验收，不从一次 main push 成功推断所有场景已覆盖。
+- **托管 runner（旧契约）**：第三轮同一提交全量通过，见 §10.4；该证据属于旧 8-job 契约。fork PR、取消/重跑等其他事件场景和故障注入清单应按实际证据分别验收，不从一次 main push 成功推断所有场景已覆盖。新 7-job 契约的 hosted 验收尚未执行。
 - **发布前置**：未配置生产签名或 `windows-release-stable` 环境。正式发布必须拒绝缺失配置。预检为读取草稿使用了 contents: write，但 API context 强制 GET-only；能否收窄 token 权限仍需托管验证。
 - **版本 PR 权限（历史与当前）**：前两轮曾因仓库禁止 Actions 创建 PR 而失败，经用户授权短暂开启用于验证。最新决定移除版本机器人，因此该 create/approve PR 开关已撤回；默认 token 权限仍为 read。当前不再保留 release-please 的 XML updater 或生成清单，Windows 仍以 Version.props 为唯一版本源；生产签名/发布环境未配置。
 - **已有工具告警**：stable rustfmt 对 nightly-only 配置发出警告；WiX 有既有 ICE/双用途 MSI 告警。它们不被描述为零告警构建，也不作为安装/升级行为的证明。
@@ -522,7 +540,7 @@ pwsh -NoProfile -File scripts/ci/windows.ps1 -OutDir dist/ci-review/windows
 pwsh -NoProfile -File scripts/ci/rust.ps1 -OutDir dist/ci-review/rust
 ```
 
-### 10.2 首轮 GitHub 全量验证
+### 10.2 首轮 GitHub 全量验证（旧 8-job 契约，历史）
 
 - 提交：[`76b42a0`](https://github.com/RyanZhou416/ClipBridge/commit/76b42a05fc7561d7ee0743aa5a3dd657e816679a)。
 - CI：[运行 44107130372](https://github.com/RyanZhou416/ClipBridge/actions/runs/44107130372)，push 触发，计划 scope=full；2026-11-17 完成，总结论 **failure**。
@@ -544,7 +562,7 @@ pwsh -NoProfile -File scripts/ci/rust.ps1 -OutDir dist/ci-review/rust
 
 随 push 触发的 [release-please 44107130209](https://github.com/RyanZhou416/ClipBridge/actions/runs/44107130209) 已更新其版本准备分支，但创建 PR 被仓库权限拒绝：`GitHub Actions is not permitted to create or approve pull requests`。首轮未修改仓库权限、未触发手动 Windows 发布；后续授权变化见 §10.1。
 
-### 10.3 第二轮托管结果与后续修复
+### 10.3 第二轮托管结果与后续修复（旧 8-job 契约，历史）
 
 [`38b8872`](https://github.com/RyanZhou416/ClipBridge/commit/38b8872bd32d101c7d10b9454c71a4734bc30c7a) 的 [运行 44115863192](https://github.com/RyanZhou416/ClipBridge/actions/runs/44115863192) 仍为 **failure**，但上轮三个直接修复已生效：Rust 全入口通过，ShellCheck 通过，Android SDK 安装通过；Windows、macOS、三种 Windows 包继续通过。
 
@@ -576,7 +594,7 @@ Android 构建工具依赖另外采用以下受控安全修复，保持 AGP 8.13
 
 后续以新提交的 GitHub 全量结果继续验收，不用以上本地证据覆盖失败任务，不自动发布。
 
-### 10.4 第三轮同一提交全量通过
+### 10.4 第三轮同一提交全量通过（旧 8-job 契约，历史）
 
 - 验证提交：[`96aa612eef3fafa2f83d446670ae08946c31190c`](https://github.com/RyanZhou416/ClipBridge/commit/96aa612eef3fafa2f83d446670ae08946c31190c)。
 - [CI 44121503303](https://github.com/RyanZhou416/ClipBridge/actions/runs/44121503303)：push 触发，全量范围，**8/8 job success，没有通过跳过必跑任务取得绿灯**。
@@ -593,9 +611,9 @@ Android 构建工具依赖另外采用以下受控安全修复，保持 AGP 8.13
 | macos | 真实 arm64 Xcode 应用构建、嵌入和 dlopen 通过，FFI=1.0；应用测试产物已上传 |
 | windows-packages | 三种所选格式全部生成并上传；内部 user MSI 保持内部角色；None/unsigned/trusted=false/timestamped=false，不能当作正式签名发行 |
 
-普通 CI 打包在独立 job 中重新构建原生库，因此报告 `sourceReusedVerified=false`；这不是复用已测试 DLL 的发布证明。手动发布仍须执行自己的 Windows 验证、精确 DLL 复用、候选绑定、生产签名及审批契约，本轮没有触发该工作流。
+旧契约的普通 CI 打包在独立 `windows-packages` job 中重新构建原生库，因此报告 `sourceReusedVerified=false`；这不是复用已测试 DLL 的发布证明。该 job 已按 §10.7 移除。手动发布仍须执行自己的 Windows 验证、精确 DLL 复用、候选绑定、生产签名及审批契约，本轮没有触发该工作流。
 
-Android 通知栏手动发送尚未实现/真机验收，应用运行、真实安装/升级/卸载、正式发行与厂商渠道的既有边界不因 CI 全绿而改变。后续纯文档提交若只运行 affected 检查，应继续引用本节固定 SHA 的全量证据，不宣称文档运行重做了全平台构建。
+Android 通知栏手动发送尚未实现/真机验收，应用运行、真实安装/升级/卸载、正式发行与厂商渠道的既有边界不因 CI 全绿而改变。后续纯文档提交若只运行 affected 检查，应继续引用本节固定 SHA 的历史全量证据，不宣称文档运行重做了全平台构建，也不宣称该历史运行覆盖新的 7-job 契约。
 
 ### 10.5 main 直推与旧分支处置（2026-11-17）
 
@@ -617,6 +635,18 @@ Android 通知栏手动发送尚未实现/真机验收，应用运行、真实�
 - PR #1 保持 closed/unmerged，版本仍为 0.1.0，未改 package version/锁文件、未合入过期代码、未创建 tag/Release。删除的是分支引用，没有重写 main 历史。
 
 今后版本和变更日志由维护者直接提交 main；新功能开发也直接推 main，不用 CI 创建临时分支或通过自动合并 PR 绕行。
+
+### 10.7 收紧日常 CI 影响范围并移出安装器打包（2026-11-18）
+
+维护者明确决定；本节取代 §10.1–§10.4 中的旧 8-job 契约描述，历史章节仅保留事实记录。
+
+1. 日常 CI 固定 **7 个 workflow job**：`changes`、`ci-config`、`rust`、`windows`、`android`、`macos`、`ci-result`。删除 `windows-packages` job；日常 CI 不构建、不签名、不上传任何 Windows 安装器。
+2. `plan` 升级为 **`schemaVersion=2`**，顶层字段仅为 `schemaVersion`、`scope`、`commit`、`required`、`reasons`。`required` 固定 5 键：`ci-config`（恒为 true）、`rust`、`windows`、`android`、`macos`。不存在 `packages` 字段；schemaVersion 1、带 `packages` 或额外任务名的输入直接失败，不做兼容降级。
+3. 完整日常/手动全量验证 = 上述 5 个固定任务的平台构建与测试，**不包含** machine MSI、Burn user EXE、portable ZIP。手动发布入口保持独立：仅 `workflow_dispatch`，按格式布尔输入选择，复用经 Windows 测试的精确 DLL/hash 构建并按政策签名真实包，候选校验及必要审批后才公开（见 [发布规范](<windows-release.md>)）。
+4. 影响范围收紧：平台专用 CI 入口/工具链只路由对应平台；平台内 Cargo 清单/锁文件与 `include` 头文件只路由 rust+该平台；根/共享 `Cargo.lock`、共享 core/ABI 与共享 Rust 工具链才路由全部平台；发布工作流、发布脚本、安装器工程与打包夹具只走 `ci-config` 的 AST/`bash -n`、XML 表、纯夹具与 YAML 结构/actionlint 检查；共享分类/聚合实现、`ci.yml`、未知路径或 diff 不可用才走 `scope=full`。规则 specific-first，宽泛的 `platforms/**` 或 `scripts/ci/**` 不得重新扩大轻量路由。
+5. 日常平台检查未被删除：Windows 仍构建 DLL/应用并运行 MSTest；Android 仍构建 debug APK 验证 JNI/双 ABI；macOS 仍构建真实 Xcode `.app`。它们是集成测试输出，不是 Windows 发布安装器；不得把“没有安装器”说成“没有构建”，也不得据此删除上述检查。
+6. 本地打包脚本继续保留，但仅在维护者明确要求时手工调用；普通 push、PR、文档或打包脚本修改都不自动产生安装器。
+7. 验收状态：本决定对应的工作流、分类和契约测试实现完成后，仍须以同一 SHA 取得新的 hosted 验收记录。截至本文更新，该运行尚未发生；不得把 `96aa612` 的旧 8-job 证据、`2d7129a` 基线或本地夹具通过写成新契约成功，也不得预填未来 run ID 或结论。`96aa612`（[run 44121503303](https://github.com/RyanZhou416/ClipBridge/actions/runs/44121503303)，8/8）及此前 MSI/EXE/ZIP 构建只作为历史证据。
 
 ## 11. 参考与适用范围
 

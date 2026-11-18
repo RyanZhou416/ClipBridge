@@ -140,6 +140,24 @@ Test-Case 'normal CI is read-only and cannot publish' {
     Assert-True (-not ($ciText -match '(?im)^\s*contents\s*:\s*write')) 'ci.yml must not request contents: write'
     Assert-True (-not ($ciText -match '(?i)secrets\.')) 'normal CI must not consume release secrets'
 }
+Test-Case 'daily CI never builds Windows distribution packages, including manual full validation' {
+    Assert-True ($null -ne $ciDoc)
+    $jobs = @($ciDoc.jobs.PSObject.Properties.Name | Sort-Object)
+    Assert-Equal 'android,changes,ci-config,ci-result,macos,rust,windows' ($jobs -join ',') 'daily CI is validation-only, with no packaging job'
+    $ciCode = (($ciText -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+    foreach ($entry in @(
+            'build-windows-(?:installers|all|machine-msi|msi|user-exe|portable-zip)\.ps1',
+            'setup-wix\.ps1',
+            'sign-windows\.ps1',
+            'scripts/release/Invoke-(?:Preflight|Stage|Publish)\.ps1',
+            'windows-packages(?:-diagnostic)?-x64-'
+        )) {
+        Assert-True ($ciCode -notmatch $entry) "daily CI contains a distribution build/release entry: $entry"
+    }
+    $packageSteps = @($releaseDoc.jobs.build.steps | Where-Object { $_.PSObject.Properties['name'] -and $_.name -eq 'Build selected packages' })
+    Assert-Equal 1 $packageSteps.Count 'manual release retains the single selected-package build entry'
+    Assert-True (($packageSteps[0].run -join "`n") -match 'build-windows-installers\.ps1') 'real installer builds belong to the manual release workflow'
+}
 Test-Case 'manual dispatch is the only publishing path' {
     Assert-True ($null -ne $releaseDoc)
     Assert-Equal 'workflow_dispatch' (@($releaseDoc.on.PSObject.Properties.Name) -join ',') 'release trigger must stay manual-only'

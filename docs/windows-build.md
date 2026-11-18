@@ -2,11 +2,11 @@
 
 > 设计与实现差异见 [ADR-005](adr/005-windows-distribution-implementation.md)；各渠道卸载/数据保留行为以该文为准。
 >
-> **GitHub 自动化范围（实现中，待远程验收）**：只纳入机器级 MSI、用户级 EXE、便携 ZIP。[手动发布工作流](<../.github/workflows/release-windows.yml>) 与 [CI 工作流](<../.github/workflows/ci.yml>) 已写入工作区，尚未触发真实发布；目标行为与门禁见 [Windows 发布规范](<windows-release.md>) 和 [CI 架构](<ci-architecture.md>)。
+> **GitHub 自动化边界（2026-11-18）**：日常 CI 只验证受影响平台的构建与测试，**不构建 MSI/EXE/ZIP**。安装器只在 [手动发布工作流](<../.github/workflows/release-windows.yml>) 中按格式选择构建、签名和验收；普通 push、PR、文档或打包脚本修改都不会自动产包。本地脚本仍可由维护者在明确需要时手工调用。目标行为与门禁见 [Windows 发布规范](<windows-release.md>) 和 [CI 架构](<ci-architecture.md>)。
 > **MSIX/StoreUpload 与 winget 继续使用下文的本地脚本和人工渠道流程，不进入 GitHub CI/发布，也不上传其包或清单。** 下文历史本机验证不表示 GitHub 已覆盖这些渠道；本次重构已移除 GitHub 工作流里的 winget 步骤。
 
 主入口是 [build-windows-installers.ps1](<../scripts/build-windows-installers.ps1>)，用 `-Formats` 选择一个或多个 MSI/EXE/ZIP 格式，或用兼容的 `-Only` 选择单渠道；两参数不可同时指定。每个渠道另有一个薄封装脚本，
-便于 CI / 本地只构建需要的产物。版本唯一真值仍是
+便于手动发布/维护者按需只构建需要的产物（日常 CI 不调用这些脚本）。版本唯一真值仍是
 `platforms/windows/ClipBridgeShell_CS/Version.props`，经 `scripts/version.ps1` 派生
 （本文实测时是 `0.1.0`，架构 `x64`）。
 

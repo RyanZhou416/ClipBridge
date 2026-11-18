@@ -159,8 +159,6 @@ try {
     if ($plan) {
         $summaryLines.Add("- scope: ``$($plan.scope)``")
         $summaryLines.Add("- commit: ``$($plan.commit)``")
-        $packagesText = if (@($plan.packages).Count -gt 0) { @($plan.packages) -join ', ' } else { '(none)' }
-        $summaryLines.Add("- packages: $packagesText")
     } else {
         $summaryLines.Add('- plan: **missing or invalid**')
     }

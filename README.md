@@ -7,6 +7,7 @@
 - 日常开发直接提交并推送到 `main`，由 [CI](<.github/workflows/ci.yml>) 验证；不要求先创建 PR，也不会因普通 push 自动创建版本 PR。
 - 版本及变更日志由维护者明确修改并直接提交到 `main`。已移除 release-please 及其生成配置；CI 不创建版本分支或 PR，也没有手动运行该机器人的入口。
 - Windows 二进制发布使用独立的 [手动发布工作流](<.github/workflows/release-windows.yml>)；普通 push、版本变更或合并均不代表发布授权。
+- 日常 CI 只编译/测试受影响的平台，不构建 MSI/EXE/ZIP 安装器；Windows 安装器只在该手动发布工作流中按所选格式构建。本地打包脚本仍可由维护者手工使用。
 
 ## 本地构建前置
 

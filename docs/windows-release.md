@@ -1,14 +1,15 @@
 # Windows 手动触发自动打包与发布规范
 
 - 状态：按本规范实施并进行本地审查，真实 GitHub 发布、生产签名与正式审批尚未验收。不得据此宣称正式发布已可用。
-- 日期：2026-11-17。
+- 日期：2026-11-18。
 - 范围：GitHub Actions 手动构建并发布 x64 机器级 MSI、用户级 Burn EXE、便携 ZIP。
+- 日常边界：普通 push/PR 不构建任何 Windows 安装器；MSI/用户 EXE/便携 ZIP 只在本文的手动发布工作流中构建、签名和验收。
 - 明确排除：MSIX、StoreUpload、Microsoft Store、winget 的 GitHub 构建、验证、清单生成、上传及提交。相关本地脚本继续保留。
 - 相关：[持续集成规范](<ci-architecture.md>)、[现有 Windows 构建命令](<windows-build.md>)、[渠道实现记录](<adr/005-windows-distribution-implementation.md>)。
 
 ## 1. 发布需求与渠道边界
 
-维护者手动决定何时发布、发布哪个提交和哪些格式；GitHub Actions 自动完成检查、构建、封装、最终校验、上传和按指定方式公开 Release。不要求维护者在本地重复打包、下载 artifact 后手工上传，也不把普通 push 当作发布授权。
+维护者手动决定何时发布、发布哪个提交和哪些格式；GitHub Actions 自动完成检查、构建、封装、最终校验、上传和按指定方式公开 Release。不要求维护者在本地重复打包、下载 artifact 后手工上传，也不把普通 push 当作发布授权。普通 push/PR 连安装器都不会构建：修改打包脚本、安装器工程或本发布工作流，日常 CI 也只运行 `ci-config` 的轻量契约检查。
 
 | 可选择的交付物 | 面向用户的文件名 | 内部构建依赖 |
 |---|---|---|
@@ -132,7 +133,7 @@ preflight：确定 build-new / reuse-candidate / already-complete
 
 Rust 工作区产物由当前 SHA 构建。发布 build 在 [Windows 验证入口](<../scripts/ci/windows.ps1>) 成功后读取其 native DLL hash，再以 `-SkipRust -ExpectedCoreDllSha256 <已测试的hash>` 调用打包主脚本；禁止为同一发布候选再次 cargo 构建后就假设字节相同。
 
-打包在 publish 前核对输入 DLL hash，签名前核对 stage DLL hash；`package-summary.json` 的 `nativeEvidence.inputDllSha256`、`stageDllSha256` 必须等于 Windows 测试证据，并且 `sourceReusedVerified=true`。签名后的 hash 变化由最终资产记录负责，不与签名前值混淆。candidate/stage 均重新检查此来源绑定。普通 CI 的独立打包 job 仍可自行构建，但不能据此宣称复用了另一 job 测过的同一字节。
+打包在 publish 前核对输入 DLL hash，签名前核对 stage DLL hash；`package-summary.json` 的 `nativeEvidence.inputDllSha256`、`stageDllSha256` 必须等于 Windows 测试证据，并且 `sourceReusedVerified=true`。签名后的 hash 变化由最终资产记录负责，不与签名前值混淆。candidate/stage 均重新检查此来源绑定。日常 CI 没有独立打包 job，也不会构建安装器；发布构建不能据此宣称日常 CI 已验过包，维护者手工本地打包也不能冒充发布候选。
 
 CI checkout、日志和临时目录按运行隔离，不把任意 `-SkipRust` 或历史 target 缓存当作验证依据。
 
@@ -256,9 +257,10 @@ release-manifest.json
 
 ## 9. 与日常 CI 和本地渠道的关系
 
-- 普通 push/PR：只运行受影响代码检查；打包输入变化时检查相关 MSI/EXE/ZIP，结果是测试 artifact，不创建 Release。
-- 手动全量 CI：验证当前 GitHub 支持范围，不发布，不包含 MSIX/winget。
+- 普通 push/PR：只运行受影响平台的构建与测试；打包脚本、安装器工程、发布工作流变化也只运行 `ci-config` 轻量契约检查，不构建 MSI/EXE/ZIP，不创建 Release。
+- 手动全量 CI：验证当前 GitHub 支持范围（`ci-config` 与 rust/windows/android/macos 共 5 个固定任务），不打包、不发布、不包含 MSIX/winget。
 - 手动 Windows 发布：新候选不依赖最近一次 CI 绿色，必须执行指定提交的共享核心/Windows 检查及所选包构建；复用原候选则严格核对原检查证据并执行当前政策校验，不能重建替换最终资产。只有明确的目标状态请求和相应审批可以使结果公开或晋级。
+- 本地打包脚本仍可被维护者显式调用，用于开发或手工排查；普通 CI 不调用它们，本地生成的包也不会自动成为发布候选。
 - MSIX、StoreUpload、winget：完全保留在本地脚本/人工渠道流程中。无需为它们配置 GitHub 环境身份、签名、API 或自动提交凭据。
 - 既有文档中的历史命令或“上传四个产物”提示不改变本规范的公开白名单；实施时应同步修正文案，但不能为此删除仍被 EXE 使用的内部 MSI。
 
@@ -267,6 +269,7 @@ release-manifest.json
 以下是最终验收清单；本地实现和 Mock/夹具测试不能代替真实托管运行、签名、审批或公开发布。未勾选项仍需相应证据。本轮未配置生产凭据、未修改仓库权限，也未创建或公开任何 Release/tag。
 
 - [ ] 只有手动发布入口；普通 push、tag 或版本修改不自动启动二进制公开发行。release-please 及其配置/生成清单不存在，普通 CI 和手动发布均不创建分支或 PR。
+- [ ] 日常 CI 固定 7 个 job / 5 个计划任务，没有 `windows-packages`，普通 push/PR 不构建任何安装器；打包/发布输入只触发轻量契约检查。真实 MSI/EXE/ZIP 只在本次手动发布中构建。
 - [ ] 表单只提供 MSI/EXE/ZIP；至少选一项，任意单项或组合可用；仅 ZIP 不要求 WiX。
 - [ ] `source_ref` 固定为 main 历史中的 SHA；版本不一致、tag 指向不一致、未知格式在编译前失败。
 - [ ] 共享构建入口支持格式集合，多个格式复用 publish/stage/heat；不将未选格式上传。

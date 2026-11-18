@@ -3,6 +3,7 @@ name: ci
 # ClipBridge 扁平多任务 CI（契约见 docs/ci-architecture.md）。
 # 分类只由 scripts/ci/plan.psm1 + get-plan.ps1 产生一个结构化 plan；
 # 每个 job 的 if 读取 plan.required，ci-result 用同一 plan 与 needs 实际结果核对。
+# 日常 CI 只编译/测试，不构建 MSI/Burn EXE/便携 ZIP；这些包仅在手动 Windows 发布中构建。
 # 本地渠道（MSIX / Store 上传 / winget）不进入本工作流，也不上传其产物。
 
 on:
@@ -163,7 +164,7 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/test-windows-report.ps1
 
-      - name: Packaging and release contract tests
+      - name: Packaging and release rule fixtures (no installer builds)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -305,7 +306,7 @@ jobs:
           rustup target add aarch64-linux-android x86_64-linux-android
 
       # 单一入口：SDK/NDK/CMake 版本核对、双 ABI SO、Gradle debug APK、包内容与签名范围检查。
-      - name: Android build and package contract
+      - name: Android native integration (debug APK verification)
         shell: bash
         run: bash scripts/ci/android.sh "$RUNNER_TEMP/ci-logs/android"
 
@@ -380,142 +381,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  windows-packages:
-    needs: [ changes, windows ]
-    if: needs.changes.result == 'success' && fromJSON(needs.changes.outputs.plan).required['windows-packages'] == true
-    runs-on: windows-2022
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      - name: Setup .NET (from global.json)
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
-        with:
-          global-json-file: global.json
-
-      # 包构建同样从当前源码构建 Rust DLL；缓存依赖产物，不把缓存命中当源码成功。
-      - name: Cache cargo (rust-cache, Windows packages)
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          shared-key: windows-packages
-
-      - name: Download and verify WiX 3.14.1
-        id: wix
-        shell: pwsh
-        run: ./scripts/ci/setup-wix.ps1 -DestDir "$env:RUNNER_TEMP/wix314"
-
-      # 只构建 plan.packages 指定格式；package-summary.json 的 role=release 才是上传白名单，
-      # role=internal（user MSI 载荷）只作为诊断 artifact。
-      - name: Build selected Windows packages
-        id: packages
-        shell: pwsh
-        env:
-          CI_PLAN: ${{ needs.changes.outputs.plan }}
-          WIX_PATH: ${{ steps.wix.outputs.wix-path }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $plan = $env:CI_PLAN | ConvertFrom-Json -Depth 16
-          $formats = @($plan.packages)
-          if ($formats.Count -eq 0) { throw 'windows-packages was scheduled but plan.packages is empty' }
-          foreach ($format in $formats) {
-            if ($format -notin @('machine-msi', 'user-exe', 'portable-zip')) {
-              throw "unsupported package format from plan: $format"
-            }
-          }
-          Write-Host "formats: $($formats -join ', ')"
-          & ./scripts/build-windows-installers.ps1 -Formats $formats -OutDir dist -WixInstallPath $env:WIX_PATH
-          if (-not $?) { throw 'build-windows-installers.ps1 failed' }
-
-          $summaryPath = Join-Path 'dist' 'package-summary.json'
-          if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
-            throw "missing package summary: $summaryPath"
-          }
-          $summary = [System.IO.File]::ReadAllText($summaryPath) | ConvertFrom-Json -Depth 16
-          if ([int]$summary.schemaVersion -ne 1) { throw "unsupported package summary schemaVersion: $($summary.schemaVersion)" }
-          if ([string]$summary.product -ne 'ClipBridge') { throw "unexpected package summary product: $($summary.product)" }
-          if ([string]$summary.platform -ne 'x64') { throw "unexpected package summary platform: $($summary.platform)" }
-
-          $summaryFormats = @($summary.formats | ForEach-Object { [string]$_ })
-          if ((($summaryFormats | Sort-Object) -join ',') -ne (($formats | Sort-Object) -join ',')) {
-            throw "package summary formats do not match plan.packages: [$($summaryFormats -join ',')] vs [$($formats -join ',')]"
-          }
-
-          $artifacts = @($summary.artifacts)
-          $release = @($artifacts | Where-Object { [string]$_.role -eq 'release' })
-          $internal = @($artifacts | Where-Object { [string]$_.role -eq 'internal' })
-          foreach ($artifact in $artifacts) {
-            $role = [string]$artifact.role
-            if ($role -notin @('release', 'internal')) { throw "unknown artifact role: $role" }
-            $name = [string]$artifact.name
-            if ([string]::IsNullOrWhiteSpace($name) -or $name -match '[\\/]' -or $name -match '\.\.') {
-              throw "invalid artifact name in package summary: $name"
-            }
-            $isInternal = [bool]$artifact.internal
-            if (($role -eq 'internal') -ne $isInternal) { throw "artifact '$name' role/internal flag disagree" }
-            $path = Join-Path 'dist' $name
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "declared artifact is missing: $path" }
-            $item = Get-Item -LiteralPath $path
-            if ([int64]$artifact.size -ne $item.Length) { throw "artifact size mismatch for $name" }
-            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash
-            if ($hash -ine [string]$artifact.sha256) { throw "artifact sha256 mismatch for $name" }
-          }
-          if ($release.Count -ne $formats.Count) {
-            throw "expected exactly one release artifact per planned format; got $($release.Count) release and $($formats.Count) formats"
-          }
-          foreach ($format in $formats) {
-            $matches = @($release | Where-Object { [string]$_.format -eq $format })
-            if ($matches.Count -ne 1) { throw "expected exactly one release artifact for format $format" }
-          }
-
-          $releasePaths = @($release | ForEach-Object { Join-Path 'dist' ([string]$_.name) })
-          $internalPaths = @($internal | ForEach-Object { Join-Path 'dist' ([string]$_.name) })
-          $releaseDelimiter = 'RELEASE_PATHS_' + [guid]::NewGuid().ToString('N')
-          $internalDelimiter = 'INTERNAL_PATHS_' + [guid]::NewGuid().ToString('N')
-          "release-paths<<$releaseDelimiter" | Add-Content -Path $env:GITHUB_OUTPUT
-          $releasePaths | Add-Content -Path $env:GITHUB_OUTPUT
-          $releaseDelimiter | Add-Content -Path $env:GITHUB_OUTPUT
-          "internal-paths<<$internalDelimiter" | Add-Content -Path $env:GITHUB_OUTPUT
-          $internalPaths | Add-Content -Path $env:GITHUB_OUTPUT
-          $internalDelimiter | Add-Content -Path $env:GITHUB_OUTPUT
-
-          $logDir = Join-Path $env:RUNNER_TEMP 'ci-logs/windows-packages'
-          New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-          Copy-Item -LiteralPath $summaryPath -Destination (Join-Path $logDir 'package-summary.json') -Force
-
-      - name: Upload selected installers (release artifacts only)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-packages-x64-${{ github.sha }}
-          path: ${{ steps.packages.outputs.release-paths }}
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
-
-      - name: Upload internal user MSI (diagnostic only)
-        if: steps.packages.outputs.internal-paths != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-packages-diagnostic-x64-${{ github.sha }}
-          path: ${{ steps.packages.outputs.internal-paths }}
-          if-no-files-found: ignore
-          compression-level: 0
-          retention-days: 7
-
-      - name: Upload Windows packaging logs and summary
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: ci-logs-windows-packages-x64-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/ci-logs/windows-packages/**/*summary*.json
-            ${{ runner.temp }}/ci-logs/windows-packages/**/*.log
-            ${{ runner.temp }}/ci-logs/windows-packages/**/*.txt
-          if-no-files-found: warn
-          retention-days: 14
-
   ci-result:
-    needs: [ changes, ci-config, rust, windows, android, macos, windows-packages ]
+    needs: [ changes, ci-config, rust, windows, android, macos ]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10

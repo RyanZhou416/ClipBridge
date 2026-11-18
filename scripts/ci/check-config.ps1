@@ -4,9 +4,13 @@
     ci-config 轻量检查：workflow/脚本语法、plan 契约、文档本地链接、工具 pin。
 
 .DESCRIPTION
-    - actionlint（固定 1.7.12）检查 .github/workflows/ci.yml；版本不符失败。
+    - actionlint（固定 1.7.12）检查 .github/workflows/ci.yml 与 release-windows.yml；
+      版本不符失败。
     - PowerShell AST 只解析 .ps1/.psm1/.psd1，不执行脚本。
     - Bash 用 `bash -n` 只做语法解析，不执行脚本。
+    - 安装器项目 XML 与本次变更的 .wxs/.wxi/.wixproj/.props/.targets/.csproj
+      使用 XmlReader 做语法解析（DtdProcessing=Prohibit、XmlResolver=null，不解析外部
+      实体）；不执行 MSBuild/WiX，不下载工具。
     - 文档本地链接只检查本次新增/修改的文档（-DocFiles 可显式指定）；
       不扫描整个文档库，不请求外网站点。
     - 对 ci.yml 执行固定 job/条件/needs/pin/权限/并发/工具 pin 的结构契约检查。
@@ -87,7 +91,7 @@ try {
         try {
             $plan = ConvertFrom-CiPlanJson -Json $PlanJson
             $Scope = [string]$plan.scope
-            Write-Host "plan: schemaVersion=$($plan.schemaVersion) scope=$Scope commit=$($plan.commit) packages=[$(@($plan.packages) -join ',')]"
+            Write-Host "plan: schemaVersion=$($plan.schemaVersion) scope=$Scope commit=$($plan.commit)"
         } catch {
             Add-Error "plan is invalid: $($_.Exception.Message)"
         }
@@ -121,8 +125,9 @@ try {
         $notes.Add('diff unavailable: changed-file scope unknown; workflow and classification checks still run')
     }
 
-    # ---- 工作流结构契约 ----
+    # ---- 工作流结构契约（ci.yml）与 actionlint 目标（ci.yml + release-windows.yml）----
     $workflowRel = '.github/workflows/ci.yml'
+    $releaseWorkflowRel = '.github/workflows/release-windows.yml'
     $workflowFull = Join-Path $root $workflowRel
     $workflowContent = ''
     if (-not (Test-Path -LiteralPath $workflowFull)) {
@@ -132,6 +137,17 @@ try {
         $contract = Test-CiWorkflowContract -Content $workflowContent -Path $workflowRel
         foreach ($contractError in @($contract.Errors)) { Add-Error "workflow contract: $contractError" }
         Write-Host "workflow contract: $($contract.Jobs.Count) jobs checked"
+    }
+    $workflowLintFiles = [System.Collections.Generic.List[string]]::new()
+    foreach ($rel in @($workflowRel, $releaseWorkflowRel)) {
+        $full = Join-Path $root $rel
+        if (Test-Path -LiteralPath $full -PathType Leaf) {
+            # actionlint 按进程 cwd 解析相对路径；显式传入 root 下的绝对路径，
+            # 保证 -RepoRoot 与调用目录不一致时仍检查同一组工作流。
+            $workflowLintFiles.Add($full.Replace('\', '/'))
+        } else {
+            Add-Error "workflow file not found for actionlint: $rel"
+        }
     }
 
     $bash = $null
@@ -328,10 +344,73 @@ try {
                 Add-Error "actionlint version mismatch: expected $($toolPins.ActionlintVersion), got '$versionOutput'"
             }
             $actionlintVersion = $toolPins.ActionlintVersion
-            $lintOutput = & $tool -no-color $workflowRel 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                foreach ($line in $lintOutput) { Add-Error "actionlint: $([string]$line)" }
+            foreach ($lintFile in @($workflowLintFiles)) {
+                $lintOutput = & $tool -no-color $lintFile 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    foreach ($line in $lintOutput) { Add-Error "actionlint ${lintFile}: $([string]$line)" }
+                }
             }
+        }
+    }
+
+    # ---- 安装器/项目 XML 语法（不执行 MSBuild/WiX，不解析外部实体） ----
+    $declaredXml = @(
+        'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Installer/Product.wxs',
+        'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Installer/ClipBridgeShell_CS.Installer.wixproj',
+        'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Bundle/Bundle.wxs',
+        'platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS.Bundle/ClipBridgeShell_CS.Bundle.wixproj'
+    )
+    $xmlExtensions = @('.wxs', '.wxi', '.wixproj', '.props', '.targets', '.csproj')
+    $xmlCandidates = [System.Collections.Generic.List[string]]::new()
+    $addXmlCandidate = {
+        param([string]$Rel)
+        if ($Rel -and -not $xmlCandidates.Contains($Rel)) { $xmlCandidates.Add($Rel) }
+    }
+    if ($Scope -eq 'full') {
+        foreach ($rel in $declaredXml) {
+            if (Test-Path -LiteralPath (Join-Path $root $rel) -PathType Leaf) {
+                & $addXmlCandidate $rel
+            } else {
+                Add-Error "declared installer XML is missing: $rel"
+            }
+        }
+        if ($diffAvailable) {
+            foreach ($rel in $changed) {
+                if ($xmlExtensions -contains [System.IO.Path]::GetExtension($rel).ToLowerInvariant()) { & $addXmlCandidate $rel }
+            }
+        }
+    } elseif ($diffAvailable) {
+        foreach ($rel in $changed) {
+            if ($xmlExtensions -contains [System.IO.Path]::GetExtension($rel).ToLowerInvariant()) { & $addXmlCandidate $rel }
+        }
+    } else {
+        $notes.Add('XML syntax scope unknown (diff unavailable); no changed project XML was checked')
+    }
+
+    $xmlChecked = 0
+    foreach ($rel in $xmlCandidates) {
+        $full = Join-Path $root $rel
+        if (-not (Test-Path -LiteralPath $full -PathType Leaf)) {
+            $notes.Add("deleted/changed XML not present, skipped: $rel")
+            continue
+        }
+        $settings = [System.Xml.XmlReaderSettings]::new()
+        $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+        $settings.XmlResolver = $null
+        $stream = $null
+        $reader = $null
+        try {
+            $stream = [System.IO.File]::OpenRead($full)
+            $reader = [System.Xml.XmlReader]::Create($stream, $settings)
+            while ($reader.Read()) { }
+            $xmlChecked++
+        } catch [System.Xml.XmlException] {
+            Add-Error "XML syntax ${rel}:$($_.Exception.LineNumber): $($_.Exception.Message)"
+        } catch {
+            Add-Error "XML parse ${rel}: $($_.Exception.Message)"
+        } finally {
+            if ($null -ne $reader) { $reader.Dispose() }
+            if ($null -ne $stream) { $stream.Dispose() }
         }
     }
 
@@ -376,6 +455,7 @@ try {
     $lines.Add("- PowerShell AST files: $psChecked")
     $lines.Add("- embedded workflow scripts: pwsh=$embeddedPs bash=$embeddedBash")
     $lines.Add("- bash -n files: $bashChecked")
+    $lines.Add("- XML files: $xmlChecked")
     $lines.Add("- documentation files: $docChecked ($docLinks local links checked)")
     foreach ($note in $notes) { $lines.Add("- note: $(Protect-CiText $note)") }
     if ($errors.Count -gt 0) {

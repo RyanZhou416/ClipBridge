@@ -3,28 +3,28 @@
     ClipBridge CI 变更分类 / 计划契约 / 汇总契约的单一实现。
 
     本模块是 §4.2/§4.4 的唯一分类来源：只在这里把“变更路径 + 事件”映射成固定
-    任务/包集合，工作流 job 条件与 ci-result 汇总都读取同一份 plan JSON。
+    任务集合，工作流 job 条件与 ci-result 汇总都读取同一份 plan JSON。
 
-    契约（严格）：
-      schemaVersion = 1
+    契约（严格，schemaVersion=2）：
+      schemaVersion = 2
       scope         = affected | full
       commit        = 当前实际检出的完整小写提交 SHA（40 或 64 个十六进制字符）
-      required      = 固定 6 键布尔 map，ci-config 恒为 true
-      packages      = machine-msi | user-exe | portable-zip 的去重数组
+      required      = 固定 5 键布尔 map（ci-config, rust, windows, android, macos），
+                      ci-config 恒为 true
       reasons       = 与 required 同键的非空字符串数组
     不变量：
-      packages 非空 <=> required.windows-packages；有包时 required.windows 必须为 true。
-      scope=full 时 6 个任务全部 true 且 3 种包全部列入。
-      MSIX / StoreUpload / winget 是本地渠道，不允许出现在 packages 或固定任务集合中。
+      scope=full 时 5 个固定任务全部 true；full 表示五个验证任务，不包含安装器构建。
+      日常 CI 不构建 MSI / Burn EXE / 便携 ZIP，因此 plan 不再包含 packages 字段；
+      旧 schemaVersion=1、旧 packages 字段与旧 windows-packages 任务名一律拒绝。
+      MSIX / StoreUpload / winget 是本地渠道，不允许出现在固定任务集合中。
 
     注意：本文件不读取 GitHub 事件，也不调用网络；工作流负责提供 base/head/commit。
 #>
 
 Set-StrictMode -Version Latest
 
-$script:CiSchemaVersion = 1
-$script:CiTasks = @('ci-config', 'rust', 'windows', 'android', 'macos', 'windows-packages')
-$script:CiPackages = @('machine-msi', 'user-exe', 'portable-zip')
+$script:CiSchemaVersion = 2
+$script:CiTasks = @('ci-config', 'rust', 'windows', 'android', 'macos')
 $script:CiWorkflowJobs = @('changes') + $script:CiTasks + @('ci-result')
 
 # 经官方 GitHub API 核实（2026-11-17）的完整提交 SHA：
@@ -70,60 +70,72 @@ $script:CiLocalOnlyPatterns = @(
 )
 
 # 纯说明文档：只认明确的文档目录与仓库根目录 Markdown（根 README/AGENTS/STATUS/
-# 大型中文文档）。任何带路径的 .md（例如 platforms/.../Assets/README.md、scripts/README.md）
-# 先走构建规则；没有构建规则时就按未知路径保守全跑。
+# 大型中文文档）。scripts/README.md 由显式规则单独识别；其它带路径的 .md 先走构建
+# 规则，没有构建规则时就按未知路径保守全跑。
 $script:CiDocOnlyPatterns = @(
     '^docs/',
     '^[^/]+\.md$'
 )
 
-# 规则是“变更输入 -> 固定任务/包集合”。命中多个规则取并集；未知路径回退 full。
-# Tasks 里的任务名不得出现固定集合之外的名字；Packages 不得出现白名单之外的格式。
-$allPkgs = $script:CiPackages
+# 规则按“具体 -> 宽泛”排序，每条路径只在首个命中的规则处生效；宽泛规则不能用
+# 并集把更精确的收紧结论（例如纯打包项目只跑 ci-config）重新扩大。
+# Tasks 里的任务名不得出现固定集合之外的名字；Tasks=@() 表示该输入只需要恒跑的
+# ci-config；Full 表示保守全量（5 个任务全跑）；Context 用于未命中任务的原因说明。
 $script:CiRules = @(
-    @{ Name = 'shared-rust-core'; Pattern = '^cb_core/'; Tasks = @('rust', 'windows', 'android', 'macos'); Packages = @(); Reason = 'shared Rust core (cb_core) is a build input of every platform' }
-    @{ Name = 'shared-rust-crates'; Pattern = '^crates/'; Tasks = @('rust', 'windows', 'android', 'macos'); Packages = @(); Reason = 'shared Rust crates are a build input of every platform' }
-    @{ Name = 'shared-c-abi'; Pattern = '^crates/cb_core_ffi/'; Tasks = @('rust', 'windows', 'android', 'macos'); Packages = $allPkgs; Reason = 'shared C ABI implementation is embedded in every Windows package' }
-    @{ Name = 'platform-abi-headers'; Pattern = '^platforms/[^/]+/include/'; Tasks = @('rust', 'windows', 'android', 'macos'); Packages = $allPkgs; Reason = 'platform C ABI header is consumed by the Rust and native integration checks' }
-    @{ Name = 'rust-manifests'; Pattern = '(^|/)(?:Cargo\.toml|Cargo\.lock)$'; Tasks = @('rust', 'windows', 'android', 'macos'); Packages = $allPkgs; Reason = 'Rust manifest/lockfile (including nested crate manifests) changes dependency resolution and every packaged native payload' }
-    @{ Name = 'cargo-config'; Pattern = '^\.cargo/'; Tasks = @('rust', 'windows', 'android', 'macos'); Packages = $allPkgs; Reason = 'cargo configuration affects every Rust build' }
-    @{ Name = 'rustfmt-policy'; Pattern = '^rustfmt\.toml$'; Tasks = @('rust'); Packages = @(); Reason = 'rustfmt policy is enforced by the rust job' }
-    @{ Name = 'cargo-deny-policy'; Pattern = '^deny\.toml$'; Tasks = @('rust'); Packages = @(); Reason = 'cargo-deny policy is enforced by the rust job' }
-    @{ Name = 'editorconfig'; Pattern = '^\.editorconfig$'; Tasks = @('windows'); Packages = @(); Reason = '.editorconfig drives the dotnet format gate' }
-    @{ Name = 'windows-core-ffi'; Pattern = '^platforms/windows/core-ffi/'; Tasks = @('rust', 'windows'); Packages = $allPkgs; Reason = 'Windows FFI implementation is embedded in all Windows packages' }
-    @{ Name = 'android-core-ffi'; Pattern = '^platforms/android/core-ffi/'; Tasks = @('rust', 'android'); Packages = @(); Reason = 'Android FFI implementation is consumed by the Android job' }
-    @{ Name = 'macos-core-ffi'; Pattern = '^platforms/macos/core-ffi/'; Tasks = @('rust', 'macos'); Packages = @(); Reason = 'macOS FFI implementation is consumed by the macOS job' }
-    @{ Name = 'windows-test-only'; Pattern = '^platforms/windows/(?:.*/)?(?:[^/]+\.Tests\.[^/]+|tests?)/'; Tasks = @('windows'); Packages = @(); Reason = 'Windows test-only input; no package is rebuilt' }
-    @{ Name = 'windows-installer-project'; Pattern = '^platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS\.Installer/'; Tasks = @('windows'); Packages = @('machine-msi', 'user-exe'); Reason = 'WiX installer project feeds the machine MSI and the user MSI payload of the Burn EXE' }
-    @{ Name = 'windows-bundle-project'; Pattern = '^platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS\.Bundle/'; Tasks = @('windows'); Packages = @('user-exe'); Reason = 'Burn bundle project produces the per-user EXE' }
-    @{ Name = 'windows-version-source'; Pattern = '^platforms/windows/ClipBridgeShell_CS/(?:Version\.props|Directory\.Build\.(?:props|targets))$'; Tasks = @('windows'); Packages = $allPkgs; Reason = 'Windows version/shared build properties are inputs of every package' }
-    @{ Name = 'windows-solution'; Pattern = '^platforms/windows/ClipBridgeShell_CS/[^/]+\.sln$'; Tasks = @('windows'); Packages = $allPkgs; Reason = 'Windows solution structure is a package build input' }
-    @{ Name = 'windows-project-inputs'; Pattern = '^platforms/windows/ClipBridgeShell_CS/(?!.*\.Tests\.[^/]+/).*\.(?:csproj|props|targets)$'; Tasks = @('windows'); Packages = $allPkgs; Reason = 'Windows project dependency/build configuration is a package build input' }
-    @{ Name = 'windows-app-resources'; Pattern = '^platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/(?:Assets|Strings)/'; Tasks = @('windows'); Packages = $allPkgs; Reason = 'Windows application resources are packaged into the published payload' }
-    @{ Name = 'windows-publish-profile'; Pattern = '^platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS/Properties/PublishProfiles/'; Tasks = @('windows'); Packages = $allPkgs; Reason = 'unpackaged publish profile is a package build input' }
-    @{ Name = 'windows-production-code'; Pattern = '^platforms/windows/'; Tasks = @('windows'); Packages = @(); Reason = 'Windows C#/XAML production or build input' }
-    @{ Name = 'android-shell'; Pattern = '^platforms/android/'; Tasks = @('android'); Packages = @(); Reason = 'Android shell/build input' }
-    @{ Name = 'macos-shell'; Pattern = '^platforms/macos/'; Tasks = @('macos'); Packages = @(); Reason = 'macOS shell/build input' }
-    @{ Name = 'windows-installer-script'; Pattern = '^scripts/(build-windows-installers|build-windows-all|version)\.ps1$'; Tasks = @('windows'); Packages = $allPkgs; Reason = 'shared Windows packaging entry/version script changes affect every selected package' }
-    @{ Name = 'windows-machine-msi-script'; Pattern = '^scripts/build-windows-machine-msi\.ps1$'; Tasks = @('windows'); Packages = @('machine-msi'); Reason = 'machine MSI wrapper change' }
-    @{ Name = 'windows-msi-script'; Pattern = '^scripts/build-windows-msi\.ps1$'; Tasks = @('windows'); Packages = @('machine-msi', 'user-exe'); Reason = 'generic WiX MSI wrapper affects both MSI formats' }
-    @{ Name = 'windows-user-exe-script'; Pattern = '^scripts/build-windows-user-exe\.ps1$'; Tasks = @('windows'); Packages = @('user-exe'); Reason = 'per-user EXE wrapper change' }
-    @{ Name = 'windows-portable-script'; Pattern = '^scripts/build-windows-portable-zip\.ps1$'; Tasks = @('windows'); Packages = @('portable-zip'); Reason = 'portable ZIP wrapper change' }
-    @{ Name = 'android-scripts'; Pattern = '^scripts/(check-android-shell-contracts\.sh|setup-ndk\.ps1)$'; Tasks = @('android'); Packages = @(); Reason = 'Android build/contract script' }
-    @{ Name = 'macos-scripts'; Pattern = '^scripts/(build-macos-ffi\.sh|check-macos-shell-env\.sh)$'; Tasks = @('macos'); Packages = @(); Reason = 'macOS build/contract script' }
-    @{ Name = 'ffi-surface-gate'; Pattern = '^scripts/verify-ffi-surface\.ps1$'; Full = $true; Reason = 'shared FFI surface gate changed; validate the whole workflow' }
-    @{ Name = 'ci-workflow'; Pattern = '^\.github/'; Full = $true; Reason = 'workflow/CI configuration changed; validate the whole workflow' }
-    @{ Name = 'ci-scripts'; Pattern = '^scripts/ci/'; Full = $true; Reason = 'CI classification/aggregation logic changed; validate the whole workflow' }
-    @{ Name = 'dotnet-toolchain'; Pattern = '^global\.json$'; Full = $true; Reason = '.NET SDK pin changed; validate the whole workflow' }
-    @{ Name = 'rust-toolchain'; Pattern = '^rust-toolchain(?:\.toml)?$'; Full = $true; Reason = 'Rust toolchain pin changed; validate the whole workflow' }
+    # ---- CI 自身与公共契约 ----
+    @{ Name = 'ci-workflow'; Pattern = '^\.github/workflows/ci\.yml$'; Full = $true; Reason = 'daily CI workflow changed; validate the whole workflow' }
+    @{ Name = 'release-workflow'; Pattern = '^\.github/workflows/release-windows\.yml$'; Tasks = @(); Reason = 'release orchestration only'; Context = 'release-orchestration change; static release fixtures run in ci-config and package builds belong to the explicit release workflow' }
+    @{ Name = 'unknown-workflow'; Pattern = '^\.github/workflows/'; Full = $true; Reason = 'unknown workflow file; the CI inventory allows only ci.yml and release-windows.yml' }
+    @{ Name = 'github-metadata'; Pattern = '^\.github/'; Full = $true; Reason = 'GitHub configuration changed; validate the whole workflow' }
+    @{ Name = 'public-ci-contract'; Pattern = '^scripts/ci/(?:plan\.psm1|get-plan\.ps1|assert-result\.ps1|check-config\.ps1|test-plan\.ps1)$'; Full = $true; Reason = 'public CI classifier/plan/result/config contract changed; validate the whole workflow' }
+    # ---- 平台 CI 入口与轻量契约夹具（夹具由恒跑的 ci-config 执行，不需要平台重建）----
+    @{ Name = 'platform-contract-fixture'; Pattern = '^scripts/ci/(?:android|macos)/tests/'; Tasks = @(); Reason = 'platform contract fixture only'; Context = 'platform contract fixture is executed by the always-on ci-config job; no platform rebuild is required' }
+    @{ Name = 'report-contract-fixture'; Pattern = '^scripts/ci/(?:test-rust-report|test-windows-report)\.ps1$'; Tasks = @(); Reason = 'report contract fixture only'; Context = 'report contract fixture is executed by the always-on ci-config job; no platform rebuild is required' }
+    @{ Name = 'rust-ci-entry'; Pattern = '^scripts/ci/(?:rust\.ps1|rust-report\.psm1)$'; Tasks = @('rust'); Reason = 'Rust CI entry/report producer is validated by the rust job' }
+    @{ Name = 'windows-ci-entry'; Pattern = '^scripts/ci/(?:windows\.ps1|windows-report\.psm1)$'; Tasks = @('windows'); Reason = 'Windows CI entry/report producer is validated by the windows job' }
+    @{ Name = 'android-ci-entry'; Pattern = '^scripts/ci/android\.sh$'; Tasks = @('android'); Reason = 'Android CI entry is executed by the android job' }
+    @{ Name = 'android-production-python'; Pattern = '^scripts/ci/android/(?:verify_apk|osv_policy)\.py$'; Tasks = @('android'); Reason = 'Android APK/policy verifier is executed by the android job' }
+    @{ Name = 'macos-ci-entry'; Pattern = '^scripts/ci/macos\.sh$'; Tasks = @('macos'); Reason = 'macOS CI entry is executed by the macos job' }
+    @{ Name = 'macos-production-script'; Pattern = '^scripts/ci/macos/(?:probe_ffi\.c|validate_xcodebuild_list\.py|verify_embedded_dylib\.sh)$'; Tasks = @('macos'); Reason = 'macOS build/probe helper is executed by the macos job' }
+    # ---- 纯打包/发布输入：日常 CI 不构建安装器，真实构建只在手动发布入口 ----
+    @{ Name = 'packaging-ci-script'; Pattern = '^scripts/ci/(?:ClipBridge\.Packaging\.psm1|setup-wix\.ps1|sign-windows\.ps1|test-packaging\.ps1|test-release-[^/]+\.ps1)$'; Tasks = @(); Reason = 'packaging/release-only input'; Context = 'packaging/release-only change; real package builds run only through the explicit release workflow' }
+    @{ Name = 'packaging-release-script'; Pattern = '^scripts/release/'; Tasks = @(); Reason = 'release orchestration only'; Context = 'release-orchestration change; real package builds run only through the explicit release workflow' }
+    @{ Name = 'packaging-windows-script'; Pattern = '^scripts/build-windows-(?:installers|all|machine-msi|msi|user-exe|portable-zip)\.ps1$'; Tasks = @(); Reason = 'Windows packaging entry only'; Context = 'Windows installer packaging change; real package builds run only through the explicit release workflow' }
+    @{ Name = 'packaging-wix-project'; Pattern = '^platforms/windows/ClipBridgeShell_CS/ClipBridgeShell_CS\.(?:Installer|Bundle)/'; Tasks = @(); Reason = 'WiX installer/bundle project only'; Context = 'WiX installer/bundle project change; real package builds run only through the explicit release workflow' }
+    @{ Name = 'scripts-readme'; Pattern = '^scripts/README\.md$'; Tasks = @(); Reason = 'documentation only'; Context = 'documentation-only change; no build is required' }
+    # ---- 共享 Rust / ABI：所有平台消费者 ----
+    @{ Name = 'shared-c-abi'; Pattern = '^crates/cb_core_ffi/'; Tasks = @('rust', 'windows', 'android', 'macos'); Reason = 'shared C ABI implementation is consumed by every platform' }
+    @{ Name = 'shared-rust-core'; Pattern = '^cb_core/'; Tasks = @('rust', 'windows', 'android', 'macos'); Reason = 'shared Rust core (cb_core) is a build input of every platform' }
+    @{ Name = 'shared-rust-crates'; Pattern = '^crates/'; Tasks = @('rust', 'windows', 'android', 'macos'); Reason = 'shared Rust crates are a build input of every platform' }
+    @{ Name = 'root-rust-manifest'; Pattern = '^(?:Cargo\.toml|Cargo\.lock)$'; Tasks = @('rust', 'windows', 'android', 'macos'); Reason = 'root Rust manifest/lockfile changes dependency resolution for every platform build' }
+    @{ Name = 'cargo-config'; Pattern = '^\.cargo/'; Tasks = @('rust', 'windows', 'android', 'macos'); Reason = 'cargo configuration affects every Rust build' }
+    @{ Name = 'rust-toolchain'; Pattern = '^rust-toolchain(?:\.toml)?$'; Tasks = @('rust', 'windows', 'android', 'macos'); Reason = 'Rust toolchain pin changes every Rust build' }
+    @{ Name = 'rust-policy'; Pattern = '^(?:rustfmt\.toml|deny\.toml)$'; Tasks = @('rust'); Reason = 'Rust formatting/dependency policy is enforced by the rust job' }
+    @{ Name = 'ffi-surface-gate'; Pattern = '^scripts/verify-ffi-surface\.ps1$'; Tasks = @('rust'); Reason = 'shared FFI surface gate is executed by the rust job' }
+    # ---- 工具链 / 编辑器配置 ----
+    @{ Name = 'dotnet-toolchain'; Pattern = '^global\.json$'; Tasks = @('windows'); Reason = '.NET SDK pin is consumed by the Windows build' }
+    @{ Name = 'editorconfig'; Pattern = '^\.editorconfig$'; Tasks = @('windows'); Reason = '.editorconfig drives the dotnet format gate' }
+    # ---- 单平台 FFI 实现 / 头文件：rust + 对应消费者，不自动扩大 ----
+    @{ Name = 'windows-core-ffi'; Pattern = '^platforms/windows/core-ffi/'; Tasks = @('rust', 'windows'); Reason = 'Windows FFI implementation is consumed by the rust and windows jobs' }
+    @{ Name = 'android-core-ffi'; Pattern = '^platforms/android/core-ffi/'; Tasks = @('rust', 'android'); Reason = 'Android FFI implementation is consumed by the rust and android jobs' }
+    @{ Name = 'macos-core-ffi'; Pattern = '^platforms/macos/core-ffi/'; Tasks = @('rust', 'macos'); Reason = 'macOS FFI implementation is consumed by the rust and macos jobs' }
+    @{ Name = 'windows-abi-header'; Pattern = '^platforms/windows/include/'; Tasks = @('rust', 'windows'); Reason = 'Windows C ABI header is checked by the shared rust gate and the windows consumer' }
+    @{ Name = 'android-abi-header'; Pattern = '^platforms/android/include/'; Tasks = @('rust', 'android'); Reason = 'Android C ABI header is checked by the shared rust gate and the android consumer' }
+    @{ Name = 'macos-abi-header'; Pattern = '^platforms/macos/include/'; Tasks = @('rust', 'macos'); Reason = 'macOS C ABI header is checked by the shared rust gate and the macos consumer' }
+    @{ Name = 'windows-manifest'; Pattern = '^platforms/windows/.*(?:Cargo\.toml|Cargo\.lock)$'; Tasks = @('rust', 'windows'); Reason = 'nested Windows Rust manifest changes the rust and windows builds' }
+    @{ Name = 'android-manifest'; Pattern = '^platforms/android/.*(?:Cargo\.toml|Cargo\.lock)$'; Tasks = @('rust', 'android'); Reason = 'nested Android Rust manifest changes the rust and android builds' }
+    @{ Name = 'macos-manifest'; Pattern = '^platforms/macos/.*(?:Cargo\.toml|Cargo\.lock)$'; Tasks = @('rust', 'macos'); Reason = 'nested macOS Rust manifest changes the rust and macos builds' }
+    # ---- 平台生产/测试/资源输入（不构建安装器）----
+    @{ Name = 'windows-input'; Pattern = '^platforms/windows/'; Tasks = @('windows'); Reason = 'Windows shell/build/test input is validated by the windows job' }
+    @{ Name = 'android-input'; Pattern = '^platforms/android/'; Tasks = @('android'); Reason = 'Android shell/build input is validated by the android job' }
+    @{ Name = 'macos-input'; Pattern = '^platforms/macos/'; Tasks = @('macos'); Reason = 'macOS shell/build input is validated by the macos job' }
+    @{ Name = 'windows-version-script'; Pattern = '^scripts/version\.ps1$'; Tasks = @('windows'); Reason = 'version/build validation is owned by the windows job' }
+    @{ Name = 'android-build-script'; Pattern = '^scripts/(?:check-android-shell-contracts\.sh|setup-ndk\.ps1)$'; Tasks = @('android'); Reason = 'Android build/contract script is executed by the android job' }
+    @{ Name = 'macos-build-script'; Pattern = '^scripts/(?:build-macos-ffi\.sh|check-macos-shell-env\.sh)$'; Tasks = @('macos'); Reason = 'macOS build/contract script is executed by the macos job' }
 )
 
 function Get-CiTaskNames {
     return @($script:CiTasks)
-}
-
-function Get-CiPackageFormats {
-    return @($script:CiPackages)
 }
 
 function Get-CiWorkflowJobNames {
@@ -197,16 +209,11 @@ function New-CiPlanObject {
         [Parameter(Mandatory)][string]$Commit,
         [Parameter(Mandatory)][string]$Scope,
         [Parameter(Mandatory)][System.Collections.IDictionary]$Required,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Packages,
         [Parameter(Mandatory)][System.Collections.IDictionary]$Reasons
     )
     $requiredOut = [ordered]@{}
     foreach ($task in $script:CiTasks) {
         $requiredOut[$task] = [bool]$Required[$task]
-    }
-    $packageOut = [System.Collections.Generic.List[string]]::new()
-    foreach ($format in $script:CiPackages) {
-        if (@($Packages) -contains $format) { $packageOut.Add($format) }
     }
     $reasonsOut = [ordered]@{}
     foreach ($task in $script:CiTasks) {
@@ -227,7 +234,6 @@ function New-CiPlanObject {
         scope         = $Scope
         commit        = $Commit
         required      = $requiredOut
-        packages      = $packageOut.ToArray()
         reasons       = $reasonsOut
     }
     return $plan
@@ -240,7 +246,7 @@ function New-CiFullPlan {
     )
     if (-not (Test-CiCommitSha $Commit)) { throw "full plan 需要完整的小写提交 SHA，实际: $Commit" }
     $why = Protect-CiText $Reason
-    if (-not $why) { $why = 'scope=full requires every task and every supported package format' }
+    if (-not $why) { $why = 'scope=full requires every validation task; no installer is built in daily CI' }
     $required = [ordered]@{}
     $reasons = [ordered]@{}
     foreach ($task in $script:CiTasks) {
@@ -251,7 +257,7 @@ function New-CiFullPlan {
             $reasons[$task] = @("scope=full: $why")
         }
     }
-    return New-CiPlanObject -Commit $Commit -Scope 'full' -Required $required -Packages $script:CiPackages -Reasons $reasons
+    return New-CiPlanObject -Commit $Commit -Scope 'full' -Required $required -Reasons $reasons
 }
 
 function ConvertFrom-GitDiffNameStatusZ {
@@ -317,7 +323,8 @@ function Get-CiChangedPaths {
 
 function Get-CiImpact {
     <#
-        纯函数：路径集合 -> required / packages / reasons / unknown / localOnly / docOnly。
+        纯函数：路径集合 -> required / reasons / unknown / localOnly / docOnly。
+        每条路径只在首个命中的规则处生效（规则按具体到宽泛排序），不同路径取并集。
         不访问 git、网络或工作区其他状态。
     #>
     param(
@@ -337,11 +344,11 @@ function Get-CiImpact {
     $required['ci-config'] = $true
     $reasonsByTask = @{}
     foreach ($task in $script:CiTasks) { $reasonsByTask[$task] = [System.Collections.Generic.List[string]]::new() }
-    $packageSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     $unknown = [System.Collections.Generic.List[string]]::new()
     $localOnly = [System.Collections.Generic.List[string]]::new()
     $docOnly = [System.Collections.Generic.List[string]]::new()
     $fullTriggers = [System.Collections.Generic.List[string]]::new()
+    $contexts = [System.Collections.Generic.List[string]]::new()
 
     foreach ($path in $normalized) {
         # 专用本地渠道文件（精确路径）先识别；宽泛的 msix/winget 子串会吞掉真实源码，
@@ -350,12 +357,19 @@ function Get-CiImpact {
         foreach ($pattern in $script:CiLocalOnlyPatterns) {
             if (Test-CiPattern $path $pattern) { $isLocal = $true; break }
         }
-        if ($isLocal) { $localOnly.Add($path); continue }
+        if ($isLocal) {
+            $localOnly.Add($path)
+            $contexts.Add('local-only channel (MSIX/StoreUpload/winget) input is excluded from GitHub CI/build')
+            continue
+        }
 
         $matched = $false
         foreach ($rule in $script:CiRules) {
             if (-not (Test-CiPattern $path $rule.Pattern)) { continue }
             $matched = $true
+            if ($rule.ContainsKey('Full') -and [bool]$rule.Full) {
+                $fullTriggers.Add("$($rule.Name): $path")
+            }
             if ($rule.ContainsKey('Tasks')) {
                 foreach ($task in @($rule.Tasks)) {
                     if ($script:CiTasks -notcontains $task) { throw "规则 $($rule.Name) 引用了未知任务 $task" }
@@ -364,15 +378,8 @@ function Get-CiImpact {
                     $reasonsByTask[$task].Add("$($rule.Name): $reason ($path)")
                 }
             }
-            if ($rule.ContainsKey('Packages')) {
-                foreach ($format in @($rule.Packages)) {
-                    if ($script:CiPackages -notcontains $format) { throw "规则 $($rule.Name) 引用了非法包格式 $format" }
-                    [void]$packageSet.Add($format)
-                }
-            }
-            if ($rule.ContainsKey('Full') -and [bool]$rule.Full) {
-                $fullTriggers.Add("$($rule.Name): $path")
-            }
+            if ($rule.ContainsKey('Context')) { $contexts.Add([string]$rule.Context) }
+            break
         }
         if ($matched) { continue }
 
@@ -381,7 +388,11 @@ function Get-CiImpact {
         foreach ($pattern in $script:CiDocOnlyPatterns) {
             if (Test-CiPattern $path $pattern) { $isDoc = $true; break }
         }
-        if ($isDoc) { $docOnly.Add($path); continue }
+        if ($isDoc) {
+            $docOnly.Add($path)
+            $contexts.Add('documentation/non-build repository input; no platform validation is required')
+            continue
+        }
 
         $unknown.Add($path)
     }
@@ -397,28 +408,16 @@ function Get-CiImpact {
         return New-CiFullPlan -Commit $Commit -Reason ('full validation trigger(s): ' + ($shown -join '; '))
     }
 
-    $packages = @($script:CiPackages | Where-Object { $packageSet.Contains($_) })
-    if ($packages.Count -gt 0) {
-        $required['windows-packages'] = $true
-        $required['windows'] = $true
-        $reasonsByTask['windows-packages'].Add('selected package format(s): ' + ($packages -join ', '))
-        $reasonsByTask['windows'].Add('Windows validation is a prerequisite for the selected packages')
-    }
-
     $context = ''
     $hasBuildInput = $false
     foreach ($task in $script:CiTasks) {
         if ($task -ne 'ci-config' -and $required[$task]) { $hasBuildInput = $true; break }
     }
     if (-not $hasBuildInput) {
-        if ($localOnly.Count -gt 0 -and $docOnly.Count -gt 0) {
-            $context = 'only local-only channel and documentation inputs; excluded from GitHub CI/build'
-        } elseif ($localOnly.Count -gt 0) {
-            $context = 'only local-only channel (MSIX/StoreUpload/winget) inputs; excluded from GitHub CI/build'
-        } elseif ($docOnly.Count -gt 0) {
-            $context = 'documentation/non-build repository input; no platform build or package is required'
-        } elseif ($normalized.Count -eq 0) {
+        if ($normalized.Count -eq 0) {
             $context = 'no changed paths; only the always-on lightweight checks are required'
+        } elseif ($contexts.Count -gt 0) {
+            $context = (@($contexts | Select-Object -Unique) -join '; ')
         }
     }
 
@@ -431,9 +430,7 @@ function Get-CiImpact {
             if ($values.Count -eq 0) { $values = @('required by the changed inputs') }
             $reasons[$task] = $values
         } else {
-            if ($task -eq 'windows-packages' -and $packages.Count -eq 0) {
-                $reasons[$task] = @('packages=[]: no packaging input changed')
-            } elseif ($context) {
+            if ($context) {
                 $reasons[$task] = @("not required: $context")
             } else {
                 $reasons[$task] = @('not required: no matching build input in this change set')
@@ -441,7 +438,7 @@ function Get-CiImpact {
         }
     }
 
-    return New-CiPlanObject -Commit $Commit -Scope 'affected' -Required $required -Packages $packages -Reasons $reasons
+    return New-CiPlanObject -Commit $Commit -Scope 'affected' -Required $required -Reasons $reasons
 }
 
 function Get-CiPlanFromChangedPaths {
@@ -465,10 +462,16 @@ function Get-CiPlanErrors {
         return @($errors)
     }
 
-    $allowed = @('schemaVersion', 'scope', 'commit', 'required', 'packages', 'reasons')
+    $allowed = @('schemaVersion', 'scope', 'commit', 'required', 'reasons')
     $keys = @(Get-CiObjectKeys $Plan)
     foreach ($key in $keys) {
-        if ($allowed -notcontains $key) { $errors.Add("unknown top-level field '$key'") }
+        if ($allowed -notcontains $key) {
+            if ($key -eq 'packages') {
+                $errors.Add("obsolete top-level field 'packages': schemaVersion 2 plans carry no package list")
+            } else {
+                $errors.Add("unknown top-level field '$key'")
+            }
+        }
     }
     foreach ($key in $allowed) {
         if ($keys -notcontains $key) { $errors.Add("missing top-level field '$key'") }
@@ -511,22 +514,6 @@ function Get-CiPlanErrors {
         if ($ciConfig -is [bool] -and -not $ciConfig) { $errors.Add("required['ci-config'] must always be true") }
     }
 
-    $packages = Get-CiPropertyValue $Plan 'packages'
-    $packageList = @()
-    if ($packages -isnot [System.Collections.IList] -or $packages -is [string]) {
-        $errors.Add('packages must be an array')
-    } else {
-        $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-        foreach ($item in $packages) {
-            if ($item -isnot [string]) { $errors.Add('packages entries must be strings'); continue }
-            if ($script:CiPackages -notcontains $item) {
-                $errors.Add("packages entry '$item' is outside the supported GitHub scope (machine-msi, user-exe, portable-zip)")
-            }
-            if (-not $seen.Add($item)) { $errors.Add("packages entry '$item' is duplicated") }
-            $packageList += $item
-        }
-    }
-
     $reasons = Get-CiPropertyValue $Plan 'reasons'
     $reasonKeys = @(Get-CiObjectKeys $reasons)
     if ($null -eq $reasons -or ($reasons -isnot [System.Collections.IDictionary] -and $reasons -isnot [pscustomobject])) {
@@ -555,23 +542,11 @@ function Get-CiPlanErrors {
     }
 
     if ($errors.Count -eq 0) {
-        $hasPackages = @($packageList).Count -gt 0
-        $windowsPackages = Get-CiPropertyValue $required 'windows-packages'
-        $windows = Get-CiPropertyValue $required 'windows'
-        if ($hasPackages -ne [bool]$windowsPackages) {
-            $errors.Add("packages must be non-empty if and only if required['windows-packages'] is true")
-        }
-        if ($hasPackages -and -not [bool]$windows) {
-            $errors.Add("required['windows-packages'] requires required['windows']=true")
-        }
         if ($scope -eq 'full') {
             foreach ($task in $script:CiTasks) {
                 if (-not [bool](Get-CiPropertyValue $required $task)) {
                     $errors.Add("scope=full requires required['$task']=true")
                 }
-            }
-            foreach ($format in $script:CiPackages) {
-                if ($packageList -notcontains $format) { $errors.Add("scope=full requires packages to include '$format'") }
             }
         }
     }
@@ -851,6 +826,30 @@ function Test-CiWorkflowContract {
     foreach ($forbidden in @('build-windows-msix', 'build-windows-winget', 'build-winget-manifest', 'StoreUpload', 'winget validate', 'winget\s+validate')) {
         if ($code -match $forbidden) { $errors.Add("forbidden local-channel command in workflow: $forbidden") }
     }
+    # 日常 CI 只编译/测试，不构建 MSI / Burn EXE / 便携 ZIP，也不进入发布流程。
+    # 使用词边界匹配，避免把注释/步骤名里的 "lightweight" 当成 WiX light.exe。
+    $forbiddenPackaging = [ordered]@{
+        'windows-packages'        = 'windows-packages'
+        'build-windows-installers' = 'build-windows-installers'
+        'setup-wix'               = 'setup-wix'
+        'sign-windows'            = 'sign-windows'
+        'ClipBridge.Packaging'    = 'ClipBridge\.Packaging'
+        'plan.packages'           = 'plan\.packages'
+        'Formats'                 = '-Formats'
+        'candle'                  = '(?i)\bcandle(?:\.exe)?\b'
+        'light'                   = '(?i)\blight(?:\.exe)?\b'
+        'heat'                    = '(?i)\bheat(?:\.exe)?\b'
+    }
+    foreach ($name in $forbiddenPackaging.Keys) {
+        if ($code -match $forbiddenPackaging[$name]) {
+            $errors.Add("daily CI must not build installers or reintroduce packaging: $name")
+        }
+    }
+    foreach ($forbiddenRelease in @('gh\s+release', 'actions/create-release', 'softprops/action-gh-release', 'release-windows\.yml', 'Invoke-Publish\.ps1', 'Invoke-Stage\.ps1')) {
+        if ($code -match $forbiddenRelease) {
+            $errors.Add("daily CI must not require or run the release path: $forbiddenRelease")
+        }
+    }
 
     # Job 级检查。
     foreach ($job in $expectedJobs) {
@@ -880,19 +879,10 @@ function Test-CiWorkflowContract {
         }
     }
 
-    $packagesJob = [string]$jobs['windows-packages']
-    if ($packagesJob) {
-        $needs = @(Get-CiJobNeedSet $packagesJob)
-        if ($needs -notcontains 'windows') { $errors.Add("windows-packages must depend on windows (plan contract requires windows=true when packages are selected)") }
-        if ($packagesJob -notmatch 'setup-wix\.ps1') { $errors.Add("windows-packages must use the pinned WiX bootstrap script") }
-        if ($packagesJob -notmatch 'build-windows-installers\.ps1') { $errors.Add("windows-packages must call the shared installer entry") }
-        if ($packagesJob -notmatch 'Formats') { $errors.Add("windows-packages must pass -Formats from plan.packages") }
-        if ($packagesJob -notmatch 'packages') { $errors.Add("windows-packages must derive formats from the plan output") }
-    }
-
     foreach ($entry in @('scripts/ci/rust.ps1', 'scripts/ci/windows.ps1', 'scripts/ci/android.sh', 'scripts/ci/macos.sh')) {
         if ($Content -notmatch [regex]::Escape($entry)) { $errors.Add("platform job must call $entry") }
     }
+    if ($Content -notmatch 'test-plan\.ps1') { $errors.Add("ci-config must run the public plan/classification contract tests") }
     if ($Content -notmatch 'test-rust-report\.ps1') { $errors.Add("ci-config must run the rust report contract tests") }
     if ($Content -notmatch 'test-windows-report\.ps1') { $errors.Add("ci-config must run the windows report contract tests") }
     if ($Content -notmatch 'test-packaging\.ps1') { $errors.Add("ci-config must run the packaging contract tests") }
@@ -985,7 +975,6 @@ function Test-CiWorkflowContract {
 
 Export-ModuleMember -Function @(
     'Get-CiTaskNames',
-    'Get-CiPackageFormats',
     'Get-CiWorkflowJobNames',
     'Get-CiActionPins',
     'Get-CiToolPins',

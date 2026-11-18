@@ -73,10 +73,11 @@ For Android shell changes, use the Gradle wrapper from `platforms/android/ClipBr
 - Be careful with changes that affect JNI/FFI boundaries or NDK setup.
 
 ## CI Notes
-The refactored CI uses a single change plan, platform entry scripts, and an always-run result check. Implementation and unverified/blocked items are recorded in [CI architecture](<docs/ci-architecture.md>).
+The refactored CI uses a single `schemaVersion=2` change plan, platform entry scripts, and an always-run result check. Daily CI has 7 jobs (`changes`, `ci-config`, `rust`, `windows`, `android`, `macos`, `ci-result`) and 5 fixed plan tasks (`ci-config`, `rust`, `windows`, `android`, `macos`); there is no `packages` field or daily packaging job. Implementation and unverified/blocked items are recorded in [CI architecture](<docs/ci-architecture.md>).
 - Shared Rust/ABI inputs propagate to Windows, Android, and macOS; a skipped required task is not success.
-- Windows runs strict native integration and MSTest. macOS targets the real Xcode app, not the SwiftPM stub.
-- GitHub packaging/release is restricted to MSI, user EXE, and portable ZIP. MSIX/StoreUpload and winget remain local-only; do not add them to CI.
+- Windows runs strict native integration and MSTest. macOS targets the real Xcode app, not the SwiftPM stub. Android builds a debug APK for JNI/ABI integration.
+- Daily CI does not build Windows installers (MSI, user EXE, portable ZIP); ordinary pushes still compile the affected apps and run their tests. Installer/packaging and release-workflow changes are routed only to the lightweight `ci-config` checks, not to platform builds.
+- Windows packaging/release is restricted to MSI, user EXE, and portable ZIP, built only by the explicit manual release workflow. Local package scripts remain usable only when a maintainer explicitly invokes them. MSIX/StoreUpload and winget remain local-only; do not add them or daily packaging to CI.
 - Develop by committing/pushing directly to main; CI must not create branches or PRs. release-please and its metadata were removed by explicit decision; do not reintroduce them, even as a manual helper. Version/changelog edits are maintainer-authored commits.
 - Public Windows releases require the explicit manual workflow. Never dispatch a release or change signing/environment settings merely to test CI.
 - Preserve security gates when they reveal existing dependency vulnerabilities; do not turn them into continue-on-error to claim a green run.
